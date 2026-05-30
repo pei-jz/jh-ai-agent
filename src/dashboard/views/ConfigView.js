@@ -17,6 +17,7 @@ export class ConfigView {
             log_dir: '',
             max_steps: 0,
             approved_projects: [],
+            write_allowed_paths: [],
             mcp_servers: {},
             llm_instances: [],
             active_llm_instance_id: null,
@@ -117,6 +118,14 @@ export class ConfigView {
         if (noProgress         !== undefined) this.config.no_progress_window         = noProgress;
         if (identicalThreshold !== undefined) this.config.identical_call_threshold   = identicalThreshold;
         if (cycleRepeats       !== undefined) this.config.cycle_detection_min_repeats = cycleRepeats;
+
+        const writeAllowedEl = document.getElementById('cfg-write-allowed');
+        if (writeAllowedEl) {
+            this.config.write_allowed_paths = writeAllowedEl.value
+                .split('\n')
+                .map(p => p.trim())
+                .filter(p => p.length > 0);
+        }
     }
 
     getModalValue(field) {
@@ -360,6 +369,18 @@ export class ConfigView {
                                     </p>
                                 </div>
                             </div>
+                        </div>
+                        <!-- ── Write-Allowed Directories ──────────────────────── -->
+                        <div style="margin-top: 8px; padding: 14px 16px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-secondary);">
+                            <div style="font-size: 12px; font-weight: 600; color: var(--accent); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 4px;">
+                                📂 Write-Allowed Directories
+                            </div>
+                            <p style="font-size: 11.5px; color: var(--text-tertiary); margin: 0 0 12px 0; line-height: 1.5;">
+                                エージェントが<strong>承認なしで書き込めるディレクトリ</strong>を1行に1つ記入します。
+                                ここに含まれるパス（とその配下）への <code>write_file</code> / 編集は承認ダイアログをスキップします。
+                                現在のワークスペースと承認済みプロジェクトは常に許可されます。リスト外への書き込みは引き続き承認が必要です。
+                            </p>
+                            <textarea id="cfg-write-allowed" class="input" rows="4" placeholder="C:\\work\\reports&#10;C:\\data\\output" style="font-family: var(--font-mono, monospace); font-size: 12px; resize: vertical;">${(this.config.write_allowed_paths || []).join('\n')}</textarea>
                         </div>
                         <div class="input-group">
                             <div class="toggle-wrap" id="cfg-logging-enabled-wrap">
@@ -1208,6 +1229,7 @@ export class ConfigView {
                         log_dir: this.config.log_dir,
                         max_steps:                   limit(this.config.max_steps),
                         approved_projects: this.config.approved_projects || [],
+                        write_allowed_paths: this.config.write_allowed_paths || [],
                         mcp_servers: mcpConfig,
                         llm_instances: this.config.llm_instances,
                         active_llm_instance_id: activeId,

@@ -86,7 +86,6 @@ pub async fn mcp_spawn<R: Runtime>(
     // Suppress the console window on Windows
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000);
     }
 

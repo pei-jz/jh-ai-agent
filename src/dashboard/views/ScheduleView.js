@@ -1,3 +1,7 @@
+import { scheduleManager } from '../../modules/ai/ScheduleManager.js';
+import { AGENT_MODES, DEFAULT_MODE_ID, buildBehavior } from '../../modules/ai/AgentModes.js';
+import { mcpManager } from '../../modules/ai/McpManager.js';
+
 const SCHEDULE_KEY = 'jh_schedules';
 
 function loadSchedules() {
@@ -6,6 +10,7 @@ function loadSchedules() {
 
 function saveSchedules(list) {
     localStorage.setItem(SCHEDULE_KEY, JSON.stringify(list));
+    scheduleManager.reloadSchedules();
 }
 
 function makeId() {
@@ -14,11 +19,43 @@ function makeId() {
 
 const DAY_LABELS = ['日', '月', '火', '水', '木', '金', '土'];
 
+const INTERVAL_OPTIONS = [
+    { value: 15,   label: '15分ごと' },
+    { value: 30,   label: '30分ごと' },
+    { value: 60,   label: '1時間ごと' },
+    { value: 120,  label: '2時間ごと' },
+    { value: 360,  label: '6時間ごと' },
+    { value: 720,  label: '12時間ごと' },
+];
+
 function nextRunText(schedule) {
     if (!schedule.enabled) return '停止中';
     const now = new Date();
+    const type = schedule.scheduleType || 'fixed';
+
+    if (type === 'once') {
+        if (!schedule.onceAt) return '—';
+        const t = new Date(schedule.onceAt);
+        if (t <= now) return '実行済み / 期限切れ';
+        const diff = t - now;
+        const diffH = Math.floor(diff / 3600000);
+        const diffM = Math.floor((diff % 3600000) / 60000);
+        if (diffH < 24) return `${diffH}時間${diffM}分後`;
+        return `${Math.floor(diffH / 24)}日後`;
+    }
+
+    if (type === 'interval') {
+        const intervalMin = Math.max(1, parseInt(schedule.intervalMinutes) || 60);
+        const curMin = now.getMinutes();
+        const nextMin = (Math.floor(curMin / intervalMin) + 1) * intervalMin;
+        const waitMin = nextMin - curMin;
+        if (waitMin <= intervalMin) return `約${waitMin}分後`;
+        return `約${Math.round(waitMin / 60)}時間後`;
+    }
+
+    // fixed
     const [h, m] = (schedule.time || '09:00').split(':').map(Number);
-    const days = schedule.days || [1,2,3,4,5];
+    const days = schedule.days || [1, 2, 3, 4, 5];
     for (let i = 0; i < 8; i++) {
         const d = new Date(now);
         d.setDate(d.getDate() + i);
@@ -173,7 +210,7 @@ export class ScheduleView {
                     letter-spacing: 0.06em;
                     color: var(--text-secondary);
                 }
-                .sch-input, .sch-textarea {
+                .sch-input, .sch-textarea, .sch-select {
                     background: var(--bg-input);
                     border: 1px solid var(--border);
                     border-radius: var(--radius-sm);
@@ -184,8 +221,31 @@ export class ScheduleView {
                     font-family: var(--font-sans);
                     transition: border-color 0.15s;
                 }
-                .sch-input:focus, .sch-textarea:focus { border-color: var(--accent); }
+                .sch-input:focus, .sch-textarea:focus, .sch-select:focus { border-color: var(--accent); }
                 .sch-textarea { resize: vertical; min-height: 80px; }
+                .sch-select { cursor: pointer; }
+
+                /* Schedule type radio pills */
+                .sch-type-group { display: flex; gap: 6px; }
+                .sch-type-btn {
+                    flex: 1;
+                    padding: 7px 10px;
+                    border-radius: 6px;
+                    border: 1.5px solid var(--border);
+                    background: var(--bg-tertiary);
+                    color: var(--text-secondary);
+                    font-size: 12px;
+                    font-weight: 600;
+                    cursor: pointer;
+                    text-align: center;
+                    transition: background 0.12s, border-color 0.12s, color 0.12s;
+                }
+                .sch-type-btn.selected {
+                    background: var(--accent);
+                    border-color: var(--accent);
+                    color: #000;
+                }
+
                 .sch-time-row { display: flex; align-items: center; gap: 12px; }
                 .sch-time-input {
                     background: var(--bg-input);
@@ -200,6 +260,20 @@ export class ScheduleView {
                     width: 120px;
                 }
                 .sch-time-input:focus { border-color: var(--accent); }
+                .sch-datetime-input {
+                    background: var(--bg-input);
+                    border: 1px solid var(--border);
+                    border-radius: var(--radius-sm);
+                    color: var(--text-primary);
+                    font-size: 14px;
+                    font-family: var(--font-mono);
+                    padding: 8px 12px;
+                    outline: none;
+                    width: 100%;
+                    box-sizing: border-box;
+                }
+                .sch-datetime-input:focus { border-color: var(--accent); }
+
                 .sch-days-picker { display: flex; gap: 6px; }
                 .sch-day-btn {
                     width: 34px; height: 34px;
@@ -270,6 +344,8 @@ export class ScheduleView {
                 }
                 .sch-run-row:last-child { border-bottom: none; }
                 .sch-run-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+
+                .sch-section-hidden { display: none; }
             </style>
 
             <div class="view-container">
@@ -300,21 +376,63 @@ export class ScheduleView {
         `;
     }
 
+    _renderMcpField(s) {
+        const servers = Object.keys(mcpManager.serversConfig?.mcpServers || {});
+        if (servers.length === 0) {
+            return `
+                <div class="sch-field">
+                    <label>MCPサーバー</label>
+                    <div style="font-size:12px;color:var(--text-tertiary);padding:8px 0">
+                        MCPサーバーが設定されていません。設定画面から追加できます。
+                    </div>
+                </div>`;
+        }
+        const selected = s.mcpServers || [];
+        const checkboxes = servers.map(name => `
+            <label style="display:flex;align-items:center;gap:8px;padding:5px 0;cursor:pointer;font-size:13px;color:var(--text-primary)">
+                <input type="checkbox" class="sch-mcp-checkbox" value="${escapeHtml(name)}"
+                    ${selected.includes(name) ? 'checked' : ''}
+                    style="accent-color:var(--accent);width:14px;height:14px;cursor:pointer">
+                <span>${escapeHtml(name)}</span>
+            </label>
+        `).join('');
+        return `
+            <div class="sch-field">
+                <label>MCPサーバー <span style="font-weight:400;text-transform:none;font-size:10px;color:var(--text-tertiary)">(未選択 = 全て使用)</span></label>
+                <div id="sch-mcp-servers" style="background:var(--bg-input);border:1px solid var(--border);border-radius:var(--radius-sm);padding:6px 12px">
+                    ${checkboxes}
+                </div>
+            </div>`;
+    }
+
+    _scheduleTypeBadge(s) {
+        const type = s.scheduleType || 'fixed';
+        if (type === 'interval') {
+            const min = s.intervalMinutes || 60;
+            return min < 60 ? `${min}分ごと` : `${min / 60}h ごと`;
+        }
+        if (type === 'once') return '1回のみ';
+        return s.time || '09:00';
+    }
+
     _renderList() {
         if (this.schedules.length === 0) {
             return `<div class="sch-empty">スケジュールがありません<br>「＋ 新規」で追加</div>`;
         }
         return this.schedules.map(s => {
             const isSelected = this._editingId === s.id;
-            const days = s.days || [1,2,3,4,5];
-            const daysHtml = DAY_LABELS.map((d, i) =>
-                `<span class="sch-day-chip ${days.includes(i) ? 'active' : 'inactive'}">${d}</span>`
-            ).join('');
+            const type = s.scheduleType || 'fixed';
+            const days = s.days || [1, 2, 3, 4, 5];
+            const daysHtml = type === 'once'
+                ? `<span style="font-size:10px;color:var(--accent)">${s.onceAt ? new Date(s.onceAt).toLocaleString() : '未設定'}</span>`
+                : DAY_LABELS.map((d, i) =>
+                    `<span class="sch-day-chip ${days.includes(i) ? 'active' : 'inactive'}">${d}</span>`
+                ).join('');
             return `
                 <div class="sch-item ${isSelected ? 'selected' : ''}" data-sch-id="${s.id}">
                     <div class="sch-item-top">
                         <span class="sch-dot ${s.enabled ? 'on' : 'off'}"></span>
-                        <span class="sch-time-badge">${escapeHtml(s.time || '09:00')}</span>
+                        <span class="sch-time-badge">${escapeHtml(this._scheduleTypeBadge(s))}</span>
                         <span style="font-size:10px;color:var(--text-tertiary);margin-left:auto">${s.enabled ? '有効' : '停止'}</span>
                     </div>
                     <div class="sch-days-row">${daysHtml}</div>
@@ -345,10 +463,29 @@ export class ScheduleView {
             `;
         }
 
-        const days = s.days || [1,2,3,4,5];
+        const type = s.scheduleType || 'fixed';
+        const days = s.days || [1, 2, 3, 4, 5];
         const daysPickerHtml = DAY_LABELS.map((d, i) =>
             `<button class="sch-day-btn ${days.includes(i) ? 'selected' : ''}" data-day="${i}">${d}</button>`
         ).join('');
+
+        const intervalOptionsHtml = INTERVAL_OPTIONS.map(opt =>
+            `<option value="${opt.value}" ${(s.intervalMinutes || 60) === opt.value ? 'selected' : ''}>${opt.label}</option>`
+        ).join('');
+
+        // Prepare datetime-local value (strip seconds for input)
+        let onceAtValue = '';
+        if (s.onceAt) {
+            try {
+                const d = new Date(s.onceAt);
+                // Format: YYYY-MM-DDTHH:MM
+                onceAtValue = d.getFullYear() + '-' +
+                    String(d.getMonth() + 1).padStart(2, '0') + '-' +
+                    String(d.getDate()).padStart(2, '0') + 'T' +
+                    String(d.getHours()).padStart(2, '0') + ':' +
+                    String(d.getMinutes()).padStart(2, '0');
+            } catch (_) {}
+        }
 
         const runs = (s.runs || []).slice(-5).reverse();
         const runsHtml = runs.length > 0
@@ -375,17 +512,54 @@ export class ScheduleView {
                     <label>プロンプト / タスク指示</label>
                     <textarea class="sch-textarea" id="sch-prompt" rows="4">${escapeHtml(s.prompt || '')}</textarea>
                 </div>
+
                 <div class="sch-field">
+                    <label>エージェントモード</label>
+                    <select class="sch-select" id="sch-agent-mode">
+                        ${Object.values(AGENT_MODES).map(m =>
+                            `<option value="${m.id}" ${(s.agentModeId || DEFAULT_MODE_ID) === m.id ? 'selected' : ''}>${m.label} — ${m.description}</option>`
+                        ).join('')}
+                    </select>
+                </div>
+
+                ${this._renderMcpField(s)}
+
+                <div class="sch-field">
+                    <label>スケジュール種別</label>
+                    <div class="sch-type-group">
+                        <button class="sch-type-btn ${type === 'fixed'    ? 'selected' : ''}" data-type="fixed">固定時刻</button>
+                        <button class="sch-type-btn ${type === 'interval' ? 'selected' : ''}" data-type="interval">繰り返し間隔</button>
+                        <button class="sch-type-btn ${type === 'once'     ? 'selected' : ''}" data-type="once">1回のみ</button>
+                    </div>
+                </div>
+
+                <!-- Fixed time section -->
+                <div class="sch-field" id="sch-section-fixed" ${type !== 'fixed' ? 'style="display:none"' : ''}>
                     <label>実行時刻</label>
                     <div class="sch-time-row">
                         <input type="time" class="sch-time-input" id="sch-time" value="${escapeHtml(s.time || '09:00')}">
-                        <span style="font-size:12px;color:var(--text-secondary)">毎日この時刻に実行</span>
+                        <span style="font-size:12px;color:var(--text-secondary)">毎週指定曜日のこの時刻</span>
                     </div>
                 </div>
-                <div class="sch-field">
+
+                <!-- Interval section -->
+                <div class="sch-field" id="sch-section-interval" ${type !== 'interval' ? 'style="display:none"' : ''}>
+                    <label>繰り返し間隔</label>
+                    <select class="sch-select" id="sch-interval">${intervalOptionsHtml}</select>
+                </div>
+
+                <!-- Once section -->
+                <div class="sch-field" id="sch-section-once" ${type !== 'once' ? 'style="display:none"' : ''}>
+                    <label>実行日時 (1回のみ)</label>
+                    <input type="datetime-local" class="sch-datetime-input" id="sch-once-at" value="${escapeHtml(onceAtValue)}">
+                </div>
+
+                <!-- Days picker (hidden for "once") -->
+                <div class="sch-field" id="sch-section-days" ${type === 'once' ? 'style="display:none"' : ''}>
                     <label>実行曜日</label>
                     <div class="sch-days-picker" id="sch-days-picker">${daysPickerHtml}</div>
                 </div>
+
                 <div class="sch-field">
                     <label>有効 / 停止</label>
                     <div class="sch-toggle-row">
@@ -443,14 +617,34 @@ export class ScheduleView {
             btn.addEventListener('click', () => btn.classList.toggle('selected'));
         });
 
+        // Schedule type switching
+        document.querySelectorAll('.sch-type-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.sch-type-btn').forEach(b => b.classList.remove('selected'));
+                btn.classList.add('selected');
+                const t = btn.getAttribute('data-type');
+                document.getElementById('sch-section-fixed').style.display    = t === 'fixed'    ? '' : 'none';
+                document.getElementById('sch-section-interval').style.display = t === 'interval' ? '' : 'none';
+                document.getElementById('sch-section-once').style.display     = t === 'once'     ? '' : 'none';
+                document.getElementById('sch-section-days').style.display     = t === 'once'     ? 'none' : '';
+            });
+        });
+
         document.getElementById('btn-save-schedule')?.addEventListener('click', () => {
             const s = this.schedules.find(x => x.id === this._editingId);
             if (!s) return;
             const selectedDays = [...document.querySelectorAll('.sch-day-btn.selected')].map(b => parseInt(b.getAttribute('data-day')));
+            const type = document.querySelector('.sch-type-btn.selected')?.getAttribute('data-type') || 'fixed';
             s.name = document.getElementById('sch-name')?.value.trim() || '';
             s.prompt = document.getElementById('sch-prompt')?.value.trim() || '';
+            s.agentModeId = document.getElementById('sch-agent-mode')?.value || DEFAULT_MODE_ID;
+            s.mcpServers = [...document.querySelectorAll('.sch-mcp-checkbox:checked')].map(cb => cb.value);
+            s.scheduleType = type;
             s.time = document.getElementById('sch-time')?.value || '09:00';
             s.days = selectedDays;
+            s.intervalMinutes = parseInt(document.getElementById('sch-interval')?.value) || 60;
+            const onceAtRaw = document.getElementById('sch-once-at')?.value || '';
+            s.onceAt = onceAtRaw ? new Date(onceAtRaw).toISOString() : null;
             s.enabled = document.getElementById('sch-enabled')?.checked ?? true;
             saveSchedules(this.schedules);
             this._refreshList();
@@ -465,11 +659,21 @@ export class ScheduleView {
             btn.disabled = true;
             btn.textContent = '実行中...';
             try {
-                const task = await window.apiClient.createTask(s.prompt, null);
+                const mcpServers = s.mcpServers && s.mcpServers.length > 0 ? s.mcpServers : null;
+                const behavior = {
+                    mode: 'iterative_agent',
+                    ...buildBehavior(s.agentModeId || DEFAULT_MODE_ID),
+                    ...(mcpServers ? { mcp_servers: mcpServers } : {})
+                };
+                const task = await window.apiClient.request('/tasks', {
+                    method: 'POST',
+                    body: JSON.stringify({ prompt: s.prompt, workspace_path: null, caller: 'Schedule', behavior })
+                });
+                const taskId = task.task_id || task.id;
                 s.runs = s.runs || [];
-                s.runs.push({ at: new Date().toISOString(), status: 'completed', taskId: task.id });
+                s.runs.push({ at: new Date().toISOString(), status: 'completed', taskId });
                 saveSchedules(this.schedules);
-                window.location.hash = `#monitor?id=${task.id}`;
+                window.location.hash = `#monitor?id=${taskId}`;
             } catch (err) {
                 s.runs = s.runs || [];
                 s.runs.push({ at: new Date().toISOString(), status: 'failed', error: err.message });
@@ -496,8 +700,13 @@ export class ScheduleView {
                 id: makeId(),
                 name: '',
                 prompt: '',
+                agentModeId: DEFAULT_MODE_ID,
+                mcpServers: [],
+                scheduleType: 'fixed',
                 time: '09:00',
                 days: [1, 2, 3, 4, 5],
+                intervalMinutes: 60,
+                onceAt: null,
                 enabled: true,
                 runs: [],
             };
@@ -511,48 +720,32 @@ export class ScheduleView {
         this._bindListItems();
         this._bindDetail();
 
-        // Poll every minute to auto-trigger due schedules
-        this._pollTimer = setInterval(() => this._checkSchedules(), 60 * 1000);
-        this._checkSchedules();
+        // Poll every 30 seconds to update UI relative time text
+        this._pollTimer = setInterval(() => {
+            this.schedules = loadSchedules();
+            this._refreshList();
+            const nextEl = document.querySelector('.sch-detail-header span:last-child');
+            if (nextEl) {
+                const s = this.schedules.find(x => x.id === this._editingId);
+                if (s) nextEl.textContent = `次回: ${nextRunText(s)}`;
+            }
+        }, 30 * 1000);
+
+        this._onSchedulesUpdated = () => {
+            this.schedules = loadSchedules();
+            this._refreshList();
+            this._refreshDetail();
+        };
+        window.addEventListener('jh-schedules-updated', this._onSchedulesUpdated);
     }
 
     destroy() {
-        if (this._pollTimer) clearInterval(this._pollTimer);
-    }
-
-    async _checkSchedules() {
-        if (!window.apiClient) return;
-        const now = new Date();
-        const hhmm = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
-        const day = now.getDay();
-
-        for (const s of this.schedules) {
-            if (!s.enabled || !s.prompt) continue;
-            const days = s.days || [1,2,3,4,5];
-            if (s.time !== hhmm || !days.includes(day)) continue;
-
-            // Check if already ran in this minute
-            const lastRun = (s.runs || []).slice(-1)[0];
-            if (lastRun) {
-                const last = new Date(lastRun.at);
-                if (last.getFullYear() === now.getFullYear() &&
-                    last.getMonth() === now.getMonth() &&
-                    last.getDate() === now.getDate() &&
-                    last.getHours() === now.getHours() &&
-                    last.getMinutes() === now.getMinutes()) continue;
-            }
-
-            try {
-                const task = await window.apiClient.createTask(s.prompt, null);
-                s.runs = s.runs || [];
-                s.runs.push({ at: now.toISOString(), status: 'completed', taskId: task.id });
-                saveSchedules(this.schedules);
-                console.log(`[Schedule] Triggered "${s.name || s.prompt.slice(0,40)}" → task ${task.id}`);
-            } catch (err) {
-                s.runs = s.runs || [];
-                s.runs.push({ at: now.toISOString(), status: 'failed', error: err.message });
-                saveSchedules(this.schedules);
-            }
+        if (this._pollTimer) {
+            clearInterval(this._pollTimer);
+            this._pollTimer = null;
+        }
+        if (this._onSchedulesUpdated) {
+            window.removeEventListener('jh-schedules-updated', this._onSchedulesUpdated);
         }
     }
 }

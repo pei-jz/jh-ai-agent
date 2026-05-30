@@ -678,6 +678,10 @@ pub struct AiConfig {
     pub log_dir: Option<String>,
     pub max_steps: Option<u32>,
     pub approved_projects: Option<Vec<String>>,
+    /// Extra directories where the agent may write WITHOUT user approval,
+    /// in addition to the active workspace. Configured from Settings.
+    #[serde(default)]
+    pub write_allowed_paths: Option<Vec<String>>,
     pub mcp_servers: Option<serde_json::Value>,
     pub llm_instances: Option<Vec<LlmInstance>>,
     /// The instance id (from llm_instances) that should be used by default
@@ -742,6 +746,7 @@ pub async fn get_ai_config<R: tauri::Runtime>(
             proxy_url: None, logging_enabled: None, log_dir: None,
             max_steps: Some(100),
             approved_projects: Some(Vec::new()),
+            write_allowed_paths: Some(Vec::new()),
             mcp_servers: None,
             llm_instances: Some(Vec::new()),
             active_llm_instance_id: None,
@@ -812,6 +817,9 @@ pub async fn save_ai_config<R: tauri::Runtime>(
                 }
                 if final_config.approved_projects.is_none() {
                     final_config.approved_projects = old_config.approved_projects;
+                }
+                if final_config.write_allowed_paths.is_none() {
+                    final_config.write_allowed_paths = old_config.write_allowed_paths;
                 }
                 if final_config.mcp_servers.is_none() {
                     final_config.mcp_servers = old_config.mcp_servers;
@@ -895,6 +903,7 @@ pub async fn set_rag_approval<R: tauri::Runtime>(
             log_dir: None,
             max_steps: Some(100),
             approved_projects: Some(Vec::new()),
+            write_allowed_paths: Some(Vec::new()),
             mcp_servers: None,
             llm_instances: Some(Vec::new()),
             active_llm_instance_id: None,

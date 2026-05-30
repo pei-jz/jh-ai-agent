@@ -11,6 +11,7 @@ import { ConfigView } from './dashboard/views/ConfigView.js';
 import { ScheduleView } from './dashboard/views/ScheduleView.js';
 import { AnalyticsView } from './dashboard/views/AnalyticsView.js';
 import { taskBridge } from './modules/bridge/TaskBridge.js';
+import { scheduleManager } from './modules/ai/ScheduleManager.js';
 import llmService from './modules/ai/LLMService.js';
 
 // API Client Helper
@@ -315,6 +316,22 @@ function injectSearchOverlayStyles() {
             font-size: 10px;
             font-family: monospace;
         }
+        .search-ask-ai-row {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 10px 18px;
+            cursor: pointer;
+            border-top: 1px solid hsla(220, 20%, 25%, 0.4);
+            color: hsl(185, 100%, 65%);
+            font-size: 13px;
+            transition: background 0.1s;
+        }
+        .search-ask-ai-row:hover, .search-ask-ai-row.focused {
+            background: hsla(185, 100%, 55%, 0.1);
+        }
+        .search-ask-ai-icon { font-size: 15px; flex-shrink: 0; }
+        .search-ask-ai-label { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     `;
     document.head.appendChild(style);
 }
@@ -337,6 +354,7 @@ function buildSearchOverlayHTML() {
             <div class="search-footer">
                 <span><kbd>↑</kbd><kbd>↓</kbd> Navigate</span>
                 <span><kbd>↵</kbd> Open task</span>
+                <span><kbd>Shift+↵</kbd> AIに質問</span>
                 <span><kbd>Ctrl+↵</kbd> Full app</span>
                 <span style="margin-left:auto"><kbd>Esc</kbd> Close</span>
             </div>
@@ -404,8 +422,18 @@ async function renderSearchResults(query) {
     _searchItems = filtered;
     _searchFocusIndex = -1;
 
+    const askAiHtml = q ? `
+        <div class="search-ask-ai-row" id="search-ask-ai-row">
+            <span class="search-ask-ai-icon">✨</span>
+            <span class="search-ask-ai-label">AIに質問: ${q.replace(/</g, '&lt;')}</span>
+            <span style="font-size:11px;opacity:0.6">Shift+↵</span>
+        </div>` : '';
+
     if (!filtered.length) {
-        container.innerHTML = '';
+        container.innerHTML = askAiHtml;
+        if (q) {
+            container.querySelector('#search-ask-ai-row')?.addEventListener('click', () => askAI(q));
+        }
         return;
     }
 
@@ -426,11 +454,14 @@ async function renderSearchResults(query) {
                 <span class="search-result-arrow">→</span>
             </div>
         `;
-    }).join('');
+    }).join('') + askAiHtml;
 
     container.querySelectorAll('.search-result-item').forEach(item => {
         item.addEventListener('click', () => openSearchResult(item.getAttribute('data-task-id')));
     });
+    if (q) {
+        container.querySelector('#search-ask-ai-row')?.addEventListener('click', () => askAI(q));
+    }
 }
 
 function openSearchResult(taskId) {
@@ -456,17 +487,104 @@ function onSearchKeydown(e) {
     } else if (e.key === 'Enter') {
         e.preventDefault();
         if (e.ctrlKey) {
-            // Ctrl+Enter → just close overlay (full app is already visible)
             hideSearch();
+        } else if (e.shiftKey) {
+            // Shift+Enter → send query to AI
+            const q = document.getElementById('search-input')?.value.trim();
+            if (q) askAI(q);
         } else if (_searchFocusIndex >= 0 && _searchItems[_searchFocusIndex]) {
             openSearchResult(_searchItems[_searchFocusIndex].id);
+        } else {
+            // Enter with no task selected but text entered → ask AI
+            const q = document.getElementById('search-input')?.value.trim();
+            if (q) askAI(q);
         }
     }
+}
+
+function askAI(query) {
+    hideSearch();
+    if (!query) return;
+    // Register the question as a pending Direct Chat and switch to the Chat screen.
+    // ChatView picks this up on init() and auto-sends it in a fresh Direct Chat session.
+    try {
+        localStorage.setItem('jh_pending_chat_question', query);
+    } catch (_) {}
+    window.location.hash = '#chat';
 }
 
 function updateSearchFocus(items) {
     items.forEach((el, i) => el.classList.toggle('focused', i === _searchFocusIndex));
     items[_searchFocusIndex]?.scrollIntoView({ block: 'nearest' });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Approval OS Notifications
+// ─────────────────────────────────────────────────────────────────────────────
+
+let _approvalNotifyUnlisten = null;
+
+async function initApprovalNotifications() {
+    // Request Web Notification permission once at startup
+    if ('Notification' in window && Notification.permission === 'default') {
+        await Notification.requestPermission();
+    }
+
+    // Listen to task-event-bridge for confirm_request / complete / error
+    _approvalNotifyUnlisten = await listen('task-event-bridge', (event) => {
+        const { taskId, event: evtType, data } = event.payload || {};
+
+        if (evtType === 'confirm_request') {
+            _sendApprovalNotification(taskId, data);
+        } else if (evtType === 'complete') {
+            _sendTaskDoneNotification(taskId, data, false);
+        } else if (evtType === 'error') {
+            _sendTaskDoneNotification(taskId, data, true);
+        }
+    });
+}
+
+function _sendApprovalNotification(taskId, data) {
+    if (!('Notification' in window) || Notification.permission !== 'granted') return;
+
+    const isCommand = data?.type === 'command_confirm';
+    const title = isCommand ? '🛡 承認が必要です' : '📋 プラン承認が必要です';
+    const body = isCommand
+        ? `コマンド実行の許可を求めています:\n${(data.command || '').slice(0, 120)}`
+        : `プランの承認を求めています:\n${(data.title || data.message || '').slice(0, 120)}`;
+
+    const n = new Notification(title, { body, tag: `approval-${data.confirmId}`, requireInteraction: true });
+
+    // Clicking the notification focuses the app window and navigates to the task
+    n.onclick = () => {
+        window.focus();
+        if (taskId) window.location.hash = `#monitor?id=${taskId}`;
+        n.close();
+    };
+}
+
+async function _sendTaskDoneNotification(taskId, data, isError) {
+    if (!('Notification' in window) || Notification.permission !== 'granted') return;
+
+    const title = isError ? '❌ タスク失敗' : '✅ タスク完了';
+    let body = isError
+        ? (data?.error || 'エラーが発生しました').slice(0, 120)
+        : 'タスクが正常に完了しました';
+
+    // Fetch task prompt for a meaningful notification body
+    try {
+        const task = await window.apiClient?.getTask(taskId);
+        if (task?.prompt) {
+            body = (isError ? '[失敗] ' : '') + task.prompt.slice(0, 120);
+        }
+    } catch (_) {}
+
+    const n = new Notification(title, { body, tag: `task-done-${taskId}` });
+    n.onclick = () => {
+        window.focus();
+        if (taskId) window.location.hash = `#monitor?id=${taskId}`;
+        n.close();
+    };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -497,6 +615,12 @@ window.addEventListener('DOMContentLoaded', async () => {
 
         // Initialize TaskBridge for background agent runs
         await taskBridge.init();
+
+        // Initialize background task scheduler
+        scheduleManager.init();
+
+        // Initialize OS notification support for approval requests
+        initApprovalNotifications();
 
         // Listen for global-shortcut event from Rust backend
         _searchUnlisten = await listen('show-search', () => showSearch());

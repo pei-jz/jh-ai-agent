@@ -191,6 +191,19 @@ class ToolExecutor {
                 }
             },
             {
+                name: 'fetch_url',
+                isSafe: true,
+                description: 'Fetch the content of a URL via HTTP GET and return the response body as text. Use this to retrieve web pages, APIs, RSS feeds, or any publicly accessible URL. For JSON APIs, the raw JSON string is returned. For HTML pages, the full HTML is returned (use run_command with a parser or extract what you need). Maximum response size is 500 KB.',
+                parameters: {
+                    type: 'object',
+                    properties: {
+                        url: { type: 'string', description: 'The full URL to fetch (must start with http:// or https://)' },
+                        headers: { type: 'object', description: 'Optional HTTP headers as key-value pairs (e.g. {"Accept": "application/json"})' }
+                    },
+                    required: ['url']
+                }
+            },
+            {
                 name: 'task_progress',
                 isSafe: true,
                 description: 'Track subtask completion state across the agent loop. State persists independently of conversation history (survives context compaction). Use action="set" once at task start to register items, action="update" to mark items complete/in_progress/blocked, action="get" to check current state without re-reading task_plan.md.',
@@ -245,6 +258,10 @@ class ToolExecutor {
         // Set() → only the names in the set are allowed; others return an error
         // []    → effectively disables all tools (caller wants chat-only mode)
         this._toolAllowlist = null;
+        // ── MCP server filter (per-session, set by behavior.mcp_servers) ───
+        // null     → all MCP servers available
+        // Set<str> → only tools from listed server names are included
+        this._mcpServerFilter = null;
     }
 
     /**
@@ -264,6 +281,15 @@ class ToolExecutor {
         this._toolAllowlist = set;
     }
 
+    /** Restrict which MCP servers contribute tools this session. null = all. */
+    setMcpServerFilter(serverNames) {
+        if (!serverNames || serverNames.length === 0) {
+            this._mcpServerFilter = null;
+            return;
+        }
+        this._mcpServerFilter = new Set(serverNames);
+    }
+
     /** Returns the tool definitions filtered by the active allowlist. */
     getActiveToolDefinitions() {
         if (!this._toolAllowlist) return this.toolDefinitions;
@@ -278,8 +304,25 @@ class ToolExecutor {
         this._taskProgressItems = [];
         this._taskProgressLoaded = false;
         this._taskCompleted = false;
-        this._toolAllowlist = null; // reset; caller may re-set after startSession
+        this._toolAllowlist = null;    // reset; caller may re-set after startSession
+        this._mcpServerFilter = null; // reset MCP server filter
         this.workspacePath = workspacePath || '.';
+
+        // ── Write-allowed directories ──────────────────────────────────
+        // Directories (besides the workspace) where write_file /
+        // multi_replace_file_content may write WITHOUT user approval.
+        // Populated from config: `write_allowed_paths` (explicit list) plus
+        // `approved_projects` (already-trusted project roots). Writes outside
+        // the workspace AND outside all of these still require approval.
+        this._writeAllowedPaths = [];
+        try {
+            const cfg = await invoke('get_ai_config');
+            const explicit = Array.isArray(cfg?.write_allowed_paths) ? cfg.write_allowed_paths : [];
+            const projects = Array.isArray(cfg?.approved_projects) ? cfg.approved_projects : [];
+            this._writeAllowedPaths = [...explicit, ...projects]
+                .filter(p => typeof p === 'string' && p.trim())
+                .map(p => p.replace(/\\/g, '/').replace(/\/+$/, ''));
+        } catch (e) { /* config unavailable — only workspace is allowed */ }
 
         // ── Session file cache ─────────────────────────────────────────
         // Stores the most-recent content of every file read or written this
@@ -491,6 +534,19 @@ class ToolExecutor {
         return tool ? !!tool.isSafe : false;
     }
 
+    /**
+     * Returns true if a resolved write path may be written WITHOUT user
+     * approval — i.e. it is inside the workspace OR inside any configured
+     * allowed directory (write_allowed_paths / approved_projects).
+     */
+    _isWriteAllowed(resolvedPath) {
+        const p = (resolvedPath || '').replace(/\\/g, '/').replace(/\/+$/, '');
+        if (!p) return false;
+        const ws = this.workspacePath ? this.workspacePath.replace(/\\/g, '/').replace(/\/+$/, '') : '';
+        if (ws && (p === ws || p.startsWith(ws + '/'))) return true;
+        return (this._writeAllowedPaths || []).some(a => p === a || p.startsWith(a + '/'));
+    }
+
     getToolsForNativeAPI() {
         const nativeTools = this.toolDefinitions.map(t => ({
             type: 'function',
@@ -503,6 +559,7 @@ class ToolExecutor {
 
         const mcpTools = mcpManager.getAllTools();
         mcpTools.forEach(t => {
+            if (this._mcpServerFilter && !this._mcpServerFilter.has(t._serverName)) return;
             nativeTools.push({
                 type: 'function',
                 function: {
@@ -849,7 +906,7 @@ class ToolExecutor {
                 case 'write_file': {
                     let finalContent = args.content ?? '';
                     const encoding = args.encoding || null;
-                    const isSafeRoot = this.workspacePath && resolvedPath.startsWith(this.workspacePath.replace(/\\/g, '/'));
+                    const isSafeRoot = this._isWriteAllowed(resolvedPath);
                     let oldContent = "";
                     let preExisting = false;
                     try {
@@ -1213,7 +1270,7 @@ class ToolExecutor {
                     const finalEditedContent = fileLineEnding === '\r\n'
                         ? workingContent.replace(/\n/g, '\r\n')
                         : workingContent;
-                    const isSafeRootEdit = this.workspacePath && editPath.startsWith(this.workspacePath.replace(/\\/g, '/'));
+                    const isSafeRootEdit = this._isWriteAllowed(editPath);
 
                     if (onConfirm && !isSafeRootEdit) {
                         const res = await onConfirm({
@@ -1351,6 +1408,48 @@ class ToolExecutor {
                     this.onToolEvent?.('artifact_modified', { name: artifactName, path: artifactPath, content: args.content });
                     return `Success: Artifact ${artifactName} ${name === 'create_artifact' ? 'created' : 'updated'}.`;
                 }
+                case 'fetch_url': {
+                    const { url, headers: extraHeaders } = args;
+                    if (!url || !/^https?:\/\//i.test(url)) {
+                        return 'Error: url must start with http:// or https://';
+                    }
+                    onAgentStatus?.(`Fetching: ${url}`);
+                    try {
+                        const fetchHeaders = { 'User-Agent': 'Mozilla/5.0 (compatible; JH-AI-Agent/1.0)', ...(extraHeaders || {}) };
+                        const resp = await fetch(url, { headers: fetchHeaders });
+                        const contentType = resp.headers.get('content-type') || '';
+                        // Cap response at 500 KB to avoid flooding context
+                        const MAX_BYTES = 500 * 1024;
+                        const reader = resp.body.getReader();
+                        const chunks = [];
+                        let totalBytes = 0;
+                        let truncated = false;
+                        while (true) {
+                            const { done, value } = await reader.read();
+                            if (done) break;
+                            totalBytes += value.byteLength;
+                            if (totalBytes > MAX_BYTES) {
+                                // Only add up to the cap
+                                const remaining = MAX_BYTES - (totalBytes - value.byteLength);
+                                if (remaining > 0) chunks.push(value.slice(0, remaining));
+                                truncated = true;
+                                reader.cancel();
+                                break;
+                            }
+                            chunks.push(value);
+                        }
+                        const merged = new Uint8Array(chunks.reduce((sum, c) => sum + c.byteLength, 0));
+                        let offset = 0;
+                        for (const c of chunks) { merged.set(c, offset); offset += c.byteLength; }
+                        const text = new TextDecoder().decode(merged);
+                        const statusLine = `HTTP ${resp.status} ${resp.statusText} — Content-Type: ${contentType}`;
+                        const truncNote = truncated ? '\n[Response truncated at 500 KB]' : '';
+                        return `${statusLine}\n\n${text}${truncNote}`;
+                    } catch (e) {
+                        return `Error fetching URL: ${e.message}`;
+                    }
+                }
+
                 case 'finish_task': {
                     // ── Pre-finish syntax gate (real-parser based) ────────
                     // Sanity-check every modified file before accepting completion.

@@ -4,6 +4,7 @@ import { mcpManager } from '../../modules/ai/McpManager.js';
 import { workflowManager } from '../../modules/ai/WorkflowManager.js';
 import { promptTemplateManager } from '../../modules/ai/PromptTemplateManager.js';
 import { skillManager } from '../../modules/ai/SkillManager.js';
+import { AGENT_MODES, DEFAULT_MODE_ID, buildBehavior } from '../../modules/ai/AgentModes.js';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 
@@ -34,6 +35,7 @@ export class ChatView {
         //             anti-loop, task_progress, retries, etc. — the same as
         //             external apps like JHEditor see.
         this.chatMode = 'simple';
+        this.agentModeId = DEFAULT_MODE_ID; // agent execution mode
         this._activeAgentWs = null;   // active WebSocket for in-flight agent task
         this._activeAgentTaskId = null;
 
@@ -897,6 +899,12 @@ export class ChatView {
                         <input type="text" id="chat-workspace-inline" class="input" value="${escapeHtml(this.workspacePath || '')}"
                             placeholder="ワークスペースパス (例: C:\\projects\\myapp)" style="flex: 1; height: 28px; font-size: 12px; padding: 0 8px;">
                         <button id="btn-workspace-select-inline" class="btn btn-secondary" style="height: 28px; padding: 0 10px; font-size: 12px;" type="button">📁 参照</button>
+                        <select id="chat-agent-mode-select" style="height:28px;font-size:12px;padding:0 8px;background:var(--bg-input);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);cursor:pointer;outline:none;">
+                            ${Object.values(AGENT_MODES).map(m =>
+                                `<option value="${m.id}" ${this.agentModeId === m.id ? 'selected' : ''}>${m.label}</option>`
+                            ).join('')}
+                        </select>
+                        <span id="agent-mode-desc" style="font-size:11px;color:var(--text-tertiary);white-space:nowrap">${AGENT_MODES[this.agentModeId]?.description || ''}</span>
                     </div>
                     ` : ''}
 
@@ -1189,6 +1197,16 @@ export class ChatView {
             });
         }
 
+        // Agent mode selector (agent workspace bar)
+        const agentModeSelect = document.getElementById('chat-agent-mode-select');
+        if (agentModeSelect) {
+            agentModeSelect.addEventListener('change', (e) => {
+                this.agentModeId = e.target.value;
+                const descEl = document.getElementById('agent-mode-desc');
+                if (descEl) descEl.textContent = AGENT_MODES[this.agentModeId]?.description || '';
+            });
+        }
+
         // MCP checkbox event listeners
         const mcpCheckboxes = document.querySelectorAll('.chat-mcp-checkbox');
         mcpCheckboxes.forEach(cb => {
@@ -1264,6 +1282,40 @@ export class ChatView {
 
         // Render attachment previews
         this.renderAttachmentPreviews();
+
+        // Auto-send a pending question routed from the global quick-search (Ctrl+Shift+Space).
+        this._consumePendingQuestion();
+    }
+
+    async _consumePendingQuestion() {
+        let pending = null;
+        try { pending = localStorage.getItem('jh_pending_chat_question'); } catch (_) {}
+        if (!pending) return;
+        try { localStorage.removeItem('jh_pending_chat_question'); } catch (_) {}
+
+        // Force Direct Chat (simple) mode and open a fresh session so the question stands alone.
+        this.chatMode = 'simple';
+        const data = this.getSessions();
+        const newId = Date.now().toString();
+        data.activeSessionId = newId;
+        data.sessions[newId] = {
+            id: newId,
+            title: '新しいチャット',
+            timestamp: Date.now(),
+            messages: [],
+            chatMode: 'simple',
+        };
+        this.saveSessions(data);
+        this.messages = [];
+
+        // reRender re-runs init(); the localStorage key is already cleared so it won't loop.
+        await this.reRender();
+
+        const textarea = document.getElementById('chat-textarea-input');
+        if (textarea) {
+            textarea.value = pending;
+            this.sendMessage();
+        }
     }
 
     handleFileAttachment(file) {
@@ -1960,6 +2012,9 @@ Your final responses and messages to the user MUST be in Japanese.
                 .map(m => ({ role: m.role, content: m.displayContent || m.content }))
                 .slice(-8);
 
+            const modeBehavior = buildBehavior(this.agentModeId,
+                userEditedPrompt ? { system_prompt: userEditedPrompt } : {}
+            );
             const taskRes = await window.apiClient.request('/tasks', {
                 method: 'POST',
                 body: JSON.stringify({
@@ -1970,7 +2025,7 @@ Your final responses and messages to the user MUST be in Japanese.
                     chat_context: chatContext.length > 0 ? chatContext : undefined,
                     behavior: {
                         mode: 'iterative_agent',
-                        ...(userEditedPrompt ? { system_prompt: userEditedPrompt } : {}),
+                        ...modeBehavior,
                     }
                 })
             });
@@ -2206,6 +2261,7 @@ Your final responses and messages to the user MUST be in Japanese.
                 session.timestamp = Date.now();
                 // Persist UI settings so they survive navigation and app restart
                 session.chatMode = this.chatMode;
+                session.agentModeId = this.agentModeId;
                 session.workspacePath = this.workspacePath;
                 session.toolsEnabled = this.toolsEnabled;
                 session.systemPrompt = this.systemPrompt;
@@ -2529,6 +2585,7 @@ Your final responses and messages to the user MUST be in Japanese.
             // Restore settings saved with this session
             if (activeSession) {
                 if (activeSession.chatMode) this.chatMode = activeSession.chatMode;
+                if (activeSession.agentModeId) this.agentModeId = activeSession.agentModeId;
                 if (activeSession.workspacePath) this.workspacePath = activeSession.workspacePath;
                 if (activeSession.toolsEnabled !== undefined) this.toolsEnabled = activeSession.toolsEnabled;
                 if (activeSession.systemPrompt) this.systemPrompt = activeSession.systemPrompt;

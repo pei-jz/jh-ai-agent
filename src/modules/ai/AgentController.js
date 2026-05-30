@@ -115,6 +115,12 @@ export class AgentController {
         if (this.behaviorOverrides && Array.isArray(this.behaviorOverrides.enabled_tools)) {
             toolExecutor.setToolAllowlist(this.behaviorOverrides.enabled_tools);
         }
+        // Apply MCP server filter (if any) — restricts which MCP servers contribute tools.
+        if (this.behaviorOverrides && Array.isArray(this.behaviorOverrides.mcp_servers)) {
+            toolExecutor.setMcpServerFilter(this.behaviorOverrides.mcp_servers);
+        } else {
+            toolExecutor.setMcpServerFilter(null);
+        }
 
         // Bind tool executor event forwarding
         toolExecutor.onToolEvent = (event, data) => {
@@ -853,11 +859,11 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
         // protocol section in the prompt always matches the API call we make here.
         const useNativeTools = llmService.supportsNativeTools() && typeof llmService.chatWithTools === 'function';
 
+        let nativeFailed = false;
         if (useNativeTools) {
             let retryCount = 0;
             const maxNativeRetries = 2;
             let currentHistory = [...history];
-            let nativeFailed = false;
 
             // systemPrompt already contains the native-mode OBSERVE/PLAN protocol
             // (built by ContextBuilder).  Do NOT append more instructions here —
