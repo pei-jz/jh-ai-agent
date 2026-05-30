@@ -1,0 +1,59 @@
+# ─── Dependencies ────────────────────────────────────────────
+node_modules
+
+# ─── Build output ────────────────────────────────────────────
+dist
+dist-ssr
+src-tauri/target
+*.local
+
+# ─── Logs ────────────────────────────────────────────────────
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# ─── Editor / IDE ────────────────────────────────────────────
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# ─── Local Claude Code state (contains user paths / username) ─
+.claude/
+
+# ─── Tauri / Rust local build artifacts ──────────────────────
+# Note: src-tauri/Cargo.lock IS committed (binary apps commit lockfile
+# for reproducible builds; only libraries gitignore it).
+src-tauri/icons_backup_old/
+
+# ─── Project-local build helpers (machine-specific) ──────────
+# .tmp_build/ is runtime junk (gitignored).
+# .proto_include/ is vendored Google standard protos REQUIRED to build
+# lance-encoding and other prost-based crates — COMMITTED on purpose,
+# so contributors don't need to download them separately.
+.tmp_build/
+cargo_check_out.txt
+
+# ─── Runtime artifacts produced by the agent itself ──────────
+.agent/
+**/.agent/
+
+
+
+# ─── Runtime config / persisted state (contain API keys + history) ─
+ai_config.json
+task_history.json
+task_logs/
+
+# ─── OS junk ─────────────────────────────────────────────────
+Thumbs.db
+.DS_Store

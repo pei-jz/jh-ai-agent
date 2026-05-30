@@ -1,0 +1,55 @@
+[package]
+name = "jh-ai-agent"
+version = "0.1.0"
+description = "J.H AI Agent — standalone Tauri-based AI agent server."
+authors = ["J.H AI Agent Contributors"]
+edition = "2021"
+license = "MIT"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "jh_ai_agent_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-ico", "image-png"] }
+tauri-plugin-opener = "2"
+tauri-plugin-shell = "2"
+tauri-plugin-global-shortcut = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# HTTP server
+axum = { version = "0.7", features = ["ws"] }
+axum-extra = { version = "0.9", features = ["typed-header"] }
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.5", features = ["cors"] }
+tower = "0.4"
+
+# HTTP client for LLM communication
+reqwest = { version = "0.12", features = ["stream", "json", "rustls-tls", "socks"] }
+futures-util = "0.3"
+
+# Utilities
+chrono = "0.4"
+uuid = { version = "1", features = ["v4"] }
+rand = "0.8"
+rfd = "0.14"
+calamine = "0.25.0"
+
+# Directory scanning (lightweight, no RAG)
+ignore = "0.4"
+
+# Content search & file-pattern globbing (for grep_search / glob tools)
+regex = "1"
+globset = "0.4"
+
+# Encoding detection and conversion for file I/O
+encoding_rs = "0.8"

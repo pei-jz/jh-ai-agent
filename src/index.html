@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>J.H AI Agent</title>
+
+    <!-- Google Fonts: Inter -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+
+    <!-- Dashboard Styles -->
+    <link rel="stylesheet" href="./styles/dashboard.css" />
+  </head>
+
+  <body>
+    <!-- Custom Title Bar (since decorations: false) -->
+    <div id="titlebar" data-tauri-drag-region>
+      <div class="titlebar-brand" data-tauri-drag-region>
+        <svg class="titlebar-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg">
+          <!-- hexagon body -->
+          <path d="M10 2L17 6v8L10 18 3 14V6z"/>
+          <!-- inner cross / circuit node -->
+          <circle cx="10" cy="10" r="2" fill="currentColor" stroke="none"/>
+          <line x1="10" y1="8" x2="10" y2="5.5"/>
+          <line x1="10" y1="12" x2="10" y2="14.5"/>
+          <line x1="8.3" y1="9" x2="6.2" y2="7.7"/>
+          <line x1="11.7" y1="11" x2="13.8" y2="12.3"/>
+          <line x1="8.3" y1="11" x2="6.2" y2="12.3"/>
+          <line x1="11.7" y1="9" x2="13.8" y2="7.7"/>
+        </svg>
+        <span class="titlebar-title" data-tauri-drag-region>J.H AI Agent</span>
+      </div>
+      <div class="titlebar-controls">
+        <button id="titlebar-minimize" class="titlebar-btn" aria-label="Minimize">─</button>
+        <button id="titlebar-maximize" class="titlebar-btn" aria-label="Maximize">□</button>
+        <button id="titlebar-close" class="titlebar-btn titlebar-btn-close" aria-label="Close">✕</button>
+      </div>
+    </div>
+
+    <!-- App Root -->
+    <div id="app">
+      <!-- Sidebar + Content injected by main.js -->
+    </div>
+
+    <!-- Main Script -->
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

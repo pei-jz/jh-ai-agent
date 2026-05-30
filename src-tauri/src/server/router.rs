@@ -1,0 +1,722 @@
+use axum::{
+    routing::{get, post, delete},
+    Router,
+    Json,
+    extract::{Path, State},
+    http::StatusCode,
+    Extension,
+};
+use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use chrono::Local;
+use uuid::Uuid;
+use tokio::sync::broadcast;
+use tauri::Emitter;
+use crate::commands::ai::AiConfig;
+use crate::server::auth::{auth_middleware, AuthToken};
+use crate::server::ws::ws_handler;
+use std::time::Duration;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskInfo {
+    pub id: String,
+    pub prompt: String,
+    pub status: String, // "running", "paused", "completed", "aborted", "failed"
+    pub progress: f32,
+    pub token_usage: TokenUsage,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+    pub workspace_path: Option<String>,
+    pub caller: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub logs: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TokenUsage {
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub total_tokens: u32,
+}
+
+#[derive(Clone)]
+pub struct AppState {
+    pub auth_token: String,
+    pub port: u16,
+    pub tasks: Arc<Mutex<HashMap<String, TaskInfo>>>,
+    pub task_senders: Arc<Mutex<HashMap<String, broadcast::Sender<String>>>>,
+    pub config_path: PathBuf,
+    pub history_path: PathBuf,
+    pub app_handle: tauri::AppHandle,
+}
+
+/// Per-request execution behavior. Callers fully control this — JH AI Agent
+/// does NOT store named profiles. Each request carries its own behavior, so
+/// adding a new use case (new app, new feature) requires zero changes here.
+///
+/// All fields are optional with sensible defaults:
+///   mode             = "iterative_agent"  (full agent loop with tools)
+///   system_prompt    = ContextBuilder.getSystemPrompt() (the built-in heavy prompt)
+///   enabled_tools    = None (all tools allowed)
+///   max_iterations   = config's max_steps (0 = unlimited)
+///   response_format  = "text"
+///   extra_instructions = None (no append)
+#[derive(Debug, Deserialize, Clone, Serialize)]
+pub struct AgentBehavior {
+    /// "single_shot" → one LLM call, return result. No agent loop, no tools.
+    /// "iterative_agent" → full agent loop (existing AgentController behavior).
+    pub mode: Option<String>,
+
+    /// Replaces the built-in system prompt entirely. When None, the caller
+    /// inherits all built-in safety rules (anti-loop, verify, etc.).
+    pub system_prompt: Option<String>,
+
+    /// Tool allowlist. None = all tools enabled. [] = no tools (effectively
+    /// degrades iterative_agent into a chat-style call). Otherwise a subset.
+    pub enabled_tools: Option<Vec<String>>,
+
+    /// Per-task override of max_steps. 0 = unlimited. Ignored in single_shot.
+    pub max_iterations: Option<u32>,
+
+    /// "text" (default) / "code" / "json". Hints the LLM about output shape
+    /// and (for json) requests structured output where the provider supports it.
+    pub response_format: Option<String>,
+
+    /// Free-form text appended AFTER the system prompt (built-in or overridden).
+    /// Use this for small per-call tweaks without rewriting the whole prompt.
+    pub extra_instructions: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateTaskRequest {
+    pub prompt: String,
+    pub workspace_path: Option<String>,
+    pub caller: Option<String>,
+    /// Arbitrary caller-supplied context (schema, current file, ER graph, etc.)
+    /// Passed through to the agent without interpretation.
+    pub context: Option<serde_json::Value>,
+    /// Per-request execution behavior. See AgentBehavior for fields.
+    pub behavior: Option<AgentBehavior>,
+    /// Base64 data URLs of images attached by the user (e.g. "data:image/png;base64,...").
+    /// Forwarded to the agent's first LLM call unchanged.
+    #[serde(default)]
+    pub images: Option<Vec<String>>,
+    /// Prior conversation messages [{role, content}] forwarded as agent chatContext
+    /// so the agent loop has full history of the current chat session.
+    #[serde(default)]
+    pub chat_context: Option<Vec<serde_json::Value>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CreateTaskResponse {
+    pub task_id: String,
+    pub ws_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SteeringRequest {
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RunTaskPayload {
+    #[serde(rename = "taskId")]
+    task_id: String,
+    prompt: String,
+    #[serde(rename = "workspacePath")]
+    workspace_path: Option<String>,
+    /// Pass-through caller context (kept opaque on the Rust side).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context: Option<serde_json::Value>,
+    /// Pass-through behavior. TaskBridge in JS will dispatch on `behavior.mode`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    behavior: Option<AgentBehavior>,
+    /// Base64 data URLs forwarded from the caller to the agent's first LLM call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    images: Option<Vec<String>>,
+    /// Prior conversation messages forwarded to the JS TaskBridge as chatContext.
+    #[serde(rename = "chatContext", skip_serializing_if = "Option::is_none")]
+    chat_context: Option<Vec<serde_json::Value>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TestConnectionRequest {
+    pub provider: String,
+    pub model: String,
+    pub api_key: Option<String>,
+    pub base_url: Option<String>,
+    pub api_version: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TestConnectionResponse {
+    pub success: bool,
+    pub message: String,
+}
+
+pub fn create_router(state: AppState) -> Router {
+    let auth_token = state.auth_token.clone();
+    
+    let cors = tower_http::cors::CorsLayer::new()
+        .allow_methods(tower_http::cors::Any)
+        .allow_headers(tower_http::cors::Any)
+        .allow_origin(tower_http::cors::Any);
+
+    // API Routes that require Authentication
+    let api_routes = Router::new()
+        .route("/models", get(get_models))
+        .route("/tasks", post(create_task).get(list_tasks))
+        .route("/tasks/:id", get(get_task).delete(abort_task))
+        .route("/tasks/:id/logs", get(get_task_logs))
+        .route("/tasks/:id/steering", post(send_steering))
+        .route("/tasks/:id/history", delete(delete_task_history))
+        .route("/config", get(get_config).put(update_config))
+        .route("/config/test", post(test_connection))
+        .route("/stats", get(get_stats))
+        .layer(axum::middleware::from_fn(auth_middleware))
+        .layer(Extension(AuthToken(auth_token.clone())));
+
+    // Public / Hybrid routes
+    Router::new()
+        .route("/api/health", get(health_check))
+        .nest("/api", api_routes)
+        .route("/ws/tasks/:id", get(ws_handler))
+        .layer(cors)
+        .with_state(state)
+}
+
+// Handler implementations
+
+async fn health_check() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "status": "ok",
+        "version": "0.1.0",
+        "time": Local::now().to_rfc3339()
+    }))
+}
+
+async fn get_models(State(state): State<AppState>) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let config = load_config(&state.config_path)?;
+    let mut models = vec![];
+    
+    // Load from dynamic instances first
+    if let Some(instances) = &config.llm_instances {
+        for inst in instances {
+            if !inst.model.is_empty() {
+                let id = format!("{}:{}", inst.id, inst.model);
+                let name = format!("{} ({})", inst.name, inst.model);
+                models.push(serde_json::json!({
+                    "id": id,
+                    "name": name,
+                    "provider": inst.provider,
+                    "context_window": inst.context_window,
+                    "max_output_tokens": inst.max_output_tokens,
+                    "temperature": inst.temperature
+                }));
+            }
+        }
+    }
+    
+    // Fallback to legacy configuration keys if no instances exist
+    if models.is_empty() {
+        if config.openai_key.is_some() {
+            models.push(serde_json::json!({ "id": "openai:gpt-4o", "name": "GPT-4o", "provider": "openai" }));
+            models.push(serde_json::json!({ "id": "openai:gpt-4-turbo", "name": "GPT-4 Turbo", "provider": "openai" }));
+        }
+        if config.anthropic_key.is_some() {
+            models.push(serde_json::json!({ "id": "anthropic:claude-3-5-sonnet-20241022", "name": "Claude 3.5 Sonnet", "provider": "anthropic" }));
+            models.push(serde_json::json!({ "id": "anthropic:claude-3-opus-20240229", "name": "Claude 3 Opus", "provider": "anthropic" }));
+        }
+        if config.gemini_key.is_some() {
+            models.push(serde_json::json!({ "id": "gemini:gemini-1.5-pro", "name": "Gemini 1.5 Pro", "provider": "gemini" }));
+            models.push(serde_json::json!({ "id": "gemini:gemini-1.5-flash", "name": "Gemini 1.5 Flash", "provider": "gemini" }));
+        }
+    }
+    
+    if models.is_empty() {
+        models.push(serde_json::json!({ "id": "anthropic:claude-3-5-sonnet-20241022", "name": "Claude 3.5 Sonnet (Default)", "provider": "anthropic" }));
+        models.push(serde_json::json!({ "id": "openai:gpt-4o", "name": "GPT-4o (Default)", "provider": "openai" }));
+        models.push(serde_json::json!({ "id": "gemini:gemini-1.5-flash", "name": "Gemini 1.5 Flash (Default)", "provider": "gemini" }));
+    }
+    
+    Ok(Json(serde_json::json!({ "models": models })))
+}
+
+async fn create_task(
+    State(state): State<AppState>,
+    Json(payload): Json<CreateTaskRequest>,
+) -> Json<CreateTaskResponse> {
+    let task_id = Uuid::new_v4().to_string();
+    let ws_url = format!("ws://localhost:{}/ws/tasks/{}?token={}", state.port, task_id, state.auth_token);
+    
+    let task = TaskInfo {
+        id: task_id.clone(),
+        prompt: payload.prompt.clone(),
+        status: "running".to_string(),
+        progress: 0.0,
+        token_usage: TokenUsage::default(),
+        started_at: Local::now().to_rfc3339(),
+        completed_at: None,
+        workspace_path: payload.workspace_path.clone(),
+        caller: payload.caller.clone(),
+        logs: vec![],
+    };
+    
+    // Register task
+    state.tasks.lock().unwrap().insert(task_id.clone(), task);
+    
+    // Create broadcast channel for WebSocket streaming
+    let (tx, _rx) = broadcast::channel(100);
+    state.task_senders.lock().unwrap().insert(task_id.clone(), tx);
+    
+    // Emit "run-task" event to tauri Webview to kickstart JS Agent loop.
+    // The behavior (if any) is passed through so the JS-side TaskBridge can
+    // dispatch into single_shot vs iterative_agent path.
+    let run_payload = RunTaskPayload {
+        task_id: task_id.clone(),
+        prompt: payload.prompt,
+        workspace_path: payload.workspace_path,
+        context: payload.context,
+        behavior: payload.behavior,
+        images: payload.images,
+        chat_context: payload.chat_context,
+    };
+    let _ = state.app_handle.emit("run-task", run_payload);
+    
+    Json(CreateTaskResponse { task_id, ws_url })
+}
+
+async fn list_tasks(State(state): State<AppState>) -> Json<Vec<TaskInfo>> {
+    let tasks = state.tasks.lock().unwrap();
+    let list: Vec<TaskInfo> = tasks.values().cloned().collect();
+    Json(list)
+}
+
+async fn get_task(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+) -> Result<Json<TaskInfo>, (StatusCode, String)> {
+    let tasks = state.tasks.lock().unwrap();
+    if let Some(task) = tasks.get(&id) {
+        Ok(Json(task.clone()))
+    } else {
+        Err((StatusCode::NOT_FOUND, "Task not found".to_string()))
+    }
+}
+
+async fn get_task_logs(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
+    // Snapshot the in-memory state quickly, then release the lock before
+    // doing any disk I/O (avoids holding the mutex during sidecar file read).
+    let (exists, in_mem_logs) = {
+        let tasks = state.tasks.lock().unwrap();
+        match tasks.get(&id) {
+            Some(task) => (true, task.logs.clone()),
+            None => (false, vec![]),
+        }
+    };
+
+    if !exists {
+        return Err((StatusCode::NOT_FOUND, "Task not found".to_string()));
+    }
+
+    // If the task still has logs in memory (live or recently completed in this
+    // session), return them as-is. Otherwise it's a task loaded from disk after
+    // an app restart — load its logs from the sidecar file lazily.
+    if !in_mem_logs.is_empty() {
+        return Ok(Json(in_mem_logs));
+    }
+
+    let disk_logs = crate::load_task_logs(&state.history_path, &id);
+
+    // Cache the loaded logs back into memory so subsequent calls don't re-read disk.
+    if !disk_logs.is_empty() {
+        let mut tasks = state.tasks.lock().unwrap();
+        if let Some(task) = tasks.get_mut(&id) {
+            if task.logs.is_empty() {
+                task.logs = disk_logs.clone();
+            }
+        }
+    }
+
+    Ok(Json(disk_logs))
+}
+
+async fn abort_task(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // Notify Frontend Webview to abort the task execution
+    let _ = state.app_handle.emit("abort-task", serde_json::json!({ "taskId": id }));
+    
+    let mut tasks = state.tasks.lock().unwrap();
+    if let Some(task) = tasks.get_mut(&id) {
+        task.status = "aborted".to_string();
+        task.completed_at = Some(Local::now().to_rfc3339());
+        Ok(Json(serde_json::json!({ "status": "aborted" })))
+    } else {
+        Err((StatusCode::NOT_FOUND, "Task not found".to_string()))
+    }
+}
+
+/// Permanently delete a task from history (memory + disk).
+/// Returns the task's time window so the client can scope API-log cleanup.
+async fn delete_task_history(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // 1. Remove from in-memory store
+    let removed = {
+        let mut tasks = state.tasks.lock().unwrap();
+        tasks.remove(&id)
+    };
+
+    let task = removed.ok_or((StatusCode::NOT_FOUND, "Task not found".to_string()))?;
+
+    // 2. Remove from persisted history file
+    if state.history_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&state.history_path) {
+            if let Ok(mut history) = serde_json::from_str::<Vec<serde_json::Value>>(&content) {
+                history.retain(|e| {
+                    e.get("id").and_then(|v| v.as_str()) != Some(&id)
+                });
+                if let Ok(json) = serde_json::to_string_pretty(&history) {
+                    let _ = std::fs::write(&state.history_path, json);
+                }
+            }
+        }
+    }
+
+    // 2b. Remove the per-task logs sidecar file too — otherwise stale logs
+    // would resurface if a future task happens to reuse the same UUID
+    // (very unlikely, but the orphaned file is wasted disk space regardless).
+    crate::delete_task_logs(&state.history_path, &id);
+
+    // 3. Drop any active WS sender so any lingering relay loop exits
+    {
+        let mut senders = state.task_senders.lock().unwrap();
+        senders.remove(&id);
+    }
+
+    Ok(Json(serde_json::json!({
+        "status": "deleted",
+        "id": id,
+        "started_at": task.started_at,
+        "completed_at": task.completed_at,
+    })))
+}
+
+async fn send_steering(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+    Json(payload): Json<SteeringRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // Notify Frontend Webview of steering message
+    let _ = state.app_handle.emit("steering-task", serde_json::json!({
+        "taskId": id,
+        "message": payload.message
+    }));
+    Ok(Json(serde_json::json!({ "status": "steered" })))
+}
+
+async fn get_config(State(state): State<AppState>) -> Result<Json<AiConfig>, (StatusCode, String)> {
+    let mut config = load_config(&state.config_path)?;
+    
+    // Mask keys
+    if config.openai_key.is_some() { config.openai_key = Some("********".to_string()); }
+    if config.anthropic_key.is_some() { config.anthropic_key = Some("********".to_string()); }
+    if config.gemini_key.is_some() { config.gemini_key = Some("********".to_string()); }
+    if config.azure_key.is_some() { config.azure_key = Some("********".to_string()); }
+    
+    if let Some(instances) = &mut config.llm_instances {
+        for inst in instances {
+            if inst.api_key.is_some() {
+                inst.api_key = Some("********".to_string());
+            }
+        }
+    }
+    
+    Ok(Json(config))
+}
+
+async fn update_config(
+    State(state): State<AppState>,
+    Json(new_config): Json<AiConfig>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let mut final_config = new_config;
+    if state.config_path.exists() {
+        if let Ok(json) = std::fs::read_to_string(&state.config_path) {
+            if let Ok(old_config) = serde_json::from_str::<AiConfig>(&json) {
+                if final_config.connection_token.is_none() {
+                    final_config.connection_token = old_config.connection_token;
+                }
+                if final_config.openai_key == Some("********".to_string()) || final_config.openai_key.is_none() {
+                    final_config.openai_key = old_config.openai_key;
+                }
+                if final_config.anthropic_key == Some("********".to_string()) || final_config.anthropic_key.is_none() {
+                    final_config.anthropic_key = old_config.anthropic_key;
+                }
+                if final_config.gemini_key == Some("********".to_string()) || final_config.gemini_key.is_none() {
+                    final_config.gemini_key = old_config.gemini_key;
+                }
+                if final_config.azure_key == Some("********".to_string()) || final_config.azure_key.is_none() {
+                    final_config.azure_key = old_config.azure_key;
+                }
+                if final_config.approved_projects.is_none() {
+                    final_config.approved_projects = old_config.approved_projects;
+                }
+                if final_config.max_steps.is_none() {
+                    final_config.max_steps = old_config.max_steps;
+                }
+                if final_config.mcp_servers.is_none() {
+                    final_config.mcp_servers = old_config.mcp_servers;
+                }
+                
+                // Merge llm_instances keys
+                if let Some(final_insts) = &mut final_config.llm_instances {
+                    if let Some(old_insts) = &old_config.llm_instances {
+                        for final_inst in final_insts {
+                            if final_inst.api_key == Some("********".to_string()) || final_inst.api_key.is_none() {
+                                if let Some(old_inst) = old_insts.iter().find(|o| o.id == final_inst.id) {
+                                    final_inst.api_key = old_inst.api_key.clone();
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Preserve active_llm_instance_id if the client did not send it
+                if final_config.active_llm_instance_id.is_none() {
+                    final_config.active_llm_instance_id = old_config.active_llm_instance_id;
+                }
+
+                // Preserve Agent Safety Limits (same rationale as save_ai_config)
+                if final_config.token_budget.is_none() {
+                    final_config.token_budget = old_config.token_budget;
+                }
+                if final_config.wall_clock_minutes.is_none() {
+                    final_config.wall_clock_minutes = old_config.wall_clock_minutes;
+                }
+                if final_config.no_progress_window.is_none() {
+                    final_config.no_progress_window = old_config.no_progress_window;
+                }
+                if final_config.identical_call_threshold.is_none() {
+                    final_config.identical_call_threshold = old_config.identical_call_threshold;
+                }
+                if final_config.cycle_detection_min_repeats.is_none() {
+                    final_config.cycle_detection_min_repeats = old_config.cycle_detection_min_repeats;
+                }
+                if final_config.prompt_templates.is_none() {
+                    final_config.prompt_templates = old_config.prompt_templates;
+                }
+            }
+        }
+    }
+
+    let json = serde_json::to_string_pretty(&final_config).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    std::fs::write(&state.config_path, json).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    
+    Ok(Json(serde_json::json!({ "status": "saved" })))
+}
+
+async fn test_connection(
+    State(state): State<AppState>,
+    Json(payload): Json<TestConnectionRequest>,
+) -> Result<Json<TestConnectionResponse>, (StatusCode, String)> {
+    // 1. Get proxy settings from saved config if any
+    let proxy_url = if let Ok(json) = std::fs::read_to_string(&state.config_path) {
+        if let Ok(config) = serde_json::from_str::<AiConfig>(&json) {
+            config.proxy_url
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // 2. Build HTTP Client
+    let mut builder = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10));
+    if let Some(url) = proxy_url {
+        if !url.is_empty() {
+            if let Ok(proxy) = reqwest::Proxy::all(url) {
+                builder = builder.proxy(proxy);
+            }
+        }
+    }
+    let client = builder.build().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to build client: {}", e)))?;
+
+    // 3. Determine URL, Headers, and Body
+    let provider = payload.provider.as_str();
+    let model = payload.model.as_str();
+    let api_key = payload.api_key.unwrap_or_default();
+    
+    // Fallback mask check (if frontend sent masked asterisk string, load from saved configuration)
+    let final_api_key = if api_key == "********" {
+        // Load original key from config
+        if let Ok(json) = std::fs::read_to_string(&state.config_path) {
+            if let Ok(config) = serde_json::from_str::<AiConfig>(&json) {
+                match provider {
+                    "openai" => config.openai_key,
+                    "anthropic" => config.anthropic_key,
+                    "gemini" => config.gemini_key,
+                    "azure" => config.azure_key,
+                    _ => None,
+                }.unwrap_or_default()
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        }
+    } else {
+        api_key
+    };
+
+    let base_url = payload.base_url.unwrap_or_default();
+    let api_version = payload.api_version.unwrap_or_default();
+
+    let (url, headers, body) = match provider {
+        "openai" => {
+            let base = if base_url.is_empty() { "https://api.openai.com/v1" } else { &base_url };
+            let url = format!("{}/chat/completions", base.trim_end_matches('/'));
+            let mut h = reqwest::header::HeaderMap::new();
+            h.insert("Authorization", format!("Bearer {}", final_api_key).parse().map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid API Key header format: {}", e)))?);
+            h.insert("Content-Type", "application/json".parse().unwrap());
+            let body = serde_json::json!({
+                "model": model,
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 5
+            });
+            (url, h, body)
+        }
+        "anthropic" => {
+            let base = if base_url.is_empty() { "https://api.anthropic.com/v1" } else { &base_url };
+            let url = format!("{}/messages", base.trim_end_matches('/'));
+            let mut h = reqwest::header::HeaderMap::new();
+            h.insert("x-api-key", final_api_key.parse().map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid API Key header format: {}", e)))?);
+            h.insert("anthropic-version", "2023-06-01".parse().unwrap());
+            h.insert("Content-Type", "application/json".parse().unwrap());
+            let body = serde_json::json!({
+                "model": model,
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 5
+            });
+            (url, h, body)
+        }
+        "gemini" => {
+            let base = if base_url.is_empty() { "https://generativelanguage.googleapis.com/v1beta" } else { &base_url };
+            let url = format!("{}/models/{}:generateContent?key={}", base.trim_end_matches('/'), model, final_api_key);
+            let mut h = reqwest::header::HeaderMap::new();
+            h.insert("Content-Type", "application/json".parse().unwrap());
+            let body = serde_json::json!({
+                "contents": [{"parts": [{"text": "ping"}]}],
+                "generationConfig": {
+                    "maxOutputTokens": 5
+                }
+            });
+            (url, h, body)
+        }
+        "azure" => {
+            let api_v = if api_version.is_empty() { "2024-02-15-preview" } else { &api_version };
+            let url = format!("{}/openai/deployments/{}/chat/completions?api-version={}", base_url.trim_end_matches('/'), model, api_v);
+            let mut h = reqwest::header::HeaderMap::new();
+            h.insert("api-key", final_api_key.parse().map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid API Key header format: {}", e)))?);
+            h.insert("Content-Type", "application/json".parse().unwrap());
+            let body = serde_json::json!({
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 5
+            });
+            (url, h, body)
+        }
+        "ollama" => {
+            let base = if base_url.is_empty() { "http://localhost:11434" } else { &base_url };
+            let url = format!("{}/api/chat", base.trim_end_matches('/'));
+            let mut h = reqwest::header::HeaderMap::new();
+            h.insert("Content-Type", "application/json".parse().unwrap());
+            let body = serde_json::json!({
+                "model": model,
+                "messages": [{"role": "user", "content": "ping"}],
+                "stream": false
+            });
+            (url, h, body)
+        }
+        "generic" => {
+            let base = if base_url.is_empty() { "http://localhost:11434/v1" } else { &base_url };
+            let url = format!("{}/chat/completions", base.trim_end_matches('/'));
+            let mut h = reqwest::header::HeaderMap::new();
+            if !final_api_key.is_empty() {
+                h.insert("Authorization", format!("Bearer {}", final_api_key).parse().map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid API Key header format: {}", e)))?);
+            }
+            h.insert("Content-Type", "application/json".parse().unwrap());
+            let body = serde_json::json!({
+                "model": model,
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 5
+            });
+            (url, h, body)
+        }
+        _ => return Err((StatusCode::BAD_REQUEST, format!("Unsupported provider: {}", provider))),
+    };
+
+    // 4. Send request and handle response
+    match client.post(&url).headers(headers).json(&body).send().await {
+        Ok(res) => {
+            if res.status().is_success() {
+                Ok(Json(TestConnectionResponse {
+                    success: true,
+                    message: "Connection verified successfully!".to_string(),
+                }))
+            } else {
+                let status = res.status();
+                let err_text = res.text().await.unwrap_or_default();
+                Ok(Json(TestConnectionResponse {
+                    success: false,
+                    message: format!("API returned error status ({}): {}", status, err_text),
+                }))
+            }
+        }
+        Err(e) => {
+            Ok(Json(TestConnectionResponse {
+                success: false,
+                message: format!("Network error: {}", e),
+            }))
+        }
+    }
+}
+
+async fn get_stats(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let tasks = state.tasks.lock().unwrap();
+    let mut total_tasks = 0;
+    let mut total_tokens = 0;
+    let mut prompt_tokens = 0;
+    let mut completion_tokens = 0;
+    
+    for task in tasks.values() {
+        total_tasks += 1;
+        prompt_tokens += task.token_usage.prompt_tokens;
+        completion_tokens += task.token_usage.completion_tokens;
+        total_tokens += task.token_usage.total_tokens;
+    }
+    
+    Json(serde_json::json!({
+        "totalTasks": total_tasks,
+        "totalTokens": total_tokens,
+        "promptTokens": prompt_tokens,
+        "completionTokens": completion_tokens,
+        "estimatedCost": (total_tokens as f64) * 0.000015
+    }))
+}
+
+// Helpers
+fn load_config(path: &PathBuf) -> Result<AiConfig, (StatusCode, String)> {
+    if !path.exists() {
+        return Ok(AiConfig::default());
+    }
+    let json = std::fs::read_to_string(path).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    serde_json::from_str(&json).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
