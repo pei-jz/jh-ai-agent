@@ -6,6 +6,11 @@ use std::time::Duration;
 use std::io::Write;
 use chrono::Local;
 use tauri::Manager;
+use super::ai_providers::{
+    model_supports_vision, parse_image_data_url, build_openai_messages,
+    clean_openai_tools, openai_tools_to_gemini,
+};
+use super::ai_config::AiConfig;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct LlmMessage {
@@ -40,12 +45,25 @@ pub struct LlmRequest {
     pub temperature: Option<f32>,
 }
 
+/// Token usage parsed from a provider's streaming response. Emitted on the final
+/// (done) chunk so the JS layer can report *real* token counts instead of an
+/// estimate. Fields default to 0 when the provider doesn't report a value.
+#[derive(Debug, Serialize, Clone, Default)]
+pub struct TokenUsage {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+}
+
 #[derive(Debug, Serialize, Clone)]
 pub struct StreamChunk {
     pub request_id: String,
     pub delta: String,
     pub done: bool,
     pub error: Option<String>,
+    /// Present only on the final (done) chunk when the provider reported usage.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<TokenUsage>,
 }
 
 async fn get_client(proxy_url: Option<String>) -> Result<Client, String> {
@@ -148,7 +166,9 @@ pub async fn llm_chat_native<R: Runtime>(
         "azure" => {
             let key = resolved_api_key.or(config.azure_key).ok_or("Azure OpenAI API key not set")?;
             let base = resolved_base_url.or(config.azure_endpoint).ok_or("Azure OpenAI Base URL not set")?;
-            let api_version = resolved_api_version.or(payload.api_version).unwrap_or_else(|| "2024-02-15-preview".to_string());
+            // 2024-08-01-preview is the first Azure OpenAI api-version with
+            // Structured Outputs (strict function calling) support.
+            let api_version = resolved_api_version.or(payload.api_version).unwrap_or_else(|| "2024-08-01-preview".to_string());
             let url = format!(
                 "{}/openai/deployments/{}/chat/completions?api-version={}",
                 base.trim_end_matches('/'),
@@ -174,57 +194,20 @@ pub async fn llm_chat_native<R: Runtime>(
         _ => return Err(format!("Unsupported provider: {}", resolved_provider)),
     };
 
-    // ── Image data-URL helper ─────────────────────────────────────────────────
-    // Frontend sends images as full data-URLs ("data:image/jpeg;base64,...") so
-    // we can extract the real MIME type instead of hardcoding "image/png".
-    fn parse_image_data_url(s: &str) -> (String, String) {
-        // "data:<mime>;base64,<data>"
-        if let Some(rest) = s.strip_prefix("data:") {
-            if let Some(semi) = rest.find(';') {
-                let mime = rest[..semi].to_string();
-                let after = &rest[semi + 1..];
-                if let Some(data) = after.strip_prefix("base64,") {
-                    return (mime, data.to_string());
-                }
-            }
-        }
-        // Plain base64 fallback (backward-compat with old callers)
-        ("image/png".to_string(), s.to_string())
-    }
-
     // Construct body (Provider specific)
     let body = match resolved_provider.as_str() {
         "openai" | "ollama" | "azure" | "generic" => {
-            let mut full_messages = Vec::new();
-            if let Some(sys) = payload.system_prompt {
-                full_messages.push(serde_json::json!({ "role": "system", "content": sys }));
-            }
-
-            let msg_len = payload.messages.len();
-            for (i, m) in payload.messages.into_iter().enumerate() {
-                // Attach images to the last user message
-                if m.role == "user" && i == msg_len - 1 && payload.images.as_ref().map_or(false, |imgs| !imgs.is_empty()) {
-                    let mut content_parts = Vec::new();
-                    content_parts.push(serde_json::json!({ "type": "text", "text": m.content }));
-
-                    if let Some(images) = &payload.images {
-                        for img in images {
-                            let (mime, data) = parse_image_data_url(img);
-                            content_parts.push(serde_json::json!({
-                                "type": "image_url",
-                                "image_url": { "url": format!("data:{};base64,{}", mime, data) }
-                            }));
-                        }
-                    }
-                    full_messages.push(serde_json::json!({ "role": m.role, "content": content_parts }));
-                } else {
-                    full_messages.push(serde_json::json!({ "role": m.role, "content": m.content }));
-                }
-            }
+            // Message array (incl. vision attach/drop) → build_openai_messages (unit-tested).
+            let vision_ok = model_supports_vision(&resolved_provider, &payload.model);
+            let full_messages = build_openai_messages(payload.system_prompt, payload.messages, &payload.images, vision_ok);
             let mut body_obj = serde_json::json!({
                 "model": payload.model,
                 "messages": full_messages,
-                "stream": true
+                "stream": true,
+                // Ask OpenAI-compatible endpoints to emit a final usage-only chunk
+                // (choices:[] + usage:{...}). Unknown-field-tolerant servers ignore
+                // it; those that honor it give us real token counts.
+                "stream_options": { "include_usage": true }
             });
             // Response-control params (OpenAI-compatible): only set when provided,
             // so unconfigured connections keep the provider's default behavior.
@@ -241,8 +224,13 @@ pub async fn llm_chat_native<R: Runtime>(
             // — falls back to text JSON via the system prompt).
             if resolved_provider != "ollama" {
                 if let Some(tools) = &payload.tools {
+                    // OpenAI Structured Outputs (strict) is supported by openai,
+                    // azure, and (opt-in) generic OpenAI-compatible endpoints.
+                    let strict_supported =
+                        matches!(resolved_provider.as_str(), "openai" | "azure" | "generic");
+                    let cleaned = clean_openai_tools(tools, strict_supported);
                     if let Some(obj) = body_obj.as_object_mut() {
-                        obj.insert("tools".to_string(), tools.clone());
+                        obj.insert("tools".to_string(), cleaned);
                         obj.insert("tool_choice".to_string(), serde_json::json!("auto"));
                     }
                 }
@@ -281,7 +269,6 @@ pub async fn llm_chat_native<R: Runtime>(
                 // ignored model capability). temperature is optional.
                 let mut body = serde_json::json!({
                     "model": payload.model,
-                    "system": payload.system_prompt,
                     "messages": full_messages,
                     "stream": true,
                     "max_tokens": resolved_max_tokens.unwrap_or(8192)
@@ -289,12 +276,24 @@ pub async fn llm_chat_native<R: Runtime>(
                 if let Some(temp) = resolved_temperature {
                     body["temperature"] = serde_json::json!(temp);
                 }
+
+                // ── Prompt caching (Anthropic, GA — no beta header needed) ──
+                // The system prompt (role + tools rules + project summary) is large
+                // and identical across every step of an agent run, so we send it as a
+                // cacheable text block. `cache_control` marks the cache breakpoint;
+                // subsequent calls within the 5-min TTL bill the cached prefix at ~10%.
+                if let Some(sys) = payload.system_prompt.clone().filter(|s| !s.is_empty()) {
+                    body["system"] = serde_json::json!([
+                        { "type": "text", "text": sys, "cache_control": { "type": "ephemeral" } }
+                    ]);
+                }
+
                 // Convert OpenAI-format tools to Anthropic format:
                 // { type, function: { name, description, parameters } }
                 // → { name, description, input_schema }
                 if let Some(tools) = &payload.tools {
                     if let Some(arr) = tools.as_array() {
-                        let anthropic_tools: Vec<serde_json::Value> = arr.iter()
+                        let mut anthropic_tools: Vec<serde_json::Value> = arr.iter()
                             .filter_map(|t| {
                                 let f = &t["function"];
                                 let name = f["name"].as_str()?;
@@ -306,6 +305,11 @@ pub async fn llm_chat_native<R: Runtime>(
                             })
                             .collect();
                         if !anthropic_tools.is_empty() {
+                            // Cache the (static) tool definitions too — mark the last
+                            // tool, which caches the whole tools block up to that point.
+                            if let Some(last) = anthropic_tools.last_mut() {
+                                last["cache_control"] = serde_json::json!({ "type": "ephemeral" });
+                            }
                             body["tools"] = serde_json::Value::Array(anthropic_tools);
                         }
                     }
@@ -365,6 +369,17 @@ pub async fn llm_chat_native<R: Runtime>(
             if !gen_config.is_empty() {
                 g_body["generationConfig"] = serde_json::Value::Object(gen_config);
             }
+            // Native function calling: convert OpenAI-format tools to Gemini
+            // functionDeclarations so the model returns structured functionCall
+            // parts instead of free-form JSON text.
+            if let Some(tools) = &payload.tools {
+                if let Some(decls) = openai_tools_to_gemini(tools) {
+                    g_body["tools"] = serde_json::json!([{ "functionDeclarations": decls }]);
+                    g_body["toolConfig"] = serde_json::json!({
+                        "functionCallingConfig": { "mode": "AUTO" }
+                    });
+                }
+            }
             g_body
         }
         _ => unreachable!(),
@@ -410,6 +425,10 @@ pub async fn llm_chat_native<R: Runtime>(
 
     tokio::spawn(async move {
         let mut full_response = String::new();
+        // Real token usage, accumulated from the provider's streaming response.
+        // Stays all-zero if the provider never reports it (JS then falls back to
+        // its own estimator). See per-provider extraction in the parse loop below.
+        let mut usage = TokenUsage::default();
 
         // ── Native tool_calls accumulator (OpenAI streaming format) ──
         // OpenAI / DeepSeek emit function-call results across many small SSE chunks:
@@ -437,6 +456,16 @@ pub async fn llm_chat_native<R: Runtime>(
                                 if line.starts_with("data: ") && line != "data: [DONE]" {
                                     let json_str = &line[6..];
                                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(json_str) {
+                                        // ── Usage (final chunk carries choices:[] + usage:{...}) ──
+                                        if json.get("usage").map_or(false, |u| u.is_object()) {
+                                            let u = &json["usage"];
+                                            let p = u["prompt_tokens"].as_u64().unwrap_or(0);
+                                            let c = u["completion_tokens"].as_u64().unwrap_or(0);
+                                            let t = u["total_tokens"].as_u64().unwrap_or(0);
+                                            if p > 0 { usage.prompt_tokens = p; }
+                                            if c > 0 { usage.completion_tokens = c; }
+                                            if t > 0 { usage.total_tokens = t; }
+                                        }
                                         // ── Branch 1: regular content delta ──
                                         let content = json["choices"][0]["delta"]["content"]
                                             .as_str().unwrap_or_default().to_string();
@@ -477,6 +506,22 @@ pub async fn llm_chat_native<R: Runtime>(
                                     let json_str = &line[6..];
                                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(json_str) {
                                         match json["type"].as_str().unwrap_or("") {
+                                            "message_start" => {
+                                                // input_tokens reported up-front; output_tokens
+                                                // is the running tally (final value in message_delta).
+                                                let mu = &json["message"]["usage"];
+                                                let p = mu["input_tokens"].as_u64().unwrap_or(0);
+                                                let c = mu["output_tokens"].as_u64().unwrap_or(0);
+                                                if p > 0 { usage.prompt_tokens = p; }
+                                                if c > 0 { usage.completion_tokens = c; }
+                                                String::new()
+                                            }
+                                            "message_delta" => {
+                                                // Final output_tokens count lands here.
+                                                let c = json["usage"]["output_tokens"].as_u64().unwrap_or(0);
+                                                if c > 0 { usage.completion_tokens = c; }
+                                                String::new()
+                                            }
                                             "content_block_start" => {
                                                 // Capture tool_use block metadata (id + name)
                                                 if json["content_block"]["type"] == "tool_use" {
@@ -518,12 +563,48 @@ pub async fn llm_chat_native<R: Runtime>(
                                 if line.starts_with("data: ") {
                                     let json_str = &line[6..];
                                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(json_str) {
-                                        json["candidates"][0]["content"]["parts"][0]["text"].as_str().unwrap_or_default().to_string()
+                                        // usageMetadata is cumulative per chunk — keep the latest.
+                                        if let Some(um) = json.get("usageMetadata") {
+                                            let p = um["promptTokenCount"].as_u64().unwrap_or(0);
+                                            let c = um["candidatesTokenCount"].as_u64().unwrap_or(0);
+                                            let t = um["totalTokenCount"].as_u64().unwrap_or(0);
+                                            if p > 0 { usage.prompt_tokens = p; }
+                                            if c > 0 { usage.completion_tokens = c; }
+                                            if t > 0 { usage.total_tokens = t; }
+                                        }
+                                        // A Gemini chunk may carry multiple parts: text and/or
+                                        // functionCall {name, args}. Accumulate text and convert
+                                        // any functionCall into the shared tool_calls envelope.
+                                        let mut text_acc = String::new();
+                                        if let Some(parts) = json["candidates"][0]["content"]["parts"].as_array() {
+                                            for part in parts {
+                                                if let Some(t) = part["text"].as_str() {
+                                                    text_acc.push_str(t);
+                                                }
+                                                if let Some(fc) = part.get("functionCall") {
+                                                    let name = fc["name"].as_str().unwrap_or("").to_string();
+                                                    let args = fc.get("args").cloned().unwrap_or_else(|| serde_json::json!({}));
+                                                    let args_str = serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
+                                                    let idx = tool_calls_acc.len() as u64;
+                                                    tool_calls_acc.insert(idx, serde_json::json!({
+                                                        "id": format!("call_{}", idx),
+                                                        "type": "function",
+                                                        "function": { "name": name, "arguments": args_str }
+                                                    }));
+                                                }
+                                            }
+                                        }
+                                        text_acc
                                     } else { String::new() }
                                 } else { String::new() }
                             }
                             "ollama" => {
                                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
+                                    // Final message carries prompt_eval_count / eval_count.
+                                    let p = json["prompt_eval_count"].as_u64().unwrap_or(0);
+                                    let c = json["eval_count"].as_u64().unwrap_or(0);
+                                    if p > 0 { usage.prompt_tokens = p; }
+                                    if c > 0 { usage.completion_tokens = c; }
                                     json["message"]["content"].as_str().unwrap_or_default().to_string()
                                 } else { String::new() }
                             }
@@ -537,6 +618,7 @@ pub async fn llm_chat_native<R: Runtime>(
                                 delta,
                                 done: false,
                                 error: None,
+                                usage: None,
                             });
                         }
                     }
@@ -547,6 +629,7 @@ pub async fn llm_chat_native<R: Runtime>(
                         delta: String::new(),
                         done: true,
                         error: Some(format!("Stream error: {}", e)),
+                        usage: None,
                     });
                     break;
                 }
@@ -585,6 +668,7 @@ pub async fn llm_chat_native<R: Runtime>(
                 delta: format!("<<<__TOOL_ENVELOPE__>>>{}", envelope_str),
                 done: false,
                 error: None,
+                usage: None,
             });
         }
 
@@ -595,12 +679,17 @@ pub async fn llm_chat_native<R: Runtime>(
             }
         }
 
-        // Finalize
+        // Finalize — attach real token usage. Derive total if the provider only
+        // gave us the two components (Anthropic/Ollama report parts, not a total).
+        if usage.total_tokens == 0 && (usage.prompt_tokens > 0 || usage.completion_tokens > 0) {
+            usage.total_tokens = usage.prompt_tokens + usage.completion_tokens;
+        }
         let _ = app.emit("llm-chunk", StreamChunk {
             request_id: rid.clone(),
             delta: String::new(),
             done: true,
             error: None,
+            usage: Some(usage),
         });
     });
 
@@ -636,446 +725,5 @@ fn log_interaction(dir: &str, provider: &str, model: &str, request: &serde_json:
     });
 
     writeln!(file, "{}", entry.to_string()).map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
-pub struct LlmInstance {
-    pub id: String,
-    pub name: String,
-    pub provider: String,
-    pub api_key: Option<String>,
-    pub base_url: Option<String>,
-    pub model: String,
-    pub api_version: Option<String>,
-    /// Optional explicit context-window size (in tokens) for this connection.
-    /// Used by the frontend's compaction logic. When set, it overrides the
-    /// built-in per-model table — essential for models we don't recognize
-    /// (e.g. DeepSeek, Qwen) whose real window differs from the default guess.
-    #[serde(default)]
-    pub context_window: Option<u32>,
-    /// Optional max output tokens for responses from this connection.
-    /// None ⇒ provider default (Anthropic uses 8192 since it's required there).
-    #[serde(default)]
-    pub max_output_tokens: Option<u32>,
-    /// Optional sampling temperature (0.0–2.0). None ⇒ provider default.
-    /// For agentic tool-use, a low value (e.g. 0.2) improves reliability.
-    #[serde(default)]
-    pub temperature: Option<f32>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
-pub struct AiConfig {
-    pub connection_token: Option<String>,
-    pub openai_key: Option<String>,
-    pub anthropic_key: Option<String>,
-    pub gemini_key: Option<String>,
-    pub azure_key: Option<String>,
-    pub azure_endpoint: Option<String>,
-    pub azure_deployment: Option<String>,
-    pub proxy_url: Option<String>,
-    pub logging_enabled: Option<bool>,
-    pub log_dir: Option<String>,
-    pub max_steps: Option<u32>,
-    pub approved_projects: Option<Vec<String>>,
-    /// Extra directories where the agent may write WITHOUT user approval,
-    /// in addition to the active workspace. Configured from Settings.
-    #[serde(default)]
-    pub write_allowed_paths: Option<Vec<String>>,
-    pub mcp_servers: Option<serde_json::Value>,
-    pub llm_instances: Option<Vec<LlmInstance>>,
-    /// The instance id (from llm_instances) that should be used by default
-    /// for the agent and for chat sessions. None ⇒ fall back to first instance.
-    #[serde(default)]
-    pub active_llm_instance_id: Option<String>,
-
-    // ── Agent Safety Limits ───────────────────────────────────────────
-    // All Option<u32>/u64 — None or 0 means "disabled / unlimited".
-    // Stored centrally so they can be tuned from Settings → General without
-    // a code rebuild and so the JSON document is self-describing.
-
-    /// Hard cap on cumulative prompt+completion tokens per task run.
-    /// None or 0 ⇒ no cost cap.
-    #[serde(default)]
-    pub token_budget: Option<u64>,
-
-    /// Hard cap on wall-clock minutes per task run. None or 0 ⇒ no time cap.
-    #[serde(default)]
-    pub wall_clock_minutes: Option<u32>,
-
-    /// Number of consecutive iterations with no file-mutating tool calls
-    /// before the agent gets a "you're stuck" reminder. 0 ⇒ disabled.
-    #[serde(default)]
-    pub no_progress_window: Option<u32>,
-
-    /// How many consecutive identical tool calls before a SOFT warning fires.
-    /// The HARD stop is at 3× this number. 0 ⇒ disabled entirely.
-    #[serde(default)]
-    pub identical_call_threshold: Option<u32>,
-
-    /// How many full cycle repeats (ABAB or ABCABC) before a SOFT warning fires.
-    /// 0 ⇒ disabled. Higher = more permissive (rare false positives but slower to catch loops).
-    #[serde(default)]
-    pub cycle_detection_min_repeats: Option<u32>,
-
-    /// Fraction (0–1) of the model's context window that conversation history
-    /// (including the injected file cache) may occupy before compaction triggers.
-    /// None ⇒ frontend default (0.7). Lower = compact sooner (less context, cheaper);
-    /// higher = keep more history (richer context, closer to the window limit).
-    #[serde(default)]
-    pub history_budget_ratio: Option<f32>,
-
-    /// Named prompt templates / slash-command snippets.
-    /// Object: { "key": { "label": "...", "prompt": "...", "icon": "..." } }
-    #[serde(default)]
-    pub prompt_templates: Option<serde_json::Value>,
-}
-
-#[tauri::command]
-pub async fn get_ai_config<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>
-) -> Result<AiConfig, String> {
-    let config_dir = app.path().app_config_dir().map_err(|e: tauri::Error| e.to_string())?;
-    let config_path = config_dir.join("ai_config.json");
-    
-    if !config_path.exists() {
-        return Ok(AiConfig {
-            connection_token: None,
-            openai_key: None, anthropic_key: None, gemini_key: None, azure_key: None,
-            azure_endpoint: None, azure_deployment: None,
-            proxy_url: None, logging_enabled: None, log_dir: None,
-            max_steps: Some(100),
-            approved_projects: Some(Vec::new()),
-            write_allowed_paths: Some(Vec::new()),
-            mcp_servers: None,
-            llm_instances: Some(Vec::new()),
-            active_llm_instance_id: None,
-            token_budget: None,
-            wall_clock_minutes: None,
-            no_progress_window: None,
-            identical_call_threshold: None,
-            cycle_detection_min_repeats: None,
-            history_budget_ratio: None,
-            prompt_templates: None,
-        });
-    }
-
-    let json = std::fs::read_to_string(config_path).map_err(|e| e.to_string())?;
-    let mut config: AiConfig = serde_json::from_str(&json).map_err(|e| e.to_string())?;
-    
-    // Sanitize Keys
-    if config.openai_key.is_some() { config.openai_key = Some("********".to_string()); }
-    if config.anthropic_key.is_some() { config.anthropic_key = Some("********".to_string()); }
-    if config.gemini_key.is_some() { config.gemini_key = Some("********".to_string()); }
-    if config.azure_key.is_some() { config.azure_key = Some("********".to_string()); }
-    
-    if let Some(instances) = &mut config.llm_instances {
-        for inst in instances {
-            if inst.api_key.is_some() {
-                inst.api_key = Some("********".to_string());
-            }
-        }
-    }
-    
-    Ok(config)
-}
-
-#[tauri::command]
-pub async fn save_ai_config<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-    config: AiConfig
-) -> Result<(), String> {
-    use tauri::Manager;
-    let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
-    
-    // Ensure dir exists
-    if !config_dir.exists() {
-        std::fs::create_dir_all(&config_dir).map_err(|e| e.to_string())?;
-    }
-
-    let config_path = config_dir.join("ai_config.json");
-    
-    // Merge logic: If existing config exists, keep keys if not provided in new config
-    let mut final_config = config;
-    if config_path.exists() {
-        if let Ok(json) = std::fs::read_to_string(&config_path) {
-            if let Ok(old_config) = serde_json::from_str::<AiConfig>(&json) {
-                if final_config.connection_token.is_none() {
-                    final_config.connection_token = old_config.connection_token;
-                }
-                if final_config.openai_key == Some("********".to_string()) || final_config.openai_key.is_none() {
-                    final_config.openai_key = old_config.openai_key;
-                }
-                if final_config.anthropic_key == Some("********".to_string()) || final_config.anthropic_key.is_none() {
-                    final_config.anthropic_key = old_config.anthropic_key;
-                }
-                if final_config.gemini_key == Some("********".to_string()) || final_config.gemini_key.is_none() {
-                    final_config.gemini_key = old_config.gemini_key;
-                }
-                if final_config.azure_key == Some("********".to_string()) || final_config.azure_key.is_none() {
-                    final_config.azure_key = old_config.azure_key;
-                }
-                if final_config.approved_projects.is_none() {
-                    final_config.approved_projects = old_config.approved_projects;
-                }
-                if final_config.write_allowed_paths.is_none() {
-                    final_config.write_allowed_paths = old_config.write_allowed_paths;
-                }
-                if final_config.mcp_servers.is_none() {
-                    final_config.mcp_servers = old_config.mcp_servers;
-                }
-                
-                // Merge llm_instances keys
-                if let Some(final_insts) = &mut final_config.llm_instances {
-                    if let Some(old_insts) = &old_config.llm_instances {
-                        for final_inst in final_insts {
-                            if final_inst.api_key == Some("********".to_string()) || final_inst.api_key.is_none() {
-                                if let Some(old_inst) = old_insts.iter().find(|o| o.id == final_inst.id) {
-                                    final_inst.api_key = old_inst.api_key.clone();
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Preserve active_llm_instance_id if the client did not send it
-                if final_config.active_llm_instance_id.is_none() {
-                    final_config.active_llm_instance_id = old_config.active_llm_instance_id;
-                }
-
-                // Preserve Agent Safety Limits if the client didn't send them.
-                // (Sent as `null` from JS when the user explicitly wants to clear/disable
-                //  a setting — vs not sending the field at all. We use a `Some(0)` marker
-                //  in the UI for "explicitly disabled", so we only fall through to the old
-                //  value when the field is genuinely missing.)
-                if final_config.token_budget.is_none() {
-                    final_config.token_budget = old_config.token_budget;
-                }
-                if final_config.wall_clock_minutes.is_none() {
-                    final_config.wall_clock_minutes = old_config.wall_clock_minutes;
-                }
-                if final_config.no_progress_window.is_none() {
-                    final_config.no_progress_window = old_config.no_progress_window;
-                }
-                if final_config.identical_call_threshold.is_none() {
-                    final_config.identical_call_threshold = old_config.identical_call_threshold;
-                }
-                if final_config.cycle_detection_min_repeats.is_none() {
-                    final_config.cycle_detection_min_repeats = old_config.cycle_detection_min_repeats;
-                }
-                if final_config.prompt_templates.is_none() {
-                    final_config.prompt_templates = old_config.prompt_templates;
-                }
-            }
-        }
-    }
-
-    let json = serde_json::to_string_pretty(&final_config).map_err(|e| e.to_string())?;
-    std::fs::write(config_path, json).map_err(|e| e.to_string())?;
-
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn set_rag_approval<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-    path: String,
-    approved: bool,
-) -> Result<(), String> {
-    use tauri::Manager;
-    let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
-    let config_path = config_dir.join("ai_config.json");
-    
-    let mut config = if config_path.exists() {
-        let json = std::fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
-        serde_json::from_str::<AiConfig>(&json).map_err(|e| e.to_string())?
-    } else {
-        AiConfig {
-            connection_token: None,
-            openai_key: None,
-            anthropic_key: None,
-            gemini_key: None,
-            azure_key: None,
-            azure_endpoint: None,
-            azure_deployment: None,
-            proxy_url: None,
-            logging_enabled: None,
-            log_dir: None,
-            max_steps: Some(100),
-            approved_projects: Some(Vec::new()),
-            write_allowed_paths: Some(Vec::new()),
-            mcp_servers: None,
-            llm_instances: Some(Vec::new()),
-            active_llm_instance_id: None,
-            token_budget: None,
-            wall_clock_minutes: None,
-            no_progress_window: None,
-            identical_call_threshold: None,
-            cycle_detection_min_repeats: None,
-            history_budget_ratio: None,
-            prompt_templates: None,
-        }
-    };
-
-    let projects = config.approved_projects.get_or_insert_with(Vec::new);
-    if approved {
-        if !projects.contains(&path) {
-            projects.push(path);
-        }
-    } else {
-        projects.retain(|p| p != &path);
-    }
-
-    let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
-    std::fs::write(config_path, json).map_err(|e| e.to_string())?;
-
-    Ok(())
-}
-
-/// Export the JH AI Agent connection settings (host / port / token) to a
-/// standard path that all "JH-family" client apps look up automatically.
-///
-/// Platform-specific path used:
-///   Windows : %APPDATA%/JH/ai-connection.json
-///   macOS   : $HOME/Library/Application Support/JH/ai-connection.json
-///   Linux   : $HOME/.config/JH/ai-connection.json
-///
-/// Once written, any JH client app using `@jh/ai-client` (or the equivalent
-/// hand-rolled connection logic) can connect without any user-side setup.
-///
-/// `port` and `token` are passed in by the JS UI from the live Tauri state.
-#[tauri::command]
-pub async fn export_connection_config(
-    port: u16,
-    token: String,
-) -> Result<String, String> {
-    let base_dir = if cfg!(target_os = "windows") {
-        std::env::var("APPDATA")
-            .map(std::path::PathBuf::from)
-            .map_err(|_| "APPDATA environment variable not set".to_string())?
-    } else if cfg!(target_os = "macos") {
-        let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
-        std::path::PathBuf::from(home).join("Library/Application Support")
-    } else {
-        // Linux / others: XDG_CONFIG_HOME or ~/.config
-        std::env::var("XDG_CONFIG_HOME")
-            .map(std::path::PathBuf::from)
-            .or_else(|_| {
-                std::env::var("HOME")
-                    .map(|h| std::path::PathBuf::from(h).join(".config"))
-            })
-            .map_err(|_| "Neither XDG_CONFIG_HOME nor HOME is set".to_string())?
-    };
-
-    let jh_dir = base_dir.join("JH");
-    if !jh_dir.exists() {
-        std::fs::create_dir_all(&jh_dir).map_err(|e| format!("Failed to create dir: {}", e))?;
-    }
-    let conn_path = jh_dir.join("ai-connection.json");
-
-    let payload = serde_json::json!({
-        "host": "127.0.0.1",
-        "port": port,
-        "token": token,
-        "exported_at": chrono::Local::now().to_rfc3339(),
-        "endpoint_base": format!("http://127.0.0.1:{}/api", port),
-        "ws_base": format!("ws://127.0.0.1:{}/ws", port),
-    });
-
-    let json = serde_json::to_string_pretty(&payload)
-        .map_err(|e| format!("Failed to serialize: {}", e))?;
-    std::fs::write(&conn_path, json)
-        .map_err(|e| format!("Failed to write to {}: {}", conn_path.display(), e))?;
-
-    Ok(conn_path.to_string_lossy().to_string())
-}
-
-/// Return the app config directory path (used by JS to read/write skill .md files).
-#[tauri::command]
-pub async fn get_app_config_dir<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-) -> Result<String, String> {
-    use tauri::Manager;
-    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
-    Ok(dir.to_string_lossy().to_string())
-}
-
-/// List skill .md files from `<config_dir>/skills/`.
-/// Returns a list of `{ name, path, title }` objects.
-#[tauri::command]
-pub async fn list_skill_files<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-) -> Result<Vec<serde_json::Value>, String> {
-    use tauri::Manager;
-    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?.join("skills");
-    if !dir.exists() {
-        return Ok(vec![]);
-    }
-    let mut results = vec![];
-    let entries = std::fs::read_dir(&dir).map_err(|e| e.to_string())?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("md") {
-            continue;
-        }
-        let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
-        let content = std::fs::read_to_string(&path).unwrap_or_default();
-        let title = content.lines().next()
-            .map(|l| l.trim_start_matches('#').trim().to_string())
-            .unwrap_or_else(|| name.clone());
-        results.push(serde_json::json!({
-            "name": name,
-            "path": path.to_string_lossy(),
-            "title": title,
-        }));
-    }
-    results.sort_by(|a, b| {
-        a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or(""))
-    });
-    Ok(results)
-}
-
-/// Read a skill file's content.
-#[tauri::command]
-pub async fn read_skill_file<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-    name: String,
-) -> Result<String, String> {
-    use tauri::Manager;
-    let path = app.path().app_config_dir().map_err(|e| e.to_string())?
-        .join("skills")
-        .join(format!("{}.md", name));
-    std::fs::read_to_string(&path).map_err(|e| format!("Cannot read skill '{}': {}", name, e))
-}
-
-/// Write (create or update) a skill file.
-#[tauri::command]
-pub async fn write_skill_file<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-    name: String,
-    content: String,
-) -> Result<(), String> {
-    use tauri::Manager;
-    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?.join("skills");
-    if !dir.exists() {
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    }
-    let path = dir.join(format!("{}.md", name));
-    std::fs::write(&path, content).map_err(|e| e.to_string())
-}
-
-/// Delete a skill file.
-#[tauri::command]
-pub async fn delete_skill_file<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-    name: String,
-) -> Result<(), String> {
-    use tauri::Manager;
-    let path = app.path().app_config_dir().map_err(|e| e.to_string())?
-        .join("skills")
-        .join(format!("{}.md", name));
-    if path.exists() {
-        std::fs::remove_file(&path).map_err(|e| e.to_string())?;
-    }
     Ok(())
 }

@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { listen } from '@tauri-apps/api/event';
+import { listen, emit } from '@tauri-apps/api/event';
 
 import { Sidebar } from './dashboard/components/Sidebar.js';
 import { OverviewView } from './dashboard/views/OverviewView.js';
@@ -9,10 +9,12 @@ import { MonitorView } from './dashboard/views/MonitorView.js';
 import { HistoryView } from './dashboard/views/HistoryView.js';
 import { ConfigView } from './dashboard/views/ConfigView.js';
 import { ScheduleView } from './dashboard/views/ScheduleView.js';
-import { AnalyticsView } from './dashboard/views/AnalyticsView.js';
+// AnalyticsView is now embedded inside the Overview dashboard (no standalone route).
 import { taskBridge } from './modules/bridge/TaskBridge.js';
 import { scheduleManager } from './modules/ai/ScheduleManager.js';
+import { mcpManager } from './modules/ai/McpManager.js';
 import llmService from './modules/ai/LLMService.js';
+import { renderMarkdown, ensureResultViewStyles } from './dashboard/utils/resultView.js';
 
 // API Client Helper
 class ApiClient {
@@ -71,6 +73,13 @@ class ApiClient {
     }
     getStats() { return this.request('/stats'); }
     getTaskLogs(id) { return this.request(`/tasks/${id}/logs`); }
+    continueTask(id, message) {
+        // Re-run a completed task with a new message under the SAME task id.
+        return this.request(`/tasks/${id}/continue`, {
+            method: 'POST',
+            body: JSON.stringify({ message })
+        });
+    }
 }
 
 // Router State
@@ -129,9 +138,6 @@ async function handleRoute() {
             break;
         case 'schedule':
             viewInstance = new ScheduleView();
-            break;
-        case 'analytics':
-            viewInstance = new AnalyticsView();
             break;
         case 'config':
             viewInstance = new ConfigView();
@@ -213,7 +219,7 @@ function injectSearchOverlayStyles() {
             padding: 16px 18px;
             border-bottom: 1px solid hsla(220, 20%, 30%, 0.5);
         }
-        .search-input-icon { font-size: 16px; opacity: 0.6; flex-shrink: 0; }
+        .search-input-icon { font-size: 16px; opacity: 0.6; flex-shrink: 0; align-self: flex-start; margin-top: 2px; }
         #search-input {
             flex: 1;
             background: none;
@@ -223,8 +229,16 @@ function injectSearchOverlayStyles() {
             font-size: 16px;
             font-family: inherit;
             caret-color: hsl(185, 100%, 55%);
+            /* Multiline support: a textarea that auto-grows up to a cap. */
+            resize: none;
+            line-height: 1.5;
+            max-height: 160px;
+            overflow-y: auto;
+            padding: 0;
+            display: block;
         }
         #search-input::placeholder { color: hsl(220, 12%, 40%); }
+        .search-input-row { align-items: flex-start; }
 
         .search-expand-btn {
             display: flex;
@@ -332,6 +346,64 @@ function injectSearchOverlayStyles() {
         }
         .search-ask-ai-icon { font-size: 15px; flex-shrink: 0; }
         .search-ask-ai-label { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+        /* ── Inline AI answer (Simple-mode direct message) ── */
+        #search-ai-answer {
+            max-height: 420px;
+            overflow-y: auto;
+            padding: 14px 18px;
+            border-top: 1px solid hsla(220, 20%, 25%, 0.5);
+            font-size: 13px;
+            color: hsl(220, 20%, 88%);
+            line-height: 1.6;
+        }
+        .search-ai-q {
+            font-size: 12px;
+            color: hsl(185, 100%, 65%);
+            margin-bottom: 8px;
+            font-weight: 600;
+            display: flex;
+            gap: 6px;
+            align-items: flex-start;
+        }
+        .search-ai-thinking { color: hsl(220, 12%, 55%); }
+        .search-ai-stream { white-space: pre-wrap; word-break: break-word; }
+        #search-ai-answer .rv-summary { font-size: 13px; }
+
+        /* ── Spotlight window: the modal FILLS the window (no white margins) ── */
+        html.spotlight-mode, .spotlight-mode, .spotlight-mode body {
+            background: transparent !important;
+            margin: 0; padding: 0;
+        }
+        .spotlight-mode #titlebar,
+        .spotlight-mode #app { display: none !important; }
+        .spotlight-mode #search-overlay {
+            position: fixed; inset: 0;
+            padding: 0;
+            display: flex;
+        }
+        .spotlight-mode #search-overlay .search-backdrop { display: none; }
+        /* Container covers 100% of the window → the dark surface IS the window,
+           so there's no transparent/white frame showing around it. */
+        .spotlight-mode .search-container {
+            width: 100vw;
+            height: 100vh;
+            border-radius: 0;
+            box-shadow: none;
+            border: none;
+            animation: none;
+            display: flex;
+            flex-direction: column;
+        }
+        /* Middle area grows; footer sticks to the bottom. */
+        .spotlight-mode #search-results { flex: 0 1 auto; }
+        .spotlight-mode #search-ai-answer { flex: 1 1 auto; max-height: none; }
+        .spotlight-mode .search-footer { margin-top: auto; }
+        /* Drag handles (no native titlebar): grab the top bar or footer to move. */
+        .spotlight-mode .search-input-row,
+        .spotlight-mode .search-footer { cursor: move; }
+        .spotlight-mode #search-input,
+        .spotlight-mode .search-expand-btn { cursor: auto; }
     `;
     document.head.appendChild(style);
 }
@@ -342,7 +414,7 @@ function buildSearchOverlayHTML() {
         <div class="search-container" role="dialog" aria-label="Quick Search">
             <div class="search-input-row">
                 <span class="search-input-icon">🔍</span>
-                <input id="search-input" type="text" placeholder="Search tasks…" autocomplete="off" spellcheck="false" />
+                <textarea id="search-input" rows="1" placeholder="検索 / AIに質問…  (Enter送信・Shift+Enterで改行)" autocomplete="off" spellcheck="false"></textarea>
                 <button class="search-expand-btn" id="search-expand-btn" title="Open full app (Ctrl+Enter)">
                     <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
                         <path d="M6 2H2v4M10 2h4v4M6 14H2v-4M10 14h4v-4"/>
@@ -351,10 +423,11 @@ function buildSearchOverlayHTML() {
                 </button>
             </div>
             <div id="search-results"></div>
+            <div id="search-ai-answer" style="display:none"></div>
             <div class="search-footer">
                 <span><kbd>↑</kbd><kbd>↓</kbd> Navigate</span>
-                <span><kbd>↵</kbd> Open task</span>
-                <span><kbd>Shift+↵</kbd> AIに質問</span>
+                <span><kbd>↵</kbd> 送信 / Open</span>
+                <span><kbd>Shift+↵</kbd> 改行</span>
                 <span><kbd>Ctrl+↵</kbd> Full app</span>
                 <span style="margin-left:auto"><kbd>Esc</kbd> Close</span>
             </div>
@@ -377,12 +450,16 @@ function initSearchOverlay() {
     // Backdrop click → close
     el.querySelector('#search-backdrop').addEventListener('click', hideSearch);
 
-    // Expand button → close overlay (main window already visible)
-    el.querySelector('#search-expand-btn').addEventListener('click', hideSearch);
+    // Expand button → open the full app. From the spotlight window this brings
+    // the main window forward and hides the spotlight; in-app it just closes.
+    el.querySelector('#search-expand-btn').addEventListener('click', onExpandApp);
 
     // Input events
     const input = el.querySelector('#search-input');
-    input.addEventListener('input', () => renderSearchResults(input.value));
+    input.addEventListener('input', () => {
+        autoGrowSearchInput(input);
+        renderSearchResults(input.value);
+    });
     input.addEventListener('keydown', onSearchKeydown);
 }
 
@@ -391,8 +468,10 @@ function showSearch() {
     if (!overlay) return;
     _searchFocusIndex = -1;
     overlay.classList.add('visible');
+    clearAiAnswer();
     const input = document.getElementById('search-input');
     input.value = '';
+    input.style.height = 'auto';   // reset multiline growth
     input.focus();
     renderSearchResults('');
 }
@@ -401,11 +480,31 @@ function hideSearch() {
     const overlay = document.getElementById('search-overlay');
     overlay?.classList.remove('visible');
     _searchFocusIndex = -1;
+    clearAiAnswer();
+    // In the dedicated spotlight window, "closing" means hiding the window itself
+    // (the overlay IS the whole window). In-app, just dismiss the overlay.
+    if (document.body.classList.contains('spotlight-mode')) {
+        try { getCurrentWindow().hide(); } catch (_) {}
+    }
+}
+
+/** "Open App" button: bring the main window forward (and hide spotlight). */
+async function onExpandApp() {
+    if (document.body.classList.contains('spotlight-mode')) {
+        clearAiAnswer();
+        try { await invoke('open_main_window'); } catch (e) { console.error(e); }
+        return;
+    }
+    hideSearch();
 }
 
 async function renderSearchResults(query) {
     const container = document.getElementById('search-results');
     if (!container) return;
+
+    // Typing a new query dismisses any shown AI answer and returns to the list.
+    clearAiAnswer();
+    container.style.display = '';
 
     let tasks = [];
     try {
@@ -465,52 +564,145 @@ async function renderSearchResults(query) {
 }
 
 function openSearchResult(taskId) {
-    hideSearch();
-    if (taskId) {
-        window.location.hash = `#monitor?task=${taskId}`;
+    if (!taskId) { hideSearch(); return; }
+    const hash = `#monitor?task=${taskId}`;
+    if (document.body.classList.contains('spotlight-mode')) {
+        // The spotlight window has no router/monitor — ask the MAIN window to
+        // navigate, then bring it forward (open_main_window also hides spotlight).
+        clearAiAnswer();
+        try { emit('spotlight-navigate', { hash }); } catch (_) {}
+        invoke('open_main_window').catch(() => {});
+        return;
     }
+    hideSearch();
+    window.location.hash = hash;
+}
+
+/** Auto-grow the multiline search textarea up to its CSS max-height. */
+function autoGrowSearchInput(ta) {
+    if (!ta) return;
+    ta.style.height = 'auto';
+    ta.style.height = Math.min(ta.scrollHeight, 160) + 'px';
 }
 
 function onSearchKeydown(e) {
+    const ta = document.getElementById('search-input');
     const items = document.querySelectorAll('.search-result-item');
+    // Once the query spans multiple lines, arrows edit the text (cursor movement)
+    // instead of navigating the task list.
+    const isMultiline = !!ta && ta.value.includes('\n');
+
     if (e.key === 'Escape') {
         e.preventDefault();
         hideSearch();
-    } else if (e.key === 'ArrowDown') {
+        return;
+    }
+    if (e.key === 'ArrowDown' && !isMultiline) {
         e.preventDefault();
         _searchFocusIndex = Math.min(_searchFocusIndex + 1, items.length - 1);
         updateSearchFocus(items);
-    } else if (e.key === 'ArrowUp') {
+        return;
+    }
+    if (e.key === 'ArrowUp' && !isMultiline) {
         e.preventDefault();
         _searchFocusIndex = Math.max(_searchFocusIndex - 1, 0);
         updateSearchFocus(items);
-    } else if (e.key === 'Enter') {
+        return;
+    }
+    if (e.key === 'Enter') {
+        // Shift+Enter inserts a newline (default textarea behavior).
+        if (e.shiftKey) return;
         e.preventDefault();
         if (e.ctrlKey) {
-            hideSearch();
-        } else if (e.shiftKey) {
-            // Shift+Enter → send query to AI
-            const q = document.getElementById('search-input')?.value.trim();
-            if (q) askAI(q);
-        } else if (_searchFocusIndex >= 0 && _searchItems[_searchFocusIndex]) {
+            // Ctrl+Enter → open the full app.
+            onExpandApp();
+            return;
+        }
+        const q = ta?.value.trim();
+        if (_searchFocusIndex >= 0 && _searchItems[_searchFocusIndex]) {
             openSearchResult(_searchItems[_searchFocusIndex].id);
-        } else {
-            // Enter with no task selected but text entered → ask AI
-            const q = document.getElementById('search-input')?.value.trim();
-            if (q) askAI(q);
+        } else if (q) {
+            askAI(q);
         }
     }
 }
 
-function askAI(query) {
-    hideSearch();
+// In-flight abort handle for the inline Simple-mode generation.
+let _aiAbort = null;
+
+/**
+ * Send the query as a Simple-mode (single LLM call, no tools/agent loop) message
+ * and render the streamed answer INLINE inside the Ctrl+Shift+Space overlay —
+ * the modal stays open and the result appears directly below the input box.
+ */
+async function askAI(query) {
     if (!query) return;
-    // Register the question as a pending Direct Chat and switch to the Chat screen.
-    // ChatView picks this up on init() and auto-sends it in a fresh Direct Chat session.
+    const answerEl = document.getElementById('search-ai-answer');
+    if (!answerEl) {
+        // Fallback (overlay not initialized): old behavior — open Chat and auto-send.
+        try { localStorage.setItem('jh_pending_chat_question', query); } catch (_) {}
+        hideSearch();
+        window.location.hash = '#chat';
+        return;
+    }
+
+    // Abort any previous in-flight generation before starting a new one.
+    if (_aiAbort) { try { _aiAbort.abort(); } catch (_) {} }
+    _aiAbort = new AbortController();
+    const myAbort = _aiAbort;
+
+    ensureResultViewStyles();
+    // Give the answer full focus — hide the task list while it's shown.
+    const resultsEl = document.getElementById('search-results');
+    if (resultsEl) resultsEl.style.display = 'none';
+    answerEl.style.display = 'block';
+    answerEl.innerHTML =
+        `<div class="search-ai-q"><span>🧑</span><span>${query.replace(/</g, '&lt;')}</span></div>` +
+        `<div class="search-ai-body"><span class="search-ai-thinking">✨ 考え中…</span></div>`;
+    const bodyEl = answerEl.querySelector('.search-ai-body');
+    answerEl.scrollTop = answerEl.scrollHeight;
+
+    let full = '';
+    let streamNode = null;
     try {
-        localStorage.setItem('jh_pending_chat_question', query);
-    } catch (_) {}
-    window.location.hash = '#chat';
+        await llmService.chat(
+            [{ role: 'user', content: query }],
+            "You are a helpful AI assistant. Answer concisely and in the user's language.",
+            (chunk) => {
+                if (myAbort.signal.aborted) return;
+                full += chunk;
+                if (!streamNode) {
+                    bodyEl.innerHTML = '<div class="search-ai-stream"></div>';
+                    streamNode = document.createTextNode('');
+                    bodyEl.querySelector('.search-ai-stream').appendChild(streamNode);
+                    // Pin to the top so the answer is read from the start as it
+                    // streams — no jarring auto-scroll-to-bottom each chunk.
+                    answerEl.scrollTop = 0;
+                }
+                // Append ONLY the new delta to the existing text node — O(chunk),
+                // not O(n) per chunk (the old `textContent = full` was O(n²) total
+                // and the per-chunk scrollHeight read forced a reflow every time).
+                streamNode.appendData(chunk);
+            },
+            myAbort.signal,
+            []
+        );
+        if (myAbort.signal.aborted) return;
+        // Render the final answer as markdown.
+        bodyEl.innerHTML = `<div class="rv-summary">${renderMarkdown(full)}</div>`;
+        answerEl.scrollTop = 0;
+    } catch (e) {
+        if (myAbort.signal.aborted) return;
+        bodyEl.innerHTML =
+            `<span style="color:hsl(0,75%,65%)">エラー: ${(e?.message || String(e)).replace(/</g, '&lt;')}</span>`;
+    }
+}
+
+/** Hide and clear the inline AI answer area, aborting any running generation. */
+function clearAiAnswer() {
+    if (_aiAbort) { try { _aiAbort.abort(); } catch (_) {} _aiAbort = null; }
+    const answerEl = document.getElementById('search-ai-answer');
+    if (answerEl) { answerEl.style.display = 'none'; answerEl.innerHTML = ''; }
 }
 
 function updateSearchFocus(items) {
@@ -590,7 +782,52 @@ async function _sendTaskDoneNotification(taskId, data, isError) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Startup Initialization
 // ─────────────────────────────────────────────────────────────────────────────
+/**
+ * Minimal bootstrap for the dedicated spotlight window. Renders only the
+ * quick-search / ask-AI overlay (Simple mode), with no dashboard chrome.
+ */
+async function initSpotlightWindow() {
+    document.documentElement.classList.add('spotlight-mode');
+    document.body.classList.add('spotlight-mode');
+    initSearchOverlay();
+
+    // Make the top input row and footer draggable so the frameless window can be
+    // moved by grabbing them. Tauri starts a drag only when the grabbed element
+    // ITSELF carries the attribute, so we tag the row, its leading icon, and the
+    // footer (its text spans). The input and "Open App" button stay interactive.
+    [
+        '#search-overlay .search-input-row',
+        '#search-overlay .search-input-icon',
+        '#search-overlay .search-footer',
+    ].forEach(sel => document.querySelector(sel)?.setAttribute('data-tauri-drag-region', ''));
+
+    try {
+        const token = await invoke('get_api_token');
+        const port = await invoke('get_server_port');
+        window.apiClient = new ApiClient(port, token);
+        await llmService.initFromConfig();
+    } catch (e) {
+        console.error('Spotlight: backend init failed:', e);
+    }
+
+    // Re-focus / reset the overlay each time the window is re-shown by the shortcut.
+    _searchUnlisten = await listen('show-search', () => showSearch());
+
+    // Show immediately (the window itself was just shown by the shortcut handler).
+    showSearch();
+}
+
 window.addEventListener('DOMContentLoaded', async () => {
+    // The spotlight window loads this same bundle. Detect it by label and run a
+    // minimal bootstrap that renders ONLY the quick-search/ask-AI overlay — no
+    // dashboard, router, TaskBridge, or scheduler.
+    let isSpotlight = false;
+    try { isSpotlight = getCurrentWindow().label === 'spotlight'; } catch (_) {}
+    if (isSpotlight) {
+        await initSpotlightWindow();
+        return;
+    }
+
     initTitlebar();
 
     // Search overlay (must be set up before async work so the DOM element exists)
@@ -613,8 +850,38 @@ window.addEventListener('DOMContentLoaded', async () => {
             console.warn('No LLM instance configured — agent will fail until one is added in Settings.');
         }
 
+        // Register persistent write/exec roots with the Rust path guard so the
+        // backend permits writes to the user's configured projects and log dir
+        // (defense-in-depth allowlist; the app config dir + temp are pre-seeded
+        // by the backend). Agent sessions add their workspace on top of this.
+        try {
+            const cfg = await invoke('get_ai_config');
+            const roots = [
+                ...(Array.isArray(cfg?.approved_projects) ? cfg.approved_projects : []),
+                ...(Array.isArray(cfg?.write_allowed_paths) ? cfg.write_allowed_paths : []),
+                cfg?.log_dir,
+            ].filter(p => typeof p === 'string' && p.trim());
+            if (roots.length > 0) {
+                await invoke('set_allowed_roots', { roots });
+            }
+        } catch (e) {
+            console.warn('Failed to register persistent path-guard roots:', e);
+        }
+
         // Initialize TaskBridge for background agent runs
         await taskBridge.init();
+
+        // Activate the inbound MCP-over-WebSocket listener (Part A / T1) so apps
+        // that dial JHAI's /mcp/ws (JHEditor/JHER/mock) register as MCP servers
+        // and their tools (e.g. get_buffer) become available to agent tasks.
+        // NOTE: this was previously only inside mcpManager.init(), which is never
+        // called (stdio servers are started directly by ChatView), so WS-dialed
+        // tool providers were silently never registered.
+        try {
+            await mcpManager.listenForWsServers();
+        } catch (e) {
+            console.warn('Failed to activate MCP-WS listener:', e);
+        }
 
         // Initialize background task scheduler
         scheduleManager.init();
@@ -624,6 +891,13 @@ window.addEventListener('DOMContentLoaded', async () => {
 
         // Listen for global-shortcut event from Rust backend
         _searchUnlisten = await listen('show-search', () => showSearch());
+
+        // The spotlight window asks the main window to navigate (e.g. open a task
+        // from the history list). open_main_window (Rust) shows/focuses us.
+        await listen('spotlight-navigate', (e) => {
+            const hash = e.payload?.hash;
+            if (hash) window.location.hash = hash;
+        });
 
         // Listen for routes
         window.addEventListener('hashchange', handleRoute);

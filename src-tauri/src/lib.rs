@@ -13,11 +13,13 @@ use chrono::Local;
 
 mod server;
 mod commands;
+mod path_guard;
 
 use crate::server::router::{create_router, AppState, TaskInfo};
 use crate::server::auth::generate_token;
 use crate::commands::indexer::IndexerState;
-use crate::commands::mcp::McpState;
+use crate::commands::mcp::{McpState, McpWsState};
+use crate::path_guard::PathGuard;
 
 // Tauri state to share token and port with frontend
 pub struct ServerConfig {
@@ -44,6 +46,107 @@ fn get_api_token(config: tauri::State<'_, ServerConfig>) -> String {
 #[tauri::command]
 fn get_server_port(config: tauri::State<'_, ServerConfig>) -> u16 {
     config.port
+}
+
+#[derive(serde::Serialize)]
+struct StorageUsage {
+    task_history_bytes: u64,
+    task_logs_bytes: u64,
+    task_logs_count: u64,
+    comm_log_bytes: u64,
+    config_dir: String,
+    log_dir: Option<String>,
+}
+
+/// Report on-disk storage used by the agent's logs/history so the UI can show
+/// sizes and let the user prune. Covers task_history.json, the per-task
+/// task_logs/ dir, and (if configured) the ai_communication.log file.
+#[tauri::command]
+fn get_storage_usage<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> StorageUsage {
+    let config_dir = app.path().app_config_dir().unwrap_or_default();
+    let file_size = |p: &std::path::Path| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+
+    let task_history_bytes = file_size(&config_dir.join("task_history.json"));
+
+    let mut task_logs_bytes = 0u64;
+    let mut task_logs_count = 0u64;
+    if let Ok(rd) = std::fs::read_dir(config_dir.join("task_logs")) {
+        for e in rd.flatten() {
+            if let Ok(m) = e.metadata() {
+                if m.is_file() { task_logs_bytes += m.len(); task_logs_count += 1; }
+            }
+        }
+    }
+
+    let mut comm_log_bytes = 0u64;
+    let mut log_dir_out = None;
+    if let Ok(txt) = std::fs::read_to_string(config_dir.join("ai_config.json")) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) {
+            if let Some(ld) = v.get("log_dir").and_then(|x| x.as_str()) {
+                if !ld.is_empty() {
+                    log_dir_out = Some(ld.to_string());
+                    comm_log_bytes = file_size(&std::path::Path::new(ld).join("ai_communication.log"));
+                }
+            }
+        }
+    }
+
+    StorageUsage {
+        task_history_bytes,
+        task_logs_bytes,
+        task_logs_count,
+        comm_log_bytes,
+        config_dir: config_dir.to_string_lossy().to_string(),
+        log_dir: log_dir_out,
+    }
+}
+
+/// Truncate the ai_communication.log file (if configured). Returns bytes freed.
+#[tauri::command]
+fn clear_comm_log<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> u64 {
+    let config_dir = app.path().app_config_dir().unwrap_or_default();
+    if let Ok(txt) = std::fs::read_to_string(config_dir.join("ai_config.json")) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) {
+            if let Some(ld) = v.get("log_dir").and_then(|x| x.as_str()) {
+                if !ld.is_empty() {
+                    let p = std::path::Path::new(ld).join("ai_communication.log");
+                    let freed = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+                    let _ = std::fs::write(&p, b"");
+                    return freed;
+                }
+            }
+        }
+    }
+    0
+}
+
+/// Bring the main app window to the foreground and hide the spotlight window.
+/// Called from the spotlight overlay's "Open App" button.
+#[tauri::command]
+fn open_main_window<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.show();
+        let _ = main.unminimize();
+        let _ = main.set_focus();
+    }
+    if let Some(sp) = app.get_webview_window("spotlight") {
+        let _ = sp.hide();
+    }
+}
+
+/// Register additional directory roots the backend may write to / delete within
+/// / use as a shell working dir. Idempotent and additive — the frontend calls
+/// this at boot (approved projects, log dir) and per agent session (workspace),
+/// plus whenever the user approves an out-of-workspace write.
+#[tauri::command]
+fn set_allowed_roots(roots: Vec<String>, guard: tauri::State<'_, PathGuard>) {
+    guard.add_roots(&roots);
+}
+
+/// Diagnostics: current allowlist snapshot.
+#[tauri::command]
+fn list_allowed_roots(guard: tauri::State<'_, PathGuard>) -> Vec<String> {
+    guard.list()
 }
 
 /// Compute the per-task logs directory next to `task_history.json`.
@@ -157,6 +260,8 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(IndexerState::default())
         .manage(McpState::default())
+        .manage(McpWsState::default())
+        .manage(PathGuard::default())
         .setup(|app| {
             // Save settings directory path
             let config_dir = app.path().app_config_dir().unwrap_or_default();
@@ -164,6 +269,16 @@ pub fn run() {
                 let _ = std::fs::create_dir_all(&config_dir);
             }
             let config_path = config_dir.join("ai_config.json");
+
+            // ── Seed the path guard with always-allowed roots ──────────────
+            // The app config dir (skills, history, session backups, artifacts)
+            // and the OS temp dir must always be writable by the backend. The
+            // frontend extends this list with the workspace / approved projects.
+            {
+                let guard = app.state::<PathGuard>();
+                guard.add_root(&config_dir);
+                guard.add_root(std::env::temp_dir());
+            }
 
             // Load or generate auth token
             let mut auth_token = String::new();
@@ -276,11 +391,16 @@ pub fn run() {
                                     }
                                 }
                                 "token_usage" => {
+                                    // ACCUMULATE across LLM calls. Each token_usage event is
+                                    // ONE call's usage; the task total is the sum of all calls.
+                                    // (Previously these were assignments, so the persisted task
+                                    // kept only the LAST step's usage — usually a tool-only step
+                                    // with ~0 tokens → the "Tokens: 0" bug on completed tasks.)
                                     if let Some(prompt) = ws_packet["data"].get("prompt_tokens").and_then(|t| t.as_u64()) {
-                                        task.token_usage.prompt_tokens = prompt as u32;
+                                        task.token_usage.prompt_tokens = task.token_usage.prompt_tokens.saturating_add(prompt as u32);
                                     }
                                     if let Some(completion) = ws_packet["data"].get("completion_tokens").and_then(|t| t.as_u64()) {
-                                        task.token_usage.completion_tokens = completion as u32;
+                                        task.token_usage.completion_tokens = task.token_usage.completion_tokens.saturating_add(completion as u32);
                                     }
                                     task.token_usage.total_tokens = task.token_usage.prompt_tokens + task.token_usage.completion_tokens;
                                 }
@@ -288,6 +408,12 @@ pub fn run() {
                                     task.status = "completed".to_string();
                                     task.progress = 1.0;
                                     task.completed_at = Some(Local::now().to_rfc3339());
+                                    // Persist the structured result summary for the API + Result tab.
+                                    if let Some(rs) = ws_packet["data"].get("resultSummary") {
+                                        if !rs.is_null() {
+                                            task.result_summary = Some(rs.clone());
+                                        }
+                                    }
                                 }
                                 "error" => {
                                     task.status = "failed".to_string();
@@ -379,7 +505,43 @@ pub fn run() {
                 }
             });
 
-            // ── Global shortcut: Ctrl+Shift+Space → show search bar ──
+            // ── Spotlight window (frameless, transparent, always-on-top) ──
+            // Hosts ONLY the quick-search / ask-AI overlay so Ctrl+Shift+Space
+            // shows just a floating modal on the desktop instead of the full app.
+            // Same bundle (index.html) — main.js detects the "spotlight" label and
+            // renders only the overlay. Created hidden; shown by the shortcut.
+            match tauri::WebviewWindowBuilder::new(
+                app.handle(),
+                "spotlight",
+                tauri::WebviewUrl::App("index.html".into()),
+            )
+                .title("J.H AI Agent — Spotlight")
+                .inner_size(720.0, 580.0)
+                .decorations(false)
+                .transparent(true)
+                .always_on_top(true)
+                .skip_taskbar(true)
+                .resizable(false)
+                // Prevent the drag-region's double-click from maximizing the
+                // spotlight to fullscreen.
+                .maximizable(false)
+                .visible(false)
+                .center()
+                .build()
+            {
+                Ok(spotlight) => {
+                    // Auto-hide on focus loss (click elsewhere) — Spotlight behavior.
+                    let sh = spotlight.clone();
+                    spotlight.on_window_event(move |event| {
+                        if let tauri::WindowEvent::Focused(false) = event {
+                            let _ = sh.hide();
+                        }
+                    });
+                }
+                Err(e) => eprintln!("Failed to create spotlight window: {}", e),
+            }
+
+            // ── Global shortcut: Ctrl+Shift+Space → show spotlight overlay ──
             let shortcut_handle = app.handle().clone();
             app.handle()
                 .global_shortcut()
@@ -387,12 +549,30 @@ pub fn run() {
                     Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::Space),
                     move |_app, _sc, event| {
                         if event.state() == ShortcutState::Pressed {
-                            // Make sure the window is visible before emitting
-                            if let Some(w) = shortcut_handle.get_webview_window("main") {
+                            // Don't pop the floating spotlight when the user is
+                            // already inside the app: if the MAIN window is focused,
+                            // suppress the shortcut entirely (the in-app UI is right
+                            // there). The spotlight is for quick access from OUTSIDE.
+                            let main_focused = shortcut_handle
+                                .get_webview_window("main")
+                                .and_then(|w| w.is_focused().ok())
+                                .unwrap_or(false);
+                            if main_focused {
+                                return;
+                            }
+
+                            // Prefer the dedicated spotlight window: show only the modal.
+                            if let Some(w) = shortcut_handle.get_webview_window("spotlight") {
+                                let _ = w.center();
                                 let _ = w.show();
                                 let _ = w.set_focus();
+                                let _ = shortcut_handle.emit_to("spotlight", "show-search", ());
+                            } else if let Some(w) = shortcut_handle.get_webview_window("main") {
+                                // Fallback: spotlight unavailable → old in-app overlay.
+                                let _ = w.show();
+                                let _ = w.set_focus();
+                                let _ = shortcut_handle.emit("show-search", ());
                             }
-                            let _ = shortcut_handle.emit("show-search", ());
                         }
                     },
                 )?;
@@ -402,12 +582,18 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_api_token,
             get_server_port,
+            open_main_window,
+            get_storage_usage,
+            clear_comm_log,
+            // Path guard (defense-in-depth write/exec allowlist)
+            set_allowed_roots,
+            list_allowed_roots,
             // AI commands
             commands::ai::llm_chat_native,
-            commands::ai::get_ai_config,
-            commands::ai::save_ai_config,
-            commands::ai::set_rag_approval,
-            commands::ai::export_connection_config,
+            commands::ai_config::get_ai_config,
+            commands::ai_config::save_ai_config,
+            commands::ai_config::set_rag_approval,
+            commands::ai_config::export_connection_config,
             // RAG / Indexer
             commands::indexer::init_indexer,
             commands::indexer::query_workspace,
@@ -430,16 +616,19 @@ pub fn run() {
             commands::search::move_file,
             // Shell operations
             commands::shell::run_command,
+            commands::shell::open_path_default,
             // MCP process management (bypasses shell plugin scope restrictions)
             commands::mcp::mcp_spawn,
+            commands::mcp::mcp_ws_send,
+            commands::mcp::mcp_ws_close,
             commands::mcp::mcp_write,
             commands::mcp::mcp_kill,
             // Skill file management
-            commands::ai::get_app_config_dir,
-            commands::ai::list_skill_files,
-            commands::ai::read_skill_file,
-            commands::ai::write_skill_file,
-            commands::ai::delete_skill_file
+            commands::ai_config::get_app_config_dir,
+            commands::ai_config::list_skill_files,
+            commands::ai_config::read_skill_file,
+            commands::ai_config::write_skill_file,
+            commands::ai_config::delete_skill_file
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

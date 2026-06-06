@@ -178,3 +178,57 @@ pub async fn mcp_kill(
     state.processes.lock().await.remove(&process_id);
     Ok(())
 }
+
+// ── MCP over inbound WebSocket (Part A / T1) ────────────────────────────────
+// An external app dials JHAI's `/mcp/ws?app=<name>` and acts as the MCP SERVER
+// (tool provider) over that connection; JHAI is the MCP CLIENT. The axum WS
+// handler (server/mcp_ws.rs) bridges raw frames ↔ the JS layer EXACTLY like the
+// stdio bridge above: incoming frames → `mcp-ws-recv-{conn_id}` Tauri events;
+// the JS McpWsClient sends frames out via `mcp_ws_send`. This keeps all MCP
+// JSON-RPC logic in JS and reuses the existing event/command plumbing.
+
+/// Outbound message for a bridged MCP WebSocket connection.
+pub enum WsOut {
+    Text(String),
+    Close,
+}
+
+/// Registry of live inbound MCP WS connections: conn_id → sender to its socket.
+pub struct McpWsState {
+    pub conns: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<WsOut>>>>,
+}
+
+impl Default for McpWsState {
+    fn default() -> Self {
+        Self {
+            conns: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+/// Send one JSON-RPC frame to a bridged MCP WS connection (JS → app).
+#[tauri::command]
+pub async fn mcp_ws_send(
+    state: State<'_, McpWsState>,
+    conn_id: String,
+    data: String,
+) -> Result<(), String> {
+    let conns = state.conns.lock().await;
+    let tx = conns
+        .get(&conn_id)
+        .ok_or_else(|| format!("MCP WS connection '{}' not found", conn_id))?;
+    tx.send(WsOut::Text(data)).map_err(|e| e.to_string())
+}
+
+/// Close a bridged MCP WS connection.
+#[tauri::command]
+pub async fn mcp_ws_close(
+    state: State<'_, McpWsState>,
+    conn_id: String,
+) -> Result<(), String> {
+    let conns = state.conns.lock().await;
+    if let Some(tx) = conns.get(&conn_id) {
+        let _ = tx.send(WsOut::Close);
+    }
+    Ok(())
+}

@@ -31,6 +31,26 @@ export class McpClient {
         this._stopped = false;
         this._restartCount = 0;
         this._unlisteners = [];
+        // Diagnostics for startup-failure reporting (surfaced in the UI tooltip).
+        this.lastError = null;        // { message, stage, at } — most recent failure
+        this._stderrBuffer = [];      // ring buffer of recent stderr lines
+    }
+
+    /** Records the most recent stderr line, keeping only the last 20. */
+    _pushStderr(text) {
+        if (!text) return;
+        this._stderrBuffer.push(String(text));
+        if (this._stderrBuffer.length > 20) this._stderrBuffer.shift();
+    }
+
+    /** Builds a human-readable error report including command and recent stderr. */
+    _buildErrorReport(err, stage) {
+        const cmd = [this.command, ...(this.args || [])].join(' ');
+        const base = err && err.message ? err.message : String(err);
+        const stderr = this._stderrBuffer.slice(-8).join('\n').trim();
+        let report = `[${stage}] ${base}\n\nコマンド: ${cmd}`;
+        if (stderr) report += `\n\nstderr:\n${stderr}`;
+        return report;
     }
 
     async start() {
@@ -72,6 +92,7 @@ export class McpClient {
             this._unlisteners.push(stdoutUnlisten);
 
             const stderrUnlisten = await listen(`mcp-stderr-${this.processId}`, (event) => {
+                this._pushStderr(event.payload);
                 if (this.onLog) this.onLog(`[${this.name}] ${event.payload}`);
             });
             this._unlisteners.push(stderrUnlisten);
@@ -93,6 +114,11 @@ export class McpClient {
                 } else {
                     console.error(`[MCP] "${this.name}" crashed ${this._restartCount} times, giving up.`);
                     if (this.onLog) this.onLog(`[${this.name}] 3回再起動を試みましたが失敗しました。`);
+                    this.lastError = {
+                        message: this._buildErrorReport(new Error(`プロセスが繰り返し終了しました (終了コード ${code})。3回の再起動に失敗しました。`), 'exit'),
+                        stage: 'exit',
+                        at: new Date().toISOString(),
+                    };
                 }
             });
             this._unlisteners.push(exitUnlisten);
@@ -121,10 +147,18 @@ export class McpClient {
             // ── Successful connection: reset restart counter so a later crash gets
             // the full 3-attempt budget again, not the remnant from this restart.
             this._restartCount = 0;
+            this.lastError = null;
 
             return true;
         } catch (e) {
-            console.error(`Failed to start MCP server "${this.name}":`, e);
+            // Determine which stage failed for a clearer report.
+            const stage = this.capabilities ? 'tools/list' : 'spawn/handshake';
+            this.lastError = {
+                message: this._buildErrorReport(e, stage),
+                stage,
+                at: new Date().toISOString(),
+            };
+            console.error(`Failed to start MCP server "${this.name}":`, this.lastError.message);
             return false;
         }
     }
@@ -183,8 +217,10 @@ export class McpClient {
         await invoke('mcp_write', { processId: this.processId, data: msg + '\n' });
     }
 
-    async callTool(name, arguments_ = {}) {
-        return this.request('tools/call', { name, arguments: arguments_ });
+    async callTool(name, arguments_ = {}, meta = null) {
+        const params = { name, arguments: arguments_ };
+        if (meta) params._meta = meta;   // per-task context (Part A / Phase 2)
+        return this.request('tools/call', params);
     }
 
     async stop() {

@@ -14,10 +14,10 @@ use chrono::Local;
 use uuid::Uuid;
 use tokio::sync::broadcast;
 use tauri::Emitter;
-use crate::commands::ai::AiConfig;
+use crate::commands::ai_config::AiConfig;
 use crate::server::auth::{auth_middleware, AuthToken};
 use crate::server::ws::ws_handler;
-use std::time::Duration;
+use crate::server::config_routes::{get_models, get_config, update_config, test_connection};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskInfo {
@@ -30,6 +30,10 @@ pub struct TaskInfo {
     pub completed_at: Option<String>,
     pub workspace_path: Option<String>,
     pub caller: Option<String>,
+    /// Structured result summary emitted on completion: { summary, files:[{path,action,description}] }.
+    /// Lets REST API consumers and the "Result" tab read the outcome without re-parsing logs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_summary: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub logs: Vec<serde_json::Value>,
 }
@@ -87,6 +91,25 @@ pub struct AgentBehavior {
     /// Free-form text appended AFTER the system prompt (built-in or overridden).
     /// Use this for small per-call tweaks without rewriting the whole prompt.
     pub extra_instructions: Option<String>,
+
+    /// MCP server names this task may use (scopes which servers' tools are
+    /// exposed to the LLM). None ⇒ all connected servers. Must be a struct field
+    /// or it is dropped at the HTTP boundary before reaching the JS agent.
+    #[serde(default)]
+    pub mcp_servers: Option<Vec<String>>,
+
+    /// Opaque per-task MCP context (e.g. { app, windowId, documentId }) injected
+    /// into every `tools/call` request's `params._meta.jhai`, so an app-hosted
+    /// MCP server can resolve which live document/window the call targets.
+    #[serde(default)]
+    pub mcp_context: Option<serde_json::Value>,
+
+    /// Named AI action (Intent/Recipe). Either a string id (resolved against the
+    /// intent registry the calling app declared) or an inline object
+    /// { systemPrompt?, tools?[], resultKind? }. Expanded by the JS agent into
+    /// enabled_tools / extra_instructions before the loop.
+    #[serde(default)]
+    pub intent: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -171,6 +194,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/tasks/:id", get(get_task).delete(abort_task))
         .route("/tasks/:id/logs", get(get_task_logs))
         .route("/tasks/:id/steering", post(send_steering))
+        .route("/tasks/:id/continue", post(continue_task))
         .route("/tasks/:id/history", delete(delete_task_history))
         .route("/config", get(get_config).put(update_config))
         .route("/config/test", post(test_connection))
@@ -183,6 +207,9 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/health", get(health_check))
         .nest("/api", api_routes)
         .route("/ws/tasks/:id", get(ws_handler))
+        // Inbound MCP-over-WebSocket (Part A / T1): apps dial in and act as the
+        // MCP server (tool provider); auth via the `token` query param in-handler.
+        .route("/mcp/ws", get(crate::server::mcp_ws::mcp_ws_handler))
         .layer(cors)
         .with_state(state)
 }
@@ -195,53 +222,6 @@ async fn health_check() -> Json<serde_json::Value> {
         "version": "0.1.0",
         "time": Local::now().to_rfc3339()
     }))
-}
-
-async fn get_models(State(state): State<AppState>) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let config = load_config(&state.config_path)?;
-    let mut models = vec![];
-    
-    // Load from dynamic instances first
-    if let Some(instances) = &config.llm_instances {
-        for inst in instances {
-            if !inst.model.is_empty() {
-                let id = format!("{}:{}", inst.id, inst.model);
-                let name = format!("{} ({})", inst.name, inst.model);
-                models.push(serde_json::json!({
-                    "id": id,
-                    "name": name,
-                    "provider": inst.provider,
-                    "context_window": inst.context_window,
-                    "max_output_tokens": inst.max_output_tokens,
-                    "temperature": inst.temperature
-                }));
-            }
-        }
-    }
-    
-    // Fallback to legacy configuration keys if no instances exist
-    if models.is_empty() {
-        if config.openai_key.is_some() {
-            models.push(serde_json::json!({ "id": "openai:gpt-4o", "name": "GPT-4o", "provider": "openai" }));
-            models.push(serde_json::json!({ "id": "openai:gpt-4-turbo", "name": "GPT-4 Turbo", "provider": "openai" }));
-        }
-        if config.anthropic_key.is_some() {
-            models.push(serde_json::json!({ "id": "anthropic:claude-3-5-sonnet-20241022", "name": "Claude 3.5 Sonnet", "provider": "anthropic" }));
-            models.push(serde_json::json!({ "id": "anthropic:claude-3-opus-20240229", "name": "Claude 3 Opus", "provider": "anthropic" }));
-        }
-        if config.gemini_key.is_some() {
-            models.push(serde_json::json!({ "id": "gemini:gemini-1.5-pro", "name": "Gemini 1.5 Pro", "provider": "gemini" }));
-            models.push(serde_json::json!({ "id": "gemini:gemini-1.5-flash", "name": "Gemini 1.5 Flash", "provider": "gemini" }));
-        }
-    }
-    
-    if models.is_empty() {
-        models.push(serde_json::json!({ "id": "anthropic:claude-3-5-sonnet-20241022", "name": "Claude 3.5 Sonnet (Default)", "provider": "anthropic" }));
-        models.push(serde_json::json!({ "id": "openai:gpt-4o", "name": "GPT-4o (Default)", "provider": "openai" }));
-        models.push(serde_json::json!({ "id": "gemini:gemini-1.5-flash", "name": "Gemini 1.5 Flash (Default)", "provider": "gemini" }));
-    }
-    
-    Ok(Json(serde_json::json!({ "models": models })))
 }
 
 async fn create_task(
@@ -261,6 +241,7 @@ async fn create_task(
         completed_at: None,
         workspace_path: payload.workspace_path.clone(),
         caller: payload.caller.clone(),
+        result_summary: None,
         logs: vec![],
     };
     
@@ -423,270 +404,59 @@ async fn send_steering(
     Ok(Json(serde_json::json!({ "status": "steered" })))
 }
 
-async fn get_config(State(state): State<AppState>) -> Result<Json<AiConfig>, (StatusCode, String)> {
-    let mut config = load_config(&state.config_path)?;
-    
-    // Mask keys
-    if config.openai_key.is_some() { config.openai_key = Some("********".to_string()); }
-    if config.anthropic_key.is_some() { config.anthropic_key = Some("********".to_string()); }
-    if config.gemini_key.is_some() { config.gemini_key = Some("********".to_string()); }
-    if config.azure_key.is_some() { config.azure_key = Some("********".to_string()); }
-    
-    if let Some(instances) = &mut config.llm_instances {
-        for inst in instances {
-            if inst.api_key.is_some() {
-                inst.api_key = Some("********".to_string());
-            }
-        }
-    }
-    
-    Ok(Json(config))
-}
-
-async fn update_config(
+/// Continue a COMPLETED task with a new user message — re-runs the agent under
+/// the SAME task id so its results accumulate in one place. Reconstructs a minimal
+/// chat_context (original goal + the last final response) and re-emits run-task.
+async fn continue_task(
+    Path(id): Path<String>,
     State(state): State<AppState>,
-    Json(new_config): Json<AiConfig>,
+    Json(payload): Json<SteeringRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let mut final_config = new_config;
-    if state.config_path.exists() {
-        if let Ok(json) = std::fs::read_to_string(&state.config_path) {
-            if let Ok(old_config) = serde_json::from_str::<AiConfig>(&json) {
-                if final_config.connection_token.is_none() {
-                    final_config.connection_token = old_config.connection_token;
-                }
-                if final_config.openai_key == Some("********".to_string()) || final_config.openai_key.is_none() {
-                    final_config.openai_key = old_config.openai_key;
-                }
-                if final_config.anthropic_key == Some("********".to_string()) || final_config.anthropic_key.is_none() {
-                    final_config.anthropic_key = old_config.anthropic_key;
-                }
-                if final_config.gemini_key == Some("********".to_string()) || final_config.gemini_key.is_none() {
-                    final_config.gemini_key = old_config.gemini_key;
-                }
-                if final_config.azure_key == Some("********".to_string()) || final_config.azure_key.is_none() {
-                    final_config.azure_key = old_config.azure_key;
-                }
-                if final_config.approved_projects.is_none() {
-                    final_config.approved_projects = old_config.approved_projects;
-                }
-                if final_config.max_steps.is_none() {
-                    final_config.max_steps = old_config.max_steps;
-                }
-                if final_config.mcp_servers.is_none() {
-                    final_config.mcp_servers = old_config.mcp_servers;
-                }
-                
-                // Merge llm_instances keys
-                if let Some(final_insts) = &mut final_config.llm_instances {
-                    if let Some(old_insts) = &old_config.llm_instances {
-                        for final_inst in final_insts {
-                            if final_inst.api_key == Some("********".to_string()) || final_inst.api_key.is_none() {
-                                if let Some(old_inst) = old_insts.iter().find(|o| o.id == final_inst.id) {
-                                    final_inst.api_key = old_inst.api_key.clone();
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Preserve active_llm_instance_id if the client did not send it
-                if final_config.active_llm_instance_id.is_none() {
-                    final_config.active_llm_instance_id = old_config.active_llm_instance_id;
-                }
-
-                // Preserve Agent Safety Limits (same rationale as save_ai_config)
-                if final_config.token_budget.is_none() {
-                    final_config.token_budget = old_config.token_budget;
-                }
-                if final_config.wall_clock_minutes.is_none() {
-                    final_config.wall_clock_minutes = old_config.wall_clock_minutes;
-                }
-                if final_config.no_progress_window.is_none() {
-                    final_config.no_progress_window = old_config.no_progress_window;
-                }
-                if final_config.identical_call_threshold.is_none() {
-                    final_config.identical_call_threshold = old_config.identical_call_threshold;
-                }
-                if final_config.cycle_detection_min_repeats.is_none() {
-                    final_config.cycle_detection_min_repeats = old_config.cycle_detection_min_repeats;
-                }
-                if final_config.prompt_templates.is_none() {
-                    final_config.prompt_templates = old_config.prompt_templates;
-                }
-            }
-        }
-    }
-
-    let json = serde_json::to_string_pretty(&final_config).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    std::fs::write(&state.config_path, json).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    
-    Ok(Json(serde_json::json!({ "status": "saved" })))
-}
-
-async fn test_connection(
-    State(state): State<AppState>,
-    Json(payload): Json<TestConnectionRequest>,
-) -> Result<Json<TestConnectionResponse>, (StatusCode, String)> {
-    // 1. Get proxy settings from saved config if any
-    let proxy_url = if let Ok(json) = std::fs::read_to_string(&state.config_path) {
-        if let Ok(config) = serde_json::from_str::<AiConfig>(&json) {
-            config.proxy_url
-        } else {
-            None
-        }
-    } else {
-        None
+    // Gather context from the existing (completed) task.
+    let (prompt, workspace, last_response) = {
+        let tasks = state.tasks.lock().unwrap();
+        let task = tasks.get(&id)
+            .ok_or((StatusCode::NOT_FOUND, "task not found".to_string()))?;
+        // Most recent complete event's message = the prior final response.
+        let last_response = task.logs.iter().rev()
+            .find(|l| l.get("event").and_then(|e| e.as_str()) == Some("complete"))
+            .and_then(|l| l.get("data").and_then(|d| d.get("message")).and_then(|m| m.as_str()))
+            .unwrap_or("")
+            .to_string();
+        (task.prompt.clone(), task.workspace_path.clone(), last_response)
     };
 
-    // 2. Build HTTP Client
-    let mut builder = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10));
-    if let Some(url) = proxy_url {
-        if !url.is_empty() {
-            if let Ok(proxy) = reqwest::Proxy::all(url) {
-                builder = builder.proxy(proxy);
-            }
+    // Minimal prior-conversation context for the continuation.
+    let mut chat_context = vec![serde_json::json!({ "role": "user", "content": prompt })];
+    if !last_response.is_empty() {
+        chat_context.push(serde_json::json!({ "role": "assistant", "content": last_response }));
+    }
+
+    // Re-open the task and create a fresh broadcast channel (the previous one was
+    // dropped when the task first completed).
+    {
+        let mut tasks = state.tasks.lock().unwrap();
+        if let Some(task) = tasks.get_mut(&id) {
+            task.status = "running".to_string();
+            task.completed_at = None;
         }
     }
-    let client = builder.build().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to build client: {}", e)))?;
+    let (tx, _rx) = broadcast::channel(100);
+    state.task_senders.lock().unwrap().insert(id.clone(), tx);
 
-    // 3. Determine URL, Headers, and Body
-    let provider = payload.provider.as_str();
-    let model = payload.model.as_str();
-    let api_key = payload.api_key.unwrap_or_default();
-    
-    // Fallback mask check (if frontend sent masked asterisk string, load from saved configuration)
-    let final_api_key = if api_key == "********" {
-        // Load original key from config
-        if let Ok(json) = std::fs::read_to_string(&state.config_path) {
-            if let Ok(config) = serde_json::from_str::<AiConfig>(&json) {
-                match provider {
-                    "openai" => config.openai_key,
-                    "anthropic" => config.anthropic_key,
-                    "gemini" => config.gemini_key,
-                    "azure" => config.azure_key,
-                    _ => None,
-                }.unwrap_or_default()
-            } else {
-                String::new()
-            }
-        } else {
-            String::new()
-        }
-    } else {
-        api_key
+    let run_payload = RunTaskPayload {
+        task_id: id.clone(),
+        prompt: payload.message,
+        workspace_path: workspace,
+        context: None,
+        behavior: None,
+        images: None,
+        chat_context: Some(chat_context),
     };
+    let _ = state.app_handle.emit("run-task", run_payload);
 
-    let base_url = payload.base_url.unwrap_or_default();
-    let api_version = payload.api_version.unwrap_or_default();
-
-    let (url, headers, body) = match provider {
-        "openai" => {
-            let base = if base_url.is_empty() { "https://api.openai.com/v1" } else { &base_url };
-            let url = format!("{}/chat/completions", base.trim_end_matches('/'));
-            let mut h = reqwest::header::HeaderMap::new();
-            h.insert("Authorization", format!("Bearer {}", final_api_key).parse().map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid API Key header format: {}", e)))?);
-            h.insert("Content-Type", "application/json".parse().unwrap());
-            let body = serde_json::json!({
-                "model": model,
-                "messages": [{"role": "user", "content": "ping"}],
-                "max_tokens": 5
-            });
-            (url, h, body)
-        }
-        "anthropic" => {
-            let base = if base_url.is_empty() { "https://api.anthropic.com/v1" } else { &base_url };
-            let url = format!("{}/messages", base.trim_end_matches('/'));
-            let mut h = reqwest::header::HeaderMap::new();
-            h.insert("x-api-key", final_api_key.parse().map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid API Key header format: {}", e)))?);
-            h.insert("anthropic-version", "2023-06-01".parse().unwrap());
-            h.insert("Content-Type", "application/json".parse().unwrap());
-            let body = serde_json::json!({
-                "model": model,
-                "messages": [{"role": "user", "content": "ping"}],
-                "max_tokens": 5
-            });
-            (url, h, body)
-        }
-        "gemini" => {
-            let base = if base_url.is_empty() { "https://generativelanguage.googleapis.com/v1beta" } else { &base_url };
-            let url = format!("{}/models/{}:generateContent?key={}", base.trim_end_matches('/'), model, final_api_key);
-            let mut h = reqwest::header::HeaderMap::new();
-            h.insert("Content-Type", "application/json".parse().unwrap());
-            let body = serde_json::json!({
-                "contents": [{"parts": [{"text": "ping"}]}],
-                "generationConfig": {
-                    "maxOutputTokens": 5
-                }
-            });
-            (url, h, body)
-        }
-        "azure" => {
-            let api_v = if api_version.is_empty() { "2024-02-15-preview" } else { &api_version };
-            let url = format!("{}/openai/deployments/{}/chat/completions?api-version={}", base_url.trim_end_matches('/'), model, api_v);
-            let mut h = reqwest::header::HeaderMap::new();
-            h.insert("api-key", final_api_key.parse().map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid API Key header format: {}", e)))?);
-            h.insert("Content-Type", "application/json".parse().unwrap());
-            let body = serde_json::json!({
-                "messages": [{"role": "user", "content": "ping"}],
-                "max_tokens": 5
-            });
-            (url, h, body)
-        }
-        "ollama" => {
-            let base = if base_url.is_empty() { "http://localhost:11434" } else { &base_url };
-            let url = format!("{}/api/chat", base.trim_end_matches('/'));
-            let mut h = reqwest::header::HeaderMap::new();
-            h.insert("Content-Type", "application/json".parse().unwrap());
-            let body = serde_json::json!({
-                "model": model,
-                "messages": [{"role": "user", "content": "ping"}],
-                "stream": false
-            });
-            (url, h, body)
-        }
-        "generic" => {
-            let base = if base_url.is_empty() { "http://localhost:11434/v1" } else { &base_url };
-            let url = format!("{}/chat/completions", base.trim_end_matches('/'));
-            let mut h = reqwest::header::HeaderMap::new();
-            if !final_api_key.is_empty() {
-                h.insert("Authorization", format!("Bearer {}", final_api_key).parse().map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid API Key header format: {}", e)))?);
-            }
-            h.insert("Content-Type", "application/json".parse().unwrap());
-            let body = serde_json::json!({
-                "model": model,
-                "messages": [{"role": "user", "content": "ping"}],
-                "max_tokens": 5
-            });
-            (url, h, body)
-        }
-        _ => return Err((StatusCode::BAD_REQUEST, format!("Unsupported provider: {}", provider))),
-    };
-
-    // 4. Send request and handle response
-    match client.post(&url).headers(headers).json(&body).send().await {
-        Ok(res) => {
-            if res.status().is_success() {
-                Ok(Json(TestConnectionResponse {
-                    success: true,
-                    message: "Connection verified successfully!".to_string(),
-                }))
-            } else {
-                let status = res.status();
-                let err_text = res.text().await.unwrap_or_default();
-                Ok(Json(TestConnectionResponse {
-                    success: false,
-                    message: format!("API returned error status ({}): {}", status, err_text),
-                }))
-            }
-        }
-        Err(e) => {
-            Ok(Json(TestConnectionResponse {
-                success: false,
-                message: format!("Network error: {}", e),
-            }))
-        }
-    }
+    let ws_url = format!("ws://localhost:{}/ws/tasks/{}?token={}", state.port, id, state.auth_token);
+    Ok(Json(serde_json::json!({ "task_id": id, "ws_url": ws_url, "status": "continuing" })))
 }
 
 async fn get_stats(State(state): State<AppState>) -> Json<serde_json::Value> {
@@ -703,17 +473,41 @@ async fn get_stats(State(state): State<AppState>) -> Json<serde_json::Value> {
         total_tokens += task.token_usage.total_tokens;
     }
     
+    // Cost is an ESTIMATE from configurable per-token rates (USD per 1M tokens),
+    // computed separately for prompt vs completion. Rates are read from
+    // ai_config.json (cost_per_1m_prompt / cost_per_1m_completion) so they can be
+    // set to the active model's real pricing instead of a single hardcoded number.
+    let (rate_p, rate_c) = read_cost_rates(&state.config_path);
+    let estimated_cost = (prompt_tokens as f64 / 1_000_000.0) * rate_p
+        + (completion_tokens as f64 / 1_000_000.0) * rate_c;
+
     Json(serde_json::json!({
         "totalTasks": total_tasks,
         "totalTokens": total_tokens,
         "promptTokens": prompt_tokens,
         "completionTokens": completion_tokens,
-        "estimatedCost": (total_tokens as f64) * 0.000015
+        "estimatedCost": estimated_cost,
+        "costRates": { "prompt_per_1m": rate_p, "completion_per_1m": rate_c }
     }))
 }
 
+/// Read per-1M-token USD cost rates from ai_config.json. Falls back to a generic
+/// low estimate when unset; set cost_per_1m_prompt / cost_per_1m_completion to the
+/// real pricing of the model you use (e.g. DeepSeek vs GPT-4o differ ~50×).
+fn read_cost_rates(config_path: &PathBuf) -> (f64, f64) {
+    let mut prompt_rate = 0.5;       // generic placeholder; configurable
+    let mut completion_rate = 1.5;
+    if let Ok(txt) = std::fs::read_to_string(config_path) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) {
+            if let Some(p) = v.get("cost_per_1m_prompt").and_then(|x| x.as_f64()) { prompt_rate = p; }
+            if let Some(c) = v.get("cost_per_1m_completion").and_then(|x| x.as_f64()) { completion_rate = c; }
+        }
+    }
+    (prompt_rate, completion_rate)
+}
+
 // Helpers
-fn load_config(path: &PathBuf) -> Result<AiConfig, (StatusCode, String)> {
+pub(crate) fn load_config(path: &PathBuf) -> Result<AiConfig, (StatusCode, String)> {
     if !path.exists() {
         return Ok(AiConfig::default());
     }

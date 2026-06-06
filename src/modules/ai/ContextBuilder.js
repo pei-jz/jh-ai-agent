@@ -236,26 +236,59 @@ JSON FORMATTING RULES (critical — most failures come from these):
         // provider allowlist here.  This guarantees ContextBuilder and AgentController
         // always agree on which calling mode is in effect.
         const isNative = llmService.supportsNativeTools();
-        const cacheKey = `${root}|${currentModel}|${outputLanguage}|${isNative}`;
+        // Heavy (file-editing agent) vs lightweight (scoped / app-intent) prompt.
+        // If the active built-in allowlist contains NO editing/exec tools, the task
+        // can't edit files at all, so the multi_replace/verify/path/anti-loop rules
+        // are pure waste — emit a slim persona + slim rules instead. Normal agent
+        // tasks (unrestricted allowlist) keep the full heavy prompt unchanged.
+        const EDITING_TOOLS = new Set([
+            'write_file', 'multi_replace_file_content', 'replace_lines',
+            'delete_file', 'move_file', 'create_dir', 'run_command',
+        ]);
+        const activeBuiltinNames = toolExecutor.getActiveToolDefinitions().map(t => t.name);
+        const editingMode = activeBuiltinNames.some(n => EDITING_TOOLS.has(n));
+        const cacheKey = `${root}|${currentModel}|${outputLanguage}|${isNative}|${editingMode ? 'edit' : 'lite'}`;
 
         let staticPrefix;
         if (this._staticCache?.key === cacheKey) {
             staticPrefix = this._staticCache.prefix;
         } else {
-            let agentPersona = `You are an elite autonomous software engineer integrated into J.H AI Agent.
+            let agentPersona = editingMode
+                ? `You are an elite autonomous software engineer integrated into J.H AI Agent.
 You explore codebases, edit files, search, and run commands using the provided tools.
 Act decisively: prefer doing the work over lengthy introspection. Verify after every change. When something fails, deduce the root cause and self-correct.
+IMPORTANT: Final responses to the USER must be in ${outputLanguage}. Internal reasoning may be in any language.`
+                : `You are a helpful AI assistant embedded in J.H AI Agent, acting as a tool-using assistant for an integrated application.
+Use the provided tools to obtain what you need, then deliver a clear, well-structured result.
 IMPORTANT: Final responses to the USER must be in ${outputLanguage}. Internal reasoning may be in any language.`;
 
-            try {
-                const personaPath = `${root}/.agent/agents/default.md`;
-                const fileData = await invoke('read_file', { path: personaPath });
-                if (fileData) {
-                    agentPersona = fileData;
-                }
-            } catch (e) {}
+            // The .agent/agents/default.md override IS the heavy software-engineer
+            // persona — only honor it in editing mode (it would re-bloat lite tasks).
+            if (editingMode) {
+                try {
+                    const personaPath = `${root}/.agent/agents/default.md`;
+                    const fileData = await invoke('read_file', { path: personaPath });
+                    if (fileData) {
+                        agentPersona = fileData;
+                    }
+                } catch (e) {}
+            }
 
-            const toolDefs = toolExecutor.toolDefinitions.map(t => `<tool name="${t.name}">\n<description>${t.description}</description>\n</tool>`).join('\n');
+            // In NATIVE mode the tool schemas are sent in the API `tools` field
+            // (authoritative) — listing them again here would duplicate them AND be
+            // billed as extra input tokens. So native mode gets only a short pointer;
+            // JSON mode needs the full textual listing (no native tools array).
+            // Build from getToolsForNativeAPI() so the listing respects the
+            // per-task allowlist + MCP server filter AND includes enabled MCP
+            // tools (e.g. an app's get_buffer). Listing every built-in here —
+            // including ones the allowlist blocks — makes the agent try blocked
+            // tools and stall on "not enabled for this task".
+            const toolDefs = toolExecutor.getToolsForNativeAPI()
+                .map(t => `<tool name="${t.function.name}">\n<description>${t.function.description}</description>\n</tool>`)
+                .join('\n');
+            const toolsSection = isNative
+                ? `Tool schemas are provided to you via the native function-calling API (the request's \`tools\` field) — invoke them directly. Built-in + any enabled MCP tools are all available there.`
+                : toolDefs;
 
             // ── Protocol section ─────────────────────────────────────────
             let instructionsPrompt = '';
@@ -282,13 +315,38 @@ PLAN: Insert it using multi_replace_file_content (content-based) so the rest of 
                 instructionsPrompt = ContextBuilder.getJsonModeProtocol();
             }
 
+            if (!editingMode) {
+                // ── Lightweight prompt for scoped / app-intent tasks ──────────
+                staticPrefix = `
+<system_role>
+${agentPersona}
+</system_role>
+
+<available_tools>
+${toolsSection}
+</available_tools>
+
+${instructionsPrompt}
+
+<task_completion>
+The ONLY way to end a task is to call \`finish_task\` — a text-only reply is never treated as completion. Call \`finish_task\` once you have delivered the result (via \`present_result\` when a result kind is expected) and the user's request is fully addressed.
+</task_completion>
+
+<critical_rules>
+1. **Deliver the result**: when you have the answer, call \`present_result\` with the requested kind (e.g. markdown / answer / table), then \`finish_task\`.
+2. **Use tools, don't guess**: call the provided tools (e.g. \`get_buffer\`) to obtain real content rather than assuming it.
+3. **Avoid loops**: if repeated tool calls don't make progress, stop and deliver a best-effort result or ask the user a clarifying question.
+4. **Language**: user-facing output in ${outputLanguage}.
+</critical_rules>
+`;
+            } else {
             staticPrefix = `
 <system_role>
 ${agentPersona}
 </system_role>
 
 <available_tools>
-${toolDefs}
+${toolsSection}
 </available_tools>
 
 ${instructionsPrompt}
@@ -315,11 +373,14 @@ Call \`finish_task\` when ALL of these are true:
      and fix any reported errors BEFORE doing anything else.
 
 2. **Tool Choice for Edits**:
-   - Create new / fully rewrite: \`write_file\`.
-   - Modify existing: \`multi_replace_file_content\` (CONTENT-BASED — see rules below).
+   - Create new file: \`write_file\`.
+   - Modify existing (small, unique change): \`multi_replace_file_content\` (CONTENT-BASED — see rules below). Default choice.
+   - Modify existing (large/awkward contiguous block, or after multi_replace keeps failing to match): \`replace_lines\` —
+     LINE-BASED. read_file first, then replace [start_line..end_line] and pass expected_first_line/expected_last_line
+     (it refuses if your line numbers are stale, so it's safe). Generates only the changed region — no whole-file rewrite, no exact re-typing of the old block.
    - NEVER use \`run_command\` with shell redirects (\`echo > file\`, \`Set-Content\`, \`sed\`) —
      they cause encoding corruption and silent breakage.
-   - If multi_replace on a long file fails twice in a row, switch to \`write_file\` with full new content.
+   - If multi_replace on a long file fails twice in a row, switch to \`replace_lines\` (NOT a full write_file rewrite — full rewrites of big files drop content).
    - **File Encoding**: \`write_file\` automatically preserves the existing file's charset (UTF-8, Shift-JIS,
      EUC-JP, UTF-16, etc.). To force a specific encoding, pass \`"encoding": "shift-jis"\` (or
      \`"utf-8"\`, \`"euc-jp"\`, \`"utf-16le"\`). \`read_file\` always returns UTF-8 regardless of the
@@ -408,6 +469,7 @@ Call \`finish_task\` when ALL of these are true:
 
 </critical_rules>
 `;
+            }
 
             this._staticCache = { key: cacheKey, prefix: staticPrefix };
         }

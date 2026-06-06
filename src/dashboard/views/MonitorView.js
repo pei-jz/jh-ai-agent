@@ -1,3 +1,5 @@
+import { renderResultSummary, attachFileOpenHandlers, ensureResultViewStyles } from '../utils/resultView.js';
+
 export class MonitorView {
     constructor() {
         this.tasks = [];
@@ -7,6 +9,14 @@ export class MonitorView {
         this.currentProgress = 0;
         this.currentStatus = 'idle';
         this.tokenUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+        // Structured result summaries for the "Result" tab — an ARRAY so multiple
+        // runs of the same task (continue-after-complete) accumulate, newest last.
+        // Each item: { summary, files:[{path,action,description}] }.
+        this.resultSummaries = [];
+        // True once the user manually picks a tab during a run — suppresses the
+        // auto-switch-to-Result on completion (so it won't yank you off the logs
+        // you're reading). Reset when a new run starts (open / continue).
+        this._userPickedTab = false;
         this._chatDataMap = {};          // uid → chat entry[]
         this._activeStepChatEntries = []; // real-time accumulator
         this._activeStepChatUid = null;   // uid for current step's button
@@ -758,9 +768,13 @@ export class MonitorView {
                 <button class="mfilter-btn" data-filter="thought">🧠 Thoughts</button>
                 <button class="mfilter-btn" data-filter="tool">🛠 Tools</button>
                 <button class="mfilter-btn" data-filter="telemetry">🔌 API</button>
+                <button class="mfilter-btn" data-filter="result">📋 Result</button>
             </div>
             <div class="mconsole" id="console-logs" data-current-filter="all">
                 ${this.renderAllLogs()}
+            </div>
+            <div class="mconsole mresult" id="result-panel" style="display:none">
+                ${this._renderResultsHtml()}
             </div>
             <div class="msteering">
                 <textarea id="input-steering" placeholder="Steer the agent... (Ctrl+Enter to send)" disabled rows="1"></textarea>
@@ -1312,7 +1326,14 @@ export class MonitorView {
         if (data.type === 'command_confirm') {
             inner = `<h4>🛡 Command Approval</h4><p>${escapeHtml(data.message || '')}</p><pre><code>${escapeHtml(data.command || '')}</code></pre>`;
         } else if (data.type === 'plan_review') {
-            inner = `<h4>📋 Plan Approval</h4><p><strong>${escapeHtml(data.title || '')}</strong></p><pre>${escapeHtml(data.message || '')}</pre>`;
+            // Editable plan — the user can revise it before approving; the edited
+            // text is sent back as modifiedContent and becomes the plan the agent follows.
+            inner = `<h4>📋 Plan Approval</h4><p><strong>${escapeHtml(data.title || '')}</strong></p>` +
+                `<p class="mconfirm-hint" style="font-size:11px;color:var(--text-tertiary);margin:0 0 6px">承認前に編集できます。承認すると編集後の計画に従います。</p>` +
+                `<textarea class="mconfirm-plan-edit" id="plan-edit-${cid}" rows="12" ` +
+                `style="width:100%;box-sizing:border-box;font-family:var(--font-mono);font-size:12px;` +
+                `background:var(--bg-primary);color:var(--text-primary);border:1px solid var(--border);` +
+                `border-radius:6px;padding:10px;resize:vertical;">${escapeHtml(data.message || '')}</textarea>`;
         } else if (data.type === 'diff_review') {
             inner = `<h4>📝 File Modification</h4><p><code>${escapeHtml(data.path || '')}</code></p><p>${escapeHtml(data.message || '')}</p>${this.renderSimpleDiff(data.oldContent || '', data.newContent || '')}`;
         }
@@ -1335,6 +1356,9 @@ export class MonitorView {
         this.currentProgress = 0;
         this.currentStatus = 'running';
         this.tokenUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+        this.resultSummaries = [];
+        this._taskFinished = false;
+        this._userPickedTab = false;
         this._activeStepChatEntries = [];
         this._activeStepChatUid = null;
         if (!window.apiClient) return;
@@ -1363,6 +1387,13 @@ export class MonitorView {
                 const packet = JSON.parse(ev.data);
                 if (!packet) return;
                 packet.data = packet.data || {};
+
+                // Any non-terminal event means a run is actively streaming → the
+                // steer box is in "steer" (not "continue") mode. This also correctly
+                // flips back after a reconnect replays an older `complete` event.
+                if (packet.event && packet.event !== 'complete' && packet.event !== 'error') {
+                    this._taskFinished = false;
+                }
 
                 // ── Approval was resolved (possibly by another connected client) ──
                 // Handle BEFORE pushing to this.logs so it isn't replayed on view reload.
@@ -1574,9 +1605,16 @@ export class MonitorView {
 
                 // Update progress/status/tokens
                 if (packet.event === 'token_usage') {
-                    this.tokenUsage = packet.data;
+                    // ACCUMULATE across LLM calls — each token_usage event is one
+                    // call's usage, not the running total. (Previously this overwrote,
+                    // so the header showed only the last step's tokens, which for a
+                    // tool-only final step is often 0 → the "Tokens: 0" bug.)
+                    const d = packet.data || {};
+                    this.tokenUsage.prompt_tokens     += d.prompt_tokens || 0;
+                    this.tokenUsage.completion_tokens += d.completion_tokens || 0;
+                    this.tokenUsage.total_tokens      += (d.total_tokens || ((d.prompt_tokens || 0) + (d.completion_tokens || 0)));
                     const vt = document.getElementById('val-total-tokens');
-                    if (vt) vt.textContent = (packet.data.total_tokens || 0).toLocaleString();
+                    if (vt) vt.textContent = this.tokenUsage.total_tokens.toLocaleString();
                     return; // don't render as inline log line
                 }
                 if (packet.event === 'status') {
@@ -1591,6 +1629,16 @@ export class MonitorView {
                 } else if (packet.event === 'complete' || packet.event === 'error') {
                     this.currentStatus = packet.event === 'complete' ? 'completed' : 'failed';
                     this.currentProgress = 1.0;
+                    // Accumulate the result summary (one per run) for the Result tab.
+                    if (packet.event === 'complete' && packet.data?.resultSummary) {
+                        this.resultSummaries.push(packet.data.resultSummary);
+                    }
+                    // On completion, switch to the Result tab — but ONLY if the user
+                    // hasn't manually navigated to another tab during this run (don't
+                    // yank them off logs they're inspecting).
+                    if (packet.event === 'complete' && !this._userPickedTab) {
+                        this._activateResultTab();
+                    }
                     const pb = document.getElementById('detail-progress-bar');
                     if (pb) pb.style.width = '100%';
                     const vp = document.getElementById('val-progress');
@@ -1607,13 +1655,24 @@ export class MonitorView {
                     const lastHeader = lastStep?.querySelector('.mstep-header');
                     if (lastHeader) this._finalizePreviousStep(lastHeader);
 
-                    disableSteering();
+                    if (packet.event === 'complete') {
+                        // Keep the steer box usable so the user can CONTINUE the task.
+                        this._taskFinished = true;
+                        const si = document.getElementById('input-steering');
+                        const sb = document.getElementById('btn-send-steering');
+                        if (si) { si.disabled = false; si.placeholder = '✓ 完了。追記してタスクを続行 (Ctrl+Enter)'; }
+                        if (sb) sb.disabled = false;
+                    } else {
+                        disableSteering();
+                    }
                 }
             } catch (e) { console.error('WS parse error:', e); }
         };
 
         this.socket.onerror = () => disableSteering();
-        this.socket.onclose = () => disableSteering();
+        // Don't disable the steer box on a normal post-completion close — the user
+        // can still type to continue the task.
+        this.socket.onclose = () => { if (!this._taskFinished) disableSteering(); };
     }
 
     async loadHistoricalLogs(taskId) {
@@ -1623,15 +1682,62 @@ export class MonitorView {
             const logs = await window.apiClient.getTaskLogs(taskId);
             if (Array.isArray(logs) && logs.length > 0) {
                 this.logs = logs.map(l => ({ ...l, data: l.data || {} }));
+                // Recover ALL run results from the persisted `complete` events
+                // (a continued task has more than one).
+                this.resultSummaries = this.logs
+                    .filter(l => l.event === 'complete' && l.data?.resultSummary)
+                    .map(l => l.data.resultSummary);
+                this._renderResultPanel();
                 if (consoleEl) {
                     consoleEl.innerHTML = this.renderAllLogs();
                     const filter = consoleEl.getAttribute('data-current-filter') || 'all';
                     this.applyFilter(consoleEl, filter);
                 }
+                // Completed task with a result → open on the Result tab by default.
+                if (this.resultSummaries.length > 0) {
+                    this._activateResultTab();
+                }
+                // Finished task → allow continuing it (re-run) from the steer box.
+                this._taskFinished = true;
+                const si = document.getElementById('input-steering');
+                const sb = document.getElementById('btn-send-steering');
+                if (si) { si.disabled = false; si.placeholder = '✓ 完了。追記してタスクを続行 (Ctrl+Enter)'; }
+                if (sb) sb.disabled = false;
             }
         } catch (e) {
             console.error('Failed to load task logs:', e);
         }
+    }
+
+    /** Build HTML for ALL accumulated run results (newest runs appended below). */
+    _renderResultsHtml() {
+        const runs = this.resultSummaries || [];
+        if (runs.length === 0) return renderResultSummary(null);
+        if (runs.length === 1) return renderResultSummary(runs[0]);
+        // Multiple runs (continue-after-complete) — label each.
+        return runs.map((r, i) =>
+            `<div class="mresult-run"><div class="mresult-run-label">実行 #${i + 1}</div>${renderResultSummary(r)}</div>`
+        ).join('<hr style="border:none;border-top:1px solid var(--border);margin:18px 0">');
+    }
+
+    /** Re-render the Result tab panel and (re)bind file-open links. */
+    _renderResultPanel() {
+        ensureResultViewStyles();
+        const rp = document.getElementById('result-panel');
+        if (!rp) return;
+        rp.innerHTML = this._renderResultsHtml();
+        attachFileOpenHandlers(rp);
+    }
+
+    /** Switch the detail view to the Result tab (used on task completion). */
+    _activateResultTab() {
+        const btns = document.querySelectorAll('.mfilter-btn');
+        if (!btns.length) return;
+        btns.forEach(b => b.classList.toggle('active', b.getAttribute('data-filter') === 'result'));
+        const consoleEl = document.getElementById('console-logs');
+        const rp = document.getElementById('result-panel');
+        if (consoleEl) consoleEl.style.display = 'none';
+        if (rp) { rp.style.display = 'block'; this._renderResultPanel(); }
     }
 
     // ─── Filter ─────────────────────────────────────────────────────────────
@@ -1769,8 +1875,15 @@ export class MonitorView {
     }
 
     sendConfirmResponse(confirmId, approved) {
+        // For an approved plan_review, send the (possibly edited) plan text back so
+        // the agent follows the user's revised plan.
+        let modifiedContent = null;
+        if (approved) {
+            const planEdit = document.getElementById(`plan-edit-${confirmId}`);
+            if (planEdit && typeof planEdit.value === 'string') modifiedContent = planEdit.value;
+        }
         if (this.socket?.readyState === WebSocket.OPEN) {
-            this.socket.send(JSON.stringify({ event: 'confirm_response', data: { confirmId, approved, modifiedContent: null } }));
+            this.socket.send(JSON.stringify({ event: 'confirm_response', data: { confirmId, approved, modifiedContent } }));
         }
         // Optimistically mark the card as resolved on this client.
         // The server will also fan-out a `confirm_resolved` event that hits any
@@ -1932,6 +2045,27 @@ export class MonitorView {
                 margin: 10px 0 5px;
             }
             .mchat-section-label:first-of-type { margin-top: 0; }
+            .mchat-subtabs {
+                display: flex;
+                gap: 4px;
+                flex-wrap: wrap;
+                margin: 4px 0 8px;
+                border-bottom: 1px solid var(--border-light);
+                padding-bottom: 6px;
+            }
+            .mchat-subtab {
+                padding: 4px 10px;
+                border: 1px solid var(--border);
+                background: var(--bg-tertiary);
+                color: var(--text-secondary);
+                font-size: 11px;
+                border-radius: var(--radius-sm);
+                cursor: pointer;
+                white-space: nowrap;
+            }
+            .mchat-subtab:hover { background: var(--bg-hover); color: var(--text-primary); }
+            .mchat-subtab.active { background: var(--bg-primary); color: var(--accent); border-color: var(--accent); }
+            .mchat-steplabel { font-size: 10.5px; color: var(--accent); font-weight: 600; }
             .mchat-pre {
                 margin: 0;
                 padding: 10px 12px;
@@ -1990,14 +2124,20 @@ export class MonitorView {
             title.textContent = `🔌 API Calls (${count}) · ↑${totalP}t ↓${totalC}t · ${totalMs}ms total`;
         }
 
+        // Turn escaped "\n"/"\t" sequences (common in raw LLM JSON envelopes) into
+        // real line breaks so the content is readable in the <pre> panels.
+        const unescapeNL = (s) => typeof s === 'string'
+            ? s.replace(/\\r\\n/g, '\n').replace(/\\n/g, '\n').replace(/\\t/g, '\t')
+            : s;
+
         const fmtMsgArray = (arr, label) => {
             let out = `=== ${label} (${arr.length} messages) ===\n`;
             arr.forEach((msg, i) => {
                 const role = msg.role || 'unknown';
-                const content = typeof msg.content === 'string'
-                    ? msg.content.substring(0, 1000) + (msg.content.length > 1000 ? '\n…(truncated)' : '')
+                const raw = typeof msg.content === 'string'
+                    ? msg.content.substring(0, 4000) + (msg.content.length > 4000 ? '\n…(truncated)' : '')
                     : JSON.stringify(msg.content, null, 2);
-                out += `──── [${i}] ${role} ────\n${content}\n\n`;
+                out += `──── [${i}] ${role} ────\n${unescapeNL(raw)}\n\n`;
             });
             return out;
         };
@@ -2040,31 +2180,80 @@ export class MonitorView {
             return out.trim() || '(empty)';
         };
 
-        body.innerHTML = entries.map((d) => {
+        const safeObj = (v) => {
+            if (v && typeof v === 'object') return v;
+            if (typeof v === 'string') { try { return JSON.parse(v); } catch { return {}; } }
+            return {};
+        };
+
+        body.innerHTML = entries.map((d, i) => {
             const method  = d.method === 'TOOL' ? `TOOL:${d.name}` : (d.method || 'CHAT');
             const isErr   = (d.status || 200) >= 400 || d.error;
-            const req     = escapeHtml(fmtPayload(d.request));
-            const res     = escapeHtml(fmtPayload(d.response || d.error || ''));
-            const hdrs    = d.headers ? escapeHtml(JSON.stringify(d.headers, null, 2)) : '';
             const usage   = d.usage
                 ? `↑${d.usage.prompt_tokens||0} / ↓${d.usage.completion_tokens||0} / total: ${d.usage.total_tokens||0} tokens`
                 : '';
+
+            const r = safeObj(d.request);
+            const systemText = typeof r.system_prompt === 'string' ? r.system_prompt : '';
+            const historyArr = Array.isArray(r.history) ? r.history : (Array.isArray(r.messages) ? r.messages : null);
+            const toolsArr   = Array.isArray(r.tools) ? r.tools : null;
+            // Scalar request params (model / tool_calling / temperature / max_tokens / …).
+            const paramsObj = {};
+            for (const k of Object.keys(r)) {
+                if (['system_prompt', 'history', 'messages', 'tools', 'url', 'headers'].includes(k)) continue;
+                if (typeof r[k] === 'string' && r[k].trim() === '') continue;
+                paramsObj[k] = r[k];
+            }
+            const responseText = unescapeNL(typeof d.response === 'string'
+                ? d.response
+                : (d.response ? JSON.stringify(d.response, null, 2) : (d.error || '')));
+
+            // Build the tab set (only include tabs that have content).
+            const tabs = [];
+            if (Object.keys(paramsObj).length) tabs.push({ key: 'params', label: '⚙ Params', content: JSON.stringify(paramsObj, null, 2) });
+            if (systemText) tabs.push({ key: 'system', label: '🧾 System', content: systemText });
+            if (historyArr) tabs.push({ key: 'history', label: `💬 History (${historyArr.length})`, content: fmtMsgArray(historyArr, 'history') });
+            if (toolsArr) tabs.push({ key: 'tools', label: `🛠 Tools (${toolsArr.length})`, content: JSON.stringify(toolsArr, null, 2) });
+            tabs.push({ key: 'response', label: '📤 Response', content: responseText || '(empty)' });
+            if (d.headers) tabs.push({ key: 'headers', label: '🔖 Headers', content: JSON.stringify(d.headers, null, 2) });
+
+            // Default to History (the part people inspect most); fall back to first.
+            const defaultIdx = Math.max(0, tabs.findIndex(t => t.key === 'history'));
+            const grp = `g${i}`;
+
+            const tabBtns = tabs.map((t, ti) =>
+                `<button class="mchat-subtab${ti === defaultIdx ? ' active' : ''}" data-grp="${grp}" data-key="${t.key}">${t.label}</button>`
+            ).join('');
+            const tabPanels = tabs.map((t, ti) =>
+                `<pre class="mchat-pre mchat-panel" data-grp="${grp}" data-key="${t.key}" style="display:${ti === defaultIdx ? 'block' : 'none'}">${escapeHtml(t.content)}</pre>`
+            ).join('');
+
             return `
                 <div class="mchat-entry">
                     <div class="mchat-entry-meta">
                         <span class="mlog-tele-method">${escapeHtml(method)}</span>
                         <span class="${isErr ? 'mlog-tele-status-err' : 'mlog-tele-status-ok'}">${d.status || (isErr ? 'ERR' : 200)}</span>
+                        ${d.stepLabel ? `<span class="mchat-steplabel">${escapeHtml(d.stepLabel)}</span>` : ''}
                         ${d.duration ? `<span class="mlog-tele-dur">${d.duration}ms</span>` : ''}
                         ${usage ? `<span class="mchat-usage">${usage}</span>` : ''}
                     </div>
-                    <div class="mchat-section-label">Request</div>
-                    <pre class="mchat-pre">${req}</pre>
-                    <div class="mchat-section-label">Response</div>
-                    <pre class="mchat-pre">${res}</pre>
-                    ${hdrs ? `<div class="mchat-section-label">Headers</div><pre class="mchat-pre">${hdrs}</pre>` : ''}
+                    <div class="mchat-subtabs">${tabBtns}</div>
+                    ${tabPanels}
                 </div>
             `;
         }).join('');
+
+        // Sub-tab switching (delegated within the modal body).
+        body.querySelectorAll('.mchat-subtab').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const grp = btn.getAttribute('data-grp');
+                const key = btn.getAttribute('data-key');
+                body.querySelectorAll(`.mchat-subtab[data-grp="${grp}"]`).forEach(b => b.classList.toggle('active', b === btn));
+                body.querySelectorAll(`.mchat-panel[data-grp="${grp}"]`).forEach(p => {
+                    p.style.display = (p.getAttribute('data-key') === key) ? 'block' : 'none';
+                });
+            });
+        });
 
         overlay.classList.add('open');
     }
@@ -2204,14 +2393,28 @@ export class MonitorView {
 
         // Filter buttons
         const filterBtns = document.querySelectorAll('.mfilter-btn');
+        const resultPanel = document.getElementById('result-panel');
         filterBtns.forEach(btn => {
             btn.addEventListener('click', () => {
+                // User manually chose a tab → stop auto-jumping to Result on completion.
+                this._userPickedTab = true;
                 filterBtns.forEach(b => b.classList.remove('active'));
                 btn.classList.add('active');
                 const filter = btn.getAttribute('data-filter');
-                if (consoleEl) {
-                    consoleEl.setAttribute('data-current-filter', filter);
-                    this.applyFilter(consoleEl, filter);
+                if (filter === 'result') {
+                    // Show the result panel, hide the log console.
+                    if (consoleEl) consoleEl.style.display = 'none';
+                    if (resultPanel) {
+                        resultPanel.style.display = 'block';
+                        this._renderResultPanel();
+                    }
+                } else {
+                    if (resultPanel) resultPanel.style.display = 'none';
+                    if (consoleEl) {
+                        consoleEl.style.display = '';
+                        consoleEl.setAttribute('data-current-filter', filter);
+                        this.applyFilter(consoleEl, filter);
+                    }
                 }
             });
         });
@@ -2225,9 +2428,32 @@ export class MonitorView {
         const steerBtn   = document.getElementById('btn-send-steering');
         const steerInput = document.getElementById('input-steering');
         if (steerBtn && steerInput) {
-            const sendSteer = () => {
+            const sendSteer = async () => {
                 const msg = steerInput.value.trim();
-                if (msg && this.socket?.readyState === WebSocket.OPEN) {
+                if (!msg) return;
+                // If the task already finished, this CONTINUES it (re-runs the agent
+                // under the same id). Otherwise it steers the live run.
+                if (this._taskFinished) {
+                    steerInput.value = '';
+                    steerInput.disabled = true; steerBtn.disabled = true;
+                    if (consoleEl) {
+                        consoleEl.style.display = '';
+                        consoleEl.insertAdjacentHTML('beforeend',
+                            `<div class="mlog mlog-status"><span class="mlog-icon">↪</span><span class="mlog-body" style="color:var(--accent)"><strong>Continue:</strong> ${escapeHtml(msg)}</span></div>`);
+                    }
+                    try {
+                        await window.apiClient.continueTask(this.selectedTaskId, msg);
+                        this._taskFinished = false;
+                        // Reconnect to stream the continued run (logs/results replay + accumulate).
+                        this.connectWebSocket(this.selectedTaskId);
+                    } catch (e) {
+                        console.error('continueTask failed:', e);
+                        steerInput.disabled = false; steerBtn.disabled = false;
+                        alert(`続行に失敗しました: ${e.message || e}`);
+                    }
+                    return;
+                }
+                if (this.socket?.readyState === WebSocket.OPEN) {
                     this.socket.send(JSON.stringify({ event: 'steering', data: { message: msg } }));
                     if (consoleEl) {
                         consoleEl.insertAdjacentHTML('beforeend',

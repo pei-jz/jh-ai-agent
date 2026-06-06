@@ -95,6 +95,13 @@ export class ConfigView {
         const logDirEl = document.getElementById('cfg-log-dir');
         if (logDirEl) this.config.log_dir = logDirEl.value.trim() || null;
 
+        const planModeEl = document.getElementById('cfg-plan-mode');
+        if (planModeEl) this.config.plan_mode = planModeEl.value;
+        const fastModelEl = document.getElementById('cfg-fast-model');
+        if (fastModelEl) this.config.fast_model_id = fastModelEl.value || null;
+        const deepModelEl = document.getElementById('cfg-deep-model');
+        if (deepModelEl) this.config.deep_model_id = deepModelEl.value || null;
+
         // Helper: read a numeric input where blank or 0 means "disabled / unlimited"
         const readNum = (id, fallback = 0) => {
             const el = document.getElementById(id);
@@ -131,7 +138,7 @@ export class ConfigView {
     getModalValue(field) {
         if (!this.editingInstance) {
             if (field === 'provider') return 'openai';
-            if (field === 'api_version') return '2024-02-15-preview';
+            if (field === 'api_version') return '2024-08-01-preview';
             return '';
         }
         const v = this.editingInstance[field];
@@ -319,6 +326,44 @@ export class ConfigView {
                             </p>
 
                             <div class="input-group" style="margin-bottom: 12px;">
+                                <label class="input-label">Plan-First Mode</label>
+                                <select id="cfg-plan-mode" class="input">
+                                    <option value="off"${(this.config.plan_mode ?? 'auto') === 'off' ? ' selected' : ''}>Off — never require a plan</option>
+                                    <option value="auto"${(this.config.plan_mode ?? 'auto') === 'auto' ? ' selected' : ''}>Auto — plan complex tasks only (recommended)</option>
+                                    <option value="always"${(this.config.plan_mode ?? 'auto') === 'always' ? ' selected' : ''}>Always — require an approved plan before any edit</option>
+                                </select>
+                                <p class="input-hint">
+                                    When active, the agent must <strong>investigate → propose a phased plan → get your approval</strong>
+                                    before it can run any file-modifying tool. Investigation tools (read / grep / list) are always allowed.
+                                    <strong>Auto</strong> only gates tasks it judges complex; simple edits run unblocked.
+                                </p>
+                            </div>
+
+                            <div class="input-group" style="margin-bottom: 12px;">
+                                <label class="input-label">Model Routing — Fast tier</label>
+                                <select id="cfg-fast-model" class="input">
+                                    <option value="">(未設定 — アクティブモデルを使用)</option>
+                                    ${(this.config.llm_instances || []).map(inst => {
+                                        const id = `${inst.id}:${inst.model}`;
+                                        return `<option value="${id}"${(this.config.fast_model_id || '') === id ? ' selected' : ''}>${inst.name} (${inst.model})</option>`;
+                                    }).join('')}
+                                </select>
+                                <p class="input-hint">即時応答向けの軽量モデル。単発タスク(アプリ連携の intent / freeform)や、複雑判定されないタスクで使われます。</p>
+                            </div>
+
+                            <div class="input-group" style="margin-bottom: 12px;">
+                                <label class="input-label">Model Routing — Deep tier</label>
+                                <select id="cfg-deep-model" class="input">
+                                    <option value="">(未設定 — アクティブモデルを使用)</option>
+                                    ${(this.config.llm_instances || []).map(inst => {
+                                        const id = `${inst.id}:${inst.model}`;
+                                        return `<option value="${id}"${(this.config.deep_model_id || '') === id ? ' selected' : ''}>${inst.name} (${inst.model})</option>`;
+                                    }).join('')}
+                                </select>
+                                <p class="input-hint">長考向けの高性能モデル。プラン必須/複雑タスク、および長時間タスクの自動エスカレーション(step 半ば到達時)で使われます。両方未設定ならルーティング無効(常にアクティブモデル)。</p>
+                            </div>
+
+                            <div class="input-group" style="margin-bottom: 12px;">
                                 <label class="input-label">Max Agent Steps</label>
                                 <input type="number" id="cfg-max-steps" class="input" value="${this.config.max_steps ?? 0}" min="0" max="10000" placeholder="0 = unlimited">
                                 <p class="input-hint">Hard step ceiling. <strong>Recommended: 0 (unlimited)</strong> — the budgets and loop detectors below are the proper safeguards.</p>
@@ -394,6 +439,18 @@ export class ConfigView {
                                 <input type="text" id="cfg-log-dir" class="input" value="${this.config.log_dir || ''}" placeholder="C:\\path\\to\\logs" style="flex: 1;">
                                 <button class="btn btn-secondary" id="btn-select-log-dir" style="padding: 0 12px; display: flex; align-items: center; justify-content: center; height: 36px; border: 1px solid var(--border);" type="button">📁 Select</button>
                             </div>
+                        </div>
+                        <div class="input-group" style="border-top: 1px solid var(--border-light); padding-top: 16px; margin-top: 16px;">
+                            <label class="input-label">🗄 ストレージ使用量</label>
+                            <div id="cfg-storage-usage" style="font-size:12px;color:var(--text-secondary);background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px;line-height:1.7;">
+                                <em style="color:var(--text-tertiary)">「更新」を押すと表示します</em>
+                            </div>
+                            <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;">
+                                <button class="btn btn-secondary" id="btn-storage-refresh" type="button" style="font-size:12px;">↻ 更新</button>
+                                <button class="btn btn-secondary" id="btn-purge-apilogs" type="button" style="font-size:12px;color:var(--error);border-color:var(--error)">旧APIログ(localStorage)を削除</button>
+                                <button class="btn btn-secondary" id="btn-clear-commlog" type="button" style="font-size:12px;color:var(--error);border-color:var(--error)">通信ログファイルをクリア</button>
+                            </div>
+                            <p class="input-hint">LLMコールの確認は <strong>Monitor</strong>（タスク別）に一本化されました。タスク履歴の削除は <strong>History</strong> から行えます。</p>
                         </div>
                         <div class="input-group" style="border-top: 1px solid var(--border-light); padding-top: 16px; margin-top: 16px;">
                             <label class="input-label">J.H AI Agent Connection Token (API Key)</label>
@@ -479,7 +536,7 @@ export class ConfigView {
 
                         <div class="input-group" id="modal-version-group" style="display: ${this.getModalValue('provider') === 'azure' ? 'flex' : 'none'};">
                             <label class="input-label">API Version</label>
-                            <input type="text" id="modal-inst-version" class="input" value="${this.getModalValue('api_version')}" placeholder="e.g. 2024-02-15-preview">
+                            <input type="text" id="modal-inst-version" class="input" value="${this.getModalValue('api_version')}" placeholder="e.g. 2024-08-01-preview">
                         </div>
 
                         <div class="input-group">
@@ -544,7 +601,7 @@ export class ConfigView {
                         <button class="settings-tab-btn ${this.activeTab === 'general' ? 'active' : ''}" data-tab="general" style="${getTabStyle('general')}">⚙️ General Settings</button>
                         <button class="settings-tab-btn ${this.activeTab === 'templates' ? 'active' : ''}" data-tab="templates" style="${getTabStyle('templates')}">📝 Templates</button>
                         <button class="settings-tab-btn ${this.activeTab === 'skills' ? 'active' : ''}" data-tab="skills" style="${getTabStyle('skills')}">⚡ Skills</button>
-                        <button class="settings-tab-btn ${this.activeTab === 'logs' ? 'active' : ''}" data-tab="logs" style="${getTabStyle('logs')}">🔌 API Logs</button>
+                        <!-- API Logs moved to the Monitor view (per-task raw payloads). -->
                         <button class="settings-tab-btn ${this.activeTab === 'rag' ? 'active' : ''}" data-tab="rag" style="${getTabStyle('rag')}">🔍 RAG Indexing</button>
                     </div>
 
@@ -1123,6 +1180,30 @@ export class ConfigView {
             });
         }
 
+        // ── Storage usage panel ──────────────────────────────────────────
+        const storageRefresh = document.getElementById('btn-storage-refresh');
+        if (storageRefresh) {
+            storageRefresh.addEventListener('click', () => this._renderStorageUsage());
+        }
+        const purgeApiLogs = document.getElementById('btn-purge-apilogs');
+        if (purgeApiLogs) {
+            purgeApiLogs.addEventListener('click', () => {
+                if (!confirm('旧APIログ(localStorageのjh_api_logs)を削除しますか？\nMonitorのタスク別ログには影響しません。')) return;
+                try { localStorage.removeItem('jh_api_logs'); } catch (_) {}
+                this._renderStorageUsage();
+            });
+        }
+        const clearCommLog = document.getElementById('btn-clear-commlog');
+        if (clearCommLog) {
+            clearCommLog.addEventListener('click', async () => {
+                if (!confirm('通信ログファイル(ai_communication.log)を空にしますか？')) return;
+                try { await invoke('clear_comm_log'); } catch (e) { console.error(e); }
+                this._renderStorageUsage();
+            });
+        }
+        // Auto-load once when the General tab is shown.
+        if (document.getElementById('cfg-storage-usage')) this._renderStorageUsage();
+
         // Export connection settings to the standard path picked up by sibling JH apps
         const btnExportConn = document.getElementById('btn-export-connection');
         if (btnExportConn) {
@@ -1239,6 +1320,10 @@ export class ConfigView {
                         no_progress_window:          limit(this.config.no_progress_window),
                         identical_call_threshold:    limit(this.config.identical_call_threshold),
                         cycle_detection_min_repeats: limit(this.config.cycle_detection_min_repeats),
+                        agent_temperature:           (this.config.agent_temperature ?? null),
+                        plan_mode:                   (this.config.plan_mode || 'auto'),
+                        fast_model_id:               (this.config.fast_model_id || null),
+                        deep_model_id:               (this.config.deep_model_id || null),
                         prompt_templates:            promptTemplateManager.toConfigValue()
                     };
 
@@ -1604,6 +1689,46 @@ export class ConfigView {
                     ${listHtml}
                 </div>
             </div>
+        `;
+    }
+
+    async _renderStorageUsage() {
+        const el = document.getElementById('cfg-storage-usage');
+        if (!el) return;
+        const fmtBytes = (b) => {
+            b = b || 0;
+            if (b < 1024) return `${b} B`;
+            if (b < 1048576) return `${(b / 1024).toFixed(1)} KB`;
+            return `${(b / 1048576).toFixed(2)} MB`;
+        };
+        const lsSize = (key) => {
+            try { const v = localStorage.getItem(key); return v ? v.length * 2 : 0; } catch { return 0; }
+        };
+        let lsTotal = 0;
+        try {
+            for (let i = 0; i < localStorage.length; i++) {
+                const k = localStorage.key(i);
+                lsTotal += (k.length + (localStorage.getItem(k) || '').length) * 2;
+            }
+        } catch (_) {}
+        const chatBytes = lsSize('direct_ai_sessions');
+        const apiLogBytes = lsSize('jh_api_logs');
+        const schedBytes = lsSize('jh_schedules');
+
+        el.innerHTML = '<em style="color:var(--text-tertiary)">読み込み中…</em>';
+        let server = {};
+        try { server = await invoke('get_storage_usage'); } catch (_) {}
+
+        el.innerHTML = `
+            <div style="font-weight:600;color:var(--text-primary);margin-bottom:4px">ローカル (localStorage)</div>
+            ・チャット履歴 (direct_ai_sessions): ${fmtBytes(chatBytes)}<br>
+            ・旧APIログ (jh_api_logs): ${fmtBytes(apiLogBytes)} ${apiLogBytes > 0 ? '<span style="color:var(--text-tertiary)">（撤去済み・削除可）</span>' : ''}<br>
+            ・スケジュール (jh_schedules): ${fmtBytes(schedBytes)}<br>
+            ・localStorage合計: <strong>${fmtBytes(lsTotal)}</strong>
+            <div style="font-weight:600;color:var(--text-primary);margin:8px 0 4px">サーバ (タスク履歴)</div>
+            ・task_history.json: ${fmtBytes(server.task_history_bytes)}<br>
+            ・task_logs/ (${server.task_logs_count || 0}ファイル): ${fmtBytes(server.task_logs_bytes)}<br>
+            ・通信ログ ai_communication.log: ${fmtBytes(server.comm_log_bytes)} ${server.log_dir ? '' : '<span style="color:var(--text-tertiary)">（未設定）</span>'}
         `;
     }
 

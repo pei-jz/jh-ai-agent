@@ -51,7 +51,6 @@ export class Sidebar {
             { id: 'monitor',    label: 'Monitor',     icon: ICONS.monitor },
             { id: 'history',    label: 'History',     icon: ICONS.history },
             { id: 'schedule',   label: 'Schedule',    icon: ICONS.schedule },
-            { id: 'analytics',  label: 'Analytics',   icon: ICONS.analytics },
             { id: 'config',     label: 'Settings',    icon: ICONS.config },
         ];
 

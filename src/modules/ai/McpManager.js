@@ -1,15 +1,70 @@
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { McpClient } from './McpClient.js';
+import { McpWsClient } from './McpWsClient.js';
 
 export class McpManager {
     constructor() {
         this.clients = new Map();
         this.serversConfig = { mcpServers: {} };
+        // name -> { message, stage, at } for servers that failed to start.
+        this.startErrors = new Map();
+        // Set once we've subscribed to inbound MCP-WS connections (T1).
+        this._wsListenerReady = false;
+    }
+
+    /** Returns the recorded startup error for a server, or null. */
+    getError(name) {
+        return this.startErrors.get(name) || null;
     }
 
     async init() {
         await this.loadConfig();
         await this.startAll();
+        await this.listenForWsServers();
+    }
+
+    /**
+     * Subscribe to inbound MCP-over-WebSocket connections (Part A / T1).
+     * When an external app dials JHAI's `/mcp/ws?app=<name>`, the Rust bridge
+     * emits `mcp-ws-connected` { app, connId }; we build an McpWsClient for it
+     * (acting as the MCP client) and register it under the app name — so its
+     * tools flow through getAllTools()/callTool() exactly like a stdio server.
+     */
+    async listenForWsServers() {
+        if (this._wsListenerReady) return;
+        this._wsListenerReady = true;
+        await listen('mcp-ws-connected', async (event) => {
+            const { app, connId } = event.payload || {};
+            if (!app || !connId) return;
+            await this.connectWsServer(app, connId);
+        });
+    }
+
+    /** Build + handshake an McpWsClient for a freshly-connected app. */
+    async connectWsServer(name, connId) {
+        // If a previous connection for this app exists, retire it first.
+        const existing = this.clients.get(name);
+        if (existing) {
+            try { await existing.stop(); } catch (_) {}
+        }
+        const client = new McpWsClient(name, connId);
+        client.onClosed = () => {
+            // Only drop if this exact connection is still the registered one.
+            if (this.clients.get(name) === client) this.clients.delete(name);
+        };
+        const success = await client.start();
+        if (success) {
+            this.clients.set(name, client);
+            this.startErrors.delete(name);
+        } else {
+            this.startErrors.set(name, client.lastError || {
+                message: `MCP(WS) サーバー "${name}" のハンドシェイクに失敗しました。`,
+                stage: 'handshake',
+                at: new Date().toISOString(),
+            });
+        }
+        return success;
     }
 
     async loadConfig() {
@@ -64,7 +119,16 @@ export class McpManager {
         const success = await client.start();
         if (success) {
             this.clients.set(name, client);
+            this.startErrors.delete(name);
+        } else {
+            // Preserve the failure reason so the UI can surface it (tooltip / detail).
+            this.startErrors.set(name, client.lastError || {
+                message: `MCP サーバー "${name}" の起動に失敗しました。`,
+                stage: 'unknown',
+                at: new Date().toISOString(),
+            });
         }
+        return success;
     }
 
     async stopAll() {
@@ -86,10 +150,10 @@ export class McpManager {
         return allTools;
     }
 
-    async callTool(serverName, toolName, args) {
+    async callTool(serverName, toolName, args, meta = null) {
         const client = this.clients.get(serverName);
         if (!client) throw new Error(`Server ${serverName} not found`);
-        return await client.callTool(toolName, args);
+        return await client.callTool(toolName, args, meta);
     }
 
     async addServer(name, command, args = [], env = {}) {
@@ -107,6 +171,7 @@ export class McpManager {
             delete this.serversConfig.mcpServers[name];
             await this.saveConfig();
         }
+        this.startErrors.delete(name);
         const client = this.clients.get(name);
         if (client) {
             client.stop();

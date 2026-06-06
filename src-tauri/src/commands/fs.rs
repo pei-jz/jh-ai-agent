@@ -1,6 +1,7 @@
 use serde::Serialize;
 use std::fs;
 use std::path::Path;
+use crate::path_guard::PathGuard;
 
 #[derive(Debug, Serialize)]
 pub struct CustomDirEntry {
@@ -87,8 +88,14 @@ pub async fn read_file(path: String) -> Result<String, String> {
 /// 2. If the file already exists, detect its charset and match it (including BOM).
 /// 3. Otherwise write as UTF-8 without BOM.
 #[tauri::command]
-pub async fn write_file(path: String, content: String, encoding: Option<String>) -> Result<(), String> {
+pub async fn write_file(
+    path: String,
+    content: String,
+    encoding: Option<String>,
+    guard: tauri::State<'_, PathGuard>,
+) -> Result<(), String> {
     use encoding_rs::*;
+    guard.ensure_allowed(&path)?;
     let p = Path::new(&path);
     if let Some(parent) = p.parent() {
         if !parent.exists() {
@@ -161,12 +168,14 @@ pub async fn read_dir(path: String) -> Result<Vec<CustomDirEntry>, String> {
 }
 
 #[tauri::command]
-pub async fn create_dir(path: String) -> Result<(), String> {
+pub async fn create_dir(path: String, guard: tauri::State<'_, PathGuard>) -> Result<(), String> {
+    guard.ensure_allowed(&path)?;
     fs::create_dir_all(path).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn delete_dir(path: String) -> Result<(), String> {
+pub async fn delete_dir(path: String, guard: tauri::State<'_, PathGuard>) -> Result<(), String> {
+    guard.ensure_allowed(&path)?;
     let p = std::path::Path::new(&path);
     if p.exists() {
         fs::remove_dir_all(&path).map_err(|e| e.to_string())
@@ -312,6 +321,47 @@ fn format_float(f: f64) -> String {
         // 余分な末尾ゼロを除去
         let s = format!("{:.10}", f);
         s.trim_end_matches('0').trim_end_matches('.').to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_utf8_bom() {
+        let (enc, bom) = detect_encoding(b"\xEF\xBB\xBFhello");
+        assert_eq!(enc, encoding_rs::UTF_8);
+        assert_eq!(bom, 3);
+    }
+
+    #[test]
+    fn detects_plain_utf8_without_bom() {
+        let (enc, bom) = detect_encoding("hello world".as_bytes());
+        assert_eq!(enc, encoding_rs::UTF_8);
+        assert_eq!(bom, 0);
+    }
+
+    #[test]
+    fn detects_utf16le_bom() {
+        let (enc, bom) = detect_encoding(b"\xFF\xFEh\x00i\x00");
+        assert_eq!(enc, encoding_rs::UTF_16LE);
+        assert_eq!(bom, 2);
+    }
+
+    #[test]
+    fn decodes_after_stripping_bom() {
+        let bytes = b"\xEF\xBB\xBFabc";
+        let (enc, bom) = detect_encoding(bytes);
+        assert_eq!(decode_bytes(bytes, enc, bom), "abc");
+    }
+
+    #[test]
+    fn shift_jis_round_trips_through_detection() {
+        // 「あ」in Shift-JIS is 0x82 0xA0 — should NOT be detected as UTF-8.
+        let sjis = [0x82u8, 0xA0u8];
+        let (enc, _) = detect_encoding(&sjis);
+        assert_ne!(enc, encoding_rs::UTF_8);
     }
 }
 

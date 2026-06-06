@@ -1,248 +1,44 @@
 import { invoke } from '@tauri-apps/api/core';
 import { mcpManager } from './McpManager.js';
 import { workflowManager } from './WorkflowManager.js';
+import { toStrictSchema } from './strictSchema.js';
+import { levenshtein, pickClosestFile } from './tools/FuzzyPath.js';
+import { shouldBlock as planShouldBlock, planGateMessage } from './tools/PlanGate.js';
+import {
+    detectLineEnding, normalizeLE, countOccurrences, replaceAllLiteral,
+    findClosestRegion, visualizeWS
+} from './tools/FileEdit.js';
+import { TOOL_DEFINITIONS } from './tools/toolSchemas.js';
+import {
+    handleListFiles, handleReadFile, handleGrepSearch, handleGlob, handleFetchUrl
+} from './tools/handlers/readOnlyHandlers.js';
+import {
+    handleWriteFile, handleMultiReplace, handleReplaceLines
+} from './tools/handlers/editHandlers.js';
+import {
+    handleDeleteFile, handleMoveFile, handleRunCommand
+} from './tools/handlers/fsShellHandlers.js';
+import {
+    handleProposePlan, handleArtifact, handleFinishTask,
+    handleVerifySyntax, handleTaskProgress, handlePresentResult
+} from './tools/handlers/agentMetaHandlers.js';
 
 class ToolExecutor {
     constructor() {
         this._taskCompleted = false;
-        this.toolDefinitions = [
-            {
-                name: 'list_files',
-                isSafe: true,
-                description: 'List files and subdirectories directly under the specified directory path.',
-                parameters: {
-                    type: 'object',
-                    properties: {
-                        path: { type: 'string', description: 'Directory path to list (. for project root)' }
-                    },
-                    required: ['path']
-                }
-            },
-            {
-                name: 'read_file',
-                isSafe: true,
-                description: 'Read the content of a file as a UTF-8 text string. By default returns up to 2000 lines from the start. Use offset (1-indexed start line) and limit (max lines) for partial reads of large files. The result is prefixed with line numbers in `<lineno>\\t<content>` format for easy reference — these line numbers are display-only and must NEVER be included in multi_replace_file_content\'s old_text (use only the content after the tab).',
-                parameters: {
-                    type: 'object',
-                    properties: {
-                        path:   { type: 'string',  description: 'Path of the file to read' },
-                        offset: { type: 'integer', description: 'Optional. 1-indexed starting line number (default 1). Use to skip past content you already have.' },
-                        limit:  { type: 'integer', description: 'Optional. Maximum number of lines to return (default 2000). Increase for files where you need the whole content.' }
-                    },
-                    required: ['path']
-                }
-            },
-            {
-                name: 'grep_search',
-                isSafe: true,
-                description: 'Recursively search for a regex pattern across files (respects .gitignore). Returns matching lines with file path and line number. Use this INSTEAD of read_file when you want to find where something is defined/used — it is dramatically cheaper than reading every file.',
-                parameters: {
-                    type: 'object',
-                    properties: {
-                        pattern:          { type: 'string',  description: 'Rust regex pattern (e.g. "function\\s+foo", "TODO|FIXME"). Special characters must be escaped.' },
-                        path:             { type: 'string',  description: 'Optional. Root directory to search. Defaults to workspace root.' },
-                        include_glob:     { type: 'string',  description: 'Optional. Limit search to files matching this glob (e.g. "*.{js,ts}", "src/**/*.rs"). Comma-separate multiple patterns.' },
-                        case_insensitive: { type: 'boolean', description: 'Optional. Default false.' },
-                        max_results:      { type: 'integer', description: 'Optional. Max matches to return (default 200, hard cap 2000).' },
-                        context_lines:    { type: 'integer', description: 'Optional. Lines of context above/below each match (default 0, max 5).' }
-                    },
-                    required: ['pattern']
-                }
-            },
-            {
-                name: 'glob',
-                isSafe: true,
-                description: 'Find files whose path matches a glob pattern (respects .gitignore). Use ** for any directories, * for any chars within one segment. Examples: "**/*.test.js", "src/**/*.{ts,tsx}", "**/README*".',
-                parameters: {
-                    type: 'object',
-                    properties: {
-                        pattern:     { type: 'string',  description: 'Glob pattern.' },
-                        path:        { type: 'string',  description: 'Optional. Root directory to search. Defaults to workspace root.' },
-                        max_results: { type: 'integer', description: 'Optional. Max files to return (default 500, hard cap 5000).' }
-                    },
-                    required: ['pattern']
-                }
-            },
-            {
-                name: 'delete_file',
-                isSafe: false,
-                description: 'Delete a single file. Refuses to delete directories. Asks the user to confirm unless inside the workspace root.',
-                parameters: {
-                    type: 'object',
-                    properties: {
-                        path: { type: 'string', description: 'Path of the file to delete' }
-                    },
-                    required: ['path']
-                }
-            },
-            {
-                name: 'move_file',
-                isSafe: false,
-                description: 'Rename or move a file/directory. Creates any missing parent directories. Will not overwrite an existing destination unless overwrite=true.',
-                parameters: {
-                    type: 'object',
-                    properties: {
-                        from:      { type: 'string',  description: 'Source path' },
-                        to:        { type: 'string',  description: 'Destination path' },
-                        overwrite: { type: 'boolean', description: 'Optional. If true, replace an existing destination. Default false.' }
-                    },
-                    required: ['from', 'to']
-                }
-            },
-            {
-                name: 'write_file',
-                isSafe: false,
-                description: 'Create a new file or completely overwrite an existing file. The existing file\'s charset encoding is automatically preserved. SAFETY: if the file already exists but was not read in this session, the call is BLOCKED unless overwrite_unread=true is passed — this prevents accidental destruction of unfamiliar files. For partial edits, prefer multi_replace_file_content over full overwrite.',
-                parameters: {
-                    type: 'object',
-                    properties: {
-                        path: { type: 'string', description: 'Path of the file to write' },
-                        content: { type: 'string', description: 'Entire content to write to the file' },
-                        encoding: { type: 'string', description: 'Optional charset override: "utf-8" (default), "shift-jis", "euc-jp", "utf-16le", "utf-16be". If omitted, the existing file\'s encoding is preserved.' },
-                        overwrite_unread: { type: 'boolean', description: 'Optional. Required (true) to overwrite a pre-existing file that has NOT been read with read_file in this session. Default false — protects you from clobbering a file you don\'t know the contents of.' }
-                    },
-                    required: ['path', 'content']
-                }
-            },
-            {
-                name: 'run_command',
-                isSafe: false,
-                description: 'Execute a shell command for builds, tests, or system checks. Defaults to a 60-second timeout; set timeout_ms for longer operations.',
-                parameters: {
-                    type: 'object',
-                    properties: {
-                        command: { type: 'string', description: 'Command string to run in the shell (e.g., "npm run test", "cargo check")' },
-                        safe_to_auto_run: { type: 'boolean', description: 'Set to true if command is safe and has no side-effects. Skips user confirmation.' },
-                        timeout_ms: { type: 'number', description: 'Timeout in milliseconds (default: 60000). Increase for long-running builds (e.g., 120000 for 2 minutes).' }
-                    },
-                    required: ['command']
-                }
-            },
-            {
-                name: 'multi_replace_file_content',
-                description: 'Apply one or more content-based search-and-replace edits to an existing file. Each replacement provides the exact original text (old_text) and its replacement (new_text); old_text MUST match EXACTLY once in the file. BEST PRACTICE: keep old_text SHORT — ideally ONE line containing a unique identifier (plus a few words of context only if needed for uniqueness). Short exact anchors succeed far more often than large multi-line blocks, which are easy to mis-transcribe. To disambiguate when a line repeats, add the minimum extra context to make it unique. Set replace_all=true to update every occurrence (useful for renames). Line numbers are NEVER used — only literal string matching. IMPORTANT: when copying text from read_file output, strip the leading `<lineno>\\t` prefix from each line — that prefix is display-only and is NOT part of the file.',
-                parameters: {
-                    type: 'object',
-                    properties: {
-                        path: { type: 'string', description: 'Path of the file to edit' },
-                        replacements: {
-                            type: 'array',
-                            description: 'Ordered list of search-and-replace operations. Each is applied sequentially to the running content, so later old_texts must match what the file looks like AFTER earlier replacements.',
-                            items: {
-                                type: 'object',
-                                properties: {
-                                    old_text: { type: 'string', description: 'Exact literal text to find. Must match exactly once (unless replace_all=true). Include surrounding context if the snippet alone is ambiguous.' },
-                                    new_text: { type: 'string', description: 'Replacement text. Use the empty string to delete the matched region.' },
-                                    replace_all: { type: 'boolean', description: 'Optional. If true, every occurrence of old_text is replaced (uniqueness is not required). Default: false.' }
-                                },
-                                required: ['old_text', 'new_text']
-                            }
-                        }
-                    },
-                    required: ['path', 'replacements']
-                }
-            },
-            {
-                name: 'create_artifact',
-                description: 'Create a new markdown artifact (e.g. implementation plan, checklist) and show it in a dedicated tab.',
-                parameters: {
-                    type: 'object',
-                    properties: {
-                        name: { type: 'string', description: "Name of the artifact file (e.g. 'task_plan')" },
-                        content: { type: 'string', description: 'Content of the artifact in markdown format' }
-                    },
-                    required: ['name', 'content']
-                }
-            },
-            {
-                name: 'update_artifact',
-                description: 'Update an existing markdown artifact (overwrites entire content).',
-                parameters: {
-                    type: 'object',
-                    properties: {
-                        name: { type: 'string', description: 'Name of the artifact file to update' },
-                        content: { type: 'string', description: 'Updated entire content of the artifact' }
-                    },
-                    required: ['name', 'content']
-                }
-            },
-            {
-                name: 'finish_task',
-                isSafe: true,
-                description: "Declare that all changes, tests, and verification have successfully completed, achieving the user's goal.",
-                parameters: {
-                    type: 'object',
-                    properties: {
-                        summary: { type: 'string', description: 'A concise final summary of what was accomplished' }
-                    },
-                    required: ['summary']
-                }
-            },
-            {
-                name: 'verify_syntax',
-                isSafe: true,
-                description: 'Validate a file using a real parser. JSON files are parsed in-process; JS/JSX/MJS/CJS files are validated by spawning `node --check` (real V8 parser); TS/TSX files are skipped with guidance (use `run_command npx tsc --noEmit` for type checking). Call after every edit to .json/.js/.jsx/.mjs/.cjs files to catch syntax breakage immediately.',
-                parameters: {
-                    type: 'object',
-                    properties: {
-                        path: { type: 'string', description: 'Path of the file to syntax-check' }
-                    },
-                    required: ['path']
-                }
-            },
-            {
-                name: 'fetch_url',
-                isSafe: true,
-                description: 'Fetch the content of a URL via HTTP GET and return the response body as text. Use this to retrieve web pages, APIs, RSS feeds, or any publicly accessible URL. For JSON APIs, the raw JSON string is returned. For HTML pages, the full HTML is returned (use run_command with a parser or extract what you need). Maximum response size is 500 KB.',
-                parameters: {
-                    type: 'object',
-                    properties: {
-                        url: { type: 'string', description: 'The full URL to fetch (must start with http:// or https://)' },
-                        headers: { type: 'object', description: 'Optional HTTP headers as key-value pairs (e.g. {"Accept": "application/json"})' }
-                    },
-                    required: ['url']
-                }
-            },
-            {
-                name: 'task_progress',
-                isSafe: true,
-                description: 'Track subtask completion state across the agent loop. State persists independently of conversation history (survives context compaction). Use action="set" once at task start to register items, action="update" to mark items complete/in_progress/blocked, action="get" to check current state without re-reading task_plan.md.',
-                parameters: {
-                    type: 'object',
-                    properties: {
-                        action: {
-                            type: 'string',
-                            enum: ['set', 'update', 'get'],
-                            description: '"set" replaces the entire item list (use at task start). "update" patches one or more items by id. "get" returns the current state without changes.'
-                        },
-                        items: {
-                            type: 'array',
-                            description: 'For "set": full list of subtasks. For "update": one or more items with id + new status (other fields optional).',
-                            items: {
-                                type: 'object',
-                                properties: {
-                                    id: { type: 'string', description: 'Stable identifier (e.g. "1", "2a")' },
-                                    title: { type: 'string', description: 'Short subtask description' },
-                                    status: {
-                                        type: 'string',
-                                        enum: ['pending', 'in_progress', 'completed', 'blocked'],
-                                        description: 'Current state of the subtask'
-                                    },
-                                    note: { type: 'string', description: 'Optional brief note (e.g. blocker reason)' }
-                                },
-                                required: ['id']
-                            }
-                        }
-                    },
-                    required: ['action']
-                }
-            }
-        ];
+        this.toolDefinitions = TOOL_DEFINITIONS;
         this.sessionModifiedFiles = new Map();
         this._sessionActive = false;
         this._currentSessionId = null;
         this.workspacePath = null;
         this.onToolEvent = null; // Callback for notifying UI/Client on tool execution events
+
+        // ── Plan gate (investigate → plan → approve → execute) ──────────
+        // When _planRequired is set (by AgentController for complex tasks) and the
+        // user hasn't approved a plan yet, mutating tools are blocked. Reset per session.
+        this._planRequired = false;
+        this._planApproved = false;
+        this._approvedPlan = null;
 
         // ── New per-session state introduced for the safety/UX upgrade ──
         // edit count per file (normalized path → count). Used to warn the LLM
@@ -262,6 +58,15 @@ class ToolExecutor {
         // null     → all MCP servers available
         // Set<str> → only tools from listed server names are included
         this._mcpServerFilter = null;
+        // ── MCP per-task context (set by behavior.mcp_context) ─────────────
+        // Injected into every tools/call as params._meta.jhai so an app-hosted
+        // MCP server can resolve the live document/window the call targets.
+        this._mcpContext = null;
+    }
+
+    /** Per-task MCP context object (e.g. {app,windowId,documentId}) or null. */
+    setMcpContext(ctx) {
+        this._mcpContext = (ctx && typeof ctx === 'object') ? ctx : null;
     }
 
     /**
@@ -269,15 +74,27 @@ class ToolExecutor {
      * Called by AgentController when behavior.enabled_tools is provided.
      *
      * @param {string[]|null} allowedNames null → unrestricted; array → allowlist.
-     *   "finish_task" is always implicitly allowed so the agent can still end.
+     *   The minimal agent-CONTROL tools (finish_task / present_result) are ALWAYS
+     *   implicitly allowed so a capability-scoped task can still terminate and
+     *   deliver its Result Contract — even when the intent only lists domain
+     *   tools (e.g. get_buffer).
+     * @param {object} [opts]
+     * @param {boolean} [opts.includePlanTools] also allow task_progress + propose_plan.
+     *   These help multi-step / plan-first tasks but invite needless over-planning
+     *   on single-shot app intents, so the caller opts in (plan-mode / complex task).
      */
-    setToolAllowlist(allowedNames) {
+    setToolAllowlist(allowedNames, { includePlanTools = false } = {}) {
         if (allowedNames === null || allowedNames === undefined) {
             this._toolAllowlist = null;
             return;
         }
         const set = new Set(allowedNames);
-        set.add('finish_task'); // always allow termination
+        set.add('finish_task');
+        set.add('present_result');
+        if (includePlanTools) {
+            set.add('task_progress');
+            set.add('propose_plan');
+        }
         this._toolAllowlist = set;
     }
 
@@ -306,6 +123,11 @@ class ToolExecutor {
         this._taskCompleted = false;
         this._toolAllowlist = null;    // reset; caller may re-set after startSession
         this._mcpServerFilter = null; // reset MCP server filter
+        this._mcpContext = null;      // reset per-task MCP context
+        // Plan gate resets each session (caller sets requirement via setPlanGate).
+        this._planRequired = false;
+        this._planApproved = false;
+        this._approvedPlan = null;
         this.workspacePath = workspacePath || '.';
 
         // ── Write-allowed directories ──────────────────────────────────
@@ -323,6 +145,19 @@ class ToolExecutor {
                 .filter(p => typeof p === 'string' && p.trim())
                 .map(p => p.replace(/\\/g, '/').replace(/\/+$/, ''));
         } catch (e) { /* config unavailable — only workspace is allowed */ }
+
+        // ── Register write/exec roots with the Rust path guard ─────────
+        // Defense-in-depth: the backend refuses to write/delete/exec outside
+        // these roots even if this layer's confirm logic is bypassed.
+        try {
+            const roots = [this.workspacePath, ...(this._writeAllowedPaths || [])]
+                .filter(p => typeof p === 'string' && p.trim() && p !== '.');
+            if (roots.length > 0) {
+                await invoke('set_allowed_roots', { roots });
+            }
+        } catch (e) {
+            console.warn('Failed to register path-guard roots:', e);
+        }
 
         // ── Session file cache ─────────────────────────────────────────
         // Stores the most-recent content of every file read or written this
@@ -423,6 +258,99 @@ class ToolExecutor {
         const n = (this._fileEditCount.get(key) || 0) + 1;
         this._fileEditCount.set(key, n);
         return n;
+    }
+
+    /**
+     * Shared write-back path for line/region edits (used by replace_lines).
+     * Handles: outside-workspace confirmation (fail-closed), write, modification
+     * tracking + UI events, read-back, structural sanity check, session-cache
+     * update, edit-count warning, and a truncated content preview. Returns the
+     * tool-result string to hand back to the model.
+     *
+     * @param {string} editPath           resolved file path
+     * @param {string} currentContent     file content BEFORE the edit
+     * @param {string} finalEditedContent file content AFTER the edit (line endings restored)
+     * @param {Function|null} onConfirm   approval channel
+     * @param {string} opSummary          short human description of the op (e.g. "Replaced lines 10-14")
+     */
+    async _finalizeEdit(editPath, currentContent, finalEditedContent, onConfirm, opSummary) {
+        const isSafeRootEdit = this._isWriteAllowed(editPath);
+        if (!isSafeRootEdit) {
+            if (!onConfirm) {
+                return `Error: edit denied — ${editPath} is outside the workspace and allowed write paths, and no approval channel is available.`;
+            }
+            const res = await onConfirm({
+                type: 'diff_review',
+                path: editPath,
+                newContent: finalEditedContent,
+                oldContent: currentContent,
+                message: `AI wants to write to file outside workspace:\nPath: ${editPath}`
+            });
+            if (res === false || res === null) return 'Error: User Denied file write.';
+            await this._allowApprovedPath(editPath);
+            if (typeof res === 'string') {
+                await invoke('write_file', { path: editPath, content: res });
+                return `Success: User modified and saved to ${editPath}`;
+            }
+        }
+
+        await invoke('write_file', { path: editPath, content: finalEditedContent });
+        this._recordModification(editPath, currentContent, finalEditedContent);
+        this.onToolEvent?.('file_modified', { path: editPath, action: 'edit', diff: `- original\n+ modified` });
+        this.onToolEvent?.('open_file', { path: editPath });
+
+        // Auto read-back so corruption is visible to the model next turn.
+        let verifiedContent = finalEditedContent;
+        try { verifiedContent = await invoke('read_file', { path: editPath }); } catch (_) { /* keep written */ }
+
+        if (this._fileCache) {
+            const normPath = editPath.replace(/\\/g, '/');
+            const existing = this._fileCache.get(normPath);
+            this._fileCache.set(normPath, {
+                content: verifiedContent,
+                readCount: existing?.readCount || 0,
+                readAt: existing?.readAt || null,
+                editedAt: Date.now()
+            });
+        }
+
+        const editCount = this._bumpFileEditCount(editPath);
+        const oldLines = currentContent.split('\n').length;
+        const newLines = verifiedContent.split('\n').length;
+        const lineDelta = newLines - oldLines;
+
+        const balance = (txt) => {
+            const counts = { '{': 0, '}': 0, '[': 0, ']': 0, '(': 0, ')': 0 };
+            for (const ch of txt) if (counts[ch] !== undefined) counts[ch]++;
+            return { braces: counts['{'] - counts['}'], brackets: counts['['] - counts[']'], parens: counts['('] - counts[')'] };
+        };
+        const before = balance(currentContent);
+        const after = balance(verifiedContent);
+        const warnings = [];
+        if (Math.abs(after.braces) > Math.abs(before.braces) + 1) warnings.push(`brace imbalance worsened (was ${before.braces}, now ${after.braces})`);
+        if (Math.abs(after.brackets) > Math.abs(before.brackets) + 1) warnings.push(`bracket imbalance worsened (was ${before.brackets}, now ${after.brackets})`);
+        if (Math.abs(after.parens) > Math.abs(before.parens) + 1) warnings.push(`paren imbalance worsened (was ${before.parens}, now ${after.parens})`);
+
+        let editCountWarning = '';
+        if (editCount === 5) {
+            editCountWarning = `\n[Warning] This is the 5th edit to ${editPath} in this session. If the file is getting tangled, reassess the approach.`;
+        } else if (editCount >= 8) {
+            editCountWarning = `\n[Warning] ${editCount} edits to ${editPath} so far — STOP and reassess; you may be thrashing.`;
+        }
+
+        const PREVIEW_LINES = 400;
+        const previewLines = verifiedContent.split('\n').slice(0, PREVIEW_LINES);
+        const truncated = newLines > PREVIEW_LINES;
+        const preview = previewLines.join('\n') + (truncated ? `\n... [${newLines - PREVIEW_LINES} more lines truncated; call read_file if you need the rest]` : '');
+
+        const warnBlock = warnings.length > 0
+            ? `\n[Structural Warning] ${warnings.join('; ')}. The edit may have corrupted the file — INSPECT the content below and fix immediately if broken. Also call verify_syntax for .js/.ts/.json files.`
+            : '';
+
+        return `Success: ${opSummary} in ${editPath}. ` +
+            `(${oldLines} → ${newLines} lines, delta ${lineDelta >= 0 ? '+' : ''}${lineDelta})` +
+            warnBlock + editCountWarning +
+            `\n\n=== File content after edit (first ${Math.min(newLines, PREVIEW_LINES)} lines) ===\n${preview}`;
     }
 
     /**
@@ -529,6 +457,61 @@ class ToolExecutor {
         }
     }
 
+    // Pure fuzzy matching → ./tools/FuzzyPath.js (unit-tested). This wrapper does
+    // the directory READ, then delegates the scoring/decision.
+    _levenshtein(a, b) { return levenshtein(a, b); }
+
+    async _fuzzyFindFile(resolvedPath) {
+        const norm = String(resolvedPath).replace(/\\/g, '/');
+        const lastSlash = norm.lastIndexOf('/');
+        const dir = lastSlash > 0 ? norm.slice(0, lastSlash) : (this.workspacePath || '.');
+        let entries;
+        try { entries = await invoke('read_dir', { path: dir }); }
+        catch (_) { return null; }
+        return pickClosestFile(resolvedPath, entries, this.workspacePath);
+    }
+
+    /** Build a helpful "file not found" error with did-you-mean suggestions. */
+    _notFoundError(resolvedPath, suggestions) {
+        const hint = (suggestions && suggestions.length > 0)
+            ? `\n\nDid you mean one of these?\n  ${suggestions.join('\n  ')}`
+            : `\n\n(No similar file names found. Try list_files on the parent directory, or grep_search for content you know is in the file.)`;
+        return `Error: file not found: ${resolvedPath}${hint}`;
+    }
+
+    /**
+     * Read a file, fuzzy-correcting a mistyped path when there is exactly one
+     * confident match in the folder (e.g. Side.tsx → Sidebar.tsx). Returns
+     * { ok:true, path, content, note } on success (note is non-empty when the
+     * path was auto-corrected) or { ok:false, error } with suggestions.
+     */
+    async _readFileSmart(resolvedPath) {
+        try {
+            const content = await invoke('read_file', { path: resolvedPath });
+            return { ok: true, path: resolvedPath, content, note: '' };
+        } catch (readErr) {
+            const msg = String(readErr?.message || readErr || '');
+            const isNotFound = /not found|os error 2|cannot find|no such file/i.test(msg);
+            if (!isNotFound) {
+                return { ok: false, error: `Error: read failed for ${resolvedPath} — ${msg}` };
+            }
+            const fix = await this._fuzzyFindFile(resolvedPath);
+            if (fix && fix.autoCorrect) {
+                try {
+                    const content = await invoke('read_file', { path: fix.path });
+                    const wrong = resolvedPath.split(/[\\/]/).pop();
+                    return {
+                        ok: true,
+                        path: fix.path,
+                        content,
+                        note: `ℹ️ Auto-corrected path: "${wrong}" → "${fix.name}" (closest match in folder). Use this exact path from now on.\n`
+                    };
+                } catch (_) { /* fall through to not-found */ }
+            }
+            return { ok: false, error: this._notFoundError(resolvedPath, fix?.suggestions || []) };
+        }
+    }
+
     isSafeTool(name) {
         const tool = this.toolDefinitions.find(t => t.name === name);
         return tool ? !!tool.isSafe : false;
@@ -547,25 +530,117 @@ class ToolExecutor {
         return (this._writeAllowedPaths || []).some(a => p === a || p.startsWith(a + '/'));
     }
 
-    getToolsForNativeAPI() {
-        const nativeTools = this.toolDefinitions.map(t => ({
-            type: 'function',
-            function: {
-                name: t.name,
-                description: t.description,
-                parameters: t.parameters
+    /** True if `resolvedPath` is the workspace root or nested inside it. */
+    _isInsideWorkspace(resolvedPath) {
+        const p = (resolvedPath || '').replace(/\\/g, '/').replace(/\/+$/, '');
+        const ws = this.workspacePath ? this.workspacePath.replace(/\\/g, '/').replace(/\/+$/, '') : '';
+        if (!p || !ws) return false;
+        return p === ws || p.startsWith(ws + '/');
+    }
+
+    /**
+     * Classify a tool call into a permission level the AgentController uses to
+     * decide execution strategy:
+     *   "Allow" → safe; run in parallel without confirmation.
+     *   "Ask"   → potentially destructive / outside-workspace; run sequentially
+     *             and require user approval (onConfirm) before executing.
+     *   "Deny"  → disabled by the active per-session allowlist; never executes.
+     *
+     * This is the source of truth the agent loop consults; executeTool ALSO
+     * enforces a fail-closed confirmation gate as defense-in-depth, so an
+     * "Ask" operation can never run when no approval channel is wired.
+     */
+    getPermissionLevel(name, args = {}) {
+        if (this._toolAllowlist && name !== 'finish_task' && !this._toolAllowlist.has(name)) {
+            return 'Deny';
+        }
+        const a = args || {};
+        const pickPath = () => this.resolvePath(a.path || a.file_path || a.filepath || a.file || a.dir || a.directory);
+        switch (name) {
+            case 'run_command':
+                return 'Ask'; // arbitrary shell execution is always gated
+            case 'delete_file':
+                return this._isInsideWorkspace(pickPath()) ? 'Allow' : 'Ask';
+            case 'move_file': {
+                const from = this.resolvePath(a.from);
+                const to = this.resolvePath(a.to);
+                return (this._isInsideWorkspace(from) && this._isInsideWorkspace(to)) ? 'Allow' : 'Ask';
             }
-        }));
+            case 'write_file':
+            case 'multi_replace_file_content':
+            case 'replace_lines':
+                return this._isWriteAllowed(pickPath()) ? 'Allow' : 'Ask';
+            default:
+                return 'Allow';
+        }
+    }
+
+    /**
+     * Fail-closed confirmation gate for boolean-approval operations.
+     * Returns true if the op may proceed, false if it must be blocked.
+     *   • safe op                       → true  (no prompt)
+     *   • unsafe op + approval channel  → user's decision
+     *   • unsafe op + NO channel        → false (denied — closes the headless
+     *                                     "no onConfirm ⇒ silent execution" hole)
+     */
+    async _confirmUnsafe(isSafe, onConfirm, payload) {
+        if (isSafe) return true;
+        if (!onConfirm) return false;
+        return !!(await onConfirm(payload));
+    }
+
+    /**
+     * Register a path the user has just approved so the Rust path guard will
+     * permit the imminent write/delete/move to it. Best-effort — a registration
+     * failure is logged but does not block the (already user-approved) action.
+     */
+    async _allowApprovedPath(...paths) {
+        try {
+            const roots = paths.filter(p => typeof p === 'string' && p.trim());
+            if (roots.length > 0) await invoke('set_allowed_roots', { roots });
+        } catch (e) {
+            console.warn('Path-guard registration failed for approved path:', e);
+        }
+    }
+
+    getToolsForNativeAPI() {
+        // Respect the per-session allowlist so the LLM is only PRESENTED tools it
+        // may actually use. Otherwise a capability-scoped task (e.g. an app intent
+        // with tools:['get_buffer']) sees every built-in, wastes steps calling
+        // them, and gets "not enabled for this task" at execution — looking like a
+        // permission wall. (Mirrors getActiveToolDefinitions filtering.)
+        const allow = this._toolAllowlist;
+
+        // Built-in tool schemas are authored strict-compliant, so they are
+        // always eligible for OpenAI Structured Outputs. The `_strict_ok` hint
+        // is read by the Rust layer, which sets function.strict per provider.
+        const nativeTools = this.toolDefinitions
+            .filter(t => !allow || allow.has(t.name))
+            .map(t => ({
+                type: 'function',
+                _strict_ok: true,
+                function: {
+                    name: t.name,
+                    description: t.description,
+                    parameters: t.parameters
+                }
+            }));
 
         const mcpTools = mcpManager.getAllTools();
         mcpTools.forEach(t => {
             if (this._mcpServerFilter && !this._mcpServerFilter.has(t._serverName)) return;
+            if (allow && !allow.has(t.name)) return;
+            const rawSchema = t.inputSchema || { type: 'object', properties: {} };
+            // Third-party MCP schemas: convert the ones we safely can to strict
+            // form, leave the rest as-is (sent WITHOUT strict).
+            const { schema, eligible } = toStrictSchema(rawSchema);
             nativeTools.push({
                 type: 'function',
+                _strict_ok: eligible,
                 function: {
                     name: t.name,
                     description: t.description || `MCP tool from ${t._serverName}`,
-                    parameters: t.inputSchema || { type: 'object', properties: {} }
+                    parameters: schema
                 }
             });
         });
@@ -623,6 +698,12 @@ class ToolExecutor {
         return `${safeRoot}/${relativePart}`.replace(/\/+/g, '/');
     }
 
+    /** Configure the plan gate for the current session (called by AgentController). */
+    setPlanGate(required) {
+        this._planRequired = !!required;
+        if (!required) this._planApproved = true; // gate off ⇒ nothing to approve
+    }
+
     async executeTool(call, onAgentStatus, onConfirm) {
         const { name } = call;
         const args = call.args || {};
@@ -634,9 +715,16 @@ class ToolExecutor {
             return `Error: Tool "${name}" is not enabled for this task. Allowed tools: ${[...this._toolAllowlist].join(', ')}.`;
         }
 
+        // ── Plan gate ───────────────────────────────────────────────────
+        // Block mutating tools until an approved plan exists (complex tasks).
+        // Investigation tools and propose_plan are always allowed.
+        if (planShouldBlock(name, this._planRequired, this._planApproved)) {
+            return planGateMessage(name);
+        }
+
         const rawPath = args.path || args.file_path || args.filepath || args.file || args.dir || args.directory;
 
-        const needsFilePath = ['read_file', 'write_file', 'open_file', 'multi_replace_file_content', 'delete_file'];
+        const needsFilePath = ['read_file', 'write_file', 'open_file', 'multi_replace_file_content', 'replace_lines', 'delete_file'];
         if (needsFilePath.includes(name) && (!rawPath || typeof rawPath !== 'string' || rawPath.trim() === '')) {
             return `Error: Missing required valid 'path' parameter for tool '${name}'.`;
         }
@@ -651,1037 +739,74 @@ class ToolExecutor {
 
         try {
             switch (name) {
-                case 'list_files': {
-                    onAgentStatus?.(`Exploring directory: ${resolvedPath}...`);
-                    const entries = await invoke('read_dir', { path: resolvedPath });
-                    if (!Array.isArray(entries) || entries.length === 0) {
-                        return `(empty) ${resolvedPath}`;
-                    }
-                    // Format: dirs first (alpha), then files (alpha), with size annotation.
-                    // This is much easier for the LLM to parse than the raw entry objects.
-                    const fmtSize = (b) => {
-                        if (!Number.isFinite(b)) return '';
-                        if (b < 1024) return `${b}B`;
-                        if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)}KB`;
-                        return `${(b / 1024 / 1024).toFixed(1)}MB`;
-                    };
-                    const dirs  = entries.filter(e => e.is_dir).sort((a, b) => a.name.localeCompare(b.name));
-                    const files = entries.filter(e => !e.is_dir).sort((a, b) => a.name.localeCompare(b.name));
-                    const lines = [];
-                    lines.push(`--- ${resolvedPath} (${dirs.length} dirs, ${files.length} files) ---`);
-                    for (const d of dirs)  lines.push(`📁 ${d.name}/`);
-                    for (const f of files) {
-                        const sz = fmtSize(f.size);
-                        lines.push(`📄 ${f.name}${sz ? `  (${sz})` : ''}`);
-                    }
-                    return lines.join('\n');
-                }
-                case 'read_file': {
-                    onAgentStatus?.(`Reading file: ${resolvedPath}...`);
-                    let fileContent;
-                    try {
-                        fileContent = await invoke('read_file', { path: resolvedPath });
-                    } catch (readErr) {
-                        // ── Fix C: "Did you mean?" file suggestions ──────
-                        // Most read_file failures are extension typos (.ts vs .tsx),
-                        // path-segment mistakes, or off-by-one paths. List the parent
-                        // dir and suggest names that look close to what the agent asked
-                        // for — turns a useless "not found" into a one-shot recovery hint.
-                        const msg = String(readErr?.message || readErr || '');
-                        const isNotFound = /not found|os error 2|cannot find|no such file/i.test(msg);
-                        if (!isNotFound) {
-                            return `Error: read_file failed for ${resolvedPath} — ${msg}`;
-                        }
+                case 'list_files':
+                    return handleListFiles(this, args, onAgentStatus, resolvedPath);
+                case 'read_file':
+                    return handleReadFile(this, args, onAgentStatus, resolvedPath);
 
-                        const lastSlash = resolvedPath.lastIndexOf('/');
-                        const dir  = lastSlash > 0 ? resolvedPath.slice(0, lastSlash) : (this.workspacePath || '.');
-                        const base = lastSlash >= 0 ? resolvedPath.slice(lastSlash + 1) : resolvedPath;
-                        const baseNoExt = base.replace(/\.[^.]+$/, '').toLowerCase();
-                        const baseLower = base.toLowerCase();
+                case 'grep_search':
+                    return handleGrepSearch(this, args, onAgentStatus);
+                case 'glob':
+                    return handleGlob(this, args, onAgentStatus);
+                case 'delete_file':
+                    return handleDeleteFile(this, args, onConfirm, onAgentStatus, resolvedPath);
 
-                        let suggestions = [];
-                        try {
-                            const entries = await invoke('read_dir', { path: dir });
-                            if (Array.isArray(entries)) {
-                                // Score each entry by (a) prefix overlap with base, (b) shared characters.
-                                const scored = entries
-                                    .filter(e => !e.is_dir)
-                                    .map(e => {
-                                        const n = e.name.toLowerCase();
-                                        const nNoExt = n.replace(/\.[^.]+$/, '');
-                                        let score = 0;
-                                        if (n === baseLower) score = 100;          // exact case-insensitive
-                                        else if (nNoExt === baseNoExt) score = 90;  // extension typo (.ts vs .tsx)
-                                        else if (n.startsWith(baseNoExt)) score = 70;
-                                        else if (nNoExt.startsWith(baseNoExt.slice(0, 6))) score = 50;
-                                        else if (n.includes(baseNoExt)) score = 30;
-                                        return { name: e.name, score };
-                                    })
-                                    .filter(s => s.score > 0)
-                                    .sort((a, b) => b.score - a.score)
-                                    .slice(0, 5);
-                                suggestions = scored.map(s => s.name);
-                            }
-                        } catch (_) { /* parent dir listing failed — fall through */ }
+                case 'move_file':
+                    return handleMoveFile(this, args, onConfirm, onAgentStatus);
 
-                        let hint = '';
-                        if (suggestions.length > 0) {
-                            hint = `\n\nDid you mean one of these in ${dir}?\n  ` +
-                                suggestions.map(n => `${dir}/${n}`).join('\n  ');
-                        } else {
-                            hint = `\n\n(No similar file names found in ${dir}. ` +
-                                `Try list_files on the parent directory, or grep_search for content you know is in the file.)`;
-                        }
-                        return `Error: read_file: file not found: ${resolvedPath}${hint}`;
-                    }
+                case 'write_file':
+                    return handleWriteFile(this, args, onConfirm, onAgentStatus, resolvedPath);
 
-                    // ── Session file cache update ──────────────────────────
-                    // Cache stores the FULL content regardless of slicing — the cache
-                    // is used by ConversationMemory.compactHistory to restore content
-                    // verbatim, and slicing is just a per-call presentation concern.
-                    if (this._fileCache) {
-                        const normPath = resolvedPath.replace(/\\/g, '/');
-                        const existing = this._fileCache.get(normPath);
-                        this._fileCache.set(normPath, {
-                            content: fileContent,
-                            readCount: (existing?.readCount || 0) + 1,
-                            readAt: Date.now(),
-                            editedAt: existing?.editedAt || null
-                        });
-                    }
+                case 'run_command':
+                    return handleRunCommand(this, args, onConfirm, onAgentStatus);
 
-                    // ── Slicing & line-numbering ──────────────────────────
-                    // Default cap = 2000 lines (matches Claude Code's Read tool).
-                    // Returning a line-numbered view costs ~6-8 chars per line of overhead
-                    // but lets the LLM reference exact lines in its OBSERVE/PLAN reasoning
-                    // and gives multi_replace_file_content a clear anchor when extracting
-                    // old_text snippets.
-                    const DEFAULT_LIMIT = 2000;
-                    const allLines = fileContent.split('\n');
-                    const total = allLines.length;
-
-                    let offset = Number.isFinite(args.offset) && args.offset >= 1 ? Math.floor(args.offset) : 1;
-                    let limit  = Number.isFinite(args.limit)  && args.limit  >= 1 ? Math.floor(args.limit)  : DEFAULT_LIMIT;
-
-                    if (offset > total) {
-                        return `Error: offset ${offset} exceeds file length (${total} lines) for ${resolvedPath}. ` +
-                            `Use offset between 1 and ${total}, or omit to start from the beginning.`;
-                    }
-
-                    const startIdx = offset - 1;
-                    const endIdx   = Math.min(total, startIdx + limit);
-                    const slice    = allLines.slice(startIdx, endIdx);
-
-                    // Pad line numbers to constant width for alignment.
-                    const lastLineNo = endIdx;
-                    const numWidth = String(lastLineNo).length;
-                    const numbered = slice
-                        .map((line, i) => `${String(startIdx + 1 + i).padStart(numWidth, ' ')}\t${line}`)
-                        .join('\n');
-
-                    // Header tells the LLM exactly what range it's looking at.
-                    const showingAll = (offset === 1 && endIdx === total);
-                    const header = showingAll
-                        ? `--- ${resolvedPath} (${total} lines) ---\n`
-                        : `--- ${resolvedPath} (showing lines ${offset}-${endIdx} of ${total}) ---\n`;
-                    const footer = endIdx < total
-                        ? `\n... [${total - endIdx} more lines — call read_file again with offset=${endIdx + 1} to continue]`
-                        : '';
-
-                    return header + numbered + footer;
-                }
-                case 'grep_search': {
-                    const searchRoot = args.path ? this.resolvePath(args.path) : this.workspacePath;
-                    onAgentStatus?.(`Searching: /${args.pattern}/ in ${searchRoot}...`);
-                    try {
-                        const res = await invoke('grep_search', {
-                            pattern: args.pattern,
-                            path: searchRoot,
-                            includeGlob: args.include_glob || null,
-                            caseInsensitive: !!args.case_insensitive,
-                            maxResults: Number.isFinite(args.max_results) ? args.max_results : null,
-                            contextLines: Number.isFinite(args.context_lines) ? args.context_lines : null
-                        });
-                        const { matches = [], files_searched = 0, truncated = false } = res || {};
-                        this.onToolEvent?.('grep_search', { pattern: args.pattern, matchCount: matches.length });
-                        if (matches.length === 0) {
-                            return `No matches for /${args.pattern}/ in ${searchRoot} ` +
-                                `(${files_searched} files searched).` +
-                                (args.include_glob ? ` Filter: ${args.include_glob}` : '');
-                        }
-                        const lines = matches.map(m => `${m.file}:${m.line}: ${m.text}`);
-                        const header = `Found ${matches.length} match(es)` +
-                            (truncated ? ' (truncated)' : '') +
-                            ` across ${files_searched} files for /${args.pattern}/:`;
-                        return `${header}\n${lines.join('\n')}` +
-                            (truncated ? `\n[Result truncated. Narrow the search with include_glob or a more specific pattern.]` : '');
-                    } catch (e) {
-                        return `Error: grep_search failed — ${e?.message || e}`;
-                    }
-                }
-                case 'glob': {
-                    const searchRoot = args.path ? this.resolvePath(args.path) : this.workspacePath;
-                    onAgentStatus?.(`Globbing: ${args.pattern} in ${searchRoot}...`);
-                    try {
-                        const res = await invoke('glob_files', {
-                            pattern: args.pattern,
-                            path: searchRoot,
-                            maxResults: Number.isFinite(args.max_results) ? args.max_results : null
-                        });
-                        const { files = [], truncated = false } = res || {};
-                        if (files.length === 0) {
-                            return `No files match glob '${args.pattern}' under ${searchRoot}.`;
-                        }
-                        return `Found ${files.length}${truncated ? '+' : ''} file(s) matching '${args.pattern}':\n` +
-                            files.join('\n') +
-                            (truncated ? `\n[Result truncated — narrow the pattern or pass max_results.]` : '');
-                    } catch (e) {
-                        return `Error: glob failed — ${e?.message || e}`;
-                    }
-                }
-                case 'delete_file': {
-                    const isSafeRootDel = this.workspacePath && resolvedPath.startsWith(this.workspacePath.replace(/\\/g, '/'));
-                    if (onConfirm && !isSafeRootDel) {
-                        const ok = await onConfirm({
-                            type: 'command_confirm',
-                            command: `delete_file ${resolvedPath}`,
-                            message: `AI wants to delete this file (outside workspace):\n${resolvedPath}`
-                        });
-                        if (!ok) return 'Error: User Denied file deletion.';
-                    }
-                    onAgentStatus?.(`Deleting file: ${resolvedPath}...`);
-                    try {
-                        await invoke('delete_file', { path: resolvedPath });
-                        // Evict from session cache so a subsequent read doesn't silently
-                        // serve stale content.
-                        if (this._fileCache) {
-                            this._fileCache.delete(resolvedPath.replace(/\\/g, '/'));
-                        }
-                        this.onToolEvent?.('file_modified', { path: resolvedPath, action: 'delete', diff: '- deleted' });
-                        return `Success: Deleted ${resolvedPath}.`;
-                    } catch (e) {
-                        return `Error: delete_file failed — ${e?.message || e}`;
-                    }
-                }
-                case 'move_file': {
-                    if (!args.from || !args.to) {
-                        return `Error: move_file requires both 'from' and 'to' parameters.`;
-                    }
-                    const fromPath = this.resolvePath(args.from);
-                    const toPath   = this.resolvePath(args.to);
-                    const bothInsideWs = this.workspacePath &&
-                        fromPath.startsWith(this.workspacePath.replace(/\\/g, '/')) &&
-                        toPath.startsWith(this.workspacePath.replace(/\\/g, '/'));
-                    if (onConfirm && !bothInsideWs) {
-                        const ok = await onConfirm({
-                            type: 'command_confirm',
-                            command: `move_file ${fromPath} → ${toPath}`,
-                            message: `AI wants to move/rename a file crossing the workspace boundary:\nFrom: ${fromPath}\nTo:   ${toPath}`
-                        });
-                        if (!ok) return 'Error: User Denied file move.';
-                    }
-                    onAgentStatus?.(`Moving: ${fromPath} → ${toPath}...`);
-                    try {
-                        await invoke('move_file', {
-                            from: fromPath,
-                            to: toPath,
-                            overwrite: !!args.overwrite
-                        });
-                        // Migrate cache entry to the new key.
-                        if (this._fileCache) {
-                            const fromKey = fromPath.replace(/\\/g, '/');
-                            const toKey   = toPath.replace(/\\/g, '/');
-                            const existing = this._fileCache.get(fromKey);
-                            if (existing) {
-                                this._fileCache.delete(fromKey);
-                                this._fileCache.set(toKey, existing);
-                            }
-                        }
-                        this.onToolEvent?.('file_modified', { path: toPath, action: 'move', diff: `- ${fromPath}\n+ ${toPath}` });
-                        return `Success: Moved ${fromPath} → ${toPath}.`;
-                    } catch (e) {
-                        return `Error: move_file failed — ${e?.message || e}`;
-                    }
-                }
-                case 'write_file': {
-                    let finalContent = args.content ?? '';
-                    const encoding = args.encoding || null;
-                    const isSafeRoot = this._isWriteAllowed(resolvedPath);
-                    let oldContent = "";
-                    let preExisting = false;
-                    try {
-                        oldContent = await invoke('read_file', { path: resolvedPath });
-                        preExisting = true; // read succeeded ⇒ file already exists
-                    } catch (e) { /* file doesn't exist — fine, this is a create */ }
-
-                    // ── Read-before-overwrite guard ─────────────────────────
-                    // If the file already exists but the agent has NEVER read it (or written it)
-                    // in this session, REFUSE the write unless overwrite_unread=true.
-                    // This is the same safety Claude Code's Write tool provides — it stops the
-                    // agent from accidentally clobbering a file whose contents it doesn't know.
-                    if (preExisting && !args.overwrite_unread) {
-                        const normPath = resolvedPath.replace(/\\/g, '/');
-                        const cached = this._fileCache?.get(normPath);
-                        const seenThisSession = !!(cached && (cached.readAt || cached.editedAt));
-                        if (!seenThisSession) {
-                            return `Error: write_file BLOCKED — ${resolvedPath} already exists but you have not read it in this session. ` +
-                                `Overwriting it would destroy content you haven't seen.\n` +
-                                `Choose one:\n` +
-                                `  1. Call read_file first, then retry write_file (recommended).\n` +
-                                `  2. If you intend to make a partial edit, use multi_replace_file_content instead.\n` +
-                                `  3. If you genuinely want to discard the existing content unseen, retry with overwrite_unread: true.`;
-                        }
-                    }
-
-                    if (onConfirm && !isSafeRoot) {
-                        const result = await onConfirm({
-                            type: 'diff_review',
-                            path: resolvedPath,
-                            newContent: args.content,
-                            oldContent: oldContent,
-                            message: `AI wants to write to file outside workspace:\nPath: ${resolvedPath}`
-                        });
-
-                        if (result === false || result === null) return "Error: User Denied file write.";
-                        if (typeof result === 'string') finalContent = result;
-                    }
-
-                    onAgentStatus?.(`Writing file: ${resolvedPath}...`);
-                    await invoke('write_file', { path: resolvedPath, content: finalContent, encoding });
-
-                    this._recordModification(resolvedPath, oldContent, finalContent);
-                    this.onToolEvent?.('file_modified', { path: resolvedPath, action: 'write', diff: `- original\n+ modified` });
-                    // Auto-open in editor tab — replaces the now-deprecated open_file tool
-                    // so the LLM doesn't have to spend a step requesting the UI to show the edit.
-                    this.onToolEvent?.('open_file', { path: resolvedPath });
-
-                    // ── Session file cache update ──────────────────────────
-                    if (this._fileCache) {
-                        const normPath = resolvedPath.replace(/\\/g, '/');
-                        const existing = this._fileCache.get(normPath);
-                        this._fileCache.set(normPath, {
-                            content: finalContent,
-                            readCount: existing?.readCount || 0,
-                            readAt: existing?.readAt || null,
-                            editedAt: Date.now()
-                        });
-                    }
-
-                    // Track edit count + size for the same anti-loop signal that
-                    // multi_replace_file_content uses.
-                    const wfEditCount = this._bumpFileEditCount(resolvedPath);
-                    const wfOldLines = oldContent ? oldContent.split('\n').length : 0;
-                    const wfNewLines = finalContent.split('\n').length;
-                    let wfWarning = '';
-                    if (wfEditCount >= 5) {
-                        wfWarning = `\n[Warning] ${wfEditCount} edits to ${resolvedPath} in this session — if you're still iterating, are you sure the approach is right?`;
-                    }
-
-                    return `Success: File saved to ${resolvedPath}. (${wfOldLines} → ${wfNewLines} lines)${wfWarning}`;
-                }
-                case 'run_command': {
-                    if (onConfirm) {
-                        const approved = await onConfirm({
-                            type: 'command_confirm',
-                            command: args.command,
-                            message: `AI wants to run this terminal command:\n${args.command}`
-                        });
-                        if (!approved) return "Error: User Denied command execution.";
-                    }
-                    onAgentStatus?.(`Running command: ${args.command}...`);
-
-                    // Default 60-second timeout prevents infinite hangs.
-                    // Agent can pass timeout_ms to override (e.g. long builds).
-                    const timeoutMs = (Number.isFinite(args.timeout_ms) && args.timeout_ms > 0)
-                        ? args.timeout_ms
-                        : 60_000;
-
-                    // ── Streaming setup ────────────────────────────────────
-                    // Generate a per-call id so live stdout/stderr chunks emitted by the
-                    // Rust side ("command-chunk" event) can be associated with this call.
-                    // We forward each chunk through onToolEvent so MonitorView shows the
-                    // command's output live instead of waiting until completion.
-                    const cmdId = `cmd_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-                    let unlisten = null;
-                    try {
-                        const { listen } = await import('@tauri-apps/api/event');
-                        unlisten = await listen('command-chunk', (event) => {
-                            const p = event?.payload;
-                            if (!p || p.command_id !== cmdId) return;
-                            this.onToolEvent?.('command_chunk', {
-                                command_id: cmdId,
-                                command: args.command,
-                                stream: p.stream,
-                                line: p.line
-                            });
-                        });
-                    } catch (e) {
-                        // Listener attach failure shouldn't abort the command — just lose streaming.
-                        console.warn('run_command: failed to attach streaming listener:', e);
-                    }
-
-                    const commandPromise = invoke('run_command', {
-                        command: args.command,
-                        cwd: this.workspacePath,
-                        commandId: cmdId
-                    });
-                    const timeoutPromise = new Promise((_, reject) =>
-                        setTimeout(
-                            () => reject(new Error(`run_command timed out after ${timeoutMs / 1000}s`)),
-                            timeoutMs
-                        )
-                    );
-
-                    let result;
-                    try {
-                        result = await Promise.race([commandPromise, timeoutPromise]);
-                    } catch (e) {
-                        if (e.message?.includes('timed out')) {
-                            return `Error: Command timed out after ${timeoutMs / 1000} seconds. ` +
-                                `The process may still be running in the background. ` +
-                                `If this command needs more time, retry with a larger timeout_ms value.`;
-                        }
-                        throw e;
-                    } finally {
-                        // Always detach the streaming listener so we don't leak event subscriptions.
-                        if (unlisten) { try { unlisten(); } catch (_) {} }
-                    }
-
-                    this.onToolEvent?.('command_run', { command: args.command, result });
-                    return result;
-                }
                 case 'open_file':
                     onAgentStatus?.(`Opening file in editor: ${resolvedPath}...`);
                     this.onToolEvent?.('open_file', { path: resolvedPath });
                     return `Success: File ${resolvedPath} opened in client editor tab.`;
                 
-                case 'multi_replace_file_content': {
-                    const editPath = this.resolvePath(args.path);
-                    const normPath = editPath.replace(/\\/g, '/');
-                    onAgentStatus?.(`Editing file: ${editPath}...`);
+                case 'multi_replace_file_content':
+                    return handleMultiReplace(this, args, onConfirm, onAgentStatus);
 
-                    let currentContent;
-                    try {
-                        currentContent = await invoke('read_file', { path: editPath });
-                    } catch (e) {
-                        return `Error: File not found: ${editPath}`;
-                    }
+                case 'replace_lines':
+                    return handleReplaceLines(this, args, onConfirm, onAgentStatus);
 
-                    if (!args.replacements || !Array.isArray(args.replacements) || args.replacements.length === 0) {
-                        return `Error: 'replacements' array is required and must not be empty.`;
-                    }
+                case 'propose_plan':
+                    return handleProposePlan(this, args, onConfirm, onAgentStatus);
 
-                    // ── Line-ending detection (Fix A) ─────────────────────
-                    // Windows files commonly use CRLF, but LLMs almost always
-                    // produce LF in their old_text. Bytewise-strict matching
-                    // would fail on every CRLF file. So: normalize BOTH sides
-                    // to LF for search/replace, and restore the file's original
-                    // line ending when we write back.
-                    const crlfCount = (currentContent.match(/\r\n/g) || []).length;
-                    const lfCount   = (currentContent.match(/(?<!\r)\n/g) || []).length;
-                    const fileLineEnding = crlfCount > lfCount ? '\r\n' : '\n';
-                    const normalizeLE = (s) => (typeof s === 'string' ? s.replace(/\r\n/g, '\n') : s);
+                case 'present_result':
+                    return handlePresentResult(this, args, onAgentStatus);
 
-                    let workingContent = normalizeLE(currentContent);
-                    let appliedCount = 0;
-
-                    // ── Helpers ───────────────────────────────────────────
-                    const countOccurrences = (haystack, needle) => {
-                        if (!needle) return 0;
-                        let n = 0, idx = 0;
-                        while ((idx = haystack.indexOf(needle, idx)) !== -1) {
-                            n++;
-                            idx += needle.length;
-                        }
-                        return n;
-                    };
-
-                    const replaceAllLiteral = (haystack, needle, replacement) => {
-                        let out = '';
-                        let idx = 0, prev = 0;
-                        while ((idx = haystack.indexOf(needle, prev)) !== -1) {
-                            out += haystack.slice(prev, idx) + replacement;
-                            prev = idx + needle.length;
-                        }
-                        out += haystack.slice(prev);
-                        return out;
-                    };
-
-                    // ── Fix B: "Did you mean?" — find closest region in file ──
-                    // Uses ORDER-RESPECTING per-line similarity (Dice coefficient on each
-                    // line's token set), aligned line-by-line against a same-size window.
-                    //
-                    // Why not plain token-set overlap (the previous approach)? Two reasons it
-                    // misfired:
-                    //   1. It ignored line ORDER, so an unrelated line that merely shared common
-                    //      tokens (e.g. `import … from …`) could outscore the real target block.
-                    //   2. `hits / anchorTokens.length` counted window tokens, so a window larger
-                    //      than the anchor could exceed 100% ("~110% token overlap").
-                    // Dice is symmetric and bounded to [0,1], and per-line alignment respects order.
-                    const tokenize = (s) => s
-                        .replace(/\s+/g, ' ')
-                        .trim()
-                        .toLowerCase()
-                        .split(' ')
-                        .filter(Boolean);
-                    const lineTokenSet = (line) => new Set(tokenize(line));
-                    const dice = (aSet, bSet) => {
-                        if (aSet.size === 0 && bSet.size === 0) return 1;
-                        if (aSet.size === 0 || bSet.size === 0) return 0;
-                        let inter = 0;
-                        for (const t of aSet) if (bSet.has(t)) inter++;
-                        return (2 * inter) / (aSet.size + bSet.size);
-                    };
-
-                    const findClosestRegion = (content, target) => {
-                        const fileLines   = content.split('\n');
-                        const targetLines = target.split('\n');
-                        const n = targetLines.length;
-                        if (n === 0) return null;
-
-                        const targetSets = targetLines.map(lineTokenSet);
-                        const targetTokenTotal = targetSets.reduce((s, set) => s + set.size, 0);
-                        if (targetTokenTotal === 0) return null; // target is all whitespace
-
-                        // Precompute file line token sets once (O(fileLines)).
-                        const fileSets = fileLines.map(lineTokenSet);
-
-                        let bestIdx = -1;
-                        let bestScore = 0;
-                        for (let i = 0; i < fileLines.length; i++) {
-                            const windowLen = Math.min(n, fileLines.length - i);
-                            let sum = 0;
-                            for (let k = 0; k < windowLen; k++) {
-                                sum += dice(targetSets[k], fileSets[i + k]);
-                            }
-                            // Divide by full target length so windows shorter than the
-                            // target (near EOF) are penalized rather than inflated.
-                            const score = sum / n;
-                            if (score > bestScore) {
-                                bestScore = score;
-                                bestIdx = i;
-                            }
-                        }
-                        if (bestIdx < 0 || bestScore < 0.4) return null;
-                        const endIdx = Math.min(fileLines.length, bestIdx + n);
-                        return {
-                            startLine: bestIdx + 1,
-                            endLine:   endIdx,
-                            content:   fileLines.slice(bestIdx, endIdx).join('\n'),
-                            score:     Math.min(1, bestScore) // clamp — never report >100%
-                        };
-                    };
-
-                    // Visualize whitespace so the LLM can SEE tab-vs-space differences.
-                    const visualizeWS = (s) => s
-                        .replace(/\t/g, '→')
-                        .replace(/ /g, '·');
-
-                    // Build a verbose "not found" error with a "did you mean?" diff.
-                    const buildNotFoundError = (i, origOldText) => {
-                        const normOld = normalizeLE(origOldText);
-                        const closest = findClosestRegion(workingContent, normOld);
-                        let hint = '';
-                        if (closest) {
-                            const expectedVis = visualizeWS(normOld.split('\n').slice(0, 8).join('\n'));
-                            const actualVis   = visualizeWS(closest.content.split('\n').slice(0, 8).join('\n'));
-                            hint =
-                                `\n\nClosest matching region (lines ${closest.startLine}-${closest.endLine}, ` +
-                                `~${Math.round(closest.score * 100)}% line similarity):\n` +
-                                `--- Your old_text (whitespace visualized: · = space, → = tab) ---\n${expectedVis}\n` +
-                                `--- File ACTUALLY contains ---\n${actualVis}\n\n` +
-                                `=== File region as-is (copy this verbatim) ===\n` +
-                                `${closest.content}\n` +
-                                `=== end ===\n` +
-                                `\nFix (recommended): instead of re-sending the whole block, pick the ONE line above ` +
-                                `that contains a unique identifier and use just that line (plus minimal context) as your ` +
-                                `old_text. Short, exact anchors succeed far more often than large multi-line blocks. ` +
-                                `Copy it character-for-character from the "File region as-is" section.`;
-                        } else {
-                            hint = `\n(No close match found — the file likely does not contain anything similar to your old_text. ` +
-                                `Call read_file to refresh your view of the file.)`;
-                        }
-                        return `Error: replacement[${i}]: old_text not found in ${editPath}. ` +
-                            `Cause is usually one of: ` +
-                            `(a) the file has changed since you last read it, ` +
-                            `(b) your old_text has different whitespace (tabs vs spaces / trailing whitespace), or ` +
-                            `(c) you copied a "<lineno>\\t" prefix from read_file output by accident.${hint}`;
-                    };
-
-                    for (let i = 0; i < args.replacements.length; i++) {
-                        const rep = args.replacements[i];
-
-                        if (typeof rep !== 'object' || rep === null) {
-                            return await this._handleMultiReplaceFailure(editPath, normPath,
-                                `Error: replacement[${i}] is not an object. Each entry must be { old_text, new_text }.`);
-                        }
-                        if (typeof rep.old_text !== 'string' || rep.old_text.length === 0) {
-                            return await this._handleMultiReplaceFailure(editPath, normPath,
-                                `Error: replacement[${i}] is missing required 'old_text' (must be a non-empty string).`);
-                        }
-                        if (rep.new_text === undefined || rep.new_text === null) {
-                            return await this._handleMultiReplaceFailure(editPath, normPath,
-                                `Error: replacement[${i}] is missing required 'new_text'. Pass "" (empty string) to delete.`);
-                        }
-
-                        // Normalize both sides to LF for matching (Fix A).
-                        const oldText    = normalizeLE(rep.old_text);
-                        const newText    = normalizeLE(String(rep.new_text));
-                        const replaceAll = rep.replace_all === true;
-
-                        if (replaceAll) {
-                            const count = countOccurrences(workingContent, oldText);
-                            if (count === 0) {
-                                return await this._handleMultiReplaceFailure(editPath, normPath,
-                                    buildNotFoundError(i, rep.old_text));
-                            }
-                            workingContent = replaceAllLiteral(workingContent, oldText, newText);
-                            appliedCount += count;
-                            continue;
-                        }
-
-                        // Uniqueness mode (default)
-                        const count = countOccurrences(workingContent, oldText);
-                        if (count === 0) {
-                            return await this._handleMultiReplaceFailure(editPath, normPath,
-                                buildNotFoundError(i, rep.old_text));
-                        }
-                        if (count > 1) {
-                            return await this._handleMultiReplaceFailure(editPath, normPath,
-                                `Error: replacement[${i}]: old_text matches ${count} times in ${editPath}. ` +
-                                `Each replacement must be unique — include 3-5 more lines of surrounding context to disambiguate, ` +
-                                `or set "replace_all": true if you intend to update every occurrence.` +
-                                `\n--- old_text preview (first 200 chars) ---\n${rep.old_text.slice(0, 200)}${rep.old_text.length > 200 ? '…' : ''}`);
-                        }
-
-                        // Exactly one match — safe to replace.
-                        const matchIdx = workingContent.indexOf(oldText);
-                        workingContent =
-                            workingContent.slice(0, matchIdx) +
-                            newText +
-                            workingContent.slice(matchIdx + oldText.length);
-                        appliedCount += 1;
-                    }
-
-                    // ── Success — reset failure counter for this file ──────
-                    this._multiReplaceFailCount.delete(normPath);
-
-                    // ── Restore original line ending before writing back ──
-                    const finalEditedContent = fileLineEnding === '\r\n'
-                        ? workingContent.replace(/\n/g, '\r\n')
-                        : workingContent;
-                    const isSafeRootEdit = this._isWriteAllowed(editPath);
-
-                    if (onConfirm && !isSafeRootEdit) {
-                        const res = await onConfirm({
-                            type: 'diff_review',
-                            path: editPath,
-                            newContent: finalEditedContent,
-                            oldContent: currentContent,
-                            message: `AI wants to write to file outside workspace:\nPath: ${editPath}`
-                        });
-
-                        if (res === false || res === null) return "Error: User Denied file write.";
-                        if (typeof res === 'string') {
-                            await invoke('write_file', { path: editPath, content: res });
-                            return `Success: User modified and saved to ${editPath}`;
-                        }
-                    }
-
-                    await invoke('write_file', { path: editPath, content: finalEditedContent });
-
-                    this._recordModification(editPath, currentContent, finalEditedContent);
-                    this.onToolEvent?.('file_modified', { path: editPath, action: 'edit', diff: `- original\n+ modified` });
-                    // Auto-open in editor tab so user sees the edit without an explicit open_file call.
-                    this.onToolEvent?.('open_file', { path: editPath });
-
-                    // ── Auto read-back & sanity check ────────────────────
-                    // The #1 cause of "agent corrupts file then doesn't notice" is that
-                    // multi_replace_file_content reports success without showing the
-                    // resulting content. Read the file back and surface the new content
-                    // plus a quick structural sanity check (bracket balance, line delta).
-                    // This makes corruption *visible* to the LLM in the very next turn.
-                    let verifiedContent = finalEditedContent;
-                    try {
-                        verifiedContent = await invoke('read_file', { path: editPath });
-                    } catch (_) {
-                        // If we can't re-read, fall through to the basic content we wrote.
-                    }
-
-                    // ── Session file cache update (use verified/read-back content) ──
-                    if (this._fileCache) {
-                        const normPath = editPath.replace(/\\/g, '/');
-                        const existing = this._fileCache.get(normPath);
-                        this._fileCache.set(normPath, {
-                            content: verifiedContent,
-                            readCount: existing?.readCount || 0,
-                            readAt: existing?.readAt || null,
-                            editedAt: Date.now()
-                        });
-                    }
-
-                    const editCount = this._bumpFileEditCount(editPath);
-                    const oldLines = currentContent.split('\n').length;
-                    const newLines = verifiedContent.split('\n').length;
-                    const lineDelta = newLines - oldLines;
-
-                    // Quick "obvious break" detector: balance braces, brackets, parens.
-                    const balance = (txt) => {
-                        const counts = { '{': 0, '}': 0, '[': 0, ']': 0, '(': 0, ')': 0 };
-                        // Naive scan — false positives in strings/comments are fine
-                        // (we're looking for catastrophic imbalance, not 100% accuracy).
-                        for (const ch of txt) if (counts[ch] !== undefined) counts[ch]++;
-                        return {
-                            braces: counts['{'] - counts['}'],
-                            brackets: counts['['] - counts[']'],
-                            parens: counts['('] - counts[')'],
-                        };
-                    };
-                    const before = balance(currentContent);
-                    const after = balance(verifiedContent);
-                    const warnings = [];
-                    if (Math.abs(after.braces) > Math.abs(before.braces) + 1) {
-                        warnings.push(`brace imbalance worsened (was ${before.braces}, now ${after.braces})`);
-                    }
-                    if (Math.abs(after.brackets) > Math.abs(before.brackets) + 1) {
-                        warnings.push(`bracket imbalance worsened (was ${before.brackets}, now ${after.brackets})`);
-                    }
-                    if (Math.abs(after.parens) > Math.abs(before.parens) + 1) {
-                        warnings.push(`paren imbalance worsened (was ${before.parens}, now ${after.parens})`);
-                    }
-
-                    // Same-file edit-count warning. If the LLM has been hammering one
-                    // file, that's almost always a signal the approach is wrong.
-                    let editCountWarning = '';
-                    if (editCount === 5) {
-                        editCountWarning = `\n[Warning] This is the 5th edit to ${editPath} in this session. If the file is getting tangled, consider doing ONE final write_file with the complete intended content instead of more multi_replace_file_content calls.`;
-                    } else if (editCount >= 8) {
-                        editCountWarning = `\n[Warning] ${editCount} edits to ${editPath} so far — STOP using multi_replace. Read the file once, then write_file the entire correct version.`;
-                    }
-
-                    // Truncate the readback so the LLM context doesn't explode on
-                    // huge files. The first 400 lines is usually enough to spot
-                    // obvious damage; the LLM can read_file for the rest if needed.
-                    const PREVIEW_LINES = 400;
-                    const previewLines = verifiedContent.split('\n').slice(0, PREVIEW_LINES);
-                    const truncated = newLines > PREVIEW_LINES;
-                    const preview = previewLines.join('\n') + (truncated ? `\n... [${newLines - PREVIEW_LINES} more lines truncated; call read_file if you need the rest]` : '');
-
-                    const warnBlock = warnings.length > 0
-                        ? `\n[Structural Warning] ${warnings.join('; ')}. The edit may have corrupted the file — INSPECT the content below and fix immediately if broken. Also call verify_syntax for .js/.ts/.json files.`
-                        : '';
-
-                    const opLabel = appliedCount === args.replacements.length
-                        ? `${appliedCount} replacement(s)`
-                        : `${appliedCount} replacement(s) from ${args.replacements.length} entry/entries`;
-                    return `Success: Applied ${opLabel} to ${editPath}. ` +
-                        `(${oldLines} → ${newLines} lines, delta ${lineDelta >= 0 ? '+' : ''}${lineDelta})` +
-                        warnBlock + editCountWarning +
-                        `\n\n=== File content after edit (first ${Math.min(newLines, PREVIEW_LINES)} lines) ===\n${preview}`;
-                }
-                case 'propose_plan': {
-                    onAgentStatus?.(`Proposed plan: ${args.title}`);
-                    const planText = `# ${args.title}\n\n` + args.steps.map((s, i) => `${i + 1}. ${s}`).join('\n');
-                    if (onConfirm) {
-                        const approved = await onConfirm({
-                            type: 'plan_review',
-                            title: args.title,
-                            message: planText
-                        });
-                        if (!approved) return "Error: User Rejected the plan. Please propose a different plan.";
-                    }
-                    this.onToolEvent?.('plan_proposed', { title: args.title, steps: args.steps });
-                    return 'Success: Plan proposed (no confirmation required).';
-                }
                 case 'create_artifact':
-                case 'update_artifact': {
-                    const actionName = name === 'create_artifact' ? 'Creating' : 'Updating';
-                    const artifactName = args.name.endsWith('.md') ? args.name : `${args.name}.md`;
-                    onAgentStatus?.(`${actionName} artifact: ${artifactName}...`);
-                    
-                    const artifactDir = this.getSessionArtifactDir();
-                    const artifactPath = `${artifactDir}/${artifactName}`;
-                    
-                    await invoke('create_dir', { path: artifactDir });
-                    await invoke('write_file', { path: artifactPath, content: args.content });
-                    
-                    this.onToolEvent?.('artifact_modified', { name: artifactName, path: artifactPath, content: args.content });
-                    return `Success: Artifact ${artifactName} ${name === 'create_artifact' ? 'created' : 'updated'}.`;
-                }
-                case 'fetch_url': {
-                    const { url, headers: extraHeaders } = args;
-                    if (!url || !/^https?:\/\//i.test(url)) {
-                        return 'Error: url must start with http:// or https://';
-                    }
-                    onAgentStatus?.(`Fetching: ${url}`);
-                    try {
-                        const fetchHeaders = { 'User-Agent': 'Mozilla/5.0 (compatible; JH-AI-Agent/1.0)', ...(extraHeaders || {}) };
-                        const resp = await fetch(url, { headers: fetchHeaders });
-                        const contentType = resp.headers.get('content-type') || '';
-                        // Cap response at 500 KB to avoid flooding context
-                        const MAX_BYTES = 500 * 1024;
-                        const reader = resp.body.getReader();
-                        const chunks = [];
-                        let totalBytes = 0;
-                        let truncated = false;
-                        while (true) {
-                            const { done, value } = await reader.read();
-                            if (done) break;
-                            totalBytes += value.byteLength;
-                            if (totalBytes > MAX_BYTES) {
-                                // Only add up to the cap
-                                const remaining = MAX_BYTES - (totalBytes - value.byteLength);
-                                if (remaining > 0) chunks.push(value.slice(0, remaining));
-                                truncated = true;
-                                reader.cancel();
-                                break;
-                            }
-                            chunks.push(value);
-                        }
-                        const merged = new Uint8Array(chunks.reduce((sum, c) => sum + c.byteLength, 0));
-                        let offset = 0;
-                        for (const c of chunks) { merged.set(c, offset); offset += c.byteLength; }
-                        const text = new TextDecoder().decode(merged);
-                        const statusLine = `HTTP ${resp.status} ${resp.statusText} — Content-Type: ${contentType}`;
-                        const truncNote = truncated ? '\n[Response truncated at 500 KB]' : '';
-                        return `${statusLine}\n\n${text}${truncNote}`;
-                    } catch (e) {
-                        return `Error fetching URL: ${e.message}`;
-                    }
-                }
+                case 'update_artifact':
+                    return handleArtifact(this, args, name, onAgentStatus);
 
-                case 'finish_task': {
-                    // ── Pre-finish syntax gate (real-parser based) ────────
-                    // Sanity-check every modified file before accepting completion.
-                    //   .json          → JSON.parse  (in-process, fast, reliable)
-                    //   .js/.jsx/...   → node --check (real V8 parser)
-                    //   .ts/.tsx       → skipped (TS needs project tsc; we surface a soft reminder
-                    //                    in the success message instead of blocking).
-                    // Files we can't parse (no Node, unreadable) are skipped silently — the
-                    // gate's purpose is to catch broken edits, not to block on environment gaps.
-                    const jsonFiles = [];
-                    const jsFiles = [];
-                    const tsFiles = [];
-                    for (const [p] of this.sessionModifiedFiles) {
-                        if (/\.json$/i.test(p)) jsonFiles.push(p);
-                        else if (/\.(js|jsx|mjs|cjs)$/i.test(p)) jsFiles.push(p);
-                        else if (/\.(ts|tsx)$/i.test(p)) tsFiles.push(p);
-                    }
+                case 'fetch_url':
+                    return handleFetchUrl(this, args, onAgentStatus);
 
-                    const failures = [];
+                case 'finish_task':
+                    return handleFinishTask(this, args, onAgentStatus);
 
-                    // JSON files — in-process check
-                    for (const filePath of jsonFiles) {
-                        try {
-                            const src = await invoke('read_file', { path: filePath });
-                            try { JSON.parse(src); }
-                            catch (e) { failures.push(`${filePath} (JSON): ${e.message}`); }
-                        } catch (_) { /* unreadable — skip */ }
-                    }
+                case 'verify_syntax':
+                    return handleVerifySyntax(this, args, onAgentStatus, resolvedPath);
 
-                    // JS files — node --check subprocess
-                    let nodeMissing = false;
-                    for (const filePath of jsFiles) {
-                        if (nodeMissing) break; // don't spam if node isn't installed
-                        const quoted = `"${filePath.replace(/"/g, '\\"')}"`;
-                        try {
-                            await invoke('run_command', {
-                                command: `node --check ${quoted}`,
-                                cwd: this.workspacePath
-                            });
-                        } catch (e) {
-                            const raw = String(e?.message || e || '');
-                            if (/is not recognized|command not found|ENOENT/i.test(raw) &&
-                                !/SyntaxError/i.test(raw)) {
-                                // Node isn't on PATH — skip rather than fail completion.
-                                nodeMissing = true;
-                                continue;
-                            }
-                            const lines = raw.split('\n').filter(l => l.trim().length > 0);
-                            const sig = lines.findIndex(l => /SyntaxError|Unexpected|Invalid/i.test(l));
-                            const slice = sig >= 0
-                                ? lines.slice(Math.max(0, sig - 1), sig + 2).join(' ')
-                                : lines.slice(0, 3).join(' ');
-                            failures.push(`${filePath} (node --check): ${slice}`);
-                        }
-                    }
-
-                    if (failures.length > 0) {
-                        return `Error: finish_task BLOCKED. The following file(s) you modified still have syntax errors. Fix them BEFORE calling finish_task again:\n\n` +
-                            failures.map(f => '  • ' + f).join('\n') +
-                            `\n\nUse verify_syntax to recheck after fixing.`;
-                    }
-
-                    onAgentStatus?.(`Task finished: ${args.summary}`);
-                    this._taskCompleted = true;
-                    // NOTE: use a DISTINCT event name ('finish_task'), NOT 'complete'.
-                    // The task-level 'complete' event (emitted by TaskBridge after run()
-                    // returns, carrying the full result.response as `message`) is what the
-                    // Chat UI renders as the final answer. If we also emit 'complete' here
-                    // it arrives FIRST with only `summary` (no `message`), so ChatView
-                    // resolves on it and shows the "(task complete)" placeholder instead of
-                    // the real summary. Keeping this event distinct avoids that collision.
-                    this.onToolEvent?.('finish_task', { summary: args.summary });
-
-                    // Soft reminder about TS files (not a block — just guidance).
-                    let tsNote = '';
-                    if (tsFiles.length > 0) {
-                        tsNote = `\n\n[Reminder] ${tsFiles.length} TypeScript file(s) were modified. ` +
-                            `If you haven't already, run the project's type checker ` +
-                            `(e.g. "npx tsc --noEmit") to catch type errors.`;
-                    }
-                    if (nodeMissing && jsFiles.length > 0) {
-                        tsNote += `\n[Note] 'node' was not on PATH, so JS files were not syntax-checked.`;
-                    }
-
-                    return `Success: Task completion declared. Summary: ${args.summary}${tsNote}`;
-                }
-
-                case 'verify_syntax': {
-                    // Real-parser delegation strategy (industry standard):
-                    //   .json          → JSON.parse (in-process, reliable, instant)
-                    //   .js/.jsx/.mjs/.cjs → `node --check` (real V8 parser, ~100ms)
-                    //   .ts/.tsx       → skip with guidance (TS needs tsc, which is a project-level concern)
-                    //   other          → skip
-                    //
-                    // We deliberately do NOT do a hand-rolled regex+`new Function` check for
-                    // JS/TS anymore — it produced both false positives (rejecting valid modern
-                    // syntax) and false negatives (passing broken code that happened to look
-                    // JS-like after type-stripping). `node --check` is the real V8 parser and
-                    // gives the same answer Node itself would.
-                    onAgentStatus?.(`Verifying syntax: ${resolvedPath}...`);
-
-                    const lower = resolvedPath.toLowerCase();
-                    const isJson = lower.endsWith('.json');
-                    const isJs = /\.(js|jsx|mjs|cjs)$/.test(lower);
-                    const isTs = /\.(ts|tsx)$/.test(lower);
-
-                    if (isJson) {
-                        let src;
-                        try {
-                            src = await invoke('read_file', { path: resolvedPath });
-                        } catch (e) {
-                            return `Error: Cannot read file for syntax check: ${e.message || e}`;
-                        }
-                        try {
-                            JSON.parse(src);
-                            return `OK: ${resolvedPath} is valid JSON.`;
-                        } catch (e) {
-                            // Extract "at position N" → line/col for actionable feedback.
-                            const m = String(e.message).match(/position\s+(\d+)/i);
-                            let loc = '';
-                            if (m) {
-                                const pos = parseInt(m[1], 10);
-                                const before = src.slice(0, pos);
-                                const line = before.split('\n').length;
-                                const col = pos - before.lastIndexOf('\n');
-                                loc = ` (line ${line}, col ${col})`;
-                            }
-                            return `Error: JSON parse failure in ${resolvedPath}${loc} — ${e.message}`;
-                        }
-                    }
-
-                    if (isJs) {
-                        // Cross-platform path quoting for the shell.
-                        // PowerShell (Windows) and sh (Unix) both accept "double-quoted" paths,
-                        // and we escape any embedded double quotes.
-                        const quoted = `"${resolvedPath.replace(/"/g, '\\"')}"`;
-                        try {
-                            // node --check is silent on success (exit 0) and prints the SyntaxError
-                            // location to stderr on failure (exit 1). run_command throws on non-zero
-                            // exit, so a syntax error lands in the catch block below.
-                            await invoke('run_command', {
-                                command: `node --check ${quoted}`,
-                                cwd: this.workspacePath
-                            });
-                            return `OK: ${resolvedPath} parses without syntax errors (node --check).`;
-                        } catch (e) {
-                            const raw = String(e?.message || e || '');
-                            // Detect "node not found" so we can give a clearer message instead of
-                            // pretending the file is broken.
-                            if (/is not recognized|command not found|ENOENT/i.test(raw) &&
-                                !/SyntaxError/i.test(raw)) {
-                                return `Skipped: 'node' executable not found on PATH. ` +
-                                    `verify_syntax cannot check JavaScript files without Node installed. ` +
-                                    `Inspect the file manually or install Node.js.`;
-                            }
-                            // Surface only the most useful slice of node's output — the SyntaxError line
-                            // plus its caret pointer is usually all that's needed.
-                            const lines = raw.split('\n').filter(l => l.trim().length > 0);
-                            const sig = lines.findIndex(l => /SyntaxError|Unexpected|Invalid/i.test(l));
-                            const slice = sig >= 0
-                                ? lines.slice(Math.max(0, sig - 2), sig + 3).join('\n')
-                                : lines.slice(0, 8).join('\n');
-                            return `Error: Syntax error in ${resolvedPath} (node --check):\n${slice}\n\n` +
-                                `Fix this before doing anything else — the previous edit likely corrupted the file.`;
-                        }
-                    }
-
-                    if (isTs) {
-                        return `Skipped: verify_syntax does not directly check TypeScript. ` +
-                            `Catastrophic structural breakage (unbalanced braces/brackets) is already ` +
-                            `flagged automatically by multi_replace_file_content's auto read-back. ` +
-                            `For full type-checking, call: run_command("npx tsc --noEmit ${resolvedPath}") ` +
-                            `or run the project's type-check script.`;
-                    }
-
-                    return `Skipped: verify_syntax only checks .json / .js / .jsx / .mjs / .cjs. ` +
-                        `Got: ${resolvedPath}. For other languages, invoke the appropriate checker via run_command ` +
-                        `(e.g. "python -m py_compile <file>", "cargo check").`;
-                }
-
-                case 'task_progress': {
-                    await this._loadTaskProgress();
-                    const action = (args.action || '').toLowerCase();
-
-                    if (action === 'get' || (!action && (!args.items || args.items.length === 0))) {
-                        return this._renderTaskProgress();
-                    }
-
-                    if (action === 'set') {
-                        const items = Array.isArray(args.items) ? args.items : [];
-                        this._taskProgressItems = items.map(it => ({
-                            id: String(it.id ?? ''),
-                            title: String(it.title ?? ''),
-                            status: ['pending', 'in_progress', 'completed', 'blocked'].includes(it.status)
-                                ? it.status : 'pending',
-                            note: it.note ? String(it.note).slice(0, 200) : ''
-                        })).filter(it => it.id);
-                        await this._saveTaskProgress();
-                        this.onToolEvent?.('task_progress', { items: this._taskProgressItems });
-                        return `Set ${this._taskProgressItems.length} subtask(s).\n${this._renderTaskProgress()}`;
-                    }
-
-                    if (action === 'update') {
-                        const patches = Array.isArray(args.items) ? args.items : [];
-                        let updated = 0;
-                        for (const patch of patches) {
-                            const id = String(patch.id ?? '');
-                            if (!id) continue;
-                            const target = this._taskProgressItems.find(it => it.id === id);
-                            if (!target) continue;
-                            if (patch.title !== undefined) target.title = String(patch.title);
-                            if (patch.status !== undefined &&
-                                ['pending', 'in_progress', 'completed', 'blocked'].includes(patch.status)) {
-                                target.status = patch.status;
-                            }
-                            if (patch.note !== undefined) target.note = String(patch.note).slice(0, 200);
-                            updated++;
-                        }
-                        await this._saveTaskProgress();
-                        this.onToolEvent?.('task_progress', { items: this._taskProgressItems });
-                        return `Updated ${updated} subtask(s).\n${this._renderTaskProgress()}`;
-                    }
-
-                    return `Error: task_progress action must be one of "set" / "update" / "get". Got: ${args.action}`;
-                }
+                case 'task_progress':
+                    return handleTaskProgress(this, args);
 
                 default: {
                     const mcpToolsAll = mcpManager.getAllTools();
                     const targetTool = mcpToolsAll.find(t => t.name === name);
                     if (targetTool) {
                         onAgentStatus?.(`Calling MCP tool: ${name} (${targetTool._serverName})...`);
-                        const response = await mcpManager.callTool(targetTool._serverName, name, args);
+                        // Strict Structured Outputs forces the model to emit every
+                        // (now-required) optional field as null. Drop top-level null
+                        // args so MCP servers that distinguish "absent" from "null"
+                        // see the field as omitted.
+                        const cleanArgs = Object.fromEntries(
+                            Object.entries(args || {}).filter(([, v]) => v !== null)
+                        );
+                        const meta = this._mcpContext ? { jhai: this._mcpContext } : null;
+                        const response = await mcpManager.callTool(targetTool._serverName, name, cleanArgs, meta);
 
                         // MCP tool response format: { content: [{type:"text", text:"..."}], isError: bool }
                         if (response && typeof response === 'object') {

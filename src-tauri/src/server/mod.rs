@@ -3,5 +3,7 @@
 
 pub mod auth;
 pub mod router;
+pub mod config_routes;
 pub mod ws;
+pub mod mcp_ws;
 

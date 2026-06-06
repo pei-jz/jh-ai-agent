@@ -1,7 +1,11 @@
+import { AnalyticsView } from './AnalyticsView.js';
+
 export class OverviewView {
     constructor() {
         this.stats = { totalTasks: 0, totalTokens: 0, promptTokens: 0, completionTokens: 0, estimatedCost: 0.0 };
         this.activeTasks = [];
+        // Analytics is embedded at the bottom of the dashboard (no standalone page).
+        this.analytics = new AnalyticsView({ embed: true });
     }
 
     async loadData() {
@@ -18,6 +22,7 @@ export class OverviewView {
 
     async render() {
         await this.loadData();
+        const analyticsHtml = await this.analytics.render();
 
         const taskCards = this.activeTasks.length > 0 
             ? this.activeTasks.map(task => `
@@ -86,11 +91,18 @@ export class OverviewView {
                         ${taskCards}
                     </div>
                 </div>
+
+                <div class="dashboard-section" style="margin-top: 28px;">
+                    <h2>Analytics</h2>
+                    ${analyticsHtml}
+                </div>
             </div>
         `;
     }
 
     init() {
+        // Wire the embedded Analytics controls (range / group-by segments).
+        try { this.analytics.init(); } catch (_) {}
     }
 }
 

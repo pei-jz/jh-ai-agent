@@ -31,7 +31,18 @@ pub async fn run_command<R: Runtime>(
     cwd: Option<String>,
     command_id: Option<String>,
     app: AppHandle<R>,
+    guard: tauri::State<'_, crate::path_guard::PathGuard>,
 ) -> Result<String, String> {
+    // Defense-in-depth: a shell command runs with `cwd` as its working
+    // directory. Require that directory to be inside an allowed root so the
+    // backend won't execute commands rooted in arbitrary locations. (The
+    // command string itself is still gated by the frontend's confirmation
+    // flow; this is a backstop, not a sandbox.)
+    if let Some(dir) = cwd.as_ref() {
+        if !dir.is_empty() {
+            guard.ensure_allowed(dir)?;
+        }
+    }
     #[allow(unused_mut)]
     let mut cmd = if cfg!(target_os = "windows") {
         let mut c = Command::new("powershell");
@@ -173,4 +184,19 @@ fn spawn_line_pump<R: Read + Send + 'static>(
             }
         }
     });
+}
+
+/// Open a file or folder with the OS default application (chosen by the OS from
+/// the file extension). Used by the "execution result" file links in the UI so
+/// clicking a created/modified file opens it like a double-click in Explorer.
+///
+/// This is intentionally a thin wrapper over the opener plugin: opening (reading)
+/// is unrestricted in this app's security model, and the action is always
+/// user-initiated (a click on a path the agent itself produced).
+#[tauri::command]
+pub fn open_path_default<R: Runtime>(app: AppHandle<R>, path: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_path(path, None::<&str>)
+        .map_err(|e| format!("Failed to open path: {}", e))
 }

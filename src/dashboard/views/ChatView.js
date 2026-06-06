@@ -7,6 +7,10 @@ import { skillManager } from '../../modules/ai/SkillManager.js';
 import { AGENT_MODES, DEFAULT_MODE_ID, buildBehavior } from '../../modules/ai/AgentModes.js';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
+import { renderFileList, filesFromModified, ensureResultViewStyles } from '../utils/resultView.js';
+import { escapeHtml, formatMessageContent, formatMarkdown, renderTableHtml } from './chat/chatMarkdown.js';
+import { STORAGE_KEY as CHAT_SESSIONS_KEY, parseSessions, pruneSessions } from './chat/chatSessions.js';
+import { extractToolCall, parseThought, renderAgentSteps, renderMessageHtml } from './chat/chatRenderer.js';
 
 export class ChatView {
     constructor() {
@@ -18,6 +22,15 @@ export class ChatView {
         this.abortController = null;
         this.attachments = [];
         this._dragDropUnlisten = null;
+
+        // ── Active skills ────────────────────────────────────────────────
+        // Skills selected via the slash-popup are NOT expanded into the input
+        // textarea (that bloated the box). Instead each is held here as a
+        // lightweight reference {name, title} shown as a removable chip, and
+        // its full body is auto-injected into the outgoing message at send
+        // time (see sendMessage). The visible chat bubble shows only a small
+        // badge, keeping the transcript clean.
+        this.activeSkills = [];   // [{ name, title }]
         
         // Settings states
         this.selectedWorkflow = 'none'; // 'none', 'research', 'planning', 'execution', 'debugging', 'verification'
@@ -121,9 +134,16 @@ export class ChatView {
             mcpServersHtml = mcpServerKeys.map(name => {
                 const isRunning = mcpManager.clients.has(name);
                 const toolCount = isRunning ? (mcpManager.clients.get(name)?.tools?.length ?? 0) : 0;
-                const badge = isRunning
-                    ? `<span style="font-size: 10px; background: var(--accent); color: #000; border-radius: 4px; padding: 1px 5px; font-weight: 600;">🟢 ${toolCount}t</span>`
-                    : '';
+                const err = mcpManager.getError(name);
+                let badge = '';
+                if (isRunning) {
+                    badge = `<span style="font-size: 10px; background: var(--accent); color: #000; border-radius: 4px; padding: 1px 5px; font-weight: 600;">🟢 ${toolCount}t</span>`;
+                } else if (err) {
+                    // Failed badge: hover for full detail (native tooltip) + click for full dialog.
+                    badge = `<span class="chat-mcp-error-badge" data-name="${escapeHtml(name)}"
+                        title="${escapeHtml(err.message)}"
+                        style="font-size: 10px; background: var(--error, #c0392b); color: #fff; border-radius: 4px; padding: 1px 6px; font-weight: 600; cursor: pointer;">⚠ 起動失敗 (詳細)</span>`;
+                }
                 return `
                     <label style="display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; user-select: none;">
                         <input type="checkbox" class="chat-mcp-checkbox" data-name="${name}" ${isRunning ? 'checked' : ''} style="cursor: pointer;">
@@ -458,6 +478,45 @@ export class ChatView {
                     padding-bottom: 8px;
                     border-bottom: 1px solid var(--border-light);
                 }
+
+                /* ── Active-skill chips ── */
+                .chat-input-skills {
+                    display: flex;
+                    flex-wrap: wrap;
+                    gap: 6px;
+                    margin-bottom: 8px;
+                }
+                .skill-chip {
+                    display: inline-flex;
+                    align-items: center;
+                    gap: 5px;
+                    background: hsla(265, 90%, 65%, 0.12);
+                    border: 1px solid hsla(265, 90%, 65%, 0.45);
+                    color: var(--text-primary);
+                    border-radius: 999px;
+                    padding: 3px 8px;
+                    font-size: 11.5px;
+                    font-weight: 500;
+                    line-height: 1.4;
+                }
+                .skill-chip-icon { font-size: 11px; }
+                .skill-chip-label {
+                    max-width: 160px;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    white-space: nowrap;
+                }
+                .skill-chip-remove {
+                    background: none;
+                    border: none;
+                    color: var(--text-tertiary);
+                    cursor: pointer;
+                    padding: 0 0 0 2px;
+                    font-size: 11px;
+                    line-height: 1;
+                }
+                .skill-chip-remove:hover { color: var(--error); }
+                .skill-chip-static { background: hsla(265, 90%, 65%, 0.10); }
 
                 .chat-preview-item {
                     position: relative;
@@ -929,7 +988,7 @@ export class ChatView {
                                 <div class="input-group">
                                     <div class="toggle-wrap" id="chat-tools-enabled-wrap">
                                         <div class="toggle ${this.toolsEnabled ? 'active' : ''}" id="chat-tools-enabled-toggle"></div>
-                                        <span class="toggle-label" style="font-size: 12px; font-weight: 500;">Enable Tool Execution (Agent Mode)</span>
+                                        <span class="toggle-label" style="font-size: 12px; font-weight: 500;">Enable Tool Execution (Simple / Agent 両対応)</span>
                                     </div>
                                 </div>
                                 <div class="input-group" style="border-top: 1px solid var(--border-light); padding-top: 12px;">
@@ -958,6 +1017,7 @@ export class ChatView {
                     <!-- Input Area -->
                     <div class="chat-input-area-wrapper" style="position: relative;">
                         <div id="slash-popup" class="slash-popup" style="display:none;"></div>
+                        <div class="chat-input-skills" id="chat-input-skills" style="display: none;"></div>
                         <div class="chat-input-previews" id="chat-input-previews" style="display: none;"></div>
                         <div class="chat-input-container">
                             <button id="btn-attach-file" class="btn-chat-attach" type="button" title="Attach image or file">📎</button>
@@ -992,6 +1052,49 @@ export class ChatView {
         // Scroll to bottom
         if (chatBody) {
             chatBody.scrollTop = chatBody.scrollHeight;
+
+            // Delegated click handler for dynamically-rendered message content.
+            // Inline on* handlers were removed so a strict CSP (script-src 'self',
+            // no 'unsafe-inline') can be enforced — see tauri.conf.json.
+            chatBody.addEventListener('click', (e) => {
+                // Copy-code button inside code blocks
+                const copyBtn = e.target.closest('.btn-copy-code');
+                if (copyBtn) {
+                    const codeEl = copyBtn.parentElement?.nextElementSibling;
+                    const text = codeEl ? codeEl.innerText : '';
+                    navigator.clipboard.writeText(text).then(() => {
+                        copyBtn.innerText = 'Copied!';
+                        setTimeout(() => { copyBtn.innerText = 'Copy'; }, 2000);
+                    }).catch(() => {});
+                    return;
+                }
+                // Zoomable image in a chat bubble → open full-size in a new window
+                const img = e.target.closest('.chat-zoomable-img');
+                if (img && img.src) {
+                    const w = window.open();
+                    if (w) {
+                        const safeSrc = img.src.replace(/"/g, '&quot;');
+                        w.document.write(`<img src="${safeSrc}" style="max-width:100%; height:auto;">`);
+                    }
+                    return;
+                }
+                // Result-file link → open with the OS default app (covers both the
+                // live-rendered list and history-restored bubbles).
+                const fileLink = e.target.closest('[data-open-path]');
+                if (fileLink) {
+                    e.preventDefault();
+                    const path = fileLink.getAttribute('data-open-path');
+                    if (path) {
+                        invoke('open_path_default', { path }).catch(err => {
+                            console.error('Failed to open path:', path, err);
+                            fileLink.classList.add('rv-open-error');
+                            fileLink.title = `開けませんでした: ${err}`;
+                        });
+                    }
+                }
+            });
+            // Styles for the result-file list (used by completed agent turns).
+            ensureResultViewStyles();
         }
 
         // Toggle System Prompt & Settings Panel
@@ -1132,6 +1235,8 @@ export class ChatView {
                 this.toolsEnabled = !this.toolsEnabled;
                 toolsToggle.classList.toggle('active', this.toolsEnabled);
                 this.reRender();
+                // Tools work in Simple mode too — make sure MCP servers are up.
+                if (this.toolsEnabled) this._startEnabledMcpServers();
             });
         }
 
@@ -1142,31 +1247,16 @@ export class ChatView {
                 if (!mode || mode === this.chatMode) return;
                 this.chatMode = mode;
                 if (mode === 'agent') {
+                    // Agent mode always runs with tools.
                     this.toolsEnabled = true;
-                    // Render the UI switch immediately, then start MCP servers in background
-                    // so the tab feels responsive.
                     this.reRender();
-                    if (Object.keys(this.allMcpServers).length > 0) {
-                        setTimeout(async () => {
-                            try {
-                                await mcpManager.loadConfig();
-                                // Only start servers that aren't already running
-                                const servers = mcpManager.serversConfig.mcpServers || {};
-                                for (const [name, config] of Object.entries(servers)) {
-                                    if (!mcpManager.clients.has(name)) {
-                                        await mcpManager.startClient(name, config);
-                                    }
-                                }
-                            } catch (e) {
-                                console.warn('Failed to start MCP servers on agent mode switch:', e);
-                            }
-                        }, 0);
-                    }
+                    this._startEnabledMcpServers();
                 } else {
-                    // Switch tools off but leave MCP servers running —
-                    // user must explicitly disable them in the settings panel.
-                    this.toolsEnabled = false;
+                    // Simple mode: KEEP the user's current tool setting (tools/MCP
+                    // such as Backlog are usable in Simple mode too — was previously
+                    // force-disabled here). Start MCP servers if tools are on.
                     this.reRender();
+                    if (this.toolsEnabled) this._startEnabledMcpServers();
                 }
             });
         });
@@ -1235,6 +1325,20 @@ export class ChatView {
             });
         });
 
+        // MCP error badge → show full failure detail in an alert dialog
+        document.querySelectorAll('.chat-mcp-error-badge').forEach(badge => {
+            badge.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const name = badge.getAttribute('data-name');
+                const err = mcpManager.getError(name);
+                if (err) {
+                    const when = err.at ? new Date(err.at).toLocaleString() : '';
+                    alert(`MCP サーバー "${name}" 起動失敗\n発生時刻: ${when}\n\n${err.message}`);
+                }
+            });
+        });
+
         // New Chat Button
         const newChatBtn = document.getElementById('btn-new-chat');
         if (newChatBtn) {
@@ -1251,14 +1355,26 @@ export class ChatView {
             });
         }
 
-        // Clear Chat History
+        // Clear Chat History (current conversation only)
         if (clearBtn) {
             clearBtn.addEventListener('click', () => {
-                if (confirm('チャット履歴を削除しますか？')) {
-                    this.messages = [];
+                if (!confirm('現在のチャットの内容を削除しますか？')) return;
+                this.messages = [];
+                // Reset the active session's messages + title and persist to BOTH
+                // localStorage and the file backup so it can't be restored.
+                const data = this.getSessions();
+                if (data.activeSessionId && data.sessions[data.activeSessionId]) {
+                    data.sessions[data.activeSessionId].messages = [];
+                    data.sessions[data.activeSessionId].title = 'New Chat';
+                    data.sessions[data.activeSessionId].timestamp = Date.now();
+                    this.saveSessions(data);
+                } else {
                     this.saveHistory();
-                    this.reRender();
                 }
+                // Immediate DOM clear (in case a later re-render is delayed/throws).
+                const container = document.getElementById('chat-messages-container');
+                if (container) container.innerHTML = '';
+                this.reRender();
             });
         }
 
@@ -1282,6 +1398,7 @@ export class ChatView {
 
         // Render attachment previews
         this.renderAttachmentPreviews();
+        this.renderSkillChips();
 
         // Auto-send a pending question routed from the global quick-search (Ctrl+Shift+Space).
         this._consumePendingQuestion();
@@ -1485,11 +1602,33 @@ export class ChatView {
         }
     }
 
+    /**
+     * Start every configured MCP server that isn't already running, so its tools
+     * become available to the chat (in BOTH Simple and Agent mode). Best-effort
+     * and idempotent. Called when tools are enabled or when switching modes.
+     */
+    async _startEnabledMcpServers() {
+        if (!this.allMcpServers || Object.keys(this.allMcpServers).length === 0) return;
+        try {
+            await mcpManager.loadConfig();
+            const servers = mcpManager.serversConfig.mcpServers || {};
+            for (const [name, config] of Object.entries(servers)) {
+                if (!mcpManager.clients.has(name)) {
+                    await mcpManager.startClient(name, config);
+                }
+            }
+            // Refresh the tools/MCP panel counts now that servers are up.
+            this.reRender();
+        } catch (e) {
+            console.warn('Failed to start MCP servers:', e);
+        }
+    }
+
     async sendMessage() {
         const textarea = document.getElementById('chat-textarea-input');
         if (!textarea) return;
         const text = textarea.value.trim();
-        if (!text && this.attachments.length === 0) return;
+        if (!text && this.attachments.length === 0 && this.activeSkills.length === 0) return;
         if (this.isGenerating) return;
 
         // Guard: Agent mode requires a workspace path
@@ -1506,8 +1645,31 @@ export class ChatView {
         const attachedImages = this.attachments.filter(a => a.type === 'image');
         const fileAttachments = this.attachments.filter(a => a.type === 'file');
 
-        // Build processedText for API (with appended documents)
-        let processedText = text;
+        // ── Inject active-skill bodies (auto-injection) ──────────────────
+        // Skill files are loaded from disk and prepended to the message sent
+        // to the AI, but NOT shown in the visible bubble (only a small badge).
+        // This keeps the transcript readable while giving the model the full
+        // skill instructions.
+        const skillRefs = [...this.activeSkills];
+        let skillPreamble = '';
+        if (skillRefs.length > 0) {
+            const bodies = [];
+            for (const s of skillRefs) {
+                try {
+                    const body = await skillManager.readContent(s.name);
+                    bodies.push(`# Skill: ${s.title} (/${s.name})\n${body}`);
+                } catch (e) {
+                    console.error(`Failed to load skill "${s.name}":`, e);
+                    this._appendSystemMessage(`⚠️ スキル「${s.name}」の読み込みに失敗しました: ${e.message || e}`);
+                }
+            }
+            if (bodies.length > 0) {
+                skillPreamble = bodies.join('\n\n') + '\n\n---\n\n';
+            }
+        }
+
+        // Build processedText for API (with skill preamble + appended documents)
+        let processedText = skillPreamble + text;
         if (fileAttachments.length > 0) {
             processedText += '\n\n';
             fileAttachments.forEach(file => {
@@ -1515,21 +1677,30 @@ export class ChatView {
             });
         }
 
-        // Save user message in history
-        this.messages.push({ 
-            role: 'user', 
+        // Save user message in history. displayContent stays clean (no skill
+        // body); the skills array drives the badge shown in the bubble.
+        this.messages.push({
+            role: 'user',
             content: processedText,
             displayContent: text,
+            skills: skillRefs.map(s => ({ name: s.name, title: s.title })),
             images: attachedImages.map(img => img.dataUrl),
             files: fileAttachments.map(f => ({ name: f.name, size: f.size }))
         });
 
-        // Clear attachments locally
+        // Clear attachments and active skills locally
         this.attachments = [];
+        this.activeSkills = [];
         this.renderAttachmentPreviews();
+        this.renderSkillChips();
 
         this.saveHistory();
         this._appendLastMessage();   // diff update — no full DOM rebuild
+
+        // Messages container — used by the simple-mode generation loop below for
+        // the thinking indicator and streamed reply bubble. (Was referenced but
+        // never defined in this scope → "chatBody is not defined" in Simple mode.)
+        const chatBody = document.getElementById('chat-messages-container');
 
         // Trigger AI Generation
         this.isGenerating = true;
@@ -1909,23 +2080,55 @@ Your final responses and messages to the user MUST be in Japanese.
             textarea.style.height = textarea.scrollHeight + 'px';
             textarea.focus();
         } else if (item.type === 'skill') {
-            // Load skill content; any text after "/key " becomes extra args
+            // Attach the skill as a chip instead of dumping its body into the
+            // input. The "/key" token is stripped from the textarea; any text
+            // the user typed after "/key " is preserved as their message. The
+            // skill body is injected at send time (see sendMessage).
             const currentValue = textarea.value;
             const afterSlash = currentValue.slice(1);
             const spaceIdx = afterSlash.indexOf(' ');
-            const extraArgs = spaceIdx >= 0 ? afterSlash.slice(spaceIdx + 1) : '';
+            const remainder = spaceIdx >= 0 ? afterSlash.slice(spaceIdx + 1) : '';
 
-            try {
-                const content = await skillManager.buildPrompt(item.key, extraArgs);
-                textarea.value = content;
-                textarea.style.height = 'auto';
-                textarea.style.height = textarea.scrollHeight + 'px';
-                textarea.focus();
-            } catch (e) {
-                console.error('Failed to load skill:', e);
-                alert(`スキルの読み込みに失敗しました: ${e.message || e}`);
+            // Avoid duplicates — re-selecting an active skill is a no-op.
+            if (!this.activeSkills.some(s => s.name === item.key)) {
+                this.activeSkills.push({ name: item.key, title: item.label || item.key });
             }
+            this.renderSkillChips();
+
+            textarea.value = remainder;
+            textarea.style.height = 'auto';
+            textarea.style.height = textarea.scrollHeight + 'px';
+            textarea.focus();
         }
+    }
+
+    /** Render the active-skill chips above the input box. */
+    renderSkillChips() {
+        const container = document.getElementById('chat-input-skills');
+        if (!container) return;
+
+        if (this.activeSkills.length === 0) {
+            container.style.display = 'none';
+            container.innerHTML = '';
+            return;
+        }
+
+        container.style.display = 'flex';
+        container.innerHTML = this.activeSkills.map(s => `
+            <span class="skill-chip" data-name="${escapeHtml(s.name)}" title="Skill: ${escapeHtml(s.name)}">
+                <span class="skill-chip-icon">⚡</span>
+                <span class="skill-chip-label">${escapeHtml(s.title)}</span>
+                <button class="skill-chip-remove" title="Remove skill">✕</button>
+            </span>
+        `).join('');
+
+        container.querySelectorAll('.skill-chip-remove').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const name = btn.closest('.skill-chip').getAttribute('data-name');
+                this.activeSkills = this.activeSkills.filter(s => s.name !== name);
+                this.renderSkillChips();
+            });
+        });
     }
 
     _hideSlashPopup() {
@@ -1938,27 +2141,7 @@ Your final responses and messages to the user MUST be in Japanese.
     // ── End slash popup helpers ─────────────────────────────────────────────
 
     _extractToolCall(response) {
-        if (!response) return null;
-        
-        const jsonMatch = response.match(/```json\s*([\s\S]*?)\s*```/);
-        if (jsonMatch) {
-            try {
-                return JSON.parse(jsonMatch[1]);
-            } catch (e) {
-                try {
-                    const cleanStr = jsonMatch[1].trim();
-                    return JSON.parse(cleanStr);
-                } catch (e2) {}
-            }
-        }
-
-        if (response.trim().startsWith('{') && response.trim().endsWith('}')) {
-            try {
-                return JSON.parse(response);
-            } catch (e) {}
-        }
-
-        return null;
+        return extractToolCall(response);
     }
 
     abortMessage() {
@@ -2055,6 +2238,20 @@ Your final responses and messages to the user MUST be in Japanese.
                     try { pkt = JSON.parse(ev.data); } catch (_) { return; }
                     if (!pkt) return;
 
+                    if (pkt.event === 'confirm_request') {
+                        // The agent paused for approval (plan / command / file write).
+                        // Approval happens in the Monitor view (an OS notification also
+                        // fires) — show a clear pending indicator here.
+                        const isPlan = pkt.data?.type === 'plan_review';
+                        const label = isPlan ? '📋 プラン承認待ち' : '🛡 承認待ち';
+                        const tid = this._activeAgentTaskId || '';
+                        aiContentEl.innerHTML = this._renderAgentSteps(steps, currentStep, streamBuffer || null) +
+                            `<div style="margin-top:10px;padding:10px 12px;border:1px solid var(--accent);border-radius:8px;background:var(--accent-glow,rgba(0,200,255,0.07));font-size:13px;">` +
+                            `<strong>${label}</strong> — <a href="#monitor?id=${tid}" style="color:var(--accent)">Monitorで内容を確認して承認/編集</a>してください。承認後に処理を続行します。</div>`;
+                        chatBody.scrollTop = chatBody.scrollHeight;
+                        return;
+                    }
+
                     if (pkt.event === 'thought' && pkt.data?.text) {
                         // New thought = new step; mark previous step's tool calls done
                         if (currentStep) {
@@ -2094,8 +2291,20 @@ Your final responses and messages to the user MUST be in Japanese.
                         // Prefer the full task response (message). Fall back to any streamed
                         // text, then a finish_task summary, then a last-resort placeholder.
                         const finalMsg = pkt.data?.message || streamBuffer || pkt.data?.summary || '(task complete)';
+                        // Modified/created files: prefer the structured resultSummary,
+                        // else derive from the raw modifiedFiles array.
+                        const resultFiles = (pkt.data?.resultSummary?.files && pkt.data.resultSummary.files.length)
+                            ? pkt.data.resultSummary.files
+                            : filesFromModified(pkt.data?.modifiedFiles);
                         aiContentEl.innerHTML = formatMessageContent(finalMsg);
-                        this.messages.push({ role: 'assistant', content: finalMsg });
+                        if (resultFiles && resultFiles.length > 0) {
+                            ensureResultViewStyles();
+                            // Clicks are handled by the delegated [data-open-path]
+                            // listener on the chat container — no per-element bind.
+                            aiContentEl.insertAdjacentHTML('beforeend', renderFileList(resultFiles));
+                        }
+                        // Persist files on the message so loadHistory can re-render the links.
+                        this.messages.push({ role: 'assistant', content: finalMsg, resultFiles });
                         this.saveHistory();
                         resolve();
 
@@ -2145,98 +2354,11 @@ Your final responses and messages to the user MUST be in Japanese.
      * Returns { observe, plan, call, raw } — fields are null if absent.
      */
     _parseThought(raw) {
-        if (!raw) return { observe: null, plan: null, call: null, raw: null };
-        // Strip <thought> XML wrapper if present
-        let text = raw.replace(/^[\s\S]*?<thought>([\s\S]*?)<\/thought>[\s\S]*$/, '$1').trim();
-        if (!text) text = raw.trim();
-
-        // Normalise pipe-separated format to newline-separated
-        text = text.replace(/\s*\|\s*(OBSERVE|PLAN|CALL):/gi, '\n$1:');
-
-        const get = (label) => {
-            const re = new RegExp(`${label}:\\s*(.+?)(?=\\n(?:OBSERVE|PLAN|CALL):|$)`, 'is');
-            const m = text.match(re);
-            return m ? m[1].trim() : null;
-        };
-        const observe = get('OBSERVE');
-        const plan    = get('PLAN');
-        const call    = get('CALL');
-
-        if (!observe && !plan && !call) {
-            // Unstructured — treat whole string as raw plan text
-            return { observe: null, plan: null, call: null, raw: text };
-        }
-        return { observe, plan, call, raw: null };
+        return parseThought(raw);
     }
 
-    /**
-     * Render accumulated agent steps as collapsible HTML blocks.
-     * @param {Array}  steps        Completed steps [{thought, toolCalls, completed}]
-     * @param {Object} currentStep  In-progress step (null when done)
-     * @param {string} streamContent  Partial streaming text from the final response
-     */
     _renderAgentSteps(steps, currentStep, streamContent) {
-        const allSteps = currentStep ? [...steps, currentStep] : [...steps];
-        let html = '';
-
-        if (allSteps.length > 0) {
-            html += '<div class="agent-steps-container">';
-            allSteps.forEach((step, i) => {
-                const isLast = i === allSteps.length - 1;
-                const rawThought = step.thought
-                    ? (typeof step.thought === 'string' ? step.thought : JSON.stringify(step.thought))
-                    : null;
-
-                const opc = this._parseThought(rawThought);
-
-                // Summary line shown in the collapsed header:
-                // prefer PLAN (what's being done), else OBSERVE, else tool names
-                const summaryBase = opc.plan || opc.observe || opc.raw
-                    || (step.toolCalls.length > 0 ? step.toolCalls.map(tc => tc.name).join(', ') : 'Processing…');
-                const summary = summaryBase.replace(/^\[[\w\s\/]+\]\s*/, '').substring(0, 80)
-                    + (summaryBase.length > 80 ? '…' : '');
-
-                html += `<details class="agent-step-block"${isLast ? ' open' : ''}>`;
-                html += `<summary><span class="agent-step-num">Step ${i + 1}</span>`;
-                html += `<span class="agent-step-label">${escapeHtml(summary)}</span></summary>`;
-                html += `<div class="agent-step-body">`;
-
-                // Structured OBSERVE / PLAN / CALL display
-                if (opc.observe || opc.plan || opc.call) {
-                    html += `<div class="agent-opc">`;
-                    if (opc.observe) {
-                        html += `<div class="agent-opc-row"><span class="agent-opc-label observe">Observe</span><span class="agent-opc-text">${escapeHtml(opc.observe)}</span></div>`;
-                    }
-                    if (opc.plan) {
-                        html += `<div class="agent-opc-row"><span class="agent-opc-label plan">Plan</span><span class="agent-opc-text">${escapeHtml(opc.plan)}</span></div>`;
-                    }
-                    if (opc.call) {
-                        html += `<div class="agent-opc-row"><span class="agent-opc-label call">Call</span><span class="agent-opc-text">${escapeHtml(opc.call)}</span></div>`;
-                    }
-                    html += `</div>`;
-                } else if (opc.raw) {
-                    // Unstructured thought — show as plain text
-                    html += `<div class="agent-thought-text">${escapeHtml(opc.raw)}</div>`;
-                }
-
-                // Tool call badges
-                step.toolCalls.forEach(tc => {
-                    const icon = tc.status === 'running' ? '⏳' : tc.status === 'error' ? '❌' : '✅';
-                    html += `<div class="agent-tool-badge">${icon} ${escapeHtml(tc.name)}</div>`;
-                });
-
-                html += `</div></details>`;
-            });
-            html += '</div>';
-        }
-
-        if (streamContent) {
-            html += `<div class="agent-final-content">${formatMarkdown(streamContent)}</div>`;
-        } else if (allSteps.length === 0) {
-            html = '<em>🤖 Agent starting…</em>';
-        }
-
-        return html;
+        return renderAgentSteps(steps, currentStep, streamContent);
     }
 
     updateSendButtonState() {
@@ -2289,107 +2411,7 @@ Your final responses and messages to the user MUST be in Japanese.
      * without triggering a full DOM replacement.
      */
     _renderMessageHtml(msg, index) {
-        // Tool call bubble
-        if (msg.isToolCall) {
-            const toolCalls = msg.toolCalls || [];
-            let thoughtsHtml = '';
-            const parsed = this._extractToolCall(msg.content);
-            if (parsed && parsed.thought) {
-                thoughtsHtml = `
-                    <details class="thought-process-block" open>
-                        <summary>思考プロセス（ツール選択）</summary>
-                        <div class="thought-process-content">${formatMarkdown(parsed.thought)}</div>
-                    </details>
-                `;
-            }
-            return `
-                <div class="chat-message-row msg-ai" style="width: 100%;">
-                    <div class="message-bubble" style="background: var(--bg-secondary); border-color: var(--border-light); max-width: 85%; width: 100%; border-radius: 12px 12px 12px 2px; padding: 12px 16px; margin-bottom: 8px;">
-                        ${thoughtsHtml}
-                        <div style="display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: var(--accent); margin-bottom: 8px;">
-                            <span>🛠️ ツール呼び出し中</span>
-                        </div>
-                        <div style="display: flex; flex-direction: column; gap: 8px;">
-                            ${toolCalls.map(tc => `
-                                <div style="background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px;">
-                                    <div style="font-family: var(--font-mono); font-size: 12.5px; font-weight: 600; color: var(--text-primary);">${escapeHtml(tc.name)}</div>
-                                    <pre style="margin: 4px 0 0 0; background: var(--bg-primary); padding: 6px; border-radius: 4px; overflow-x: auto; font-family: var(--font-mono); font-size: 11.5px; color: var(--text-secondary);"><code>${escapeHtml(JSON.stringify(tc.args, null, 2))}</code></pre>
-                                </div>
-                            `).join('')}
-                        </div>
-                    </div>
-                </div>
-            `;
-        }
-
-        // Tool result bubble
-        if (msg.isToolResult) {
-            const results = msg.results || [];
-            return `
-                <div class="chat-message-row msg-user" style="width: 100%; justify-content: flex-end;">
-                    <div class="message-bubble" style="background: hsla(185, 100%, 55%, 0.03); border-color: var(--border-light); max-width: 85%; width: 100%; border-radius: 12px 12px 2px 12px; padding: 10px 14px; margin-bottom: 8px;">
-                        <details style="outline: none;">
-                            <summary style="cursor: pointer; font-size: 12.5px; font-weight: 500; color: var(--text-secondary); user-select: none;">
-                                ➜ ツール実行結果 (${results.length}件)
-                            </summary>
-                            <div style="margin-top: 8px; display: flex; flex-direction: column; gap: 8px;">
-                                ${results.map(r => {
-                                    const isErr = typeof r.result === 'string' && r.result.startsWith('Error');
-                                    return `
-                                        <div style="border-top: 1px solid var(--border-light); padding-top: 8px;">
-                                            <div style="font-size: 11.5px; font-weight: 600; color: ${isErr ? 'var(--error)' : 'var(--text-secondary)'}; margin-bottom: 4px;">
-                                                <strong>${escapeHtml(r.tool_call_name)}</strong> の結果:
-                                            </div>
-                                            <pre style="margin: 0; background: var(--bg-primary); padding: 8px; border-radius: 6px; overflow-x: auto; font-family: var(--font-mono); font-size: 11.5px; color: ${isErr ? 'var(--error)' : 'var(--text-primary)'}; white-space: pre-wrap; max-height: 250px; overflow-y: auto;"><code>${escapeHtml(typeof r.result === 'string' ? r.result : JSON.stringify(r.result, null, 2))}</code></pre>
-                                        </div>
-                                    `;
-                                }).join('')}
-                            </div>
-                        </details>
-                    </div>
-                </div>
-            `;
-        }
-
-        // Regular user / assistant bubble
-        const isUser = msg.role === 'user';
-        let attachmentsHtml = '';
-
-        if (msg.images && msg.images.length > 0) {
-            attachmentsHtml += `<div class="chat-bubble-images" style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px;">`;
-            msg.images.forEach(imgUrl => {
-                attachmentsHtml += `<img src="${imgUrl}" style="max-height: 180px; max-width: 100%; border-radius: 6px; border: 1px solid var(--border); cursor: pointer;" onclick="const w=window.open(); w.document.write('<img src=\''+this.src+'\' style=\'max-width:100%; height:auto;\'>')">`;
-            });
-            attachmentsHtml += `</div>`;
-        }
-
-        if (msg.files && msg.files.length > 0) {
-            attachmentsHtml += `<div class="chat-bubble-files" style="display: flex; flex-direction: column; gap: 4px; margin-top: 8px;">`;
-            msg.files.forEach(f => {
-                attachmentsHtml += `
-                    <div style="display: flex; align-items: center; gap: 8px; background: var(--bg-tertiary); border: 1px solid var(--border); padding: 6px 12px; border-radius: 6px; font-size: 12px; width: fit-content;">
-                        <span>📄</span>
-                        <span style="font-weight: 500;">${escapeHtml(f.name)}</span>
-                        <span style="color: var(--text-tertiary); font-size: 11px;">(${(f.size / 1024).toFixed(1)} KB)</span>
-                    </div>
-                `;
-            });
-            attachmentsHtml += `</div>`;
-        }
-
-        const mainContentHtml = isUser ? formatMarkdown(msg.displayContent || msg.content) : formatMessageContent(msg.content);
-        const isError = msg.isError;
-        const bubbleStyle = isError ? 'border-style: solid; border-color: var(--error); background: var(--error-bg);' : '';
-        const contentStyle = isError ? 'color: var(--error); font-weight: 500;' : '';
-
-        return `
-            <div class="chat-message-row ${isUser ? 'msg-user' : 'msg-ai'}">
-                <div class="message-bubble" style="${bubbleStyle}">
-                    <div class="message-content" style="${contentStyle}">${mainContentHtml}</div>
-                    ${attachmentsHtml}
-                </div>
-            </div>
-        `;
+        return renderMessageHtml(msg);
     }
 
     /**
@@ -2455,38 +2477,15 @@ Your final responses and messages to the user MUST be in Japanese.
     }
 
     getSessions() {
-        const key = 'direct_ai_sessions';
-        try {
-            return JSON.parse(localStorage.getItem(key) || '{"activeSessionId": null, "sessions": {}}');
-        } catch {
-            return { activeSessionId: null, sessions: {} };
-        }
+        return parseSessions(localStorage.getItem(CHAT_SESSIONS_KEY));
     }
 
     saveSessions(data) {
-        const key = 'direct_ai_sessions';
-        const sessions = data.sessions || {};
-        const sessionIds = Object.keys(sessions);
-
-        // Limit total stored sessions to 20
-        if (sessionIds.length > 20) {
-            const sorted = Object.values(sessions).sort((a, b) => a.timestamp - b.timestamp);
-            const toRemoveCount = sorted.length - 20;
-            for (let i = 0; i < toRemoveCount; i++) {
-                const oldest = sorted[i];
-                delete data.sessions[oldest.id];
-                if (data.activeSessionId === oldest.id) {
-                    data.activeSessionId = null;
-                }
-            }
-            if (!data.activeSessionId && Object.keys(data.sessions).length > 0) {
-                const remaining = Object.values(data.sessions).sort((a, b) => b.timestamp - a.timestamp);
-                data.activeSessionId = remaining[0].id;
-            }
-        }
+        // Cap to the most-recent N sessions (pure logic → chat/chatSessions.js).
+        pruneSessions(data);
 
         // Primary: localStorage (synchronous, always available)
-        localStorage.setItem(key, JSON.stringify(data));
+        localStorage.setItem(CHAT_SESSIONS_KEY, JSON.stringify(data));
 
         // Secondary: file-based backup (async, non-blocking).
         // Provides persistence across localStorage clears and larger storage.
@@ -2666,163 +2665,4 @@ Your final responses and messages to the user MUST be in Japanese.
         overlay.appendChild(content);
         document.body.appendChild(overlay);
     }
-}
-
-function escapeHtml(str) {
-    if (!str) return '';
-    return str.replace(/&/g, "&amp;")
-              .replace(/</g, "&lt;")
-              .replace(/>/g, "&gt;")
-              .replace(/"/g, "&quot;")
-              .replace(/'/g, "&#039;");
-}
-
-function formatMessageContent(text) {
-    if (!text) return '';
-    
-    let thinkHtml = '';
-    let contentText = text;
-    
-    if (text.includes('<think>')) {
-        const parts = text.split('<think>');
-        const preThink = parts[0];
-        const postThink = parts[1];
-        
-        if (postThink.includes('</think>')) {
-            const postThinkParts = postThink.split('</think>');
-            const thinkText = postThinkParts[0];
-            const restText = postThinkParts[1] || '';
-            
-            thinkHtml = `
-                <details class="thought-process-block" open>
-                    <summary>Thought Process (Completed)</summary>
-                    <div class="thought-process-content">${formatMarkdown(thinkText)}</div>
-                </details>
-            `;
-            contentText = preThink + restText;
-        } else {
-            thinkHtml = `
-                <details class="thought-process-block" open>
-                    <summary>Thought Process (Thinking...)</summary>
-                    <div class="thought-process-content thought-process-streaming">${formatMarkdown(postThink)}</div>
-                </details>
-            `;
-            contentText = preThink;
-        }
-    }
-    
-    return thinkHtml + formatMarkdown(contentText);
-}
-
-function formatMarkdown(text) {
-    if (!text) return '';
-    
-    let html = escapeHtml(text);
-    
-    // Code blocks with syntax highlighting layout
-    html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (match, lang, code) => {
-        return `<div class="code-block-wrapper">
-            <div class="code-block-header">
-                <span class="code-block-lang">${lang || 'code'}</span>
-                <button class="btn-copy-code" onclick="navigator.clipboard.writeText(this.parentElement.nextElementSibling.innerText); this.innerText='Copied!'; setTimeout(() => this.innerText='Copy', 2000);">Copy</button>
-            </div>
-            <pre><code class="language-${lang}">${code.trim()}</code></pre>
-        </div>`;
-    });
-    
-    // Inline code
-    html = html.replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>');
-    
-    // Tables parser
-    const lines = html.split('\n');
-    let inTable = false;
-    let tableHeaders = [];
-    let tableRows = [];
-    let newLines = [];
-    
-    for (let i = 0; i < lines.length; i++) {
-        const line = lines[i].trim();
-        if (line.startsWith('|') && line.endsWith('|')) {
-            const cells = line.split('|').map(c => c.trim()).filter((c, idx, arr) => idx > 0 && idx < arr.length - 1);
-            if (!inTable) {
-                const nextLine = lines[i+1] ? lines[i+1].trim() : '';
-                if (nextLine.startsWith('|') && nextLine.includes('-')) {
-                    inTable = true;
-                    tableHeaders = cells;
-                    i++; // skip separator
-                    continue;
-                }
-            }
-            if (inTable) {
-                tableRows.push(cells);
-                continue;
-            }
-        }
-        
-        if (inTable && !(line.startsWith('|') && line.endsWith('|'))) {
-            newLines.push(renderTableHtml(tableHeaders, tableRows));
-            inTable = false;
-            tableHeaders = [];
-            tableRows = [];
-        }
-        
-        newLines.push(lines[i]);
-    }
-    
-    if (inTable) {
-        newLines.push(renderTableHtml(tableHeaders, tableRows));
-    }
-    
-    html = newLines.join('\n');
-    
-    // Headers
-    html = html.replace(/^######\s+(.+)$/gm, '<h6>$1</h6>');
-    html = html.replace(/^#####\s+(.+)$/gm, '<h5>$1</h5>');
-    html = html.replace(/^####\s+(.+)$/gm, '<h4>$1</h4>');
-    html = html.replace(/^###\s+(.+)$/gm, '<h3>$1</h3>');
-    html = html.replace(/^##\s+(.+)$/gm, '<h2>$1</h2>');
-    html = html.replace(/^#\s+(.+)$/gm, '<h1>$1</h1>');
-    
-    // Blockquotes
-    html = html.replace(/^&gt;\s+(.+)$/gm, '<blockquote>$1</blockquote>');
-    
-    // Bold & Italic
-    html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-    html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
-    html = html.replace(/_([^_]+)_/g, '<em>$1</em>');
-    
-    // Lists
-    html = html.replace(/^\s*[-*]\s+(.+)$/gm, '<li>$1</li>');
-    html = html.replace(/^\s*\d+\.\s+(.+)$/gm, '<li class="ol-item">$1</li>');
-    
-    html = html.replace(/(<li>.*<\/li>)/gs, (match) => {
-        if (match.includes('ol-item')) {
-            return `<ol>${match.replace(/ class="ol-item"/g, '')}</ol>`;
-        } else {
-            return `<ul>${match}</ul>`;
-        }
-    });
-    
-    // Line breaks
-    const blocks = html.split(/(<div class="code-block-wrapper">[\s\S]*?<\/div>|<pre>[\s\S]*?<\/pre>|<table>[\s\S]*?<\/table>|<ul>[\s\S]*?<\/ul>|<ol>[\s\S]*?<\/ol>)/g);
-    for (let k = 0; k < blocks.length; k++) {
-        const b = blocks[k];
-        if (!b.startsWith('<div class="code-block-wrapper"') && !b.startsWith('<pre') && !b.startsWith('<table') && !b.startsWith('<ul') && !b.startsWith('<ol')) {
-            blocks[k] = b.replace(/\n/g, '<br>');
-        }
-    }
-    html = blocks.join('');
-    
-    return html;
-}
-
-function renderTableHtml(headers, rows) {
-    const headerHtml = headers.map(h => `<th>${h}</th>`).join('');
-    const rowsHtml = rows.map(r => `<tr>${r.map(cell => `<td>${cell}</td>`).join('')}</tr>`).join('');
-    return `<div class="table-wrap">
-        <table>
-            <thead><tr>${headerHtml}</tr></thead>
-            <tbody>${rowsHtml}</tbody>
-        </table>
-    </div>`;
 }

@@ -72,3 +72,28 @@ pub async fn auth_middleware(
 /// Wrapper type to store the auth token in request extensions.
 #[derive(Clone, Debug)]
 pub struct AuthToken(pub String);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_is_32_hex_chars() {
+        let t = generate_token();
+        assert_eq!(t.len(), 32, "token should be 16 bytes => 32 hex chars");
+        assert!(t.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn tokens_are_unique() {
+        // Extremely unlikely to collide for a 128-bit random token.
+        let a = generate_token();
+        let b = generate_token();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn hex_encode_pads_each_byte() {
+        assert_eq!(hex_encode(&[0x00, 0x0f, 0xff]), "000fff");
+    }
+}

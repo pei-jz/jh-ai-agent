@@ -5,6 +5,13 @@ import { contextBuilder, ContextBuilder } from './ContextBuilder.js';
 import { conversationMemory } from './ConversationMemory.js';
 import { jsonrepair } from 'jsonrepair';
 import { invoke } from '@tauri-apps/api/core';
+import {
+    safeParseJSON, extractToolCall, extractAllPossibleToolCalls,
+    extractThoughtFromMalformedText, cleanFinalResponse
+} from './agent/ResponseParser.js';
+import { detectCycle } from './agent/LoopDetector.js';
+import { normalizeSafetyLimits } from './agent/SafetyLimits.js';
+import { buildRecoveryHint } from './agent/RecoveryHints.js';
 
 export class AgentController {
     constructor() {
@@ -30,6 +37,21 @@ export class AgentController {
         // edits in Settings → LLM Connections take effect without a restart.
         // (If the user removed the previously-active instance, this re-picks the first available one.)
         await llmService.initFromConfig();
+
+        // Surface the tool-calling mode once, so it's clear WHY argument typos
+        // happen: in JSON-text mode the model hand-writes tool-call JSON (param
+        // keys, commas, quotes) → structural typos. Native function-calling has
+        // the API enforce the schema, eliminating that class of error.
+        try {
+            const nativeMode = llmService.supportsNativeTools?.();
+            const provider = llmService.getCurrentProvider?.() || '?';
+            onAgentStatus?.({
+                event: 'status', status: 'running',
+                message: nativeMode
+                    ? `Tool calling: native function API (${provider}) — argument schema enforced.`
+                    : `Tool calling: JSON-text mode (${provider} has no native function calls) — expect more argument typos. An OpenAI/Anthropic/Gemini/Azure connection enables schema-enforced calls.`
+            });
+        } catch (_) { /* non-critical */ }
 
         workflowManager.setPhase(WorkflowPhases.RESEARCH);
         
@@ -62,12 +84,50 @@ export class AgentController {
         let toolCallHistory = [];
         let usedToolTypes = new Set();
 
+        // ── Expand Intent/Recipe (behavior.intent) into behavior fields ──
+        // A named AI action declared by the calling app. Inline-object form
+        // { systemPrompt?, tools?[], resultKind? } is expanded here into the
+        // existing enabled_tools / extra_instructions plumbing so the rest of
+        // the loop needs no special-casing. (String-id resolution against a
+        // per-app intent registry is a future step.)
+        this._intentTier = null;   // reset per run (controller may be reused)
+        this._modelOverride = null;
+        this._deepModelId = null;
+        this._applyIntent();
+
         // ── Load all Agent Safety Limits from config ─────────────────
         // For each field: 0 / null / undefined / non-numeric is treated as
         // "disabled / unlimited". Any positive integer is the hard threshold.
         const safety = await this._loadSafetyLimits();
         // Apply the configurable history-budget ratio to the compaction logic.
         conversationMemory.setBudgetConfig({ ratio: safety.historyBudgetRatio });
+        // Low temperature for agent edits (fewer transcription typos). Applied only
+        // when the active connection has no explicit temperature set (respects user config).
+        this._agentTemperature = safety.agentTemperature;
+        // Plan-first gate: a complex task (or planMode='always') must propose a plan
+        // and get USER approval before any mutating tool runs. Applied to the tool
+        // executor AFTER startSession() (which resets the gate). 'off' disables it.
+        this._planRequired = safety.planMode === 'always'
+            || (safety.planMode === 'auto' && this._looksComplex(prompt));
+        // Model routing (fast/deep tiers) + auto-escalation. fast = default for
+        // quick/app-intent tasks; deep = complex/plan-first tasks and escalation.
+        const tierModels = await this._resolveTierModels();
+        this._deepModelId = tierModels.deep;
+        this._modelOverride = this._planRequired
+            ? (tierModels.deep || tierModels.fast || null)
+            : (tierModels.initial || null);
+        this._escalateAtStep = Math.max(6, Math.ceil((safety.maxIterations || 30) * 0.5));
+        if (this._modelOverride) {
+            onAgentStatus?.({ event: 'status', status: 'running', message: `🧭 モデル: ${this._modelOverride}${this._planRequired ? ' (deep / plan-first)' : ''}` });
+        }
+        // Load long-term memory (episodic summaries + durable facts) from disk so
+        // ContextBuilder can inject relevant context into the system prompt. Cheap
+        // and best-effort; getPromptContext degrades to '' if nothing is loaded.
+        try {
+            await conversationMemory.loadMemory(workspacePath);
+        } catch (e) {
+            console.warn('AgentController: loadMemory failed:', e);
+        }
         this.baseMaxIterations = safety.maxSteps;
         // Per-task override from behavior (e.g. REST API caller). 0 stays unlimited.
         if (this.behaviorOverrides && Number.isFinite(this.behaviorOverrides.max_iterations)) {
@@ -97,10 +157,13 @@ export class AgentController {
             'create_artifact', 'update_artifact',
             'run_command',     // count as progress — conservative (avoids false stops)
             'delete_file', 'move_file',
+            'propose_plan',    // planning counts as progress (avoids no-progress stop while investigating)
             'finish_task',     // terminal — also counts as "progress" (will end loop)
         ]);
 
         await toolExecutor.startSession(workspacePath);
+        // Arm the plan gate for this session (mutating tools blocked until approval).
+        toolExecutor.setPlanGate(this._planRequired);
 
         // Invalidate ContextBuilder's static cache so the new session gets a
         // fresh build (picks up any persona/config changes since last run).
@@ -113,7 +176,12 @@ export class AgentController {
         // Apply behavior's enabled_tools allowlist (if any). null/undefined means
         // unrestricted (default); an empty array disables all tools except finish_task.
         if (this.behaviorOverrides && Array.isArray(this.behaviorOverrides.enabled_tools)) {
-            toolExecutor.setToolAllowlist(this.behaviorOverrides.enabled_tools);
+            // Only add the planning/progress control tools when this task is
+            // plan-required or complex; single-shot app intents stay minimal
+            // (finish_task + present_result) to avoid needless over-planning.
+            toolExecutor.setToolAllowlist(this.behaviorOverrides.enabled_tools, {
+                includePlanTools: this._planRequired,
+            });
         }
         // Apply MCP server filter (if any) — restricts which MCP servers contribute tools.
         if (this.behaviorOverrides && Array.isArray(this.behaviorOverrides.mcp_servers)) {
@@ -121,6 +189,10 @@ export class AgentController {
         } else {
             toolExecutor.setMcpServerFilter(null);
         }
+
+        // Apply per-task MCP context (e.g. {app,windowId,documentId}) — injected
+        // into tools/call _meta.jhai so app-hosted MCP servers resolve live state.
+        toolExecutor.setMcpContext(this.behaviorOverrides ? this.behaviorOverrides.mcp_context : null);
 
         // Bind tool executor event forwarding
         toolExecutor.onToolEvent = (event, data) => {
@@ -199,6 +271,13 @@ export class AgentController {
                 }
             }
 
+            // ── Auto-escalate fast→deep tier for long-running tasks ──
+            if (this._deepModelId && this._modelOverride !== this._deepModelId
+                && iteration >= this._escalateAtStep) {
+                this._modelOverride = this._deepModelId;
+                onAgentStatus?.({ event: 'status', status: 'running', message: `🧠 上位モデル(deep)に切替 — step ${iteration} 到達` });
+            }
+
             // ── Token budget enforcement (cumulativeTokens updated below per LLM call) ──
             if (safety.tokenBudget > 0) {
                 if (cumulativeTokens >= safety.tokenBudget) {
@@ -230,14 +309,26 @@ export class AgentController {
                 onAgentStatus?.({ event: 'status', status: 'running', message: `📌 Steering applied: "${preview}"` });
             }
 
-            // On the first iteration, force the agent to register subtasks when
-            // the prompt looks like a multi-step task. This runtime injection is
-            // more salient than a static rule and reduces "lost progress on compaction".
-            if (iteration === 1 && this._looksComplex(prompt)) {
-                history.push({
-                    role: 'user',
-                    content: '[Planning Required] This task has multiple steps. Your VERY FIRST tool call MUST be `task_progress(action="set", items=[...])` — list every subtask before touching any file or running any command. After registering, proceed immediately with execution without waiting for confirmation.'
-                });
+            // First-iteration planning injection. With the plan gate ON (complex
+            // task / planMode), enforce investigate → propose_plan → APPROVAL →
+            // execute. Otherwise fall back to the lighter "register subtasks" nudge.
+            if (iteration === 1) {
+                if (this._planRequired) {
+                    history.push({
+                        role: 'user',
+                        content: '[Plan-First Required] This is a complex task. Workflow you MUST follow:\n' +
+                            '1. INVESTIGATE only (read_file / grep_search / list_files) until you understand the change and its impact across the codebase.\n' +
+                            '2. Call `propose_plan` with the work split into ordered PHASES (e.g. Investigation → Implementation → Verification). The user reviews and may EDIT it.\n' +
+                            '3. WAIT for approval. Editing files or running commands is BLOCKED until the plan is approved.\n' +
+                            '4. After approval, execute PHASE BY PHASE, tracking progress with `task_progress`.\n' +
+                            'Do NOT make any changes before the plan is approved.'
+                    });
+                } else if (this._looksComplex(prompt)) {
+                    history.push({
+                        role: 'user',
+                        content: '[Planning Required] This task has multiple steps. Your VERY FIRST tool call MUST be `task_progress(action="set", items=[...])` — list every subtask before touching any file or running any command. After registering, proceed immediately with execution without waiting for confirmation.'
+                    });
+                }
             }
 
             const startTime = Date.now();
@@ -250,7 +341,7 @@ export class AgentController {
                 try {
                     const currentModel = llmService.getCurrentModel() || '';
                     this._compressToolResultsInHistory(history);
-                    let compactedHistory = await conversationMemory.compactHistory(history, currentModel, toolExecutor.getFileCache());
+                    let compactedHistory = await conversationMemory.compactHistory(history, currentModel, toolExecutor.getFileCache(), onLog);
 
                     // ── Apply caller's behavior overrides ──────────────────
                     // If the task was started via REST API with a `behavior` field
@@ -292,8 +383,12 @@ export class AgentController {
                         }
                     } catch (_) { /* token estimation is non-critical */ }
 
-                    // Phase 4: Use _generateWithHistory which tries native tools first
-                    genResult = await this._generateWithHistory(compactedHistory, systemPrompt, abortSignal, kisContext, images, onUpdate);
+                    // Phase 4: Use _generateWithHistory which tries native tools first.
+                    // Send attached images ONLY on the first step — base64 images are
+                    // huge, and re-sending them every iteration wastes tokens (the model
+                    // has already analyzed them into its history). Subsequent steps run text-only.
+                    const stepImages = (iteration === 1) ? images : [];
+                    genResult = await this._generateWithHistory(compactedHistory, systemPrompt, abortSignal, kisContext, stepImages, onUpdate);
                     
                     if (compactedHistory.length < history.length) {
                         history = compactedHistory;
@@ -418,6 +513,26 @@ export class AgentController {
                     }
                 } catch (e) {}
 
+                // Capture the FULL raw request payload for the per-task Monitor view
+                // (replaces the old global Settings → API Logs). tools are only sent
+                // as a native array when the provider supports function-calling;
+                // in JSON-text mode they're embedded in system_prompt instead.
+                let reqTools = [];
+                let reqModel = '';
+                let reqTemp = null;
+                let reqMaxTokens = null;
+                let reqMode = 'json-text';
+                try {
+                    reqModel = llmService.getCurrentModel?.() || '';
+                    reqMode = llmService.supportsNativeTools?.() ? 'native' : 'json-text';
+                    if (reqMode === 'native' && toolExecutor.getToolsForNativeAPI) {
+                        reqTools = toolExecutor.getToolsForNativeAPI();
+                    }
+                    const ut = llmService.getCurrentTemperature?.();
+                    reqTemp = (ut === null || ut === undefined) ? (this._agentTemperature ?? null) : ut;
+                    reqMaxTokens = llmService.currentMaxOutputTokens ?? null;
+                } catch (_) { /* logging only — non-critical */ }
+
                 onLog({
                     method: 'CHAT',
                     status: 200,
@@ -427,10 +542,15 @@ export class AgentController {
                     url: url,
                     headers: headers,
                     request: {
-                        url: url,
-                        headers: headers,
+                        model: reqModel,
+                        tool_calling: reqMode,
+                        temperature: reqTemp,
+                        max_tokens: reqMaxTokens,
                         system_prompt: systemPrompt,
-                        history: history
+                        history: history,
+                        tools: reqTools,
+                        url: url,
+                        headers: headers
                     },
                     response: content
                 });
@@ -471,12 +591,10 @@ export class AgentController {
                 toolCallHistory.push(...currentToolCalls);
                 toolCall.tool_calls.forEach(tc => usedToolTypes.add(tc.name));
 
-                // Phase 4: legacy "expand maxIterations when many tools used" hack —
-                // only meaningful when there is a hard step cap. In unlimited mode
-                // (this.maxIterations === 0) we skip it entirely.
-                if (this.maxIterations > 0 && usedToolTypes.size >= 5 && this.maxIterations < 20) {
-                    this.maxIterations = 20;
-                }
+                // (Removed legacy hack that silently bumped maxIterations to a
+                // hardcoded 20 when ≥5 tool types were used — it overrode the user's
+                // configured step cap. We now always honor the configured limit;
+                // raise Settings → General → Max Steps if more headroom is needed.)
 
                 if (currentSignature === lastToolCallSignature) {
                     repeatCount++;
@@ -641,23 +759,8 @@ export class AgentController {
                     consecutiveErrorCount = 0;
                 }
 
-                // Phase 4: Detailed recovery hints based on error type (from JHEditor)
-                let recoveryHint = '';
-                if (hasErrors) {
-                    const errorResults = results.filter(r => typeof r.result === 'string' && r.result.startsWith('Error'));
-                    for (const er of errorResults) {
-                        const errMsg = er.result.toLowerCase();
-                        if (errMsg.includes('user denied') || errMsg.includes('rejected') || errMsg.includes('blocked')) {
-                            recoveryHint += `\n[Important] The user denied command/tool execution. DO NOT attempt the identical operation again. Pivot to an alternative approach or report to the user.`;
-                        } else if (errMsg.includes('not found') || errMsg.includes('no such file')) {
-                            recoveryHint += `\n[Self-Correction Hint] File not found. Verify paths using list_files or grep_search.`;
-                        } else if (errMsg.includes('invalid line range') || errMsg.includes('does not match')) {
-                            recoveryHint += `\n[Self-Correction Hint] Line range does not match. Re-read the file using read_file to check current contents.`;
-                        } else {
-                            recoveryHint += `\n[Self-Correction Hint] Run verification checks after edits. If errors occur, update your plan and retry. Please bundle verifications after major changes rather than running tests after every single line edit.\n`;
-                        }
-                    }
-                }
+                // Recovery hints by error type → ./agent/RecoveryHints.js (unit-tested).
+                let recoveryHint = hasErrors ? buildRecoveryHint(results) : '';
 
                 if (consecutiveErrorCount >= 3) {
                     recoveryHint += `\n[Critical Warning] Encountered ${consecutiveErrorCount} consecutive errors. Re-evaluate your approach or report status to the user.`;
@@ -726,7 +829,18 @@ export class AgentController {
                 // This avoids an extra LLM round-trip just to confirm termination.
                 if (toolExecutor.isTaskCompleted && toolExecutor.isTaskCompleted()) {
                     const ftResult = results.find(r => r.tool_call_name === 'finish_task');
-                    finalResponse = ftResult?.result || response;
+                    // Prefer the model's FULL answer (its `thought` on the finishing turn,
+                    // e.g. a rich markdown reply) over finish_task's one-line `summary`,
+                    // so the Result tab shows the actual content, not just a recap.
+                    let richThought = '';
+                    if (toolCall?.thought) {
+                        richThought = typeof toolCall.thought === 'string'
+                            ? toolCall.thought
+                            : (toolCall.thought.current_task || '');
+                    }
+                    richThought = this._cleanFinalResponse(richThought || '').trim();
+                    const ftSummary = (ftResult?.result || '').trim();
+                    finalResponse = (richThought.length >= 40) ? richThought : (ftSummary || richThought || response);
                     onAgentStatus?.({ event: 'status', status: 'completed', message: 'Task finished. ✅' });
                     break;
                 }
@@ -843,12 +957,96 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
             finalResponse = (finalResponse || '') + "\n\n(注意: 最大ステップ数に達したため、処理を中断しました。)";
         }
 
+        // Capture session artifacts BEFORE endSession (which nulls workspacePath).
+        const modifiedFiles = toolExecutor.getModifiedFiles();
+        const sessionId = toolExecutor.getCurrentSessionId();
+        const wsPath = workspacePath || toolExecutor.workspacePath;
+
+        // Build the structured result summary (markdown + file table) consumed by
+        // the "Result" tab (MonitorView) and the chat file list (ChatView), and
+        // returned to REST API callers via the `complete` event.
+        const resultSummary = await this._buildResultSummary(finalResponse, modifiedFiles, onLog);
+
+        // Long-term memory: record this completed session to the durable journal +
+        // facts store. (Previously addEntry existed but was never called — LTM was
+        // effectively dormant.) Best-effort; never block completion on it.
+        try {
+            await conversationMemory.addEntry(prompt, finalResponse, sessionId, wsPath, onLog);
+        } catch (e) {
+            console.warn('AgentController: LTM addEntry failed:', e);
+        }
+
         toolExecutor.endSession();
 
         return {
             response: finalResponse,
-            modifiedFiles: toolExecutor.getModifiedFiles()
+            modifiedFiles,
+            resultSummary
         };
+    }
+
+    /**
+     * Build a structured result summary for the post-run "Result" view.
+     * @param {string} finalResponse - the agent's final summary text (markdown-ish)
+     * @param {Array}  modifiedFiles - [{ path, original, current }] from ToolExecutor
+     * @returns {Promise<{summary:string, files:Array<{path,action,description}>}>}
+     */
+    async _buildResultSummary(finalResponse, modifiedFiles, onLog = null) {
+        // action is derived deterministically: a null/empty `original` means the
+        // file did not exist before this session → "created"; otherwise "modified".
+        const files = (modifiedFiles || []).map(f => ({
+            path: f.path,
+            action: (f.original === null || f.original === undefined || f.original === '')
+                ? 'created' : 'modified',
+            description: ''
+        }));
+
+        // Best-effort one-line description per file via a single cheap LLM call.
+        // Wrapped so a failure (or no LLM) just leaves descriptions blank.
+        if (files.length > 0 && files.length <= 30) {
+            try {
+                const list = files.map(f => `- ${f.path} (${f.action})`).join('\n');
+                const prompt =
+                    `Given the agent's final summary and the list of files it created/modified, ` +
+                    `write a concise one-line description (max 80 chars, same language as the summary) ` +
+                    `of each file's role/purpose. Output ONLY a raw JSON array of {"path","description"} — no markdown.\n\n` +
+                    `[Final Summary]\n${String(finalResponse || '').substring(0, 1200)}\n\n[Files]\n${list}`;
+                let raw = '';
+                const sumSys = 'You are a JSON generator. Output ONLY a valid JSON array, nothing else.';
+                const _t0 = Date.now();
+                const gen = await llmService.generate(prompt, sumSys, (chunk) => { raw += chunk; });
+                if (onLog) {
+                    try {
+                        onLog({
+                            method: 'CHAT', status: 200, duration: Date.now() - _t0,
+                            stepLabel: '📋 Result File Descriptions',
+                            usage: gen?.usage,
+                            request: { purpose: 'result-file-descriptions', system_prompt: sumSys, prompt },
+                            response: raw
+                        });
+                    } catch (_) {}
+                }
+                const m = raw.match(/\[[\s\S]*\]/);
+                if (m) {
+                    const arr = JSON.parse(m[0]);
+                    for (const item of (Array.isArray(arr) ? arr : [])) {
+                        if (!item || !item.path) continue;
+                        const norm = String(item.path).replace(/\\/g, '/');
+                        const match = files.find(f =>
+                            f.path === item.path ||
+                            f.path.replace(/\\/g, '/') === norm ||
+                            f.path.replace(/\\/g, '/').endsWith(norm));
+                        if (match && item.description) {
+                            match.description = String(item.description).substring(0, 200);
+                        }
+                    }
+                }
+            } catch (e) {
+                console.warn('AgentController: file description generation failed:', e);
+            }
+        }
+
+        return { summary: String(finalResponse || ''), files };
     }
 
     // ─── Phase 4: _generateWithHistory — tries native tool calling first, falls back to JSON mode ───
@@ -858,6 +1056,13 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
         // ContextBuilder has already built systemPrompt using the same flag, so the
         // protocol section in the prompt always matches the API call we make here.
         const useNativeTools = llmService.supportsNativeTools() && typeof llmService.chatWithTools === 'function';
+
+        // Resolve the agent temperature: only override when the connection has no
+        // explicit temperature (so we never clobber a value the user deliberately set).
+        const userTemp = llmService.getCurrentTemperature ? llmService.getCurrentTemperature() : undefined;
+        const tempOverride = (userTemp === null || userTemp === undefined)
+            ? (Number.isFinite(this._agentTemperature) ? this._agentTemperature : null)
+            : null;
 
         let nativeFailed = false;
         if (useNativeTools) {
@@ -874,7 +1079,7 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
                     const tools = toolExecutor.getToolsForNativeAPI ? toolExecutor.getToolsForNativeAPI() : [];
                     if (tools.length === 0) break; // No tools registered, skip native
 
-                    const result = await llmService.chatWithTools(currentHistory, systemPrompt, tools, abortSignal, images);
+                    const result = await llmService.chatWithTools(currentHistory, systemPrompt, tools, abortSignal, images, tempOverride, this._modelOverride || null);
 
                     // Fallback to JSON mode when native tool calling doesn't work:
                     // Case 1: both content and toolCalls are empty → model gave nothing useful
@@ -969,7 +1174,7 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
                 ContextBuilder.getJsonModeProtocol() +
                 `</protocol_override>\n`;
         }
-        return await llmService.chat(history, fallbackSystemPrompt, onUpdate, abortSignal, images);
+        return await llmService.chat(history, fallbackSystemPrompt, onUpdate, abortSignal, images, tempOverride, this._modelOverride || null);
     }
 
     // ─── Telemetry ───
@@ -1001,6 +1206,32 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
 
     // ─── Phase 3: History Compression (JHEditor detailed version) ───
 
+    /**
+     * True if a "Tool Execution Results:" message contains a successful read_file
+     * result whose content is substantial but within `budget` chars — i.e. a file
+     * snapshot worth preserving verbatim through compression (re-read suppression).
+     */
+    _resultGroupHasReadContent(content, budget) {
+        if (typeof content !== 'string') return false;
+        try {
+            const marker = 'Tool Execution Results:\n';
+            const j = content.indexOf(marker);
+            if (j === -1) return false;
+            const raw = content.substring(j + marker.length).trim();
+            const end = raw.indexOf('\n[');
+            const jsonStr = end !== -1 ? raw.substring(0, end) : raw;
+            const results = JSON.parse(jsonStr);
+            if (!Array.isArray(results)) return false;
+            return results.some(r =>
+                r && r.tool_call_name === 'read_file' &&
+                typeof r.result === 'string' &&
+                !r.result.startsWith('Error') &&
+                r.result.length > 200 && r.result.length <= budget);
+        } catch (_) {
+            return false;
+        }
+    }
+
     _compressToolResultsInHistory(history) {
         // ── Compression policy (revised) ─────────────────────────────────
         //   • Keep the 3 most-recent tool result groups VERBATIM. This is the
@@ -1031,7 +1262,24 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
         const toCompress = toolResultIndices.slice(KEEP_RECENT_RESULTS);
         if (toCompress.length === 0) return;
 
+        // ── Re-read suppression: preserve the latest read_file SNAPSHOT verbatim ──
+        // Stripping old read_file results to "(Completed)" discards the file's
+        // content, so once a read ages out of the 3-recent window the agent has
+        // nothing to work from and RE-READS the whole file — the dominant token
+        // sink on long single-file edits. Keep the most-recent sizable read_file
+        // result (one file, within a char budget) so the current snapshot stays
+        // available and re-reads become unnecessary.
+        const SNAPSHOT_CHAR_BUDGET = 40000;
+        let preserveIdx = -1;
+        for (const idx of toolResultIndices) { // newest-first
+            if (this._resultGroupHasReadContent(history[idx]?.content, SNAPSHOT_CHAR_BUDGET)) {
+                preserveIdx = idx;
+                break;
+            }
+        }
+
         for (const i of toCompress) {
+            if (i === preserveIdx) continue; // keep the latest file snapshot intact
             const original = history[i].content;
             let summary = '[System: Past tool execution results have been summarized.]';
             let hadError = false;
@@ -1099,301 +1347,14 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
 
     // ─── Phase 4: Robust JSON parsing with jsonrepair and multi-fallback (from JHEditor) ───
 
-    _safeParseJSON(str) {
-        if (typeof str !== 'string') return str;
-        let trimmed = str.trim();
+    // Pure parsing logic lives in ./agent/ResponseParser.js (Phase 1 refactor).
+    // These thin wrappers preserve the existing `this._method(...)` call sites.
+    _safeParseJSON(str) { return safeParseJSON(str); }
 
-        try {
-            return JSON.parse(trimmed);
-        } catch (e) {
-            let repaired = trimmed;
-
-            // Handle markdown code blocks
-            if (repaired.startsWith('```')) {
-                const lines = repaired.split('\n');
-                if (lines[0].startsWith('```')) lines.shift();
-                if (lines[lines.length - 1].startsWith('```')) lines.pop();
-                repaired = lines.join('\n').trim();
-            }
-
-            try {
-                // First try standard parse after stripping markdown
-                return JSON.parse(repaired);
-            } catch (e2) {}
-
-            // ── Pre-repair: fix unescaped Windows backslashes ──
-            // LLMs frequently emit `"path": "C:\Users\foo"` where `\U` and `\f`
-            // are invalid JSON escapes. We rewrite single backslashes that
-            // aren't followed by a valid escape character into doubled ones.
-            // This is safe because no JSON string can contain a literal
-            // single backslash anyway (it would already be a parse error).
-            try {
-                const winEscapeFixed = repaired.replace(
-                    /\\(?!["\\/bfnrtu])/g,
-                    '\\\\'
-                );
-                if (winEscapeFixed !== repaired) {
-                    return JSON.parse(winEscapeFixed);
-                }
-            } catch (e2b) {}
-
-            try {
-                // Use jsonrepair to forcefully fix missing quotes, colons, etc.
-                const highlyRepaired = jsonrepair(repaired);
-                return JSON.parse(highlyRepaired);
-            } catch (e3) {
-                // Find outermost JSON structures as a last resort before repairing
-                const start = repaired.indexOf('{');
-                const end = repaired.lastIndexOf('}');
-                if (start !== -1 && end !== -1 && end > start) {
-                    const extracted = repaired.substring(start, end + 1);
-                    try {
-                        const highlyRepairedExtracted = jsonrepair(extracted);
-                        return JSON.parse(highlyRepairedExtracted);
-                    } catch (e4) {
-                        // Final attempt: combine win-escape fix + jsonrepair
-                        try {
-                            const both = jsonrepair(
-                                extracted.replace(/\\(?!["\\/bfnrtu])/g, '\\\\')
-                            );
-                            return JSON.parse(both);
-                        } catch (_) {
-                            throw e3;
-                        }
-                    }
-                }
-                throw e3;
-            }
-        }
-    }
-
-    // ─── Phase 4: Full _extractToolCall with XML tags + multi-JSON parsing (from JHEditor) ───
-
-    _extractToolCall(text) {
-        if (!text) return null;
-        const results = { thought: null, tool_calls: [] };
-
-        // 1. Try to extract from <thought> and <tool_calls> tags (XML-like format)
-        const thoughtMatch = text.match(/<thought>([\s\S]*?)<\/thought>/);
-        if (thoughtMatch) {
-            results.thought = thoughtMatch[1].trim();
-        }
-
-        const toolCallsMatch = text.match(/<tool_calls>([\s\S]*?)<\/tool_calls>/);
-        if (toolCallsMatch) {
-            const innerContent = toolCallsMatch[1];
-            const toolCallRegex = /<tool_call\s+name="([^"]+)"\s+args=({[\s\S]*?}|"[^"]*")\s*\/>/g;
-            let tcMatch;
-            while ((tcMatch = toolCallRegex.exec(innerContent)) !== null) {
-                try {
-                    let argsStr = tcMatch[2].trim();
-                    if (argsStr.startsWith('"') && argsStr.endsWith('"')) {
-                        argsStr = argsStr.substring(1, argsStr.length - 1);
-                    }
-                    const args = this._safeParseJSON(argsStr);
-                    results.tool_calls.push({ name: tcMatch[1], args });
-                } catch (e) {
-                    console.warn("Failed to parse args in <tool_call> tag:", tcMatch[2], e);
-                }
-            }
-        }
-
-        // If we already found tool calls via tags, we can stop here
-        if (results.tool_calls.length > 0) return results;
-
-        let foundValidJson = false;
-
-        // 2. Try JSON code blocks
-        const blockRegex = /```(?:json)?\s*([\s\S]*?)\s*```/g;
-        let match;
-        while ((match = blockRegex.exec(text)) !== null) {
-            const rawContent = match[1].trim();
-            try {
-                const data = this._safeParseJSON(rawContent);
-                foundValidJson = true;
-                if (data.thought) {
-                    if (!results.thought) results.thought = data.thought;
-                    else if (typeof results.thought === 'object' && typeof data.thought === 'object') Object.assign(results.thought, data.thought);
-                }
-                if (data.tool_calls) {
-                    if (Array.isArray(data.tool_calls)) {
-                        results.tool_calls.push(...data.tool_calls);
-                    } else if (typeof data.tool_calls === 'object' && data.tool_calls.name) {
-                        results.tool_calls.push(data.tool_calls);
-                    }
-                }
-            } catch (e) {
-                // Try extracting tool calls from the malformed code block
-                const fallbackCalls = this._extractAllPossibleToolCalls(rawContent);
-                if (fallbackCalls.length > 0) {
-                    results.tool_calls.push(...fallbackCalls);
-                }
-            }
-        }
-
-        // 3. Try raw JSON string
-        if (results.tool_calls.length === 0) {
-            const rawStr = text.trim();
-            let parsedWhole = false;
-            if (rawStr.startsWith('{') && rawStr.endsWith('}')) {
-                try {
-                    const data = this._safeParseJSON(rawStr);
-                    if (data && (data.thought || data.tool_calls)) {
-                        parsedWhole = true;
-                        if (data.thought) {
-                            results.thought = data.thought;
-                        }
-                        if (data.tool_calls) {
-                            if (Array.isArray(data.tool_calls)) {
-                                results.tool_calls.push(...data.tool_calls);
-                            } else if (typeof data.tool_calls === 'object' && data.tool_calls.name) {
-                                results.tool_calls.push(data.tool_calls);
-                            }
-                        }
-                    }
-                } catch (e) { }
-            }
-
-            if (!parsedWhole) {
-                // Last resort: find outermost { ... }
-                const start = text.indexOf('{');
-                const end = text.lastIndexOf('}');
-                if (start !== -1 && end !== -1 && end > start) {
-                    try {
-                        const data = this._safeParseJSON(text.substring(start, end + 1));
-                        if (data && (data.thought || data.tool_calls)) {
-                            parsedWhole = true;
-                            if (data.thought) {
-                                results.thought = data.thought;
-                            }
-                            if (data.tool_calls) {
-                                if (Array.isArray(data.tool_calls)) {
-                                    results.tool_calls.push(...data.tool_calls);
-                                } else if (typeof data.tool_calls === 'object' && data.tool_calls.name) {
-                                    results.tool_calls.push(data.tool_calls);
-                                }
-                            }
-                        }
-                    } catch (e) { }
-                }
-            }
-
-            // If we still don't have tool calls, run the brace-matching fallback extraction on the whole text!
-            if (results.tool_calls.length === 0) {
-                const fallbackCalls = this._extractAllPossibleToolCalls(text);
-                if (fallbackCalls.length > 0) {
-                    results.tool_calls.push(...fallbackCalls);
-                }
-            }
-        }
-
-        // Try extracting thought if still empty and JSON parsing failed
-        if (!results.thought) {
-            results.thought = this._extractThoughtFromMalformedText(text);
-        }
-
-        if (results.tool_calls.length > 0 || results.thought) return results;
-        return null;
-    }
-
-    _extractAllPossibleToolCalls(text) {
-        const toolCalls = [];
-        let startPositions = [];
-        let inString = false;
-        let escape = false;
-
-        for (let i = 0; i < text.length; i++) {
-            const char = text[i];
-            if (escape) {
-                escape = false;
-                continue;
-            }
-            if (char === '\\') {
-                escape = true;
-                continue;
-            }
-            if (char === '"') {
-                inString = !inString;
-                continue;
-            }
-            if (inString) continue;
-
-            if (char === '{') {
-                startPositions.push(i);
-            } else if (char === '}') {
-                const startIdx = startPositions.pop();
-                if (startIdx !== undefined) {
-                    const candidate = text.substring(startIdx, i + 1);
-                    // Check if candidate looks like a tool call: {"name": ..., "args": ...}
-                    if (candidate.includes('"name"') && candidate.includes('"args"')) {
-                        try {
-                            const parsed = this._safeParseJSON(candidate);
-                            if (parsed && typeof parsed === 'object' && typeof parsed.name === 'string' && parsed.args && !parsed.tool_calls) {
-                                const isDuplicate = toolCalls.some(tc => tc.name === parsed.name && JSON.stringify(tc.args) === JSON.stringify(parsed.args));
-                                if (!isDuplicate) {
-                                    toolCalls.push(parsed);
-                                }
-                            }
-                        } catch (e) {
-                            try {
-                                const repaired = jsonrepair(candidate);
-                                const parsed = JSON.parse(repaired);
-                                if (parsed && typeof parsed === 'object' && typeof parsed.name === 'string' && parsed.args && !parsed.tool_calls) {
-                                    const isDuplicate = toolCalls.some(tc => tc.name === parsed.name && JSON.stringify(tc.args) === JSON.stringify(parsed.args));
-                                    if (!isDuplicate) {
-                                        toolCalls.push(parsed);
-                                    }
-                                }
-                            } catch (err) {}
-                        }
-                    }
-                }
-            }
-        }
-        return toolCalls;
-    }
-
-    _extractThoughtFromMalformedText(text) {
-        // 1. Try to extract string thought: "thought": "..."
-        const stringRegex = /"thought"\s*:\s*"([^"]+)"/i;
-        const match = text.match(stringRegex);
-        if (match) return match[1];
-
-        // 2. Try to extract object thought: "thought": { ... }
-        const objectStartIdx = text.search(/"thought"\s*:\s*\{/i);
-        if (objectStartIdx !== -1) {
-            const startBraceIdx = text.indexOf('{', objectStartIdx);
-            if (startBraceIdx !== -1) {
-                let braceCount = 0;
-                let inString = false;
-                let escape = false;
-                for (let i = startBraceIdx; i < text.length; i++) {
-                    const char = text[i];
-                    if (escape) { escape = false; continue; }
-                    if (char === '\\') { escape = true; continue; }
-                    if (char === '"') { inString = !inString; continue; }
-                    if (inString) continue;
-
-                    if (char === '{') braceCount++;
-                    else if (char === '}') {
-                        braceCount--;
-                        if (braceCount === 0) {
-                            const objStr = text.substring(startBraceIdx, i + 1);
-                            try {
-                                return this._safeParseJSON(objStr);
-                            } catch (e) {
-                                try {
-                                    return JSON.parse(jsonrepair(objStr));
-                                } catch (err) {}
-                            }
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        return null;
-    }
+    // ─── Tool-call extraction → ./agent/ResponseParser.js (thin wrappers) ───
+    _extractToolCall(text) { return extractToolCall(text); }
+    _extractAllPossibleToolCalls(text) { return extractAllPossibleToolCalls(text); }
+    _extractThoughtFromMalformedText(text) { return extractThoughtFromMalformedText(text); }
 
     /**
      * Read the persistent Agent Safety Limits from saved config and normalize them.
@@ -1406,41 +1367,10 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
      * directly without re-doing the null-checks every iteration.
      */
     async _loadSafetyLimits() {
-        const defaults = {
-            maxSteps: 0,
-            tokenBudget: 0,
-            wallClockMinutes: 0,
-            noProgressWindow: 15,                // sensible default — most people want this on
-            identicalCallThreshold: 5,           // soft warn at 5×, hard stop at 15×
-            cycleDetectionMinRepeats: 3,         // soft warn after ABAB×3 or ABCABC×3
-            historyBudgetRatio: 0.7,             // fraction of context window history may use
-        };
-
         let cfg = {};
         try { cfg = await invoke('get_ai_config'); } catch (_) { /* keep defaults */ }
-
-        const num = (v, fallback) => {
-            if (v === null || v === undefined || v === '') return fallback;
-            const n = parseInt(v, 10);
-            if (!Number.isFinite(n) || n < 0) return fallback;
-            return n;
-        };
-
-        // Ratio is a float in (0, 1]; parsed separately from the integer fields.
-        const ratioRaw = Number(cfg.history_budget_ratio);
-        const historyBudgetRatio = (Number.isFinite(ratioRaw) && ratioRaw > 0 && ratioRaw <= 1)
-            ? ratioRaw
-            : defaults.historyBudgetRatio;
-
-        return {
-            maxSteps:                 num(cfg.max_steps,                   defaults.maxSteps),
-            tokenBudget:              num(cfg.token_budget,                defaults.tokenBudget),
-            wallClockMinutes:         num(cfg.wall_clock_minutes,          defaults.wallClockMinutes),
-            noProgressWindow:         num(cfg.no_progress_window,          defaults.noProgressWindow),
-            identicalCallThreshold:   num(cfg.identical_call_threshold,    defaults.identicalCallThreshold),
-            cycleDetectionMinRepeats: num(cfg.cycle_detection_min_repeats, defaults.cycleDetectionMinRepeats),
-            historyBudgetRatio,
-        };
+        // Pure normalization lives in ./agent/SafetyLimits.js (unit-tested).
+        return normalizeSafetyLimits(cfg);
     }
 
     /**
@@ -1461,140 +1391,11 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
      * Length 2 needs `2 * minRepeats` matching tail calls (e.g. minRepeats=3 → last 6 = ABABAB).
      * Length 3 needs `3 * minRepeats` matching tail calls (e.g. minRepeats=3 → last 9 = ABCABCABC).
      */
-    _detectCycle(history, minRepeats = 3) {
-        if (!Array.isArray(history)) return null;
-        if (!Number.isFinite(minRepeats) || minRepeats <= 0) return null; // disabled
-        // 3-cycles need at least 2 repetitions to be meaningful (ABCABC < that
-        // is just 3 distinct calls in a row).
-        const min3 = Math.max(2, minRepeats);
-
-        const sig = c => `${c.name}(${c.argsStr})`;
-
-        // ── 2-cycle (ABAB…): need 2 * minRepeats consecutive matching calls ──
-        const need2 = 2 * minRepeats;
-        if (history.length >= need2) {
-            const tail = history.slice(-need2).map(sig);
-            const a = tail[0], b = tail[1];
-            if (a !== b) {
-                let ok = true;
-                for (let i = 0; i < tail.length; i++) {
-                    if (tail[i] !== (i % 2 === 0 ? a : b)) { ok = false; break; }
-                }
-                if (ok) {
-                    const calls = history.slice(-need2);
-                    return {
-                        pattern: `${calls[0].name}→${calls[1].name}`,
-                        length: 2,
-                        repeats: minRepeats
-                    };
-                }
-            }
-        }
-
-        // ── 3-cycle (ABCABC…): need 3 * min3 consecutive matching calls ──
-        const need3 = 3 * min3;
-        if (history.length >= need3) {
-            const tail = history.slice(-need3).map(sig);
-            const a = tail[0], b = tail[1], c = tail[2];
-            if (new Set([a, b, c]).size === 3) {
-                let ok = true;
-                for (let i = 0; i < tail.length; i++) {
-                    const expected = i % 3 === 0 ? a : i % 3 === 1 ? b : c;
-                    if (tail[i] !== expected) { ok = false; break; }
-                }
-                if (ok) {
-                    const calls = history.slice(-need3);
-                    return {
-                        pattern: `${calls[0].name}→${calls[1].name}→${calls[2].name}`,
-                        length: 3,
-                        repeats: min3
-                    };
-                }
-            }
-        }
-
-        return null;
-    }
+    _detectCycle(history, minRepeats = 3) { return detectCycle(history, minRepeats); }
 
     // ─── Phase 4: Full _cleanFinalResponse with thought extraction + multi-language (from JHEditor) ───
 
-    _cleanFinalResponse(text) {
-        if (!text) return '';
-        try {
-            let thoughtPart = '';
-            let remainingText = text;
-
-            // 1. Handle <thought> and <tool_calls> tags
-            const thoughtMatch = text.match(/<thought>([\s\S]*?)<\/thought>/);
-            if (thoughtMatch) {
-                thoughtPart = `> ${thoughtMatch[1].trim().replace(/\n/g, '\n> ')}`;
-                remainingText = remainingText.replace(thoughtMatch[0], '').trim();
-            }
-
-            const toolCallsMatch = text.match(/<tool_calls>([\s\S]*?)<\/tool_calls>/);
-            if (toolCallsMatch) {
-                remainingText = remainingText.replace(toolCallsMatch[0], '').trim();
-            }
-
-            // 2. Handle JSON blocks (existing logic)
-            const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-            
-            if (jsonMatch) {
-                remainingText = remainingText.replace(jsonMatch[0], '').trim();
-                try {
-                    const parsed = this._safeParseJSON(jsonMatch[1].trim());
-                    const thought = parsed.thought || parsed;
-                    if (typeof thought === 'object') {
-                        const subThought = Object.entries(thought)
-                            .map(([k, v]) => `> **${k}**: ${typeof v === 'object' ? JSON.stringify(v) : v}`)
-                            .join('\n');
-                        thoughtPart = (thoughtPart ? thoughtPart + '\n' : '') + subThought;
-                    } else {
-                        thoughtPart = (thoughtPart ? thoughtPart + '\n' : '') + `> ${thought}`;
-                    }
-                } catch (e) { }
-            } else {
-                const start = text.indexOf('{');
-                const end = text.lastIndexOf('}');
-                if (start !== -1 && end !== -1 && end > start) {
-                    const possibleJson = text.substring(start, end + 1);
-                    try {
-                        const parsed = this._safeParseJSON(possibleJson);
-                        if (parsed.thought || parsed.tool_calls) {
-                            remainingText = remainingText.replace(possibleJson, '').trim();
-                            const thought = parsed.thought || parsed;
-                            if (typeof thought === 'object') {
-                                const subThought = Object.entries(thought)
-                                    .map(([k, v]) => `> **${k}**: ${typeof v === 'object' ? JSON.stringify(v) : v}`)
-                                    .join('\n');
-                                thoughtPart = (thoughtPart ? thoughtPart + '\n' : '') + subThought;
-                            } else {
-                                thoughtPart = (thoughtPart ? thoughtPart + '\n' : '') + `> ${thought}`;
-                            }
-                        }
-                    } catch (e) { }
-                }
-            }
-
-            const cleanedThought = thoughtPart.replace(/[>\s\.]/g, '').trim();
-            const isThoughtPlaceholder = cleanedThought.length === 0 || cleanedThought.toLowerCase() === 'reasoning' || cleanedThought.toLowerCase() === 'analyzing';
-
-            const cleanedRemainingText = remainingText.trim();
-            const isRemainingPlaceholder = cleanedRemainingText.replace(/[\s\.]/g, '').trim().length === 0;
-
-            if (cleanedRemainingText.length > 5 && !isRemainingPlaceholder) {
-                return remainingText;
-            }
-
-            if (thoughtPart && !isThoughtPlaceholder) {
-                return `### 🧠 Reasoning Process\n${thoughtPart}`;
-            }
-
-            // If everything is blank or placeholder, return a friendly message
-            return 'すべてのタスクが正常に完了しました。';
-        } catch (e) { }
-        return String(text);
-    }
+    _cleanFinalResponse(text) { return cleanFinalResponse(text); }
 
     /**
      * Delete session directories older than 30 days to prevent disk bloat.
@@ -1633,6 +1434,69 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
      *   • Complexity verbs + prompt > 100 chars
      *   • Word count > 60
      */
+    /**
+     * Expand `behaviorOverrides.intent` (AI-Hub Intent/Recipe) into the existing
+     * behavior fields, in place. Accepts an inline object
+     * `{ systemPrompt?, tools?[], resultKind? }`. A bare string id is left for a
+     * future per-app intent registry (no-op here). Does not override fields the
+     * caller already set explicitly.
+     */
+    /**
+     * Resolve fast/deep tier model ids from config + behavior. Returns
+     * { fast, deep, initial }. `initial` honors an explicit behavior.model, else
+     * the intent tier ('deep'→deep, else fast). All null ⇒ routing disabled
+     * (the active model is used, i.e. no override).
+     */
+    async _resolveTierModels() {
+        try {
+            const cfg = await invoke('get_ai_config');
+            const fast = cfg.fast_model_id || null;
+            const deep = cfg.deep_model_id || null;
+            if (!fast && !deep) return { fast: null, deep: null, initial: null };
+            const explicit = (this.behaviorOverrides && this.behaviorOverrides.model) || null;
+            const tier = this._intentTier || 'fast';
+            const initial = explicit || (tier === 'deep' ? (deep || fast) : (fast || deep));
+            return { fast, deep, initial };
+        } catch (_) {
+            return { fast: null, deep: null, initial: null };
+        }
+    }
+
+    _applyIntent() {
+        const b = this.behaviorOverrides;
+        if (!b || !b.intent) return;
+        const intent = b.intent;
+        if (typeof intent !== 'object') return;   // string id → future registry; skip
+
+        // tools → enabled_tools allowlist (don't clobber an explicit one).
+        if (Array.isArray(intent.tools) && !Array.isArray(b.enabled_tools)) {
+            b.enabled_tools = intent.tools.slice();
+        }
+
+        // tier ('fast' | 'deep') → model routing hint (resolved in run()).
+        if (typeof intent.tier === 'string') {
+            this._intentTier = intent.tier.trim().toLowerCase() || null;
+        }
+
+        // systemPrompt + resultKind → appended guidance via extra_instructions
+        // (which the loop already merges into the system prompt).
+        const extra = [];
+        if (typeof intent.systemPrompt === 'string' && intent.systemPrompt.trim()) {
+            extra.push(intent.systemPrompt.trim());
+        }
+        if (typeof intent.resultKind === 'string' && intent.resultKind.trim()) {
+            extra.push(
+                `When the task is complete, deliver the result to the calling app by calling ` +
+                `present_result with kind="${intent.resultKind.trim()}" (then finish_task).`
+            );
+        }
+        if (extra.length > 0) {
+            b.extra_instructions = [b.extra_instructions, ...extra]
+                .filter(s => typeof s === 'string' && s.trim())
+                .join('\n\n');
+        }
+    }
+
     _looksComplex(prompt) {
         if (!prompt || typeof prompt !== 'string') return false;
         const p = prompt.trim();
@@ -1647,11 +1511,18 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
         const uniqueFiles = new Set(fileMentions.map(f => f.toLowerCase()));
         if (uniqueFiles.size >= 3) return true;
 
-        // Complexity verbs + non-trivial length
+        // Complexity verbs + non-trivial length (English)
         if (p.length > 100 && /\b(implement|add|create|refactor|update|modify|change|fix|migrate|convert|integrate)\b/i.test(p)) return true;
 
-        // Word count > 60 — probably a detailed instruction
+        // Complexity verbs (Japanese) + non-trivial length. Japanese has no word
+        // spaces, so we gate on raw character count instead of word count.
+        if (p.length > 60 && /(実装|追加|作成|リファクタ|修正|変更|対応|移行|統合|設計|置き換|分割|整理|導入)/.test(p)) return true;
+
+        // Word count > 60 — probably a detailed instruction (space-delimited langs)
         if (p.split(/\s+/).length > 60) return true;
+
+        // Long CJK instruction (no spaces) — > 120 chars is rarely a one-liner
+        if (p.length > 120 && /[぀-ヿ一-龯]/.test(p)) return true;
 
         return false;
     }

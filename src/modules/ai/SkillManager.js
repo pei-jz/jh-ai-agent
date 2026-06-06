@@ -10,8 +10,11 @@
  *
  *   Prompt content…     ← the rest becomes the prompt sent to the AI
  *
- * Invocation: user types /skill-name [optional extra args]
- * The skill's content replaces the input; any extra args are appended.
+ * Invocation: user types /skill-name in the chat box. Selecting it from the
+ * slash-popup attaches the skill as a chip (ChatView.activeSkills) rather than
+ * dumping its body into the textarea. The full skill body is auto-injected
+ * into the outgoing message at send time (ChatView.sendMessage), so the input
+ * stays clean and the chat bubble shows only a small badge.
  */
 
 import { invoke } from '@tauri-apps/api/core';

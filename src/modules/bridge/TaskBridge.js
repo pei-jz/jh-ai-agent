@@ -126,7 +126,7 @@ class TaskBridge {
                 progress: 0.1
             });
 
-            await llmService.chat(
+            const genResult = await llmService.chat(
                 [{ role: 'user', content: prompt }],
                 systemPrompt,
                 (chunk) => {
@@ -137,9 +137,21 @@ class TaskBridge {
                 []
             );
 
+            // Report token usage so the monitor/analytics aren't stuck at 0 for
+            // single-shot tasks (e.g. QuickSearch). chat() returns real usage
+            // (or an estimate fallback).
+            if (genResult?.usage) {
+                this.emitTaskEvent(taskId, 'token_usage', {
+                    prompt_tokens: genResult.usage.prompt_tokens || 0,
+                    completion_tokens: genResult.usage.completion_tokens || 0,
+                    total_tokens: genResult.usage.total_tokens || 0
+                });
+            }
+
             this.emitTaskEvent(taskId, 'complete', {
                 message: fullResponse,
-                modifiedFiles: []
+                modifiedFiles: [],
+                resultSummary: { summary: fullResponse, files: [] }
             });
         } catch (err) {
             console.error('TaskBridge: single_shot error:', err);
@@ -215,7 +227,8 @@ class TaskBridge {
             // Emit completion
             this.emitTaskEvent(taskId, 'complete', {
                 message: result.response,
-                modifiedFiles: result.modifiedFiles
+                modifiedFiles: result.modifiedFiles,
+                resultSummary: result.resultSummary
             });
 
         } catch (err) {

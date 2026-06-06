@@ -1,12 +1,26 @@
 import { invoke } from '@tauri-apps/api/core';
 import { tokenEstimator } from './TokenEstimator.js';
 import LLMService from './LLMService.js';
+import { sanitizeXmlTags, relevanceScore, scoreMessageImportance } from './memory/MemoryScoring.js';
+import { mergeFacts as mergeFactsInto, selectRelevantFacts } from './memory/FactStore.js';
 
 class ConversationMemory {
     constructor() {
         this.entries = [];
         this.loaded = false;
         this.maxEntries = 20;
+
+        // ── Long-term memory (durable journal + curated facts) ─────────
+        // Two durable artifacts live under <workspace>/.agent/long_term/:
+        //   • journal.md  — append-only, human-readable log of every completed
+        //                    session (date, topic, outcome, files, summary).
+        //   • facts.json  — curated durable facts (project conventions, decisions,
+        //                    gotchas) extracted by the LLM and deduped over time.
+        // Recall: getPromptContext injects the top relevant facts + episodic
+        // summaries by keyword overlap (no embeddings — device-perf friendly).
+        this.facts = [];          // [{ fact, date, sessionId, hits }]
+        this.factsLoaded = false;
+        this.maxFacts = 100;      // cap; least-relevant pruned on overflow
 
         // ── History budget configuration ───────────────────────────────
         // Fraction of the model's context window that history (conversation +
@@ -46,12 +60,8 @@ class ConversationMemory {
     /**
      * Escape active XML tags in memory to prevent system prompt pollution.
      */
-    _sanitizeXmlTags(text) {
-        if (typeof text !== 'string') return text;
-        return text.replace(/<(\/?)(artifacts|artifact|active_file|other_open_files|terminal_output|linter_diagnostics|user_selected_context|knowledge_items)(\s[^>]*)?>/gi, (match, slash, tagName, attrs) => {
-            return `[${slash || ''}${tagName}${attrs || ''}]`;
-        });
-    }
+    // Pure scoring/text helpers → ./memory/MemoryScoring.js (thin wrappers).
+    _sanitizeXmlTags(text) { return sanitizeXmlTags(text); }
 
     /**
      * Load memory from .agent/memory.json
@@ -70,6 +80,91 @@ class ConversationMemory {
             this.entries = [];
             this.loaded = true;
         }
+        await this.loadFacts(workspacePath);
+    }
+
+    /**
+     * Load the durable facts store from .agent/long_term/facts.json.
+     */
+    async loadFacts(workspacePath) {
+        if (!workspacePath) return;
+        try {
+            const path = `${workspacePath}/.agent/long_term/facts.json`;
+            const data = await invoke('read_file', { path });
+            if (data) {
+                const parsed = JSON.parse(data);
+                this.facts = Array.isArray(parsed) ? parsed : [];
+                console.log(`AI Memory: Loaded ${this.facts.length} durable facts.`);
+            }
+        } catch (e) {
+            this.facts = [];
+        }
+        this.factsLoaded = true;
+    }
+
+    /**
+     * Persist the curated facts store. Caps at maxFacts, dropping the
+     * least-referenced (lowest hits, then oldest) entries on overflow.
+     */
+    async saveFacts(workspacePath) {
+        if (!workspacePath) return;
+        try {
+            const dirPath = `${workspacePath}/.agent/long_term`;
+            try { await invoke('create_dir', { path: dirPath }); } catch (e) { /* exists */ }
+
+            if (this.facts.length > this.maxFacts) {
+                this.facts.sort((a, b) => (b.hits || 0) - (a.hits || 0) || (b.timestamp || 0) - (a.timestamp || 0));
+                this.facts = this.facts.slice(0, this.maxFacts);
+            }
+            await invoke('write_file', {
+                path: `${dirPath}/facts.json`,
+                content: JSON.stringify(this.facts, null, 2)
+            });
+        } catch (e) {
+            console.error('AI Memory: Failed to save facts:', e);
+        }
+    }
+
+    /**
+     * Append a human-readable entry to the durable journal (append-only).
+     * Reads the existing file and rewrites it (write_file has no append mode);
+     * this is cheap because the journal is short prose, not file contents.
+     */
+    async appendJournal(workspacePath, entry) {
+        if (!workspacePath || !entry) return;
+        try {
+            const dirPath = `${workspacePath}/.agent/long_term`;
+            try { await invoke('create_dir', { path: dirPath }); } catch (e) { /* exists */ }
+            const path = `${dirPath}/journal.md`;
+
+            let existing = '';
+            try { existing = await invoke('read_file', { path }) || ''; } catch (e) { /* new file */ }
+            if (!existing) existing = '# Agent Long-Term Journal\n\nAppend-only log of completed sessions.\n';
+
+            const outcomeIcon = entry.outcome === 'success' ? '✅' : (entry.outcome === 'error' ? '❌' : '⚠️');
+            const filesStr = (entry.keyFiles && entry.keyFiles.length) ? entry.keyFiles.join(', ') : '—';
+            const actionsStr = (entry.actions && entry.actions.length) ? entry.actions.map(a => `\n  - ${a}`).join('') : '';
+            const block =
+                `\n---\n\n## [${entry.date}] ${outcomeIcon} ${entry.topic}\n` +
+                (entry.sessionId ? `*session: ${entry.sessionId}*\n` : '') +
+                `\n**Summary:** ${entry.summary}\n` +
+                (actionsStr ? `\n**Actions:**${actionsStr}\n` : '') +
+                `\n**Files:** ${filesStr}\n`;
+
+            await invoke('write_file', { path, content: existing + block });
+        } catch (e) {
+            console.error('AI Memory: Failed to append journal:', e);
+        }
+    }
+
+    /**
+     * Merge newly-extracted durable facts into the store, deduping by normalized
+     * text. Existing matches get their hit count bumped (so frequently-reaffirmed
+     * facts survive pruning); genuinely new facts are appended.
+     */
+    mergeFacts(newFacts, sessionId) {
+        // Dedup/near-dup merge logic → ./memory/FactStore.js (unit-tested).
+        mergeFactsInto(this.facts, newFacts, sessionId);
     }
 
     /**
@@ -99,7 +194,7 @@ class ConversationMemory {
     /**
      * Add a conversation entry after an agent session completes.
      */
-    async addEntry(userQuery, agentResponse, sessionId = null, workspacePath = null) {
+    async addEntry(userQuery, agentResponse, sessionId = null, workspacePath = null, onLog = null) {
         if (!this.loaded) await this.loadMemory(workspacePath);
 
         const safeQuery = this._sanitizeXmlTags(String(userQuery || ''));
@@ -108,7 +203,7 @@ class ConversationMemory {
         let entry;
 
         try {
-            entry = await this._generateStructuredSummary(safeQuery, safeResponse, sessionId);
+            entry = await this._generateStructuredSummary(safeQuery, safeResponse, sessionId, onLog);
         } catch (e) {
             console.warn('AI Memory: LLM summarization failed, using fallback:', e);
             entry = {
@@ -119,18 +214,33 @@ class ConversationMemory {
                 actions: [],
                 outcome: 'unknown',
                 keyFiles: [],
-                summary: safeResponse.substring(0, 300)
+                summary: safeResponse.substring(0, 300),
+                facts: []
             };
         }
 
         this.entries.push(entry);
         await this.saveMemory(workspacePath);
+
+        // ── Durable long-term artifacts ───────────────────────────────
+        // Append a readable journal entry and fold any extracted facts into the
+        // curated facts store. Best-effort — never throw out of addEntry.
+        try {
+            if (!this.factsLoaded) await this.loadFacts(workspacePath);
+            await this.appendJournal(workspacePath, entry);
+            if (entry.facts && entry.facts.length) {
+                this.mergeFacts(entry.facts, sessionId);
+                await this.saveFacts(workspacePath);
+            }
+        } catch (e) {
+            console.warn('AI Memory: long-term persistence failed:', e);
+        }
     }
 
     /**
      * Uses LLM to generate a structured summary of the session.
      */
-    async _generateStructuredSummary(query, response, sessionId) {
+    async _generateStructuredSummary(query, response, sessionId, onLog = null) {
         const prompt = `Analyze the following interaction with the AI assistant and output a JSON object summarizing it.
 Do not output any markdown code blocks or explanations, just the raw JSON object.
 
@@ -146,15 +256,25 @@ JSON output format:
   "actions": ["Up to 3 short sentences of actions taken"],
   "outcome": "success or partial or error",
   "keyFiles": ["Up to 3 main file paths modified/referenced"],
-  "summary": "Summary of what was done and achieved within 120 characters"
+  "summary": "Summary of what was done and achieved within 120 characters",
+  "facts": ["Up to 3 DURABLE facts worth remembering long-term: project conventions, key decisions, architecture notes, or gotchas. Omit transient details. Empty array if none."]
 }`;
 
         let rawResult = '';
-        await LLMService.generate(
-            prompt,
-            'You are a JSON generator. Output ONLY a valid JSON object, nothing else. No markdown, no explanation.',
-            (chunk) => { rawResult += chunk; }
-        );
+        const sumSys = 'You are a JSON generator. Output ONLY a valid JSON object, nothing else. No markdown, no explanation.';
+        const _t0 = Date.now();
+        const gen = await LLMService.generate(prompt, sumSys, (chunk) => { rawResult += chunk; });
+        if (onLog) {
+            try {
+                onLog({
+                    method: 'CHAT', status: 200, duration: Date.now() - _t0,
+                    stepLabel: '🧠 Long-term Memory Summary',
+                    usage: gen?.usage,
+                    request: { purpose: 'ltm-structured-summary', system_prompt: sumSys, prompt },
+                    response: rawResult
+                });
+            } catch (_) {}
+        }
 
         let parsed;
         const jsonMatch = rawResult.match(/\{[\s\S]*\}/);
@@ -172,7 +292,8 @@ JSON output format:
             actions: Array.isArray(parsed.actions) ? parsed.actions.slice(0, 3).map(a => String(a).substring(0, 100)) : [],
             outcome: ['success', 'partial', 'error'].includes(parsed.outcome) ? parsed.outcome : 'unknown',
             keyFiles: Array.isArray(parsed.keyFiles) ? parsed.keyFiles.slice(0, 3).map(f => String(f).substring(0, 150)) : [],
-            summary: String(parsed.summary || '').substring(0, 200)
+            summary: String(parsed.summary || '').substring(0, 200),
+            facts: Array.isArray(parsed.facts) ? parsed.facts.slice(0, 3).map(f => String(f).substring(0, 300)) : []
         };
     }
 
@@ -186,7 +307,7 @@ JSON output format:
      *   agent doesn't have to re-read files it already fetched before compaction.
      *   Schema: Map<normalizedPath, { content, readCount, editedAt, readAt }>
      */
-    async compactHistory(history, modelId = '', fileCache = null) {
+    async compactHistory(history, modelId = '', fileCache = null, onLog = null) {
         if (!tokenEstimator) {
             if (history.length <= 8) return history;
             return history.slice(-4);
@@ -270,25 +391,75 @@ JSON output format:
             if (allPaths.size > 0)  keyInfo.push(`Files touched: ${[...allPaths].slice(0, 8).join(', ')}`);
             if (allErrors.size > 0) keyInfo.push(`Errors:\n  • ${[...allErrors].slice(0, 5).join('\n  • ')}`);
 
-            const summaryPrompt = `Summarize the key points of the following conversation within 5 lines. Prioritize key decisions, code changes, and error details.\nDo NOT summarize file contents — those are preserved separately via the session file cache.\n\n${oldMessages.map(m => `[${m.role}]: ${m.content.substring(0, 300)}`).join('\n\n')}`;
+            // ── Importance-based preservation + plan anchoring ─────────────
+            // Instead of summarizing ALL old messages (which loses high-value
+            // detail like the plan, decisions, and the exact errors being fixed),
+            // we keep the most important old messages VERBATIM within a small
+            // budget and only summarize the low-value remainder (tool chatter,
+            // system nudges, redundant reflections).
+            const PLAN_RE = /plan\.md|\[plan\]|計画書|実装計画|## *plan/i;
+            const planSet = new Set(oldMessages.filter(m => PLAN_RE.test(m.content || '')));
+
+            // ~25% of the history budget (in chars; ~4 chars/token) for verbatim keeps.
+            const VERBATIM_CHAR_BUDGET = Math.floor(historyBudget * 0.25 * 4);
+            const preservedSet = new Set(planSet);
+            let verbatimUsed = [...planSet].reduce((s, m) => s + (m.content || '').length, 0);
+
+            const ranked = oldMessages
+                .filter(m => !preservedSet.has(m))
+                .map(m => ({ m, score: this._scoreMessageImportance(m) }))
+                .sort((a, b) => b.score - a.score);
+            for (const { m, score } of ranked) {
+                if (score < 3) break;  // ranked desc — once below threshold, stop
+                const len = (m.content || '').length;
+                if (verbatimUsed + len > VERBATIM_CHAR_BUDGET) continue;
+                preservedSet.add(m);
+                verbatimUsed += len;
+            }
+
+            // Preserve chronological order; summarize only what we dropped.
+            const preserved = oldMessages.filter(m => preservedSet.has(m));
+            const toSummarize = oldMessages.filter(m => !preservedSet.has(m));
 
             let summary = '';
-            await LLMService.generate(summaryPrompt, 'You are a conversation summarizer. Output only the summary, nothing else.', (chunk) => {
-                summary += chunk;
-            });
-
+            if (toSummarize.length > 0) {
+                const summaryPrompt = `Summarize the key points of the following conversation within 5 lines. Prioritize key decisions, code changes, and error details.\nDo NOT summarize file contents — those are preserved separately via the session file cache.\n\n${toSummarize.map(m => `[${m.role}]: ${(m.content || '').substring(0, 300)}`).join('\n\n')}`;
+                const sumSys = 'You are a conversation summarizer. Output only the summary, nothing else.';
+                const _t0 = Date.now();
+                const gen = await LLMService.generate(summaryPrompt, sumSys, (chunk) => { summary += chunk; });
+                // Surface this auxiliary LLM call in the task's Monitor logs so its
+                // token cost is visible (it's billed to the same task, not free).
+                if (onLog) {
+                    try {
+                        onLog({
+                            method: 'CHAT', status: 200, duration: Date.now() - _t0,
+                            stepLabel: '🗜 History Compaction',
+                            usage: gen?.usage,
+                            request: { purpose: 'history-compaction-summary', model: modelId, system_prompt: sumSys, prompt: summaryPrompt },
+                            response: summary
+                        });
+                    } catch (_) {}
+                }
+            }
             if (keyInfo.length > 0) {
-                summary += '\n\nKey Context:\n' + keyInfo.join('\n');
+                summary += (summary ? '\n\n' : '') + 'Key Context:\n' + keyInfo.join('\n');
             }
 
             const compactedHistory = [];
             if (originalUserMsg) {
                 compactedHistory.push(originalUserMsg);
             }
-            compactedHistory.push(
-                { role: 'user', content: `[Past Conversation Summary]\n${summary}` },
-                { role: 'assistant', content: 'Understood. I have reviewed the past conversation summary and will keep the original goal in mind.' }
-            );
+            if (summary) {
+                compactedHistory.push(
+                    { role: 'user', content: `[Past Conversation Summary]\n${summary}` },
+                    { role: 'assistant', content: 'Understood. I have reviewed the past conversation summary and will keep the original goal in mind.' }
+                );
+            }
+            // Re-inject the high-value messages (plan, decisions, key errors) verbatim.
+            if (preserved.length > 0) {
+                compactedHistory.push(...preserved);
+                console.log(`AI Memory: Preserved ${preserved.length} high-value message(s) verbatim (${verbatimUsed} chars), summarized ${toSummarize.length}.`);
+            }
 
             // ── Session file cache injection ──────────────────────────────────
             // Files read or written via read_file / write_file / multi_replace_file_content
@@ -376,30 +547,21 @@ JSON output format:
     }
 
     /**
+     * Score a conversation message's importance for compaction (higher = keep
+     * verbatim). Heuristic, no LLM call. Rewards plans, decisions, errors, file
+     * modifications, and genuine user instructions; penalizes bulky tool-result
+     * dumps and system nudges that add little once summarized.
+     * @param {{role:string, content:string}} msg
+     * @returns {number}
+     */
+    _scoreMessageImportance(msg) { return scoreMessageImportance(msg); }
+
+    /**
      * Score a memory entry's relevance to the current query (0–1).
      * Uses simple keyword overlap — no external calls needed.
      * Higher = more relevant.
      */
-    _relevanceScore(entry, query) {
-        if (!query) return 0.5; // no query → treat all equally
-        const q = query.toLowerCase();
-        const qWords = new Set(q.split(/\W+/).filter(w => w.length > 2));
-        if (qWords.size === 0) return 0.5;
-
-        let hits = 0;
-        const fields = [
-            entry.topic || '',
-            entry.summary || '',
-            (entry.actions || []).join(' '),
-            (entry.keyFiles || []).join(' ')
-        ].join(' ').toLowerCase();
-
-        for (const word of qWords) {
-            if (fields.includes(word)) hits++;
-        }
-
-        return hits / qWords.size;
-    }
+    _relevanceScore(entry, query) { return relevanceScore(entry, query); }
 
     /**
      * Returns a context string for injection into the AI system prompt.
@@ -408,8 +570,10 @@ JSON output format:
      *   Without it, falls back to the most recent 3 entries (original behaviour).
      */
     getPromptContext(currentQuery = '') {
+        const factsSection = this._getFactsContext(currentQuery);
+
         if (!this.entries || this.entries.length === 0) {
-            return '';
+            return factsSection;
         }
 
         let selected;
@@ -440,7 +604,22 @@ JSON output format:
             return `[${e.date}] Q: ${cleanQuery}\nA: ${cleanSummary}`;
         }).join('\n---\n');
 
-        return `\n[Past Conversation Memory (Top ${selected.length} relevant sessions)]\n${memoryText}\n`;
+        return `${factsSection}\n[Past Conversation Memory (Top ${selected.length} relevant sessions)]\n${memoryText}\n`;
+    }
+
+    /**
+     * Build the "Durable Facts" prompt section from the curated facts store,
+     * ranked by relevance to the current query (keyword overlap), then recency.
+     * Returns '' when there are no facts. Bumps hit counts on injected facts so
+     * frequently-relevant facts resist pruning (not persisted here — saved on
+     * the next addEntry).
+     */
+    _getFactsContext(currentQuery = '', limit = 5) {
+        // Selection/ranking → ./memory/FactStore.js (unit-tested); formatting stays here.
+        const top = selectRelevantFacts(this.facts, currentQuery, limit);
+        if (top.length === 0) return '';
+        const lines = top.map(f => `  • ${sanitizeXmlTags(f.fact)}`).join('\n');
+        return `\n[Durable Project Facts (long-term memory)]\n${lines}\n`;
     }
 }
 

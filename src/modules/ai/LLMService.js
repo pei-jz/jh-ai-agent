@@ -1,6 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { ApiLogStore } from '../storage/ApiLogStore.js';
 import { tokenEstimator } from './TokenEstimator.js';
 
 class LLMService {
@@ -41,6 +40,7 @@ class LLMService {
             // /api/models already emits each instance as `{inst.id}:{inst.model}`
             const res = await window.apiClient.getModels();
             const models = res?.models || [];
+            this._models = models; // cache for per-task model-override resolution
             if (models.length === 0) return null;
 
             // Try to read the saved "active" preference
@@ -118,7 +118,7 @@ class LLMService {
 
     async _initNativeListener() {
         await listen('llm-chunk', (event) => {
-            const { request_id, delta, done, error } = event.payload;
+            const { request_id, delta, done, error, usage } = event.payload;
             const callback = this.activeRequestStreams.get(request_id);
             if (callback) {
                 if (error) {
@@ -126,13 +126,50 @@ class LLMService {
                     callback(null, true, error);
                     this.activeRequestStreams.delete(request_id);
                 } else if (done) {
-                    callback('', true);
+                    // `usage` is the REAL provider-reported token count (or undefined
+                    // when the provider didn't report it — callers then estimate).
+                    callback('', true, null, usage || null);
                     this.activeRequestStreams.delete(request_id);
                 } else {
                     callback(delta, false);
                 }
             }
         });
+    }
+
+    /**
+     * Resolve the usage object for a completed request. Prefers the REAL
+     * provider-reported usage (from the streaming done chunk); falls back to a
+     * local estimate when the provider didn't report token counts (e.g. some
+     * generic OpenAI-compatible endpoints, or non-streaming-usage providers).
+     * @param {object|null} reported - { prompt_tokens, completion_tokens, total_tokens } or null
+     * @param {Array} messages       - request messages (for prompt estimation)
+     * @param {string} systemPrompt  - request system prompt
+     * @param {string} response      - full response text (for completion estimation)
+     */
+    _resolveUsage(reported, messages, systemPrompt, response) {
+        const p = reported?.prompt_tokens || 0;
+        const c = reported?.completion_tokens || 0;
+        const t = reported?.total_tokens || 0;
+        if (p > 0 || c > 0 || t > 0) {
+            return {
+                prompt_tokens: p,
+                completion_tokens: c,
+                total_tokens: t > 0 ? t : (p + c),
+                estimated: false
+            };
+        }
+        // Estimate from text (prompt = system + all messages, completion = response).
+        const promptText = (systemPrompt || '') + '\n' +
+            (messages || []).map(m => typeof m.content === 'string' ? m.content : JSON.stringify(m.content)).join('\n');
+        const prompt_tokens = tokenEstimator.estimateTokens(promptText);
+        const completion_tokens = tokenEstimator.estimateTokens(response || '');
+        return {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens: prompt_tokens + completion_tokens,
+            estimated: true
+        };
     }
 
     setCurrentModel(modelId) {
@@ -171,6 +208,27 @@ class LLMService {
         return this.currentModel;
     }
 
+    /**
+     * Resolve metadata for a model id ("{instance_id}:{model}") from the cached
+     * models list, for per-task model overrides (fast/deep routing). Returns the
+     * UNDERLYING provider + per-connection limits, or null if unknown.
+     */
+    _resolveModelMeta(modelId) {
+        const m = (this._models || []).find(x => x.id === modelId);
+        if (!m) return null;
+        return {
+            provider: m.provider || m.id.split(':')[0],
+            contextWindow: Number(m.context_window) || 0,
+            maxOutputTokens: Number(m.max_output_tokens) || null,
+            temperature: (m.temperature ?? null),
+        };
+    }
+
+    /** Per-connection temperature override, or null/undefined if none set. */
+    getCurrentTemperature() {
+        return this.currentTemperature;
+    }
+
     /** Per-connection context window override (tokens), or 0 if none set. */
     getContextWindow() {
         return this.currentContextWindow || 0;
@@ -195,13 +253,14 @@ class LLMService {
         return await this.chat([{ role: 'user', content: prompt }], systemPrompt, onStream, abortSignal);
     }
 
-    async chat(messages, systemPrompt, onStream, abortSignal, images = []) {
+    async chat(messages, systemPrompt, onStream, abortSignal, images = [], temperatureOverride = null, modelOverride = null) {
         // If no model is set yet (e.g. agent started before initFromConfig finished),
         // try to load it on-demand. Fail with a clear message if there's still none.
         if (!this.currentModel) {
             await this.initFromConfig();
         }
-        const modelId = this.currentModel;
+        const modelId = modelOverride || this.currentModel;
+        const ovMeta = modelOverride ? this._resolveModelMeta(modelOverride) : null;
         if (!modelId) {
             throw new Error(
                 'No LLM connection configured. Open Settings → LLM Connections and add at least one connection (and Save).'
@@ -226,13 +285,13 @@ class LLMService {
             system_prompt: systemPrompt || null,
             images: images.length > 0 ? images : null,
             base_url: providerName === 'azure' ? config.azure_endpoint : (providerName === 'ollama' ? 'http://localhost:11434' : null),
-            api_version: providerName === 'azure' ? '2024-02-15-preview' : null,
+            api_version: providerName === 'azure' ? '2024-08-01-preview' : null,
             api_key: null,
             proxy: config.proxy_url || null,
             request_id: requestId,
             // Response-control overrides (null ⇒ Rust resolves from instance config / provider default)
-            max_tokens: this.currentMaxOutputTokens || null,
-            temperature: (this.currentTemperature ?? null)
+            max_tokens: (ovMeta ? (ovMeta.maxOutputTokens || null) : (this.currentMaxOutputTokens || null)),
+            temperature: (Number.isFinite(temperatureOverride) ? temperatureOverride : (ovMeta ? (ovMeta.temperature ?? null) : (this.currentTemperature ?? null)))
         };
 
         return new Promise(async (resolve, reject) => {
@@ -243,43 +302,13 @@ class LLMService {
                 });
             }
 
-            this.activeRequestStreams.set(requestId, (delta, done, error) => {
+            this.activeRequestStreams.set(requestId, (delta, done, error, reportedUsage) => {
                 if (error) {
-                    ApiLogStore.save({
-                        id: requestId,
-                        timestamp: new Date().toISOString(),
-                        model: modelId,
-                        provider: providerName,
-                        messages_count: messages.length,
-                        prompt_preview: (messages[messages.length - 1]?.content || '').substring(0, 120),
-                        response_preview: '',
-                        prompt_tokens: 0,
-                        completion_tokens: 0,
-                        total_tokens: 0,
-                        latency_ms: Date.now() - _startTime,
-                        error: String(error)
-                    });
+                    // Per-call LLM logging is now consolidated into per-task logs
+                    // (MonitorView). The old global ApiLogStore (localStorage) was retired.
                     reject(new Error(error));
                 } else if (done) {
-                    const usage = {
-                        prompt_tokens: 0,
-                        completion_tokens: fullResponse.length,
-                        total_tokens: fullResponse.length
-                    };
-                    ApiLogStore.save({
-                        id: requestId,
-                        timestamp: new Date().toISOString(),
-                        model: modelId,
-                        provider: providerName,
-                        messages_count: messages.length,
-                        prompt_preview: (messages[messages.length - 1]?.content || '').substring(0, 120),
-                        response_preview: fullResponse.substring(0, 120),
-                        prompt_tokens: usage.prompt_tokens,
-                        completion_tokens: usage.completion_tokens,
-                        total_tokens: usage.total_tokens,
-                        latency_ms: Date.now() - _startTime,
-                        error: null
-                    });
+                    const usage = this._resolveUsage(reportedUsage, messages, systemPrompt, fullResponse);
                     resolve({ content: fullResponse, usage });
                 } else {
                     fullResponse += delta;
@@ -306,13 +335,14 @@ class LLMService {
      * @param {Array} images - Optional base64 images
      * @returns {Object} { content: string, toolCalls: Array|null, usage: Object }
      */
-    async chatWithTools(messages, systemPrompt, tools, abortSignal, images = []) {
+    async chatWithTools(messages, systemPrompt, tools, abortSignal, images = [], temperatureOverride = null, modelOverride = null) {
         // If no model is set yet (e.g. agent started before initFromConfig finished),
         // try to load it on-demand. Fail with a clear message if there's still none.
         if (!this.currentModel) {
             await this.initFromConfig();
         }
-        const modelId = this.currentModel;
+        const modelId = modelOverride || this.currentModel;
+        const ovMeta = modelOverride ? this._resolveModelMeta(modelOverride) : null;
         if (!modelId) {
             throw new Error(
                 'No LLM connection configured. Open Settings → LLM Connections and add at least one connection (and Save).'
@@ -327,11 +357,12 @@ class LLMService {
 
         // For the native-tool-calling capability check, use the *underlying* provider —
         // an instance id like "inst_1716..." would otherwise miss this whitelist.
-        const underlyingProvider = this.getCurrentProvider();
+        // With a model override, resolve the override's underlying provider instead.
+        const underlyingProvider = ovMeta ? (ovMeta.provider || modelId.split(':')[0]) : this.getCurrentProvider();
         const supportsNativeTools = ['openai', 'gemini', 'anthropic', 'azure'].includes(underlyingProvider);
         if (!supportsNativeTools) {
             // Fallback: use regular chat (tool calls will be parsed from response text)
-            const result = await this.chat(messages, systemPrompt, null, abortSignal, images);
+            const result = await this.chat(messages, systemPrompt, null, abortSignal, images, temperatureOverride, modelOverride);
             return { ...result, toolCalls: null };
         }
 
@@ -347,14 +378,14 @@ class LLMService {
             system_prompt: systemPrompt || null,
             images: images.length > 0 ? images : null,
             base_url: providerName === 'azure' ? config.azure_endpoint : (providerName === 'ollama' ? 'http://localhost:11434' : null),
-            api_version: providerName === 'azure' ? '2024-02-15-preview' : null,
+            api_version: providerName === 'azure' ? '2024-08-01-preview' : null,
             api_key: null,
             proxy: config.proxy_url || null,
             request_id: requestId,
             tools: tools,  // Native tool definitions
             // Response-control overrides (null ⇒ Rust resolves from instance config / provider default)
-            max_tokens: this.currentMaxOutputTokens || null,
-            temperature: (this.currentTemperature ?? null)
+            max_tokens: (ovMeta ? (ovMeta.maxOutputTokens || null) : (this.currentMaxOutputTokens || null)),
+            temperature: (Number.isFinite(temperatureOverride) ? temperatureOverride : (ovMeta ? (ovMeta.temperature ?? null) : (this.currentTemperature ?? null)))
         };
 
         return new Promise(async (resolve, reject) => {
@@ -372,15 +403,14 @@ class LLMService {
             // (Rewriting this line clean — earlier version contained literal NULs.)
             const TOOL_ENVELOPE_SENTINEL = '<<<__TOOL_ENVELOPE__>>>';
 
-            this.activeRequestStreams.set(requestId, (delta, done, error) => {
+            this.activeRequestStreams.set(requestId, (delta, done, error, reportedUsage) => {
                 if (error) {
                     reject(new Error(error));
                 } else if (done) {
-                    const usage = {
-                        prompt_tokens: 0,
-                        completion_tokens: fullResponse.length,
-                        total_tokens: fullResponse.length
-                    };
+                    // For tool-call responses, fullResponse holds the envelope JSON;
+                    // estimating completion from it is still a reasonable upper bound
+                    // when the provider didn't report usage.
+                    const usage = this._resolveUsage(reportedUsage, messages, systemPrompt, fullResponse);
 
                     // Try to parse native tool calls from the response
                     let toolCalls = null;

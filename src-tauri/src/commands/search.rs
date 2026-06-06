@@ -14,6 +14,7 @@ use ignore::WalkBuilder;
 use regex::RegexBuilder;
 use serde::Serialize;
 use std::path::Path;
+use crate::path_guard::PathGuard;
 
 // ── grep_search ────────────────────────────────────────────────────────────────
 
@@ -277,7 +278,8 @@ pub async fn glob_files(
 
 /// Delete a single file. Refuses to delete directories — use delete_dir for those.
 #[tauri::command]
-pub async fn delete_file(path: String) -> Result<(), String> {
+pub async fn delete_file(path: String, guard: tauri::State<'_, PathGuard>) -> Result<(), String> {
+    guard.ensure_allowed(&path)?;
     let p = Path::new(&path);
     if !p.exists() {
         return Err(format!("File does not exist: {}", path));
@@ -300,7 +302,12 @@ pub async fn move_file(
     from: String,
     to: String,
     overwrite: Option<bool>,
+    guard: tauri::State<'_, PathGuard>,
 ) -> Result<(), String> {
+    // Both the source (being removed) and destination (being created) must be
+    // inside allowed roots.
+    guard.ensure_allowed(&from)?;
+    guard.ensure_allowed(&to)?;
     let src = Path::new(&from);
     let dst = Path::new(&to);
     if !src.exists() {

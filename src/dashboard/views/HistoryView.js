@@ -1,12 +1,13 @@
-import { ApiLogStore } from '../../modules/storage/ApiLogStore.js';
+// History view — agent task execution history.
+//
+// The old global "API Logs" tab (backed by the localStorage ApiLogStore) was
+// retired: per-call LLM payloads now live per-task in the Monitor view. This
+// view shows the task list with search/filter and supports single + bulk delete.
 
 export class HistoryView {
     constructor() {
         this.tasks = [];
         this.filteredTasks = [];
-        this.apiLogs = [];
-        this.filteredApiLogs = [];
-        this.activeTab = 'tasks';
 
         // Task filters
         this.taskQuery = '';
@@ -14,11 +15,8 @@ export class HistoryView {
         this.taskDateFrom = '';
         this.taskDateTo = '';
 
-        // API log filters
-        this.logQuery = '';
-        this.logProvider = 'all';
-        this.logDateFrom = '';
-        this.logDateTo = '';
+        // Bulk selection (task ids)
+        this.selectedIds = new Set();
     }
 
     async loadTasks() {
@@ -28,15 +26,13 @@ export class HistoryView {
                 this.tasks = all.filter(t => t.status !== 'running');
                 this.tasks.sort((a, b) => new Date(b.started_at) - new Date(a.started_at));
                 this.filteredTasks = [...this.tasks];
+                // Drop selections for tasks that no longer exist.
+                const live = new Set(this.tasks.map(t => t.id));
+                this.selectedIds = new Set([...this.selectedIds].filter(id => live.has(id)));
             }
         } catch (e) {
             console.error('Failed to load tasks:', e);
         }
-    }
-
-    loadApiLogs() {
-        this.apiLogs = ApiLogStore.getAll();
-        this.filteredApiLogs = [...this.apiLogs];
     }
 
     applyTaskFilter() {
@@ -54,30 +50,17 @@ export class HistoryView {
         });
     }
 
-    applyLogFilter() {
-        const q = this.logQuery.toLowerCase();
-        const from = this.logDateFrom ? new Date(this.logDateFrom) : null;
-        const to = this.logDateTo ? new Date(this.logDateTo + 'T23:59:59') : null;
-
-        this.filteredApiLogs = this.apiLogs.filter(log => {
-            const matchQ = !q || log.model.toLowerCase().includes(q) || (log.prompt_preview || '').toLowerCase().includes(q) || (log.response_preview || '').toLowerCase().includes(q);
-            const matchProv = this.logProvider === 'all' || log.provider === this.logProvider;
-            const logDate = new Date(log.timestamp);
-            const matchFrom = !from || logDate >= from;
-            const matchTo = !to || logDate <= to;
-            return matchQ && matchProv && matchFrom && matchTo;
-        });
-    }
-
     renderTaskRows() {
         if (this.filteredTasks.length === 0) {
-            return `<tr><td colspan="8" class="hist-empty-cell">No execution history found.</td></tr>`;
+            return `<tr><td colspan="9" class="hist-empty-cell">No execution history found.</td></tr>`;
         }
         return this.filteredTasks.map(task => {
             const duration = getDuration(task.started_at, task.completed_at);
             const callerBadge = task.caller ? `<span class="hist-caller-badge">${escapeHtml(task.caller)}</span>` : '<span class="hist-caller-none">—</span>';
+            const checked = this.selectedIds.has(task.id) ? 'checked' : '';
             return `
-                <tr class="hist-row" data-task-id="${task.id}">
+                <tr class="hist-row ${this.selectedIds.has(task.id) ? 'hist-row-selected' : ''}" data-task-id="${task.id}">
+                    <td class="hist-check-cell"><input type="checkbox" class="hist-row-check" data-id="${task.id}" ${checked}></td>
                     <td><span class="task-badge badge-${task.status}">${task.status}</span></td>
                     <td class="hist-mono">#${task.id.slice(0, 8)}</td>
                     <td class="hist-prompt-cell" title="${escapeHtml(task.prompt)}">${escapeHtml(task.prompt)}</td>
@@ -86,361 +69,147 @@ export class HistoryView {
                     <td class="hist-num">${duration}</td>
                     <td class="hist-date">${formatDate(task.started_at)}</td>
                     <td class="hist-actions-cell">
-                        <button class="hist-btn-delete" data-delete-task-id="${task.id}" title="Delete this task and its API logs">🗑</button>
+                        <button class="hist-btn-delete" data-delete-task-id="${task.id}" title="Delete this task">🗑</button>
                     </td>
                 </tr>
             `;
         }).join('');
     }
 
-    renderLogRows() {
-        if (this.filteredApiLogs.length === 0) {
-            return `<tr><td colspan="7" class="hist-empty-cell">No API logs found.</td></tr>`;
-        }
-        return this.filteredApiLogs.map(log => {
-            const statusCls = log.error ? 'badge-failed' : 'badge-completed';
-            const statusLabel = log.error ? 'error' : 'ok';
-            const latency = log.latency_ms ? `${(log.latency_ms / 1000).toFixed(2)}s` : '—';
-            return `
-                <tr class="hist-row hist-log-row" data-log-id="${escapeHtml(log.id)}">
-                    <td><span class="task-badge ${statusCls}">${statusLabel}</span></td>
-                    <td class="hist-mono" title="${escapeHtml(log.model)}">${escapeHtml(log.model.split(':').pop())}<br><span class="hist-provider-label">${escapeHtml(log.provider)}</span></td>
-                    <td class="hist-prompt-cell" title="${escapeHtml(log.prompt_preview)}">${escapeHtml(log.prompt_preview || '—')}</td>
-                    <td class="hist-prompt-cell" title="${escapeHtml(log.response_preview)}">${log.error ? `<span style="color:var(--error)">${escapeHtml(log.error.substring(0, 80))}</span>` : escapeHtml(log.response_preview || '—')}</td>
-                    <td class="hist-num">${(log.total_tokens || 0).toLocaleString()}</td>
-                    <td class="hist-num">${latency}</td>
-                    <td class="hist-date">${formatDate(log.timestamp)}</td>
-                </tr>
-            `;
-        }).join('');
+    _renderBulkBar() {
+        const n = this.selectedIds.size;
+        if (n === 0) return '';
+        return `
+            <div class="hist-bulk-bar">
+                <span class="hist-bulk-count">${n}件を選択中</span>
+                <button id="hist-bulk-delete" class="hist-bulk-btn-danger">🗑 選択したタスクを削除</button>
+                <button id="hist-bulk-clear" class="hist-bulk-btn">選択解除</button>
+            </div>
+        `;
     }
 
     async render() {
         await this.loadTasks();
-        this.loadApiLogs();
-
-        // Collect unique providers for filter dropdown
-        const providers = [...new Set(this.apiLogs.map(l => l.provider))].filter(Boolean);
-        const providerOptions = providers.map(p => `<option value="${p}">${p}</option>`).join('');
+        this.applyTaskFilter();
 
         return `
             <style>
-                .hist-tabs {
-                    display: flex;
-                    gap: 4px;
-                    background: var(--bg-tertiary);
-                    padding: 4px;
-                    border-radius: var(--radius-md);
-                    width: fit-content;
-                    margin-bottom: 20px;
-                }
-                .hist-tab-btn {
-                    padding: 8px 20px;
-                    border: none;
-                    background: transparent;
-                    color: var(--text-secondary);
-                    font-size: 13px;
-                    font-weight: 500;
-                    border-radius: var(--radius-sm);
-                    cursor: pointer;
-                    transition: background var(--transition-fast), color var(--transition-fast);
-                    white-space: nowrap;
-                }
-                .hist-tab-btn.active {
-                    background: var(--bg-primary);
-                    color: var(--accent);
-                    box-shadow: 0 1px 4px rgba(0,0,0,0.3);
-                }
-                .hist-tab-btn:hover:not(.active) {
-                    background: var(--bg-hover);
-                    color: var(--text-primary);
-                }
-                .hist-tab-panel { display: none; }
-                .hist-tab-panel.active { display: block; }
-
                 .hist-search-bar {
-                    display: flex;
-                    gap: 10px;
-                    align-items: center;
-                    flex-wrap: wrap;
-                    padding: 14px 16px;
-                    background: var(--bg-secondary);
-                    border: 1px solid var(--border);
-                    border-radius: var(--radius-md);
-                    margin-bottom: 16px;
+                    display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+                    padding: 14px 16px; background: var(--bg-secondary);
+                    border: 1px solid var(--border); border-radius: var(--radius-md); margin-bottom: 16px;
                 }
-                .hist-search-input-wrap {
-                    position: relative;
-                    flex: 1;
-                    min-width: 200px;
-                }
-                .hist-search-icon {
-                    position: absolute;
-                    left: 10px;
-                    top: 50%;
-                    transform: translateY(-50%);
-                    color: var(--text-tertiary);
-                    font-size: 14px;
-                    pointer-events: none;
-                }
+                .hist-search-input-wrap { position: relative; flex: 1; min-width: 200px; }
+                .hist-search-icon { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: var(--text-tertiary); font-size: 14px; pointer-events: none; }
                 .hist-search-input {
-                    width: 100%;
-                    padding: 8px 12px 8px 32px;
-                    background: var(--bg-input);
-                    border: 1px solid var(--border);
-                    border-radius: var(--radius-sm);
-                    color: var(--text-primary);
-                    font-size: 13px;
-                    outline: none;
-                    box-sizing: border-box;
+                    width: 100%; padding: 8px 12px 8px 32px; background: var(--bg-input);
+                    border: 1px solid var(--border); border-radius: var(--radius-sm);
+                    color: var(--text-primary); font-size: 13px; outline: none; box-sizing: border-box;
                 }
-                .hist-search-input:focus {
-                    border-color: var(--accent);
-                    box-shadow: 0 0 0 2px var(--accent-glow);
-                }
+                .hist-search-input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-glow); }
                 .hist-search-input::placeholder { color: var(--text-tertiary); }
                 .hist-filter-select {
-                    padding: 8px 28px 8px 10px;
-                    background: var(--bg-input);
-                    border: 1px solid var(--border);
-                    border-radius: var(--radius-sm);
-                    color: var(--text-primary);
-                    font-size: 12.5px;
-                    outline: none;
-                    appearance: none;
-                    -webkit-appearance: none;
+                    padding: 8px 28px 8px 10px; background: var(--bg-input); border: 1px solid var(--border);
+                    border-radius: var(--radius-sm); color: var(--text-primary); font-size: 12.5px; outline: none;
+                    appearance: none; -webkit-appearance: none;
                     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23888' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
-                    background-repeat: no-repeat;
-                    background-position: right 8px center;
-                    cursor: pointer;
+                    background-repeat: no-repeat; background-position: right 8px center; cursor: pointer;
                 }
                 .hist-filter-select:focus { border-color: var(--accent); }
-                .hist-date-input {
-                    padding: 8px 10px;
-                    background: var(--bg-input);
-                    border: 1px solid var(--border);
-                    border-radius: var(--radius-sm);
-                    color: var(--text-primary);
-                    font-size: 12.5px;
-                    outline: none;
-                }
+                .hist-date-input { padding: 8px 10px; background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-primary); font-size: 12.5px; outline: none; }
                 .hist-date-input:focus { border-color: var(--accent); }
-                .hist-date-sep {
-                    color: var(--text-tertiary);
-                    font-size: 12px;
-                }
-                .hist-btn-refresh {
-                    padding: 8px 14px;
-                    background: var(--bg-tertiary);
-                    border: 1px solid var(--border);
-                    border-radius: var(--radius-sm);
-                    color: var(--text-secondary);
-                    font-size: 12px;
-                    cursor: pointer;
-                    white-space: nowrap;
-                    transition: background var(--transition-fast);
-                }
+                .hist-date-sep { color: var(--text-tertiary); font-size: 12px; }
+                .hist-btn-refresh { padding: 8px 14px; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-secondary); font-size: 12px; cursor: pointer; white-space: nowrap; transition: background var(--transition-fast); }
                 .hist-btn-refresh:hover { background: var(--bg-hover); color: var(--text-primary); }
 
-                .hist-summary {
-                    font-size: 12px;
-                    color: var(--text-tertiary);
-                    margin-bottom: 10px;
-                    padding-left: 2px;
-                }
+                .hist-summary { font-size: 12px; color: var(--text-tertiary); margin-bottom: 10px; padding-left: 2px; }
 
-                .hist-table-card {
-                    background: var(--bg-secondary);
-                    border: 1px solid var(--border);
-                    border-radius: var(--radius-md);
-                    overflow: hidden;
+                .hist-bulk-bar {
+                    display: flex; align-items: center; gap: 12px;
+                    padding: 10px 14px; margin-bottom: 12px;
+                    background: var(--accent-glow, rgba(0,200,255,0.08));
+                    border: 1px solid var(--accent); border-radius: var(--radius-md);
                 }
-                .hist-table {
-                    width: 100%;
-                    border-collapse: collapse;
-                    font-size: 12.5px;
+                .hist-bulk-count { font-size: 13px; font-weight: 600; color: var(--accent); }
+                .hist-bulk-btn-danger {
+                    padding: 6px 14px; background: transparent; border: 1px solid var(--error);
+                    color: var(--error); border-radius: var(--radius-sm); font-size: 12.5px; cursor: pointer; font-weight: 500;
                 }
-                .hist-table thead th {
-                    background: var(--bg-tertiary);
-                    padding: 10px 14px;
-                    font-size: 11px;
-                    font-weight: 600;
-                    text-transform: uppercase;
-                    letter-spacing: 0.05em;
-                    color: var(--text-secondary);
-                    border-bottom: 1px solid var(--border);
-                    text-align: left;
-                    white-space: nowrap;
-                }
-                .hist-table tbody tr {
-                    border-bottom: 1px solid var(--border-light);
-                    transition: background var(--transition-fast);
-                }
+                .hist-bulk-btn-danger:hover { background: var(--error-bg); }
+                .hist-bulk-btn { padding: 6px 12px; background: var(--bg-tertiary); border: 1px solid var(--border); color: var(--text-secondary); border-radius: var(--radius-sm); font-size: 12.5px; cursor: pointer; }
+                .hist-bulk-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+                .hist-table-card { background: var(--bg-secondary); border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden; }
+                .hist-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+                .hist-table thead th { background: var(--bg-tertiary); padding: 10px 14px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-secondary); border-bottom: 1px solid var(--border); text-align: left; white-space: nowrap; }
+                .hist-table tbody tr { border-bottom: 1px solid var(--border-light); transition: background var(--transition-fast); }
                 .hist-table tbody tr:last-child { border-bottom: none; }
                 .hist-row { cursor: pointer; }
                 .hist-row:hover { background: var(--bg-hover); }
-                .hist-table td {
-                    padding: 10px 14px;
-                    vertical-align: middle;
-                    color: var(--text-primary);
-                }
-                .hist-empty-cell {
-                    text-align: center;
-                    padding: 40px !important;
-                    color: var(--text-tertiary);
-                    font-size: 13px;
-                }
-                .hist-prompt-cell {
-                    max-width: 260px;
-                    overflow: hidden;
-                    text-overflow: ellipsis;
-                    white-space: nowrap;
-                    color: var(--text-secondary);
-                }
-                .hist-mono {
-                    font-family: var(--font-mono);
-                    font-size: 11.5px;
-                    color: var(--text-tertiary);
-                }
-                .hist-num {
-                    text-align: right;
-                    font-variant-numeric: tabular-nums;
-                    color: var(--text-secondary);
-                }
-                .hist-date {
-                    white-space: nowrap;
-                    color: var(--text-tertiary);
-                    font-size: 11.5px;
-                }
-                .hist-caller-badge {
-                    background: var(--bg-tertiary);
-                    border: 1px solid var(--border-light);
-                    border-radius: 4px;
-                    padding: 2px 7px;
-                    font-size: 11px;
-                    color: var(--text-secondary);
-                }
+                .hist-row-selected { background: var(--accent-glow, rgba(0,200,255,0.06)); }
+                .hist-table td { padding: 10px 14px; vertical-align: middle; color: var(--text-primary); }
+                .hist-check-cell { text-align: center; width: 40px; padding: 6px !important; }
+                .hist-row-check, #task-select-all { width: 15px; height: 15px; cursor: pointer; accent-color: var(--accent); }
+                .hist-empty-cell { text-align: center; padding: 40px !important; color: var(--text-tertiary); font-size: 13px; }
+                .hist-prompt-cell { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); }
+                .hist-mono { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-tertiary); }
+                .hist-num { text-align: right; font-variant-numeric: tabular-nums; color: var(--text-secondary); }
+                .hist-date { white-space: nowrap; color: var(--text-tertiary); font-size: 11.5px; }
+                .hist-caller-badge { background: var(--bg-tertiary); border: 1px solid var(--border-light); border-radius: 4px; padding: 2px 7px; font-size: 11px; color: var(--text-secondary); }
                 .hist-caller-none { color: var(--text-tertiary); }
-                .hist-provider-label {
-                    font-size: 10px;
-                    color: var(--text-tertiary);
-                }
-                .hist-actions-cell {
-                    text-align: center;
-                    padding: 6px !important;
-                }
-                .hist-btn-delete {
-                    background: transparent;
-                    border: 1px solid transparent;
-                    color: var(--text-tertiary);
-                    font-size: 14px;
-                    padding: 4px 8px;
-                    border-radius: var(--radius-sm);
-                    cursor: pointer;
-                    transition: background var(--transition-fast),
-                                color var(--transition-fast),
-                                border-color var(--transition-fast);
-                }
-                .hist-btn-delete:hover {
-                    background: var(--error-bg);
-                    border-color: var(--error);
-                    color: var(--error);
-                }
-                .hist-btn-delete:disabled {
-                    opacity: 0.5;
-                    cursor: not-allowed;
-                }
+                .hist-actions-cell { text-align: center; padding: 6px !important; }
+                .hist-btn-delete { background: transparent; border: 1px solid transparent; color: var(--text-tertiary); font-size: 14px; padding: 4px 8px; border-radius: var(--radius-sm); cursor: pointer; transition: background var(--transition-fast), color var(--transition-fast), border-color var(--transition-fast); }
+                .hist-btn-delete:hover { background: var(--error-bg); border-color: var(--error); color: var(--error); }
+                .hist-btn-delete:disabled { opacity: 0.5; cursor: not-allowed; }
             </style>
 
             <div class="view-container">
                 <div class="view-header">
                     <div>
                         <h1>History</h1>
-                        <p class="subtitle">Agent execution history and LLM API call logs</p>
+                        <p class="subtitle">Agent execution history (per-call LLM payloads are in the Monitor view)</p>
                     </div>
                 </div>
 
-                <!-- Tabs -->
-                <div class="hist-tabs">
-                    <button class="hist-tab-btn ${this.activeTab === 'tasks' ? 'active' : ''}" data-tab="tasks">Task History</button>
-                    <button class="hist-tab-btn ${this.activeTab === 'api-logs' ? 'active' : ''}" data-tab="api-logs">API Logs <span style="font-size:11px;opacity:0.7">(${this.apiLogs.length})</span></button>
+                <div class="hist-search-bar">
+                    <div class="hist-search-input-wrap">
+                        <span class="hist-search-icon">🔍</span>
+                        <input type="text" id="task-search" class="hist-search-input" placeholder="Search by prompt, ID or caller..." value="${escapeHtml(this.taskQuery)}">
+                    </div>
+                    <select id="task-status-filter" class="hist-filter-select">
+                        <option value="all" ${this.taskStatus === 'all' ? 'selected' : ''}>All Statuses</option>
+                        <option value="completed" ${this.taskStatus === 'completed' ? 'selected' : ''}>Completed</option>
+                        <option value="failed" ${this.taskStatus === 'failed' ? 'selected' : ''}>Failed</option>
+                        <option value="aborted" ${this.taskStatus === 'aborted' ? 'selected' : ''}>Aborted</option>
+                    </select>
+                    <input type="date" id="task-date-from" class="hist-date-input" value="${this.taskDateFrom}" title="From date">
+                    <span class="hist-date-sep">~</span>
+                    <input type="date" id="task-date-to" class="hist-date-input" value="${this.taskDateTo}" title="To date">
+                    <button id="task-btn-refresh" class="hist-btn-refresh">↻ Refresh</button>
                 </div>
 
-                <!-- Task History Tab -->
-                <div class="hist-tab-panel ${this.activeTab === 'tasks' ? 'active' : ''}" id="hist-panel-tasks">
-                    <div class="hist-search-bar">
-                        <div class="hist-search-input-wrap">
-                            <span class="hist-search-icon">🔍</span>
-                            <input type="text" id="task-search" class="hist-search-input" placeholder="Search by prompt, ID or caller..." value="${escapeHtml(this.taskQuery)}">
-                        </div>
-                        <select id="task-status-filter" class="hist-filter-select">
-                            <option value="all" ${this.taskStatus === 'all' ? 'selected' : ''}>All Statuses</option>
-                            <option value="completed" ${this.taskStatus === 'completed' ? 'selected' : ''}>Completed</option>
-                            <option value="failed" ${this.taskStatus === 'failed' ? 'selected' : ''}>Failed</option>
-                            <option value="aborted" ${this.taskStatus === 'aborted' ? 'selected' : ''}>Aborted</option>
-                        </select>
-                        <input type="date" id="task-date-from" class="hist-date-input" value="${this.taskDateFrom}" title="From date">
-                        <span class="hist-date-sep">~</span>
-                        <input type="date" id="task-date-to" class="hist-date-input" value="${this.taskDateTo}" title="To date">
-                        <button id="task-btn-refresh" class="hist-btn-refresh">↻ Refresh</button>
-                    </div>
-                    <div class="hist-summary">Showing ${this.filteredTasks.length} of ${this.tasks.length} tasks</div>
-                    <div class="hist-table-card">
-                        <table class="hist-table">
-                            <thead>
-                                <tr>
-                                    <th style="width:110px">Status</th>
-                                    <th style="width:100px">Task ID</th>
-                                    <th>Prompt</th>
-                                    <th style="width:110px">Caller</th>
-                                    <th style="width:90px;text-align:right">Tokens</th>
-                                    <th style="width:80px;text-align:right">Duration</th>
-                                    <th style="width:170px">Started At</th>
-                                    <th style="width:56px;text-align:center">Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody id="task-table-body">
-                                ${this.renderTaskRows()}
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
+                <div class="hist-summary">Showing ${this.filteredTasks.length} of ${this.tasks.length} tasks</div>
+                <div id="hist-bulk-bar-wrap">${this._renderBulkBar()}</div>
 
-                <!-- API Logs Tab -->
-                <div class="hist-tab-panel ${this.activeTab === 'api-logs' ? 'active' : ''}" id="hist-panel-api-logs">
-                    <div class="hist-search-bar">
-                        <div class="hist-search-input-wrap">
-                            <span class="hist-search-icon">🔍</span>
-                            <input type="text" id="log-search" class="hist-search-input" placeholder="Search by model, prompt or response..." value="${escapeHtml(this.logQuery)}">
-                        </div>
-                        <select id="log-provider-filter" class="hist-filter-select">
-                            <option value="all">All Providers</option>
-                            ${providerOptions}
-                        </select>
-                        <input type="date" id="log-date-from" class="hist-date-input" value="${this.logDateFrom}" title="From date">
-                        <span class="hist-date-sep">~</span>
-                        <input type="date" id="log-date-to" class="hist-date-input" value="${this.logDateTo}" title="To date">
-                        <button id="log-btn-clear" class="hist-btn-refresh" style="color:var(--error);border-color:var(--error)">🗑 Clear Logs</button>
-                    </div>
-                    <div class="hist-summary">Showing ${this.filteredApiLogs.length} of ${this.apiLogs.length} log entries</div>
-                    <div class="hist-table-card">
-                        <table class="hist-table">
-                            <thead>
-                                <tr>
-                                    <th style="width:70px">Status</th>
-                                    <th style="width:130px">Model</th>
-                                    <th>Prompt</th>
-                                    <th>Response</th>
-                                    <th style="width:80px;text-align:right">Tokens</th>
-                                    <th style="width:80px;text-align:right">Latency</th>
-                                    <th style="width:170px">Timestamp</th>
-                                </tr>
-                            </thead>
-                            <tbody id="log-table-body">
-                                ${this.renderLogRows()}
-                            </tbody>
-                        </table>
-                    </div>
+                <div class="hist-table-card">
+                    <table class="hist-table">
+                        <thead>
+                            <tr>
+                                <th class="hist-check-cell"><input type="checkbox" id="task-select-all" title="Select all (filtered)"></th>
+                                <th style="width:110px">Status</th>
+                                <th style="width:100px">Task ID</th>
+                                <th>Prompt</th>
+                                <th style="width:110px">Caller</th>
+                                <th style="width:90px;text-align:right">Tokens</th>
+                                <th style="width:80px;text-align:right">Duration</th>
+                                <th style="width:170px">Started At</th>
+                                <th style="width:56px;text-align:center">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="task-table-body">
+                            ${this.renderTaskRows()}
+                        </tbody>
+                    </table>
                 </div>
             </div>
         `;
@@ -449,35 +218,66 @@ export class HistoryView {
     _updateTaskTable() {
         const body = document.getElementById('task-table-body');
         if (body) body.innerHTML = this.renderTaskRows();
-        const summary = body?.closest('.hist-tab-panel')?.querySelector('.hist-summary');
+        const summary = document.querySelector('.hist-summary');
         if (summary) summary.textContent = `Showing ${this.filteredTasks.length} of ${this.tasks.length} tasks`;
+        const bulkWrap = document.getElementById('hist-bulk-bar-wrap');
+        if (bulkWrap) bulkWrap.innerHTML = this._renderBulkBar();
+        this._syncSelectAll();
         this._bindTaskRows();
+        this._bindBulkBar();
     }
 
-    _updateLogTable() {
-        const body = document.getElementById('log-table-body');
-        if (body) body.innerHTML = this.renderLogRows();
-        const panel = document.getElementById('hist-panel-api-logs');
-        const summary = panel?.querySelector('.hist-summary');
-        if (summary) summary.textContent = `Showing ${this.filteredApiLogs.length} of ${this.apiLogs.length} log entries`;
+    _syncSelectAll() {
+        const selAll = document.getElementById('task-select-all');
+        if (!selAll) return;
+        const visible = this.filteredTasks.map(t => t.id);
+        const allSelected = visible.length > 0 && visible.every(id => this.selectedIds.has(id));
+        selAll.checked = allSelected;
+        selAll.indeterminate = !allSelected && visible.some(id => this.selectedIds.has(id));
     }
 
     _bindTaskRows() {
+        // Row click → open in Monitor (ignore clicks on the checkbox / delete button).
         document.querySelectorAll('.hist-row[data-task-id]').forEach(row => {
-            row.addEventListener('click', () => {
+            row.addEventListener('click', (e) => {
+                if (e.target.closest('.hist-row-check') || e.target.closest('.hist-btn-delete')) return;
                 const id = row.getAttribute('data-task-id');
                 if (id) window.location.hash = `#monitor?id=${id}`;
             });
         });
 
-        // Delete buttons — stop propagation so the row click doesn't fire
+        // Per-row checkbox
+        document.querySelectorAll('.hist-row-check').forEach(cb => {
+            cb.addEventListener('click', (e) => e.stopPropagation());
+            cb.addEventListener('change', () => {
+                const id = cb.getAttribute('data-id');
+                if (cb.checked) this.selectedIds.add(id); else this.selectedIds.delete(id);
+                const row = cb.closest('.hist-row');
+                if (row) row.classList.toggle('hist-row-selected', cb.checked);
+                const bulkWrap = document.getElementById('hist-bulk-bar-wrap');
+                if (bulkWrap) bulkWrap.innerHTML = this._renderBulkBar();
+                this._syncSelectAll();
+                this._bindBulkBar();
+            });
+        });
+
+        // Per-row delete
         document.querySelectorAll('.hist-btn-delete[data-delete-task-id]').forEach(btn => {
             btn.addEventListener('click', async (e) => {
                 e.stopPropagation();
                 const id = btn.getAttribute('data-delete-task-id');
-                if (!id) return;
-                await this._deleteTask(id, btn);
+                if (id) await this._deleteTask(id, btn);
             });
+        });
+    }
+
+    _bindBulkBar() {
+        const del = document.getElementById('hist-bulk-delete');
+        if (del) del.addEventListener('click', () => this._deleteSelected());
+        const clr = document.getElementById('hist-bulk-clear');
+        if (clr) clr.addEventListener('click', () => {
+            this.selectedIds.clear();
+            this._updateTaskTable();
         });
     }
 
@@ -485,118 +285,48 @@ export class HistoryView {
         const task = this.tasks.find(t => t.id === id);
         const short = id.slice(0, 8);
         const promptPreview = (task?.prompt || '').slice(0, 60);
-
-        const ok = confirm(
-            `Delete task #${short}?\n\n` +
-            `"${promptPreview}${(task?.prompt || '').length > 60 ? '…' : ''}"\n\n` +
-            `Linked API logs from this task's lifespan will also be removed.\n` +
-            `This cannot be undone.`
-        );
+        const ok = confirm(`Delete task #${short}?\n\n"${promptPreview}${(task?.prompt || '').length > 60 ? '…' : ''}"\n\nThis cannot be undone.`);
         if (!ok) return;
 
-        btn.disabled = true;
-        const originalText = btn.textContent;
-        btn.textContent = '…';
-
+        if (btn) { btn.disabled = true; btn.textContent = '…'; }
         try {
-            // 1. Delete from backend (memory + disk)
-            const result = await window.apiClient.deleteTaskHistory(id);
-
-            // 2. Delete associated API logs from local storage by timestamp window
-            const removedLogs = ApiLogStore.removeInRange(
-                result?.started_at || task?.started_at,
-                result?.completed_at || task?.completed_at || new Date().toISOString()
-            );
-
-            // 3. Refresh in-memory state
+            await window.apiClient.deleteTaskHistory(id);
             this.tasks = this.tasks.filter(t => t.id !== id);
+            this.selectedIds.delete(id);
             this.applyTaskFilter();
             this._updateTaskTable();
-
-            // Refresh API logs view too
-            this.loadApiLogs();
-            this.applyLogFilter();
-            this._updateLogTable();
-            this._bindLogRows();
-
-            // Update tab counter
-            const apiLogTabBtn = document.querySelector('.hist-tab-btn[data-tab="api-logs"]');
-            if (apiLogTabBtn) {
-                apiLogTabBtn.innerHTML = `API Logs <span style="font-size:11px;opacity:0.7">(${this.apiLogs.length})</span>`;
-            }
-
-            console.log(`Deleted task ${id} and ${removedLogs} API log(s) in its time window.`);
         } catch (err) {
             console.error('Failed to delete task:', err);
             alert(`Failed to delete task: ${err.message || err}`);
-            btn.disabled = false;
-            btn.textContent = originalText;
+            if (btn) { btn.disabled = false; btn.textContent = '🗑'; }
         }
     }
 
-    _bindLogRows() {
-        document.querySelectorAll('.hist-log-row').forEach(row => {
-            row.addEventListener('click', () => {
-                const logId = row.getAttribute('data-log-id');
-                const log = this.apiLogs.find(l => l.id === logId);
-                if (log) this._showLogDetail(log);
-            });
-        });
-    }
+    async _deleteSelected() {
+        const ids = [...this.selectedIds];
+        if (ids.length === 0) return;
+        if (!confirm(`選択した ${ids.length} 件のタスクを削除しますか？\nこの操作は取り消せません。`)) return;
 
-    _showLogDetail(log) {
-        const overlay = document.createElement('div');
-        overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);z-index:3000;display:flex;align-items:center;justify-content:center;';
-        const box = document.createElement('div');
-        box.style.cssText = 'background:var(--bg-secondary);border:1px solid var(--border);border-radius:10px;width:640px;max-height:80vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,0.5);';
-        box.innerHTML = `
-            <div style="padding:14px 18px;background:var(--bg-tertiary);border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;">
-                <span style="font-weight:600;font-size:14px;color:var(--text-primary)">API Log Detail</span>
-                <button id="log-detail-close" style="background:none;border:none;color:var(--text-secondary);font-size:18px;cursor:pointer;">✖</button>
-            </div>
-            <div style="padding:18px;overflow-y:auto;flex:1;display:flex;flex-direction:column;gap:14px;font-size:13px;">
-                <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
-                    <div><label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:3px">Model</label><span style="font-family:var(--font-mono)">${escapeHtml(log.model)}</span></div>
-                    <div><label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:3px">Provider</label><span>${escapeHtml(log.provider)}</span></div>
-                    <div><label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:3px">Timestamp</label><span>${formatDate(log.timestamp)}</span></div>
-                    <div><label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:3px">Latency</label><span>${log.latency_ms ? (log.latency_ms/1000).toFixed(2)+'s' : '—'}</span></div>
-                    <div><label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:3px">Tokens</label><span>${(log.total_tokens||0).toLocaleString()} (prompt: ${log.prompt_tokens||0}, completion: ${log.completion_tokens||0})</span></div>
-                    <div><label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:3px">Messages</label><span>${log.messages_count||0}</span></div>
-                </div>
-                ${log.prompt_preview ? `
-                <div>
-                    <label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:5px">Prompt (preview)</label>
-                    <div style="background:var(--bg-tertiary);border:1px solid var(--border-light);border-radius:6px;padding:10px;font-size:12px;line-height:1.5;color:var(--text-secondary);white-space:pre-wrap;max-height:120px;overflow-y:auto;">${escapeHtml(log.prompt_preview)}</div>
-                </div>` : ''}
-                ${log.response_preview ? `
-                <div>
-                    <label style="font-size:11px;color:var(--text-tertiary);display:block;margin-bottom:5px">Response (preview)</label>
-                    <div style="background:var(--bg-tertiary);border:1px solid var(--border-light);border-radius:6px;padding:10px;font-size:12px;line-height:1.5;color:var(--text-secondary);white-space:pre-wrap;max-height:120px;overflow-y:auto;">${escapeHtml(log.response_preview)}</div>
-                </div>` : ''}
-                ${log.error ? `
-                <div>
-                    <label style="font-size:11px;color:var(--error);display:block;margin-bottom:5px">Error</label>
-                    <div style="background:var(--error-bg);border:1px solid var(--error);border-radius:6px;padding:10px;font-size:12px;color:var(--error);white-space:pre-wrap;">${escapeHtml(log.error)}</div>
-                </div>` : ''}
-            </div>
-        `;
-        box.querySelector('#log-detail-close').onclick = () => document.body.removeChild(overlay);
-        overlay.onclick = e => { if (e.target === overlay) document.body.removeChild(overlay); };
-        overlay.appendChild(box);
-        document.body.appendChild(overlay);
+        const delBtn = document.getElementById('hist-bulk-delete');
+        if (delBtn) { delBtn.disabled = true; delBtn.textContent = '削除中…'; }
+
+        let failed = 0;
+        for (const id of ids) {
+            try {
+                await window.apiClient.deleteTaskHistory(id);
+                this.tasks = this.tasks.filter(t => t.id !== id);
+                this.selectedIds.delete(id);
+            } catch (err) {
+                console.error('Bulk delete failed for', id, err);
+                failed++;
+            }
+        }
+        this.applyTaskFilter();
+        this._updateTaskTable();
+        if (failed > 0) alert(`${failed} 件の削除に失敗しました。`);
     }
 
     init() {
-        // Tab switching
-        document.querySelectorAll('.hist-tab-btn').forEach(btn => {
-            btn.addEventListener('click', () => {
-                const tab = btn.getAttribute('data-tab');
-                this.activeTab = tab;
-                document.querySelectorAll('.hist-tab-btn').forEach(b => b.classList.toggle('active', b.getAttribute('data-tab') === tab));
-                document.querySelectorAll('.hist-tab-panel').forEach(p => p.classList.toggle('active', p.id === `hist-panel-${tab}`));
-            });
-        });
-
         // Task filters
         const taskSearch = document.getElementById('task-search');
         const taskStatus = document.getElementById('task-status-filter');
@@ -625,37 +355,17 @@ export class HistoryView {
             taskRefresh.textContent = '↻ Refresh';
         });
 
-        // API log filters
-        const logSearch = document.getElementById('log-search');
-        const logProvider = document.getElementById('log-provider-filter');
-        const logFrom = document.getElementById('log-date-from');
-        const logTo = document.getElementById('log-date-to');
-        const logClear = document.getElementById('log-btn-clear');
-
-        const filterLogs = () => {
-            this.logQuery = logSearch?.value || '';
-            this.logProvider = logProvider?.value || 'all';
-            this.logDateFrom = logFrom?.value || '';
-            this.logDateTo = logTo?.value || '';
-            this.applyLogFilter();
-            this._updateLogTable();
-            this._bindLogRows();
-        };
-
-        logSearch?.addEventListener('input', filterLogs);
-        logProvider?.addEventListener('change', filterLogs);
-        logFrom?.addEventListener('change', filterLogs);
-        logTo?.addEventListener('change', filterLogs);
-        logClear?.addEventListener('click', () => {
-            if (confirm('Clear all API logs?')) {
-                ApiLogStore.clear();
-                this.loadApiLogs();
-                this._updateLogTable();
-            }
+        // Select-all (operates on the currently filtered rows)
+        const selAll = document.getElementById('task-select-all');
+        selAll?.addEventListener('change', () => {
+            const visible = this.filteredTasks.map(t => t.id);
+            if (selAll.checked) visible.forEach(id => this.selectedIds.add(id));
+            else visible.forEach(id => this.selectedIds.delete(id));
+            this._updateTaskTable();
         });
 
         this._bindTaskRows();
-        this._bindLogRows();
+        this._bindBulkBar();
     }
 }
 

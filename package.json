@@ -9,12 +9,18 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
     "// tauri": "Sets env vars inline so `npm run tauri build` works without going through build.ps1. PROTOC_INCLUDE points the build script for prost-based crates (lance-encoding, etc.) at the standard google/* protos we ship in .proto_include/. TMP/TEMP redirected to an ASCII project-local dir to avoid issues on Windows accounts with non-ASCII usernames (e.g. Japanese/Korean). The `if` is wrapped in parens because cmd otherwise scopes the rest of the `&&` chain INSIDE the `if` body — so when .tmp_build already exists, the whole chain (including `tauri`) would be silently skipped with exit 0. Windows-only syntax (uses `set`); Unix users invoke tauri-cli directly.",
     "tauri": "(if not exist .tmp_build mkdir .tmp_build) && set PROTOC_INCLUDE=%CD%\\.proto_include&& set TMP=%CD%\\.tmp_build&& set TEMP=%CD%\\.tmp_build&& tauri"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",
-    "vite": "^6.0.0"
+    "@vitest/coverage-v8": "^2.1.9",
+    "jsdom": "^25.0.1",
+    "vite": "^6.0.0",
+    "vitest": "^2.1.0"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.2.0",
