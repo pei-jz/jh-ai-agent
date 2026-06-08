@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  # ── Frontend / JS unit tests (fast, no native toolchain needed) ──────────
+  js-tests:
+    name: JS unit tests (vitest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      # Coverage run enforces the thresholds in vitest.config.js (fails on regression).
+      - run: npm run test:coverage
+
+  # ── Rust unit tests (path guard, auth token, encoding detection) ─────────
+  # Runs on Windows to match the app's primary target. The frontend is built
+  # first because `tauri::generate_context!()` embeds ../dist at compile time.
+  rust-tests:
+    name: Rust unit tests (cargo test)
+    runs-on: windows-latest
+    env:
+      PROTOC_INCLUDE: ${{ github.workspace }}\.proto_include
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build frontend (needed by generate_context!)
+        run: |
+          npm ci
+          npm run build
+      - name: Run cargo tests
+        working-directory: src-tauri
+        run: cargo test --lib

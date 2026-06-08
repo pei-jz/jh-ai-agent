@@ -186,13 +186,13 @@ class JhaiAdapter {
     // ── Running tasks (intent / freeform) + result handling ──────────────────
 
     /** Run a registered intent. Returns a promise that resolves with the result envelope (or null). */
-    async runIntent(intentId, { prompt, context } = {}) {
-        return this.runIntentTask(intentId, { prompt, context }).completed;
+    async runIntent(intentId, { prompt, context, images } = {}) {
+        return this.runIntentTask(intentId, { prompt, context, images }).completed;
     }
 
     /** Freeform chat (no intent), still scoped to this app's tools + context. */
-    async chat(prompt, { context } = {}) {
-        return this.chatTask(prompt, { context }).completed;
+    async chat(prompt, { context, images } = {}) {
+        return this.chatTask(prompt, { context, images }).completed;
     }
 
     /**
@@ -204,7 +204,7 @@ class JhaiAdapter {
      *   onEvent(event, data) (if provided) receives EVERY task event
      *   (status / thought / tool_call / stream / result / complete / error).
      */
-    runIntentTask(intentId, { prompt, context, onEvent } = {}) {
+    runIntentTask(intentId, { prompt, context, images, onEvent } = {}) {
         const intent = this.intents.get(intentId);
         if (!intent) throw new Error(`Unknown intent: ${intentId}`);
         const inline = {
@@ -213,20 +213,20 @@ class JhaiAdapter {
             resultKind: intent.resultKind,
             tier: intent.tier,
         };
-        return this._runTask(prompt || intent.title || intentId, { intent: inline, context, onEvent });
+        return this._runTask(prompt || intent.title || intentId, { intent: inline, context, images, onEvent });
     }
 
     /** Freeform task handle (no intent). Same shape as runIntentTask. */
-    chatTask(prompt, { context, onEvent } = {}) {
-        return this._runTask(prompt, { context, onEvent });
+    chatTask(prompt, { context, images, onEvent } = {}) {
+        return this._runTask(prompt, { context, images, onEvent });
     }
 
-    _runTask(prompt, { intent = null, context, onEvent } = {}) {
+    _runTask(prompt, { intent = null, context, images, onEvent } = {}) {
         let abortFn = () => {};
         let resolveTid;
         const taskId = new Promise((r) => { resolveTid = r; });
         const completed = (async () => {
-            const tid = await this._createTask(prompt, { intent, context });
+            const tid = await this._createTask(prompt, { intent, context, images });
             resolveTid(tid);
             const handle = this._subscribeTaskHandle(tid, onEvent);
             abortFn = handle.abort;
@@ -237,17 +237,24 @@ class JhaiAdapter {
         return { taskId, completed, abort: () => abortFn() };
     }
 
-    async _createTask(prompt, { intent = null, context } = {}) {
+    async _createTask(prompt, { intent = null, context, images } = {}) {
         if (!this._fetch) throw new Error('No fetch implementation available');
         const mcpContext = context || (this.contextProvider ? this.contextProvider() : null);
         const behavior = { mcp_servers: [this.app] };
         if (intent) behavior.intent = intent;
         if (mcpContext) behavior.mcp_context = mcpContext;
 
+        // First-class image channel. Images MUST be base64 data URLs
+        // ("data:image/png;base64,…"); they're forwarded to the agent's LLM call
+        // (re-attached for the first several steps). Sent at the top level — the
+        // server reads `images` first, then falls back to behavior.mcp_context.images.
+        const reqBody = { prompt, caller: this.app, behavior };
+        if (Array.isArray(images) && images.length) reqBody.images = images;
+
         const res = await this._fetch(`${this.baseUrl}/api/tasks`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.token}` },
-            body: JSON.stringify({ prompt, caller: this.app, behavior }),
+            body: JSON.stringify(reqBody),
         });
         if (!res.ok) throw new Error(`Task create failed: HTTP ${res.status}`);
         const body = await res.json();

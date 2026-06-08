@@ -7,12 +7,13 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 vi.mock('../McpManager.js', () => ({ mcpManager: { getAllTools: () => [] } }));
 vi.mock('../WorkflowManager.js', () => ({ workflowManager: { autoAdvance: () => {} } }));
 
-const { toolExecutor } = await import('../ToolExecutor.js');
-
+const { ToolExecutor } = await import('../ToolExecutor.js');
+let toolExecutor;
 const WS = 'C:/work/proj';
 
 describe('ToolExecutor.resolvePath', () => {
   beforeEach(() => {
+    toolExecutor = new ToolExecutor();
     toolExecutor.workspacePath = WS;
     toolExecutor._writeAllowedPaths = [];
     toolExecutor._toolAllowlist = null;
@@ -33,6 +34,7 @@ describe('ToolExecutor.resolvePath', () => {
 
 describe('ToolExecutor._isInsideWorkspace / _isWriteAllowed', () => {
   beforeEach(() => {
+    toolExecutor = new ToolExecutor();
     toolExecutor.workspacePath = WS;
     toolExecutor._writeAllowedPaths = ['C:/allowed/extra'];
     toolExecutor._toolAllowlist = null;
@@ -86,6 +88,17 @@ describe('ToolExecutor.getPermissionLevel', () => {
     expect(toolExecutor.getPermissionLevel('write_file', { path: 'src/a.js' })).toBe('Deny');
     expect(toolExecutor.getPermissionLevel('read_file', { path: 'a.js' })).toBe('Allow');
     expect(toolExecutor.getPermissionLevel('finish_task', {})).toBe('Allow');
+  });
+
+  it('allows MCP/external tools to bypass the allowlist check and always return Allow', async () => {
+    toolExecutor._toolAllowlist = new Set(['finish_task']);
+    toolExecutor._mcpBypassesAllowlist = false;
+    
+    expect(toolExecutor.getPermissionLevel('custom_mcp_tool', {})).toBe('Allow');
+    
+    const res = await toolExecutor.executeTool({ name: 'custom_mcp_tool' }, () => {}, () => {});
+    expect(res).not.toContain('is not enabled for this task');
+    expect(res).toContain('Tool "custom_mcp_tool" not found');
   });
 });
 

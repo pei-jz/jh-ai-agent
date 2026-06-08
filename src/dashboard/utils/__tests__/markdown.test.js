@@ -85,6 +85,32 @@ describe('renderResultSummary', () => {
     it('shows "なし" when there are no files', () => {
         expect(renderResultSummary({ summary: 'x', files: [] })).toContain('なし');
     });
+    it('renders the structured shape: answer headline + stats chips + collapsible details', () => {
+        const html = renderResultSummary({
+            answer: '# 回答\n\n不足データを報告',
+            stats: { steps: 2, tools: { present_result: 1, finish_task: 1 }, tokens: 5200, durationMs: 20000, files: 0 },
+            request: 'ご依頼テキスト',
+            plan: '計画テキスト',
+            files: [],
+        });
+        // answer section
+        expect(html).toContain('rv-answer');
+        expect(html).toContain('<h1 class="rv-h">回答</h1>');
+        // stats chips (tool total = 2, tokens shown as k, duration in s)
+        expect(html).toContain('rv-chip');
+        expect(html).toContain('ステップ 2');
+        expect(html).toContain('ツール 2');
+        expect(html).toContain('5.2k');
+        // collapsible details holds request + plan
+        expect(html).toContain('<details');
+        expect(html).toContain('ご依頼テキスト');
+        expect(html).toContain('計画テキスト');
+    });
+    it('prefers structured answer over flat summary when both present', () => {
+        const html = renderResultSummary({ answer: 'STRUCTURED', summary: 'FLAT', files: [] });
+        expect(html).toContain('STRUCTURED');
+        expect(html).not.toContain('FLAT');
+    });
 });
 
 describe('renderFileList', () => {

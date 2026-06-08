@@ -1,6 +1,6 @@
 import llmService from './LLMService.js';
 import { workflowManager, WorkflowPhases } from './WorkflowManager.js';
-import { toolExecutor } from './ToolExecutor.js';
+import { ToolExecutor } from './ToolExecutor.js';
 import { contextBuilder, ContextBuilder } from './ContextBuilder.js';
 import { conversationMemory } from './ConversationMemory.js';
 import { jsonrepair } from 'jsonrepair';
@@ -23,6 +23,8 @@ export class AgentController {
         // the Rust AgentBehavior struct: { system_prompt, enabled_tools,
         // max_iterations, extra_instructions, response_format }.
         this.behaviorOverrides = null;
+        this.toolExecutor = new ToolExecutor();
+        this.caller = null;
     }
 
     addSteeringMessage(msg) {
@@ -32,6 +34,10 @@ export class AgentController {
     async run(prompt, workspacePath, onUpdate, onAgentStatus, onConfirm, clientContext = null, chatContext = [], onLog = null, abortSignal = null, kisContext = '', images = []) {
         chatContext = chatContext || [];
         images = images || [];
+        // How many leading steps re-attach the user's images to the LLM call. Covers
+        // an investigate→plan→build flow where the image is only "used" after step 1,
+        // while still bounding token cost on long tasks. (See use site below.)
+        const IMAGE_ATTACH_MAX_STEPS = 10;
 
         // Re-resolve the active LLM connection from settings every run so
         // edits in Settings → LLM Connections take effect without a restart.
@@ -83,6 +89,12 @@ export class AgentController {
         let textOnlyCount = 0;   // consecutive text-only responses (no tool call, no finish_task)
         let toolCallHistory = [];
         let usedToolTypes = new Set();
+        // Per-tool call counts (e.g. {read_file:3, write_file:1}) for the Result stats line.
+        const toolUsageCounts = {};
+        // The LAST present_result envelope the agent delivered — this is the model's
+        // SUBSTANTIVE answer (markdown/table/etc.), distinct from the finish_task
+        // wrap-up thought. Preferred as the Result's headline content.
+        this._lastResultEnvelope = null;
 
         // ── Expand Intent/Recipe (behavior.intent) into behavior fields ──
         // A named AI action declared by the calling app. Inline-object form
@@ -104,11 +116,22 @@ export class AgentController {
         // Low temperature for agent edits (fewer transcription typos). Applied only
         // when the active connection has no explicit temperature set (respects user config).
         this._agentTemperature = safety.agentTemperature;
+        // External callers (apps invoking via the REST API, e.g. JHProjectManager)
+        // run UNATTENDED — there is no human watching to review/approve a plan. The
+        // plan-first gate's USER approval would therefore block forever (or be a
+        // meaningless click). So plan-first applies ONLY to interactive callers
+        // (JHAI's own chat = 'DirectChat', and scheduled runs). Computed once here
+        // and reused below for the tool-allowlist decision.
+        const isExternalCaller = (this.caller && !['DirectChat', 'Schedule'].includes(this.caller))
+            || !!(this.behaviorOverrides && (this.behaviorOverrides.mcp_servers || this.behaviorOverrides.intent));
+        this._isExternalCaller = isExternalCaller;
         // Plan-first gate: a complex task (or planMode='always') must propose a plan
         // and get USER approval before any mutating tool runs. Applied to the tool
         // executor AFTER startSession() (which resets the gate). 'off' disables it.
-        this._planRequired = safety.planMode === 'always'
-            || (safety.planMode === 'auto' && this._looksComplex(prompt));
+        // Skipped entirely for external callers (no human to approve).
+        this._planRequired = !isExternalCaller
+            && (safety.planMode === 'always'
+                || (safety.planMode === 'auto' && this._looksComplex(prompt)));
         // Model routing (fast/deep tiers) + auto-escalation. fast = default for
         // quick/app-intent tasks; deep = complex/plan-first tasks and escalation.
         const tierModels = await this._resolveTierModels();
@@ -119,6 +142,35 @@ export class AgentController {
         this._escalateAtStep = Math.max(6, Math.ceil((safety.maxIterations || 30) * 0.5));
         if (this._modelOverride) {
             onAgentStatus?.({ event: 'status', status: 'running', message: `🧭 モデル: ${this._modelOverride}${this._planRequired ? ' (deep / plan-first)' : ''}` });
+        }
+
+        // ── Vision routing ──────────────────────────────────────────────
+        // If images are attached, the active/selected model MUST be vision-capable,
+        // otherwise the Rust layer drops them with a note (symptom: "the current
+        // model cannot read the image"). App tasks route to the FAST tier by
+        // default, which is often a cheap text-only model — so auto-switch to any
+        // configured vision-capable model, and if none exists, warn loudly instead
+        // of silently ignoring the image.
+        if (images.length > 0) {
+            const chosen = this._modelOverride || llmService.getCurrentModel();
+            const chosenOk = llmService.modelSupportsVision?.(chosen);
+            if (!chosenOk) {
+                const candidates = [
+                    this.behaviorOverrides?.model,
+                    tierModels.deep,
+                    tierModels.fast,
+                    llmService.getCurrentModel(),
+                ].filter(Boolean);
+                const visionModel = candidates.find(id => llmService.modelSupportsVision?.(id));
+                if (visionModel) {
+                    this._modelOverride = visionModel;
+                    onAgentStatus?.({ event: 'status', status: 'running', message: `🖼 画像入力のためビジョン対応モデルに切替: ${visionModel}` });
+                } else {
+                    onAgentStatus?.({ event: 'status', status: 'running', message: `⚠️ ${images.length}枚の画像が添付されていますが、設定中のモデル(${chosen || '未設定'})はビジョン非対応です。画像は無視されます。Settings → LLM Connections で GPT-4o / Claude / Gemini などビジョン対応モデルを選択（またはFast/Deep tierに設定）してください。` });
+                }
+            } else {
+                onAgentStatus?.({ event: 'status', status: 'running', message: `🖼 ${images.length}枚の画像を受信（モデル ${chosen} はビジョン対応）。` });
+            }
         }
         // Load long-term memory (episodic summaries + durable facts) from disk so
         // ContextBuilder can inject relevant context into the system prompt. Cheap
@@ -161,9 +213,9 @@ export class AgentController {
             'finish_task',     // terminal — also counts as "progress" (will end loop)
         ]);
 
-        await toolExecutor.startSession(workspacePath);
+        await this.toolExecutor.startSession(workspacePath);
         // Arm the plan gate for this session (mutating tools blocked until approval).
-        toolExecutor.setPlanGate(this._planRequired);
+        this.toolExecutor.setPlanGate(this._planRequired);
 
         // Invalidate ContextBuilder's static cache so the new session gets a
         // fresh build (picks up any persona/config changes since last run).
@@ -173,29 +225,39 @@ export class AgentController {
         // Runs in the background — failures are silently ignored.
         this._cleanupOldSessions(workspacePath).catch(() => {});
 
-        // Apply behavior's enabled_tools allowlist (if any). null/undefined means
-        // unrestricted (default); an empty array disables all tools except finish_task.
-        if (this.behaviorOverrides && Array.isArray(this.behaviorOverrides.enabled_tools)) {
+        // Determine tool allowlist behavior. (isExternalCaller computed above.)
+        let enabledTools = this.behaviorOverrides?.enabled_tools;
+
+        if (isExternalCaller && (enabledTools === null || enabledTools === undefined)) {
+            // External callers default to restricting native tools to only finish/meta tools,
+            // while bypassing allowlist checks for MCP tools (provided by the workspace side).
+            enabledTools = [];
+            this.toolExecutor._mcpBypassesAllowlist = true;
+        }
+
+        if (Array.isArray(enabledTools)) {
             // Only add the planning/progress control tools when this task is
             // plan-required or complex; single-shot app intents stay minimal
             // (finish_task + present_result) to avoid needless over-planning.
-            toolExecutor.setToolAllowlist(this.behaviorOverrides.enabled_tools, {
+            this.toolExecutor.setToolAllowlist(enabledTools, {
                 includePlanTools: this._planRequired,
             });
         }
         // Apply MCP server filter (if any) — restricts which MCP servers contribute tools.
         if (this.behaviorOverrides && Array.isArray(this.behaviorOverrides.mcp_servers)) {
-            toolExecutor.setMcpServerFilter(this.behaviorOverrides.mcp_servers);
+            this.toolExecutor.setMcpServerFilter(this.behaviorOverrides.mcp_servers);
         } else {
-            toolExecutor.setMcpServerFilter(null);
+            this.toolExecutor.setMcpServerFilter(null);
         }
 
         // Apply per-task MCP context (e.g. {app,windowId,documentId}) — injected
         // into tools/call _meta.jhai so app-hosted MCP servers resolve live state.
-        toolExecutor.setMcpContext(this.behaviorOverrides ? this.behaviorOverrides.mcp_context : null);
+        this.toolExecutor.setMcpContext(this.behaviorOverrides ? this.behaviorOverrides.mcp_context : null);
 
         // Bind tool executor event forwarding
-        toolExecutor.onToolEvent = (event, data) => {
+        this.toolExecutor.onToolEvent = (event, data) => {
+            // Capture the model's delivered answer (present_result) for the Result view.
+            if (event === 'result' && data?.envelope) this._lastResultEnvelope = data.envelope;
             onAgentStatus?.({ event, ...data });
         };
 
@@ -233,7 +295,7 @@ export class AgentController {
 
             // Sync task_plan.md check
             try {
-                const path = `${toolExecutor.getSessionArtifactDir(workspacePath)}/task_plan.md`;
+                const path = `${this.toolExecutor.getSessionArtifactDir(workspacePath)}/task_plan.md`;
                 const fileData = await invoke('read_file', { path });
                 if (fileData) {
                     onAgentStatus?.({ event: 'task_plan_sync', content: fileData });
@@ -341,7 +403,7 @@ export class AgentController {
                 try {
                     const currentModel = llmService.getCurrentModel() || '';
                     this._compressToolResultsInHistory(history);
-                    let compactedHistory = await conversationMemory.compactHistory(history, currentModel, toolExecutor.getFileCache(), onLog);
+                    let compactedHistory = await conversationMemory.compactHistory(history, currentModel, this.toolExecutor.getFileCache(), onLog);
 
                     // ── Apply caller's behavior overrides ──────────────────
                     // If the task was started via REST API with a `behavior` field
@@ -354,7 +416,8 @@ export class AgentController {
                         && this.behaviorOverrides.system_prompt.trim().length > 0) {
                         systemPrompt = this.behaviorOverrides.system_prompt;
                     } else {
-                        systemPrompt = await contextBuilder.getSystemPrompt(workspacePath, clientContext, null, kisContext, prompt);
+                        const editContext = clientContext?.editContext || null;
+                        systemPrompt = await contextBuilder.getSystemPrompt(workspacePath, this.toolExecutor, clientContext, editContext, kisContext, prompt);
                     }
                     if (this.behaviorOverrides && this.behaviorOverrides.extra_instructions) {
                         systemPrompt += '\n\n' + this.behaviorOverrides.extra_instructions;
@@ -384,10 +447,15 @@ export class AgentController {
                     } catch (_) { /* token estimation is non-critical */ }
 
                     // Phase 4: Use _generateWithHistory which tries native tools first.
-                    // Send attached images ONLY on the first step — base64 images are
-                    // huge, and re-sending them every iteration wastes tokens (the model
-                    // has already analyzed them into its history). Subsequent steps run text-only.
-                    const stepImages = (iteration === 1) ? images : [];
+                    // Send attached images for the FIRST FEW steps, not just step 1.
+                    // Rationale: an investigate/plan-first flow often spends step 1 on a
+                    // tool call (e.g. fetching current state) WITHOUT transcribing the
+                    // image into text, so the actual output (e.g. building a WBS from a
+                    // matrix screenshot) happens a few steps later. If images were sent
+                    // only on step 1, the model would no longer "see" them when it matters
+                    // — the exact symptom reported (matrix not in the message). Bounded to
+                    // IMAGE_ATTACH_MAX_STEPS so we don't re-bill a large image on long tasks.
+                    const stepImages = (iteration <= IMAGE_ATTACH_MAX_STEPS) ? images : [];
                     genResult = await this._generateWithHistory(compactedHistory, systemPrompt, abortSignal, kisContext, stepImages, onUpdate);
                     
                     if (compactedHistory.length < history.length) {
@@ -490,7 +558,9 @@ export class AgentController {
                 event: 'token_usage',
                 prompt_tokens: genResult.usage?.prompt_tokens || 0,
                 completion_tokens: genResult.usage?.completion_tokens || 0,
-                total_tokens: genResult.usage?.total_tokens || 0
+                total_tokens: genResult.usage?.total_tokens || 0,
+                cache_read_input_tokens: genResult.usage?.cache_read_input_tokens || 0,
+                cache_creation_input_tokens: genResult.usage?.cache_creation_input_tokens || 0
             });
 
             if (onLog) {
@@ -522,15 +592,31 @@ export class AgentController {
                 let reqTemp = null;
                 let reqMaxTokens = null;
                 let reqMode = 'json-text';
+                let imageDiag = { images_present: images.length, attached_this_step: false, vision_supported: false, images: [] };
                 try {
                     reqModel = llmService.getCurrentModel?.() || '';
                     reqMode = llmService.supportsNativeTools?.() ? 'native' : 'json-text';
-                    if (reqMode === 'native' && toolExecutor.getToolsForNativeAPI) {
-                        reqTools = toolExecutor.getToolsForNativeAPI();
+                    if (reqMode === 'native' && this.toolExecutor.getToolsForNativeAPI) {
+                        reqTools = this.toolExecutor.getToolsForNativeAPI();
                     }
                     const ut = llmService.getCurrentTemperature?.();
                     reqTemp = (ut === null || ut === undefined) ? (this._agentTemperature ?? null) : ut;
                     reqMaxTokens = llmService.currentMaxOutputTokens ?? null;
+
+                    // ── Image / vision diagnostics ─────────────────────────────
+                    // Show, per step, EXACTLY whether the attached image(s) were sent
+                    // to the LLM. The base64 blob itself is omitted (huge) but its
+                    // mime + size is shown. `vision_supported` mirrors the Rust gate
+                    // (model_supports_vision): if false, the Rust layer DROPS the
+                    // image before the API call, so it never reaches the LLM.
+                    const usedModelId = this._modelOverride || reqModel;
+                    imageDiag.vision_supported = llmService.modelSupportsVision?.(usedModelId) || false;
+                    const sentThisStep = (iteration <= IMAGE_ATTACH_MAX_STEPS) ? images : [];
+                    imageDiag.attached_this_step = sentThisStep.length > 0 && imageDiag.vision_supported;
+                    imageDiag.images = sentThisStep.map(s => {
+                        const m = /^data:([^;]+);base64,/.exec(String(s));
+                        return { mime: m ? m[1] : 'unknown(bare base64→image/png)', approx_bytes: String(s).length };
+                    });
                 } catch (_) { /* logging only — non-critical */ }
 
                 onLog({
@@ -543,9 +629,13 @@ export class AgentController {
                     headers: headers,
                     request: {
                         model: reqModel,
+                        model_used: this._modelOverride || reqModel,
                         tool_calling: reqMode,
                         temperature: reqTemp,
                         max_tokens: reqMaxTokens,
+                        vision_supported: imageDiag.vision_supported,
+                        images_attached_to_llm: imageDiag.attached_this_step,
+                        images: imageDiag.images,
                         system_prompt: systemPrompt,
                         history: history,
                         tools: reqTools,
@@ -589,7 +679,10 @@ export class AgentController {
                     argsStr: JSON.stringify(tc.args || {})
                 }));
                 toolCallHistory.push(...currentToolCalls);
-                toolCall.tool_calls.forEach(tc => usedToolTypes.add(tc.name));
+                toolCall.tool_calls.forEach(tc => {
+                    usedToolTypes.add(tc.name);
+                    toolUsageCounts[tc.name] = (toolUsageCounts[tc.name] || 0) + 1;
+                });
 
                 // (Removed legacy hack that silently bumped maxIterations to a
                 // hardcoded 20 when ≥5 tool types were used — it overrode the user's
@@ -691,8 +784,8 @@ export class AgentController {
                 let hasErrors = false;
 
                 for (const tc of toolCall.tool_calls) {
-                    const level = toolExecutor.getPermissionLevel 
-                        ? toolExecutor.getPermissionLevel(tc.name, tc.args) 
+                    const level = this.toolExecutor.getPermissionLevel 
+                        ? this.toolExecutor.getPermissionLevel(tc.name, tc.args) 
                         : "Allow";
                     if (level === "Allow") safeCalls.push(tc);
                     else if (level === "Deny") deniedCalls.push(tc);
@@ -712,7 +805,7 @@ export class AgentController {
                     const safeResults = await Promise.all(safeCalls.map(async (call) => {
                         onAgentStatus?.({ event: 'tool_call', name: call.name, args: call.args });
                         const toolStartTime = Date.now();
-                        const result = await toolExecutor.executeTool(call, (statusMsg) => {
+                        const result = await this.toolExecutor.executeTool(call, (statusMsg) => {
                             onAgentStatus?.({ event: 'status', status: 'running', message: statusMsg });
                         }, onConfirm);
                         const toolDuration = Date.now() - toolStartTime;
@@ -731,7 +824,7 @@ export class AgentController {
                 for (const call of dangerousCalls) {
                     onAgentStatus?.({ event: 'tool_call', name: call.name, args: call.args });
                     const toolStartTime = Date.now();
-                    const result = await toolExecutor.executeTool(call, (statusMsg) => {
+                    const result = await this.toolExecutor.executeTool(call, (statusMsg) => {
                         onAgentStatus?.({ event: 'status', status: 'running', message: statusMsg });
                     }, onConfirm);
                     const toolDuration = Date.now() - toolStartTime;
@@ -827,7 +920,7 @@ export class AgentController {
 
                 // If finish_task was just executed, break immediately with its summary.
                 // This avoids an extra LLM round-trip just to confirm termination.
-                if (toolExecutor.isTaskCompleted && toolExecutor.isTaskCompleted()) {
+                if (this.toolExecutor.isTaskCompleted && this.toolExecutor.isTaskCompleted()) {
                     const ftResult = results.find(r => r.tool_call_name === 'finish_task');
                     // Prefer the model's FULL answer (its `thought` on the finishing turn,
                     // e.g. a rich markdown reply) over finish_task's one-line `summary`,
@@ -918,7 +1011,7 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
                     continue;
                 }
 
-                if (toolExecutor.isTaskCompleted && toolExecutor.isTaskCompleted()) {
+                if (this.toolExecutor.isTaskCompleted && this.toolExecutor.isTaskCompleted()) {
                     // finish_task was called in a previous iteration — model is now wrapping up
                     // with a final summary text. This is the expected exit path.
                     onAgentStatus?.({ event: 'status', status: 'completed', message: 'Task finished. ✅' });
@@ -958,14 +1051,24 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
         }
 
         // Capture session artifacts BEFORE endSession (which nulls workspacePath).
-        const modifiedFiles = toolExecutor.getModifiedFiles();
-        const sessionId = toolExecutor.getCurrentSessionId();
-        const wsPath = workspacePath || toolExecutor.workspacePath;
+        const modifiedFiles = this.toolExecutor.getModifiedFiles();
+        const sessionId = this.toolExecutor.getCurrentSessionId();
+        const wsPath = workspacePath || this.toolExecutor.workspacePath;
 
         // Build the structured result summary (markdown + file table) consumed by
         // the "Result" tab (MonitorView) and the chat file list (ChatView), and
-        // returned to REST API callers via the `complete` event.
-        const resultSummary = await this._buildResultSummary(finalResponse, modifiedFiles, onLog);
+        // returned to REST API callers via the `complete` event. The meta lets the
+        // summary be a DETAILED report (request → plan → actions → result) rather
+        // than a bare one-liner.
+        const resultSummary = await this._buildResultSummary(finalResponse, modifiedFiles, onLog, {
+            prompt,
+            approvedPlan: this.toolExecutor._approvedPlan || '',
+            toolCounts: toolUsageCounts,
+            iterations: iteration,
+            durationMs: Date.now() - taskStartMs,
+            tokens: cumulativeTokens,
+            presentedAnswer: this._extractEnvelopeAnswer(this._lastResultEnvelope),
+        });
 
         // Long-term memory: record this completed session to the durable journal +
         // facts store. (Previously addEntry existed but was never called — LTM was
@@ -976,7 +1079,7 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
             console.warn('AgentController: LTM addEntry failed:', e);
         }
 
-        toolExecutor.endSession();
+        this.toolExecutor.endSession();
 
         return {
             response: finalResponse,
@@ -991,7 +1094,7 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
      * @param {Array}  modifiedFiles - [{ path, original, current }] from ToolExecutor
      * @returns {Promise<{summary:string, files:Array<{path,action,description}>}>}
      */
-    async _buildResultSummary(finalResponse, modifiedFiles, onLog = null) {
+    async _buildResultSummary(finalResponse, modifiedFiles, onLog = null, meta = {}) {
         // action is derived deterministically: a null/empty `original` means the
         // file did not exist before this session → "created"; otherwise "modified".
         const files = (modifiedFiles || []).map(f => ({
@@ -1046,7 +1149,89 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
             }
         }
 
-        return { summary: String(finalResponse || ''), files };
+        // Assemble both a flat markdown `summary` (back-compat: API consumers, chat,
+        // older renderers) AND structured fields for the sectioned Result UI
+        // (answer / stats / request / plan / files rendered as distinct sections).
+        const summary = this._composeDetailedReport(finalResponse, files, meta);
+        const presented = String(meta.presentedAnswer || '').trim();
+        const answer = (presented.length >= 1) ? presented : String(finalResponse || '');
+        const stats = {
+            steps: meta.iterations || 0,
+            tools: meta.toolCounts || {},
+            tokens: meta.tokens || 0,
+            durationMs: meta.durationMs || 0,
+            files: files.length,
+        };
+        return {
+            summary,
+            answer,
+            stats,
+            request: String(meta.prompt || ''),
+            plan: String(meta.approvedPlan || ''),
+            files,
+        };
+    }
+
+    /**
+     * Extract the model's substantive answer text from a present_result envelope.
+     * Returns '' when there is no usable text payload (e.g. file-list/code-edit
+     * kinds carry structured data, not prose — those fall back to finalResponse).
+     */
+    _extractEnvelopeAnswer(envelope) {
+        if (!envelope || typeof envelope !== 'object') return '';
+        const p = envelope.payload || {};
+        return String(p.md || p.text || p.markdown || envelope.summary || '').trim();
+    }
+
+    /**
+     * Compose the Result markdown. ANSWER-FIRST: the model's actual deliverable
+     * (present_result content, else the final response) is the headline; run
+     * statistics are a single compact line; the originating request / plan follow
+     * as small, truncated context. Deterministic (no LLM).
+     */
+    _composeDetailedReport(finalResponse, files = [], meta = {}) {
+        const {
+            prompt = '', approvedPlan = '', toolCounts = {},
+            iterations = 0, durationMs = 0, tokens = 0, presentedAnswer = '',
+        } = meta;
+        const clip = (s, n) => {
+            const t = String(s || '').trim();
+            return t.length > n ? t.slice(0, n) + `\n… (省略 ${t.length - n} 文字)` : t;
+        };
+
+        const sections = [];
+
+        // 1. HEADLINE — the LLM's actual answer (present_result preferred).
+        const answer = (presentedAnswer && presentedAnswer.length >= 1)
+            ? presentedAnswer
+            : String(finalResponse || '');
+        sections.push(clip(answer, 8000) || '（回答なし）');
+
+        // 2. Compact stats line (one row, secondary).
+        const stat = [`ステップ ${iterations}`];
+        const toolPairs = Object.entries(toolCounts || {});
+        if (toolPairs.length) {
+            stat.push('ツール ' + toolPairs.map(([n, c]) => `${n}×${c}`).join(', '));
+        }
+        if (tokens > 0) {
+            stat.push(`トークン ${tokens >= 1000 ? (tokens / 1000).toFixed(1) + 'k' : tokens}`);
+        }
+        if (durationMs > 0) stat.push(`所要 ${Math.round(durationMs / 1000)}s`);
+        if (Array.isArray(files) && files.length) stat.push(`ファイル ${files.length}件`);
+        sections.push(`---\n\n> 📊 ${stat.join(' ・ ')}`);
+
+        // 3. Small context tail: request + plan (truncated). Kept minor since the
+        //    full request/history is already available in the other Monitor tabs.
+        const tail = [];
+        if (prompt && String(prompt).trim()) {
+            tail.push(`**📥 ご依頼内容**\n\n${clip(prompt, 600)}`);
+        }
+        if (approvedPlan && String(approvedPlan).trim()) {
+            tail.push(`**🗺 実行計画**\n\n${clip(approvedPlan, 1500)}`);
+        }
+        if (tail.length) sections.push(tail.join('\n\n'));
+
+        return sections.join('\n\n');
     }
 
     // ─── Phase 4: _generateWithHistory — tries native tool calling first, falls back to JSON mode ───
@@ -1076,7 +1261,7 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
 
             while (retryCount <= maxNativeRetries) {
                 try {
-                    const tools = toolExecutor.getToolsForNativeAPI ? toolExecutor.getToolsForNativeAPI() : [];
+                    const tools = this.toolExecutor.getToolsForNativeAPI ? this.toolExecutor.getToolsForNativeAPI() : [];
                     if (tools.length === 0) break; // No tools registered, skip native
 
                     const result = await llmService.chatWithTools(currentHistory, systemPrompt, tools, abortSignal, images, tempOverride, this._modelOverride || null);
@@ -1091,7 +1276,7 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
                     if (hasNoToolCalls) {
                         const txt = (result?.content || '').trim();
                         const looksLikeToolTextCall = /\bCALL:\s*\w/i.test(txt) ||
-                            toolExecutor.toolDefinitions?.some(td => new RegExp(`\\b${td.name}\\b`).test(txt) && /PLAN:/i.test(txt));
+                            this.toolExecutor.toolDefinitions?.some(td => new RegExp(`\\b${td.name}\\b`).test(txt) && /PLAN:/i.test(txt));
                         if (!txt || looksLikeToolTextCall) {
                             nativeFailed = true;
                             break;
@@ -1478,12 +1663,14 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
             this._intentTier = intent.tier.trim().toLowerCase() || null;
         }
 
-        // systemPrompt + resultKind → appended guidance via extra_instructions
+        // systemPrompt → replaces the default system prompt entirely
+        if (typeof intent.systemPrompt === 'string' && intent.systemPrompt.trim()) {
+            b.system_prompt = intent.systemPrompt.trim();
+        }
+
+        // resultKind → appended guidance via extra_instructions
         // (which the loop already merges into the system prompt).
         const extra = [];
-        if (typeof intent.systemPrompt === 'string' && intent.systemPrompt.trim()) {
-            extra.push(intent.systemPrompt.trim());
-        }
         if (typeof intent.resultKind === 'string' && intent.resultKind.trim()) {
             extra.push(
                 `When the task is complete, deliver the result to the calling app by calling ` +

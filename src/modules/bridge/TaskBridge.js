@@ -33,6 +33,7 @@ class TaskBridge {
                 clientContext,
                 chatContext,
                 images,
+                caller,
             } = payload;
 
             const mode = behavior?.mode || 'iterative_agent';
@@ -44,7 +45,7 @@ class TaskBridge {
                 // can honor system_prompt / enabled_tools / max_iterations overrides.
                 await this.startAgentTask(
                     taskId, prompt, workspacePath,
-                    clientContext || context, chatContext, behavior, images || []
+                    clientContext || context, chatContext, behavior, images || [], caller
                 );
             }
         });
@@ -144,7 +145,9 @@ class TaskBridge {
                 this.emitTaskEvent(taskId, 'token_usage', {
                     prompt_tokens: genResult.usage.prompt_tokens || 0,
                     completion_tokens: genResult.usage.completion_tokens || 0,
-                    total_tokens: genResult.usage.total_tokens || 0
+                    total_tokens: genResult.usage.total_tokens || 0,
+                    cache_read_input_tokens: genResult.usage.cache_read_input_tokens || 0,
+                    cache_creation_input_tokens: genResult.usage.cache_creation_input_tokens || 0
                 });
             }
 
@@ -163,7 +166,7 @@ class TaskBridge {
         }
     }
 
-    async startAgentTask(taskId, prompt, workspacePath, clientContext, chatContext = [], behavior = null, images = []) {
+    async startAgentTask(taskId, prompt, workspacePath, clientContext, chatContext = [], behavior = null, images = [], caller = null) {
         // Prevent duplicate tasks
         if (this.activeAgents.has(taskId)) {
             console.warn("TaskBridge: Task already running:", taskId);
@@ -178,6 +181,7 @@ class TaskBridge {
         if (behavior) {
             controller.behaviorOverrides = behavior;
         }
+        controller.caller = caller;
 
         this.activeAgents.set(taskId, { controller, abortController });
 

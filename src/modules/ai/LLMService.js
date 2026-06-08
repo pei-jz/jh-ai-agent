@@ -151,11 +151,16 @@ class LLMService {
         const p = reported?.prompt_tokens || 0;
         const c = reported?.completion_tokens || 0;
         const t = reported?.total_tokens || 0;
-        if (p > 0 || c > 0 || t > 0) {
+        // Cache breakdown (Anthropic: additive to input; OpenAI/Gemini: subset of prompt).
+        const cr = reported?.cache_read_input_tokens || 0;
+        const cc = reported?.cache_creation_input_tokens || 0;
+        if (p > 0 || c > 0 || t > 0 || cr > 0 || cc > 0) {
             return {
                 prompt_tokens: p,
                 completion_tokens: c,
-                total_tokens: t > 0 ? t : (p + c),
+                total_tokens: t > 0 ? t : (p + c + cr + cc),
+                cache_read_input_tokens: cr,
+                cache_creation_input_tokens: cc,
                 estimated: false
             };
         }
@@ -168,6 +173,8 @@ class LLMService {
             prompt_tokens,
             completion_tokens,
             total_tokens: prompt_tokens + completion_tokens,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
             estimated: true
         };
     }
@@ -206,6 +213,31 @@ class LLMService {
 
     getCurrentModel() {
         return this.currentModel;
+    }
+
+    /**
+     * Whether a model id ("{instance}:{model}") accepts image (vision) input.
+     * EXACT mirror of the Rust `model_supports_vision` (commands/ai_providers.rs)
+     * so that if this returns true, the Rust side will actually attach the images
+     * (and not drop them with a note). Keep the two in sync.
+     */
+    modelSupportsVision(modelId) {
+        if (!modelId) return false;
+        const meta = this._resolveModelMeta(modelId);
+        let provider = (meta?.provider || '').toLowerCase();
+        if (!provider) {
+            provider = (modelId === this.currentModel)
+                ? (this.getCurrentProvider() || '').toLowerCase()
+                : (modelId.split(':')[0] || '').toLowerCase();
+        }
+        const model = modelId.substring(modelId.indexOf(':') + 1).toLowerCase();
+        if (provider === 'gemini' || provider === 'anthropic') return true;
+        if (provider === 'openai' || provider === 'azure' || provider === 'generic') {
+            return model.includes('gpt') || model.includes('chatgpt')
+                || model.startsWith('o1') || model.startsWith('o3') || model.startsWith('o4')
+                || model.includes('-o1') || model.includes('-o3') || model.includes('-o4');
+        }
+        return false;
     }
 
     /**

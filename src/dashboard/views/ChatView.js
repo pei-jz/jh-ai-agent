@@ -1,5 +1,5 @@
 import llmService from '../../modules/ai/LLMService.js';
-import { toolExecutor } from '../../modules/ai/ToolExecutor.js';
+import { ToolExecutor } from '../../modules/ai/ToolExecutor.js';
 import { mcpManager } from '../../modules/ai/McpManager.js';
 import { workflowManager } from '../../modules/ai/WorkflowManager.js';
 import { promptTemplateManager } from '../../modules/ai/PromptTemplateManager.js';
@@ -155,7 +155,7 @@ export class ChatView {
         }
 
         // Generate tools list
-        const activeTools = toolExecutor.getToolsForNativeAPI();
+        const activeTools = ToolExecutor.getAllAvailableToolsForNativeAPI();
         let toolsListHtml = '';
         if (activeTools.length === 0) {
             toolsListHtml = `<div style="font-size: 11.5px; color: var(--text-tertiary);">No tools available.</div>`;

@@ -68,6 +68,21 @@ export function ensureResultViewStyles() {
         .rv-file-link.rv-open-error { color: var(--error, #e06c75); }
         .rv-action { white-space: nowrap; }
         .rv-empty { color: var(--text-tertiary); font-size: 12px; padding: 8px 0; }
+        /* Sectioned result view */
+        .rv-section-label { font-weight: 700; font-size: 12px; color: var(--text-secondary);
+            text-transform: uppercase; letter-spacing: 0.04em; margin: 4px 0 6px; }
+        .rv-answer { font-size: 13.5px; }
+        .rv-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 14px; }
+        .rv-chip { display: inline-flex; align-items: center; gap: 4px; font-size: 11px;
+            color: var(--text-secondary); background: var(--bg-tertiary);
+            border: 1px solid var(--border); border-radius: 999px; padding: 2px 9px; white-space: nowrap; }
+        .rv-details { margin: 6px 0 14px; border: 1px solid var(--border); border-radius: 6px;
+            background: var(--bg-secondary, transparent); }
+        .rv-details > summary { cursor: pointer; padding: 7px 10px; font-size: 12px; font-weight: 600;
+            color: var(--text-secondary); user-select: none; list-style: revert; }
+        .rv-details[open] > summary { border-bottom: 1px solid var(--border); }
+        .rv-details > .rv-summary, .rv-details > .rv-detail-h { padding: 0 10px; }
+        .rv-detail-h { font-weight: 600; font-size: 12px; color: var(--text-secondary); margin: 10px 0 4px; }
     `;
     document.head.appendChild(style);
 }

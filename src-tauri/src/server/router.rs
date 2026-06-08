@@ -43,6 +43,13 @@ pub struct TokenUsage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub total_tokens: u32,
+    // Cache tokens (DeepSeek prompt_cache_hit / OpenAI cached_tokens — a SUBSET of
+    // prompt; Anthropic cache_read — additive). #[serde(default)] keeps old
+    // persisted history JSON (without these fields) deserializable.
+    #[serde(default)]
+    pub cache_read_input_tokens: u32,
+    #[serde(default)]
+    pub cache_creation_input_tokens: u32,
 }
 
 #[derive(Clone)]
@@ -162,6 +169,8 @@ struct RunTaskPayload {
     /// Prior conversation messages forwarded to the JS TaskBridge as chatContext.
     #[serde(rename = "chatContext", skip_serializing_if = "Option::is_none")]
     chat_context: Option<Vec<serde_json::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    caller: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -228,8 +237,36 @@ async fn create_task(
     State(state): State<AppState>,
     Json(payload): Json<CreateTaskRequest>,
 ) -> Json<CreateTaskResponse> {
+    let mut payload = payload;
     let task_id = Uuid::new_v4().to_string();
     let ws_url = format!("ws://localhost:{}/ws/tasks/{}?token={}", state.port, task_id, state.auth_token);
+
+    // Extract images from behavior.mcp_context if not present at the top level
+    if payload.images.is_none() || payload.images.as_ref().map_or(true, |v| v.is_empty()) {
+        if let Some(behavior) = &payload.behavior {
+            if let Some(mcp_context) = &behavior.mcp_context {
+                if let Some(images_val) = mcp_context.get("images") {
+                    if let Some(images_arr) = images_val.as_array() {
+                        let extracted_images: Vec<String> = images_arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect();
+                        if !extracted_images.is_empty() {
+                            payload.images = Some(extracted_images);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Extract context from behavior.mcp_context if not present at the top level
+    if payload.context.is_none() {
+        if let Some(behavior) = &payload.behavior {
+            if let Some(mcp_context) = &behavior.mcp_context {
+                payload.context = Some(mcp_context.clone());
+            }
+        }
+    }
     
     let task = TaskInfo {
         id: task_id.clone(),
@@ -263,6 +300,7 @@ async fn create_task(
         behavior: payload.behavior,
         images: payload.images,
         chat_context: payload.chat_context,
+        caller: payload.caller,
     };
     let _ = state.app_handle.emit("run-task", run_payload);
     
@@ -413,7 +451,7 @@ async fn continue_task(
     Json(payload): Json<SteeringRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     // Gather context from the existing (completed) task.
-    let (prompt, workspace, last_response) = {
+    let (prompt, workspace, caller, last_response) = {
         let tasks = state.tasks.lock().unwrap();
         let task = tasks.get(&id)
             .ok_or((StatusCode::NOT_FOUND, "task not found".to_string()))?;
@@ -423,7 +461,7 @@ async fn continue_task(
             .and_then(|l| l.get("data").and_then(|d| d.get("message")).and_then(|m| m.as_str()))
             .unwrap_or("")
             .to_string();
-        (task.prompt.clone(), task.workspace_path.clone(), last_response)
+        (task.prompt.clone(), task.workspace_path.clone(), task.caller.clone(), last_response)
     };
 
     // Minimal prior-conversation context for the continuation.
@@ -452,6 +490,7 @@ async fn continue_task(
         behavior: None,
         images: None,
         chat_context: Some(chat_context),
+        caller,
     };
     let _ = state.app_handle.emit("run-task", run_payload);
 

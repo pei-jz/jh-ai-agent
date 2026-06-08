@@ -53,7 +53,21 @@ pub struct TokenUsage {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub total_tokens: u64,
+    /// Input tokens served FROM the prompt cache (billed at ~10%). Anthropic
+    /// reports this as `cache_read_input_tokens`; OpenAI as
+    /// `prompt_tokens_details.cached_tokens`; Gemini as `cachedContentTokenCount`.
+    #[serde(default)]
+    pub cache_read_input_tokens: u64,
+    /// Input tokens WRITTEN to the cache this call (Anthropic only; billed at
+    /// ~125%). 0 for providers that don't report a separate cache-write count.
+    #[serde(default)]
+    pub cache_creation_input_tokens: u64,
 }
+
+/// Sentinel separating the cacheable system prefix from the volatile suffix.
+/// Emitted by ContextBuilder.js (SYSTEM_CACHE_BREAK). On Anthropic the prefix
+/// becomes a `cache_control` block; other providers strip it.
+const SYS_CACHE_BREAK: &str = "<<<JHAI_SYSTEM_CACHE_BREAK>>>";
 
 #[derive(Debug, Serialize, Clone)]
 pub struct StreamChunk {
@@ -64,6 +78,36 @@ pub struct StreamChunk {
     /// Present only on the final (done) chunk when the provider reported usage.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<TokenUsage>,
+}
+
+/// Recursively shorten embedded base64 image payloads in a JSON value so a
+/// request body can be dumped to a log file without megabytes of base64. Targets
+/// `image_url.url` ("data:…;base64,…") and Anthropic `source.data`. ASCII-safe.
+fn truncate_base64_in_place(v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::Object(map) => {
+            for (k, val) in map.iter_mut() {
+                if let serde_json::Value::String(s) = val {
+                    let looks_image = s.starts_with("data:image")
+                        || ((k == "url" || k == "data") && s.len() > 256);
+                    if looks_image && s.len() > 96 {
+                        let head: String = s.chars().take(80).collect();
+                        *val = serde_json::Value::String(
+                            format!("{}…[truncated, {} chars total]", head, s.len()),
+                        );
+                    }
+                } else {
+                    truncate_base64_in_place(val);
+                }
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr.iter_mut() {
+                truncate_base64_in_place(item);
+            }
+        }
+        _ => {}
+    }
 }
 
 async fn get_client(proxy_url: Option<String>) -> Result<Client, String> {
@@ -198,8 +242,11 @@ pub async fn llm_chat_native<R: Runtime>(
     let body = match resolved_provider.as_str() {
         "openai" | "ollama" | "azure" | "generic" => {
             // Message array (incl. vision attach/drop) → build_openai_messages (unit-tested).
+            // OpenAI-compatible endpoints have no prefix-split mechanism here, so the
+            // cache-break sentinel is collapsed back to a newline.
             let vision_ok = model_supports_vision(&resolved_provider, &payload.model);
-            let full_messages = build_openai_messages(payload.system_prompt, payload.messages, &payload.images, vision_ok);
+            let sys_clean = payload.system_prompt.map(|s| s.replace(SYS_CACHE_BREAK, "\n"));
+            let full_messages = build_openai_messages(sys_clean, payload.messages, &payload.images, vision_ok);
             let mut body_obj = serde_json::json!({
                 "model": payload.model,
                 "messages": full_messages,
@@ -263,6 +310,24 @@ pub async fn llm_chat_native<R: Runtime>(
                     full_messages.push(serde_json::json!({ "role": m.role, "content": m.content }));
                 }
             }
+
+            // ── Conversation-history caching ───────────────────────────────
+            // Mark the LAST message block with cache_control so the growing
+            // history is billed incrementally: on the next step the prior turns
+            // are a cached prefix (~10%), and only the newest turn is full price.
+            // String content must be promoted to block form to carry the marker.
+            if let Some(last) = full_messages.last_mut() {
+                if last["content"].is_string() {
+                    let text = last["content"].as_str().unwrap_or("").to_string();
+                    last["content"] = serde_json::json!([
+                        { "type": "text", "text": text, "cache_control": { "type": "ephemeral" } }
+                    ]);
+                } else if let Some(arr) = last["content"].as_array_mut() {
+                    if let Some(lp) = arr.last_mut() {
+                        lp["cache_control"] = serde_json::json!({ "type": "ephemeral" });
+                    }
+                }
+            }
             {
                 // Anthropic REQUIRES max_tokens. Use the configured value, else a
                 // sane 8192 default (previously a hardcoded 8096 — a typo that also
@@ -278,14 +343,32 @@ pub async fn llm_chat_native<R: Runtime>(
                 }
 
                 // ── Prompt caching (Anthropic, GA — no beta header needed) ──
-                // The system prompt (role + tools rules + project summary) is large
-                // and identical across every step of an agent run, so we send it as a
-                // cacheable text block. `cache_control` marks the cache breakpoint;
-                // subsequent calls within the 5-min TTL bill the cached prefix at ~10%.
+                // The system prompt is split on SYS_CACHE_BREAK into a STABLE prefix
+                // (persona + tool rules + project summary + memory…) and a VOLATILE
+                // suffix (task_plan / workflow / artifacts). Only the prefix carries
+                // `cache_control`, so the large static block is billed at ~10% on
+                // cache hits while the changing tail doesn't bust the cached prefix.
+                // (No sentinel ⇒ legacy single cached block.)
                 if let Some(sys) = payload.system_prompt.clone().filter(|s| !s.is_empty()) {
-                    body["system"] = serde_json::json!([
-                        { "type": "text", "text": sys, "cache_control": { "type": "ephemeral" } }
-                    ]);
+                    if let Some(idx) = sys.find(SYS_CACHE_BREAK) {
+                        let prefix = sys[..idx].to_string();
+                        let suffix = sys[idx + SYS_CACHE_BREAK.len()..].to_string();
+                        let mut blocks = Vec::new();
+                        if !prefix.trim().is_empty() {
+                            blocks.push(serde_json::json!({
+                                "type": "text", "text": prefix,
+                                "cache_control": { "type": "ephemeral" }
+                            }));
+                        }
+                        if !suffix.trim().is_empty() {
+                            blocks.push(serde_json::json!({ "type": "text", "text": suffix }));
+                        }
+                        body["system"] = serde_json::Value::Array(blocks);
+                    } else {
+                        body["system"] = serde_json::json!([
+                            { "type": "text", "text": sys, "cache_control": { "type": "ephemeral" } }
+                        ]);
+                    }
                 }
 
                 // Convert OpenAI-format tools to Anthropic format:
@@ -354,7 +437,7 @@ pub async fn llm_chat_native<R: Runtime>(
                 gen_config.insert("temperature".to_string(), serde_json::json!(temp));
             }
 
-            let mut g_body = if let Some(sys) = payload.system_prompt {
+            let mut g_body = if let Some(sys) = payload.system_prompt.map(|s| s.replace(SYS_CACHE_BREAK, "\n")) {
                 serde_json::json!({
                     "contents": contents,
                     "system_instruction": {
@@ -384,6 +467,27 @@ pub async fn llm_chat_native<R: Runtime>(
         }
         _ => unreachable!(),
     };
+
+    // ── Optional raw-request dump (opt-in via env JHAI_DEBUG_LLM_BODY=1) ──
+    // Writes the EXACT request body actually sent to the provider — with base64
+    // image data truncated so the file stays small — to the system temp dir.
+    // This is the authoritative way to confirm whether image_url / image parts
+    // reached the LLM (e.g. to verify a "vision not supported" drop). Off by
+    // default; one file per request id.
+    if std::env::var("JHAI_DEBUG_LLM_BODY").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false) {
+        let mut dump = body.clone();
+        truncate_base64_in_place(&mut dump);
+        let pretty = serde_json::to_string_pretty(&serde_json::json!({
+            "url": url,
+            "provider": resolved_provider,
+            "model": payload.model,
+            "request_id": payload.request_id,
+            "body": dump,
+        })).unwrap_or_else(|_| "{}".to_string());
+        let path = std::env::temp_dir().join(format!("jhai_llm_req_{}.json", payload.request_id));
+        let _ = std::fs::write(&path, &pretty);
+        eprintln!("[JHAI] LLM request body dumped to {}", path.display());
+    }
 
     // Send Request
     let response = client.post(&url)
@@ -462,9 +566,18 @@ pub async fn llm_chat_native<R: Runtime>(
                                             let p = u["prompt_tokens"].as_u64().unwrap_or(0);
                                             let c = u["completion_tokens"].as_u64().unwrap_or(0);
                                             let t = u["total_tokens"].as_u64().unwrap_or(0);
+                                            // Cached tokens are a SUBSET of prompt_tokens
+                                            // (informational — already counted in total).
+                                            // OpenAI:   prompt_tokens_details.cached_tokens
+                                            // DeepSeek: prompt_cache_hit_tokens (its automatic
+                                            //           context cache; prompt = hit + miss).
+                                            let cached = u["prompt_tokens_details"]["cached_tokens"].as_u64()
+                                                .or(u["prompt_cache_hit_tokens"].as_u64())
+                                                .unwrap_or(0);
                                             if p > 0 { usage.prompt_tokens = p; }
                                             if c > 0 { usage.completion_tokens = c; }
                                             if t > 0 { usage.total_tokens = t; }
+                                            if cached > 0 { usage.cache_read_input_tokens = cached; }
                                         }
                                         // ── Branch 1: regular content delta ──
                                         let content = json["choices"][0]["delta"]["content"]
@@ -509,11 +622,18 @@ pub async fn llm_chat_native<R: Runtime>(
                                             "message_start" => {
                                                 // input_tokens reported up-front; output_tokens
                                                 // is the running tally (final value in message_delta).
+                                                // With prompt caching, input_tokens counts ONLY the
+                                                // uncached portion; cached/written counts are separate
+                                                // and ADDITIVE to total input.
                                                 let mu = &json["message"]["usage"];
                                                 let p = mu["input_tokens"].as_u64().unwrap_or(0);
                                                 let c = mu["output_tokens"].as_u64().unwrap_or(0);
+                                                let cr = mu["cache_read_input_tokens"].as_u64().unwrap_or(0);
+                                                let cc = mu["cache_creation_input_tokens"].as_u64().unwrap_or(0);
                                                 if p > 0 { usage.prompt_tokens = p; }
                                                 if c > 0 { usage.completion_tokens = c; }
+                                                if cr > 0 { usage.cache_read_input_tokens = cr; }
+                                                if cc > 0 { usage.cache_creation_input_tokens = cc; }
                                                 String::new()
                                             }
                                             "message_delta" => {
@@ -568,9 +688,12 @@ pub async fn llm_chat_native<R: Runtime>(
                                             let p = um["promptTokenCount"].as_u64().unwrap_or(0);
                                             let c = um["candidatesTokenCount"].as_u64().unwrap_or(0);
                                             let t = um["totalTokenCount"].as_u64().unwrap_or(0);
+                                            // Gemini cached tokens are a SUBSET of promptTokenCount.
+                                            let cached = um["cachedContentTokenCount"].as_u64().unwrap_or(0);
                                             if p > 0 { usage.prompt_tokens = p; }
                                             if c > 0 { usage.completion_tokens = c; }
                                             if t > 0 { usage.total_tokens = t; }
+                                            if cached > 0 { usage.cache_read_input_tokens = cached; }
                                         }
                                         // A Gemini chunk may carry multiple parts: text and/or
                                         // functionCall {name, args}. Accumulate text and convert
@@ -681,8 +804,16 @@ pub async fn llm_chat_native<R: Runtime>(
 
         // Finalize — attach real token usage. Derive total if the provider only
         // gave us the two components (Anthropic/Ollama report parts, not a total).
-        if usage.total_tokens == 0 && (usage.prompt_tokens > 0 || usage.completion_tokens > 0) {
-            usage.total_tokens = usage.prompt_tokens + usage.completion_tokens;
+        if usage.total_tokens == 0
+            && (usage.prompt_tokens > 0 || usage.completion_tokens > 0
+                || usage.cache_read_input_tokens > 0 || usage.cache_creation_input_tokens > 0)
+        {
+            // Anthropic/Ollama don't report a total. For Anthropic the cache counts
+            // are SEPARATE from input_tokens, so include them to reflect full context
+            // size. (OpenAI/Gemini report total directly, so this branch is skipped
+            // and their cached counts stay subset-of-prompt as the providers intend.)
+            usage.total_tokens = usage.prompt_tokens + usage.completion_tokens
+                + usage.cache_read_input_tokens + usage.cache_creation_input_tokens;
         }
         let _ = app.emit("llm-chunk", StreamChunk {
             request_id: rid.clone(),

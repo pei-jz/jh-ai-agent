@@ -4,9 +4,15 @@ import { conversationMemory } from './ConversationMemory.js';
 import { workflowManager } from './WorkflowManager.js';
 import { tokenEstimator } from './TokenEstimator.js';
 import llmService from './LLMService.js';
-import { toolExecutor } from './ToolExecutor.js';
 
 class ContextBuilder {
+    // Sentinel separating the STABLE (cacheable) system prefix from the VOLATILE
+    // (per-turn-changing) suffix. The Rust layer (ai.rs) splits the system prompt
+    // on this marker: the prefix becomes an Anthropic `cache_control` text block
+    // (billed at ~10% on cache hits), the suffix is sent uncached. Non-Anthropic
+    // providers strip the marker. Keep in sync with SYS_CACHE_BREAK in ai.rs.
+    static SYSTEM_CACHE_BREAK = '<<<JHAI_SYSTEM_CACHE_BREAK>>>';
+
     constructor() {
         // Cache for the static prompt prefix (persona + tool defs + protocol + rules).
         // Rebuilt only when workspace, model, language, or native-tool flag changes.
@@ -151,7 +157,7 @@ JSON FORMATTING RULES (critical — most failures come from these):
         return parts.length === 0 ? '' : `<active_context>\n${parts.join('\n')}\n</active_context>\n`;
     }
 
-    async getSystemPrompt(workspacePath, clientContext = null, editContext = null, kisContext = '', currentQuery = '') {
+    async getSystemPrompt(workspacePath, toolExecutor, clientContext = null, editContext = null, kisContext = '', currentQuery = '') {
         const root = workspacePath || '.';
 
         const currentModel = llmService.getCurrentModel() || '';
@@ -475,14 +481,25 @@ Call \`finish_task\` when ALL of these are true:
         }
 
         // ══════════════════════════════════════════════════════════════
-        // Assemble full system prompt:
-        //   Static prefix (cached) → Semi-static → Dynamic suffix
-        // Order maximizes LLM prefix caching (Gemini, Anthropic, OpenAI)
+        // Assemble the system prompt in TWO regions split by SYSTEM_CACHE_BREAK:
+        //
+        //   STABLE region (before the sentinel) → cached on Anthropic
+        //     Byte-identical across every step of a run: persona/tools/rules,
+        //     environment, project summary, KIs, long-term memory (ranked by the
+        //     run-constant query), user-selected + active-file context.
+        //
+        //   VOLATILE region (after the sentinel) → sent uncached
+        //     Changes during the run: task_plan (mutated by task_progress),
+        //     workflow phase, artifacts (written by the agent). Keeping these
+        //     OUT of the cached prefix is what lets the big static block — and
+        //     the conversation history — stay cache-hits step after step.
+        //
+        // ai.rs splits on the sentinel; non-Anthropic providers strip it.
         // ══════════════════════════════════════════════════════════════
-        let systemPrompt = staticPrefix;
+        let stablePart = staticPrefix;
 
         // ── Semi-Static (changes per session, not per request) ──
-        systemPrompt += `
+        stablePart += `
 <environment>
 <project_root>${root}</project_root>
 <model_limit_tokens>${modelLimit.toLocaleString()}</model_limit_tokens>
@@ -493,10 +510,30 @@ ${projectInfo}
 </project_summary>
 `;
 
+        if (kisContext) {
+            stablePart += `\n<knowledge_items>\n${kisContext}\n</knowledge_items>\n`;
+        }
+
+        // Long-term memory is ranked against currentQuery, which is constant for
+        // the whole run — so it's stable and cacheable.
+        if (memoryContext) {
+            stablePart += `\n${memoryContext}\n`;
+        }
+
+        if (editContext) {
+            stablePart += `\n<user_selected_context>\n<![CDATA[\n${editContext}\n]]>\n</user_selected_context>\n`;
+        }
+
+        if (activeContext) {
+            stablePart += `\n${activeContext}\n`;
+        }
+
+        // ── Volatile region (per-turn changing — kept uncached) ──
+        let volatilePart = '';
+
         // task_plan.md gets its own highlighted section so the agent doesn't
-        // re-read it after compaction. Placed semi-statically (session-level,
-        // not per-request) so prefix caching still benefits but the agent
-        // always sees the current plan inline.
+        // re-read it after compaction. It mutates as the agent updates the
+        // checklist, so it lives in the volatile (uncached) region.
         if (taskPlanContent) {
             // Budget at most 20% of system prompt for the plan (it can grow as the
             // agent updates checklists; trim if it gets out of hand).
@@ -506,7 +543,7 @@ ${projectInfo}
             if (planTokens > planBudget) {
                 planBody = tokenEstimator.trimToFit(planBody, planBudget);
             }
-            systemPrompt += `
+            volatilePart += `
 <task_plan source="artifact:task_plan.md">
 <!-- IMPORTANT: This is the FULL current task_plan.md. Do NOT call read_file on it —
      it is already provided here in every prompt. Use the task_progress tool to mark
@@ -518,32 +555,19 @@ ${planBody}
 `;
         }
 
-        if (kisContext) {
-            systemPrompt += `\n<knowledge_items>\n${kisContext}\n</knowledge_items>\n`;
-        }
-
-        // ── Dynamic Suffix (changes every request, ordered least→most volatile) ──
         if (workflowContext) {
-            systemPrompt += `\n${workflowContext}\n`;
-        }
-
-        if (memoryContext) {
-            systemPrompt += `\n${memoryContext}\n`;
+            volatilePart += `\n${workflowContext}\n`;
         }
 
         if (artifactContext) {
-            systemPrompt += `\n${artifactContext}\n`;
+            volatilePart += `\n${artifactContext}\n`;
         }
 
-        if (editContext) {
-            systemPrompt += `\n<user_selected_context>\n<![CDATA[\n${editContext}\n]]>\n</user_selected_context>\n`;
-        }
-
-        if (activeContext) {
-            systemPrompt += `\n${activeContext}\n`;
-        }
-
-        return systemPrompt;
+        // Only emit the sentinel when there's a volatile region to separate;
+        // otherwise the whole prompt is the cacheable prefix.
+        return volatilePart.trim()
+            ? `${stablePart}${ContextBuilder.SYSTEM_CACHE_BREAK}\n${volatilePart}`
+            : stablePart;
     }
 }
 

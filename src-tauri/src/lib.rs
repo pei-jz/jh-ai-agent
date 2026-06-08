@@ -402,6 +402,15 @@ pub fn run() {
                                     if let Some(completion) = ws_packet["data"].get("completion_tokens").and_then(|t| t.as_u64()) {
                                         task.token_usage.completion_tokens = task.token_usage.completion_tokens.saturating_add(completion as u32);
                                     }
+                                    // Accumulate cache tokens too, so the persisted/reloaded task
+                                    // summary matches the per-step cache counts (was: never summed →
+                                    // header showed ⚡0 while steps showed ⚡N).
+                                    if let Some(cr) = ws_packet["data"].get("cache_read_input_tokens").and_then(|t| t.as_u64()) {
+                                        task.token_usage.cache_read_input_tokens = task.token_usage.cache_read_input_tokens.saturating_add(cr as u32);
+                                    }
+                                    if let Some(cc) = ws_packet["data"].get("cache_creation_input_tokens").and_then(|t| t.as_u64()) {
+                                        task.token_usage.cache_creation_input_tokens = task.token_usage.cache_creation_input_tokens.saturating_add(cc as u32);
+                                    }
                                     task.token_usage.total_tokens = task.token_usage.prompt_tokens + task.token_usage.completion_tokens;
                                 }
                                 "complete" => {

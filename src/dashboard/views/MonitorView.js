@@ -1,4 +1,4 @@
-import { renderResultSummary, attachFileOpenHandlers, ensureResultViewStyles } from '../utils/resultView.js';
+import { renderResultSummary, attachFileOpenHandlers, ensureResultViewStyles, renderMarkdown } from '../utils/resultView.js';
 
 export class MonitorView {
     constructor() {
@@ -8,7 +8,7 @@ export class MonitorView {
         this.logs = [];
         this.currentProgress = 0;
         this.currentStatus = 'idle';
-        this.tokenUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+        this.tokenUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
         // Structured result summaries for the "Result" tab — an ARRAY so multiple
         // runs of the same task (continue-after-complete) accumulate, newest last.
         // Each item: { summary, files:[{path,action,description}] }.
@@ -742,6 +742,9 @@ export class MonitorView {
     _renderDetail(task) {
         if (!task) return '<div class="mdetail-empty"><span class="mdetail-empty-icon">📊</span><h3>Task not found</h3></div>';
         const tokens = this.tokenUsage.total_tokens || task.token_usage.total_tokens;
+        const inInit = this.tokenUsage.prompt_tokens || task.token_usage.prompt_tokens || 0;
+        const outInit = this.tokenUsage.completion_tokens || task.token_usage.completion_tokens || 0;
+        const cachedInit = this.tokenUsage.cache_read_input_tokens || task.token_usage.cache_read_input_tokens || 0;
         const prog = this.currentProgress || task.progress || 0;
         const status = this.currentStatus !== 'idle' ? this.currentStatus : task.status;
 
@@ -751,7 +754,7 @@ export class MonitorView {
                 ${task.caller ? `<span class="mtask-caller">${escapeHtml(task.caller)}</span>` : ''}
                 <span class="task-badge badge-${task.status}">${task.status}</span>
                 <span class="mdetail-prompt-text" title="${escapeHtml(task.prompt)}">${escapeHtml(task.prompt)}</span>
-                <span class="mdetail-tokens">Tokens: <strong id="val-total-tokens">${tokens.toLocaleString()}</strong></span>
+                <span class="mdetail-tokens">Tokens: <strong id="val-total-tokens">${tokens.toLocaleString()}</strong><span class="mdetail-tokens-bd" style="font-size:11px;font-weight:400;color:var(--text-tertiary);margin-left:4px;">(<span id="val-in-tokens" title="入力（cached除く・全額課金分）">↑${inInit.toLocaleString()}</span> · <span id="val-cache-tokens" title="キャッシュ読出（約10%課金 = 節約分）">⚡${cachedInit.toLocaleString()}</span> · <span id="val-out-tokens" title="出力">↓${outInit.toLocaleString()}</span>)</span></span>
                 ${task.status === 'running' ? `<button class="btn btn-error" id="btn-abort-task" style="height:28px;padding:0 12px;font-size:11px;flex-shrink:0">⏹ Abort</button>` : ''}
             </div>
             <div class="mdetail-progress">
@@ -824,11 +827,13 @@ export class MonitorView {
                 this._chatDataMap[chatUid] = [...stepChatEntries];
                 const totalPrompt     = stepChatEntries.reduce((s, c) => s + (c.usage?.prompt_tokens     || 0), 0);
                 const totalCompletion = stepChatEntries.reduce((s, c) => s + (c.usage?.completion_tokens || 0), 0);
+                const totalCached     = stepChatEntries.reduce((s, c) => s + (c.usage?.cache_read_input_tokens || 0), 0);
                 const totalDur        = stepChatEntries.reduce((s, c) => s + (c.duration || 0), 0);
                 const lastEntry = stepChatEntries[stepChatEntries.length - 1];
                 const statusCode = lastEntry.status || 200;
                 const isErr = statusCode >= 400 || lastEntry.error;
-                chatBtnHtml = `<button class="mstep-chat-btn${isErr ? ' err' : ''}" data-chat-uid="${chatUid}">CHAT ${statusCode} · ↑${totalPrompt}t ↓${totalCompletion}t · ${totalDur}ms</button>`;
+                const cachedTxt = totalCached > 0 ? ` ⚡${totalCached}t` : '';
+                chatBtnHtml = `<button class="mstep-chat-btn${isErr ? ' err' : ''}" data-chat-uid="${chatUid}">CHAT ${statusCode} · ↑${totalPrompt}t${cachedTxt} ↓${totalCompletion}t · ${totalDur}ms</button>`;
             }
 
             const isLatest = stepCount === totalSteps;
@@ -1326,14 +1331,28 @@ export class MonitorView {
         if (data.type === 'command_confirm') {
             inner = `<h4>🛡 Command Approval</h4><p>${escapeHtml(data.message || '')}</p><pre><code>${escapeHtml(data.command || '')}</code></pre>`;
         } else if (data.type === 'plan_review') {
-            // Editable plan — the user can revise it before approving; the edited
-            // text is sent back as modifiedContent and becomes the plan the agent follows.
-            inner = `<h4>📋 Plan Approval</h4><p><strong>${escapeHtml(data.title || '')}</strong></p>` +
-                `<p class="mconfirm-hint" style="font-size:11px;color:var(--text-tertiary);margin:0 0 6px">承認前に編集できます。承認すると編集後の計画に従います。</p>` +
-                `<textarea class="mconfirm-plan-edit" id="plan-edit-${cid}" rows="12" ` +
-                `style="width:100%;box-sizing:border-box;font-family:var(--font-mono);font-size:12px;` +
-                `background:var(--bg-primary);color:var(--text-primary);border:1px solid var(--border);` +
-                `border-radius:6px;padding:10px;resize:vertical;">${escapeHtml(data.message || '')}</textarea>`;
+            // Plan shown as a rendered Markdown PREVIEW by default; an "edit" toggle
+            // swaps to a raw textarea. The textarea is the source of truth read back
+            // by sendConfirmResponse, so editing still flows through unchanged.
+            ensureResultViewStyles();
+            const planText = data.message || '';
+            inner = `<h4>📋 Plan Approval</h4>` +
+                `<div style="display:flex;align-items:center;gap:8px;margin:0 0 6px">` +
+                  `<strong style="flex:1">${escapeHtml(data.title || '')}</strong>` +
+                  `<button type="button" class="mconfirm-plan-toggle" data-confirm-id="${cid}" ` +
+                    `style="height:24px;padding:0 10px;font-size:11px;cursor:pointer;` +
+                    `background:var(--bg-secondary);color:var(--text-secondary);` +
+                    `border:1px solid var(--border);border-radius:4px;">✏️ 編集</button>` +
+                `</div>` +
+                `<p class="mconfirm-hint" style="font-size:11px;color:var(--text-tertiary);margin:0 0 6px">承認前に「編集」で修正できます。承認すると（編集後の）計画に従います。</p>` +
+                `<div class="mconfirm-plan-preview rv-root" id="plan-preview-${cid}" ` +
+                  `style="max-height:420px;overflow:auto;background:var(--bg-primary);` +
+                  `border:1px solid var(--border);border-radius:6px;padding:10px 14px;">` +
+                  `${renderMarkdown(planText)}</div>` +
+                `<textarea class="mconfirm-plan-edit" id="plan-edit-${cid}" rows="14" ` +
+                  `style="display:none;width:100%;box-sizing:border-box;font-family:var(--font-mono);font-size:12px;` +
+                  `background:var(--bg-primary);color:var(--text-primary);border:1px solid var(--border);` +
+                  `border-radius:6px;padding:10px;resize:vertical;">${escapeHtml(planText)}</textarea>`;
         } else if (data.type === 'diff_review') {
             inner = `<h4>📝 File Modification</h4><p><code>${escapeHtml(data.path || '')}</code></p><p>${escapeHtml(data.message || '')}</p>${this.renderSimpleDiff(data.oldContent || '', data.newContent || '')}`;
         }
@@ -1355,7 +1374,7 @@ export class MonitorView {
         this.logs = [];
         this.currentProgress = 0;
         this.currentStatus = 'running';
-        this.tokenUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+        this.tokenUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
         this.resultSummaries = [];
         this._taskFinished = false;
         this._userPickedTab = false;
@@ -1464,11 +1483,12 @@ export class MonitorView {
                     // Compute aggregated values
                     const totalPrompt     = this._activeStepChatEntries.reduce((s, c) => s + (c.usage?.prompt_tokens     || 0), 0);
                     const totalCompletion = this._activeStepChatEntries.reduce((s, c) => s + (c.usage?.completion_tokens || 0), 0);
+                    const totalCached     = this._activeStepChatEntries.reduce((s, c) => s + (c.usage?.cache_read_input_tokens || 0), 0);
                     const totalDur        = this._activeStepChatEntries.reduce((s, c) => s + (c.duration || 0), 0);
                     const lastEntry = this._activeStepChatEntries[this._activeStepChatEntries.length - 1];
                     const statusCode = lastEntry.status || 200;
                     const isErr = statusCode >= 400 || lastEntry.error;
-                    const btnText = `CHAT ${statusCode} · ↑${totalPrompt}t ↓${totalCompletion}t · ${totalDur}ms`;
+                    const btnText = `CHAT ${statusCode} · ↑${totalPrompt}t${totalCached > 0 ? ` ⚡${totalCached}t` : ''} ↓${totalCompletion}t · ${totalDur}ms`;
 
                     // ⚠ Route the CHAT button to the AGENT's currently-running step
                     // (the last real step in DOM order), NOT to whichever step the user
@@ -1610,11 +1630,22 @@ export class MonitorView {
                     // so the header showed only the last step's tokens, which for a
                     // tool-only final step is often 0 → the "Tokens: 0" bug.)
                     const d = packet.data || {};
+                    const cr = d.cache_read_input_tokens || 0;
+                    const cc = d.cache_creation_input_tokens || 0;
                     this.tokenUsage.prompt_tokens     += d.prompt_tokens || 0;
                     this.tokenUsage.completion_tokens += d.completion_tokens || 0;
-                    this.tokenUsage.total_tokens      += (d.total_tokens || ((d.prompt_tokens || 0) + (d.completion_tokens || 0)));
+                    this.tokenUsage.total_tokens      += (d.total_tokens || ((d.prompt_tokens || 0) + (d.completion_tokens || 0) + cr + cc));
+                    this.tokenUsage.cache_read_input_tokens     += cr;
+                    this.tokenUsage.cache_creation_input_tokens += cc;
                     const vt = document.getElementById('val-total-tokens');
                     if (vt) vt.textContent = this.tokenUsage.total_tokens.toLocaleString();
+                    // Breakdown: input (full-priced, cache excluded) · cached (~10%) · output.
+                    const vin = document.getElementById('val-in-tokens');
+                    if (vin) vin.textContent = `↑${this.tokenUsage.prompt_tokens.toLocaleString()}`;
+                    const vc = document.getElementById('val-cache-tokens');
+                    if (vc) vc.textContent = `⚡${this.tokenUsage.cache_read_input_tokens.toLocaleString()}`;
+                    const vout = document.getElementById('val-out-tokens');
+                    if (vout) vout.textContent = `↓${this.tokenUsage.completion_tokens.toLocaleString()}`;
                     return; // don't render as inline log line
                 }
                 if (packet.event === 'status') {
@@ -2190,7 +2221,7 @@ export class MonitorView {
             const method  = d.method === 'TOOL' ? `TOOL:${d.name}` : (d.method || 'CHAT');
             const isErr   = (d.status || 200) >= 400 || d.error;
             const usage   = d.usage
-                ? `↑${d.usage.prompt_tokens||0} / ↓${d.usage.completion_tokens||0} / total: ${d.usage.total_tokens||0} tokens`
+                ? `↑${d.usage.prompt_tokens||0}${(d.usage.cache_read_input_tokens||0) > 0 ? ` (cached ${d.usage.cache_read_input_tokens})` : ''}${(d.usage.cache_creation_input_tokens||0) > 0 ? ` (+cache ${d.usage.cache_creation_input_tokens})` : ''} / ↓${d.usage.completion_tokens||0} / total: ${d.usage.total_tokens||0} tokens`
                 : '';
 
             const r = safeObj(d.request);
@@ -2307,6 +2338,29 @@ export class MonitorView {
                 const btnReject  = e.target.closest('.btn-reject');
                 if (btnApprove) { this.sendConfirmResponse(btnApprove.getAttribute('data-confirm-id'), true); return; }
                 if (btnReject)  { this.sendConfirmResponse(btnReject.getAttribute('data-confirm-id'), false); return; }
+
+                // ②b Plan preview ⇄ edit toggle
+                const btnPlanToggle = e.target.closest('.mconfirm-plan-toggle');
+                if (btnPlanToggle) {
+                    const pcid = btnPlanToggle.getAttribute('data-confirm-id');
+                    const pv = document.getElementById(`plan-preview-${pcid}`);
+                    const ta = document.getElementById(`plan-edit-${pcid}`);
+                    if (pv && ta) {
+                        const editing = ta.style.display !== 'none';
+                        if (editing) {
+                            // Leaving edit mode → re-render preview from the edited text.
+                            pv.innerHTML = renderMarkdown(ta.value);
+                            ta.style.display = 'none';
+                            pv.style.display = 'block';
+                            btnPlanToggle.textContent = '✏️ 編集';
+                        } else {
+                            ta.style.display = 'block';
+                            pv.style.display = 'none';
+                            btnPlanToggle.textContent = '👁 プレビュー';
+                        }
+                    }
+                    return;
+                }
 
                 // ③ Step header toggle (skip if CHAT button was clicked — already handled above)
                 const stepHeader = e.target.closest('.mstep-header');

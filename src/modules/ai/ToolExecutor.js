@@ -23,7 +23,7 @@ import {
     handleVerifySyntax, handleTaskProgress, handlePresentResult
 } from './tools/handlers/agentMetaHandlers.js';
 
-class ToolExecutor {
+export class ToolExecutor {
     constructor() {
         this._taskCompleted = false;
         this.toolDefinitions = TOOL_DEFINITIONS;
@@ -54,6 +54,7 @@ class ToolExecutor {
         // Set() → only the names in the set are allowed; others return an error
         // []    → effectively disables all tools (caller wants chat-only mode)
         this._toolAllowlist = null;
+        this._mcpBypassesAllowlist = false;
         // ── MCP server filter (per-session, set by behavior.mcp_servers) ───
         // null     → all MCP servers available
         // Set<str> → only tools from listed server names are included
@@ -122,6 +123,7 @@ class ToolExecutor {
         this._taskProgressLoaded = false;
         this._taskCompleted = false;
         this._toolAllowlist = null;    // reset; caller may re-set after startSession
+        this._mcpBypassesAllowlist = false;
         this._mcpServerFilter = null; // reset MCP server filter
         this._mcpContext = null;      // reset per-task MCP context
         // Plan gate resets each session (caller sets requirement via setPlanGate).
@@ -418,6 +420,9 @@ class ToolExecutor {
         this._sessionActive = false;
         this._currentSessionId = null;
         this.workspacePath = null;
+        this._toolAllowlist = null;
+        this._mcpServerFilter = null;
+        this._mcpContext = null;
     }
 
     isSessionActive() {
@@ -551,8 +556,16 @@ class ToolExecutor {
      * "Ask" operation can never run when no approval channel is wired.
      */
     getPermissionLevel(name, args = {}) {
+        const isNative = this.toolDefinitions.some(t => t.name === name);
+        if (!isNative) {
+            // MCP/External tools (provided by another app/API) bypass all permission checks
+            return 'Allow';
+        }
+
         if (this._toolAllowlist && name !== 'finish_task' && !this._toolAllowlist.has(name)) {
-            return 'Deny';
+            if (isNative || !this._mcpBypassesAllowlist) {
+                return 'Deny';
+            }
         }
         const a = args || {};
         const pickPath = () => this.resolvePath(a.path || a.file_path || a.filepath || a.file || a.dir || a.directory);
@@ -603,6 +616,11 @@ class ToolExecutor {
         }
     }
 
+    static getAllAvailableToolsForNativeAPI() {
+        const dummy = new ToolExecutor();
+        return dummy.getToolsForNativeAPI();
+    }
+
     getToolsForNativeAPI() {
         // Respect the per-session allowlist so the LLM is only PRESENTED tools it
         // may actually use. Otherwise a capability-scoped task (e.g. an app intent
@@ -629,7 +647,7 @@ class ToolExecutor {
         const mcpTools = mcpManager.getAllTools();
         mcpTools.forEach(t => {
             if (this._mcpServerFilter && !this._mcpServerFilter.has(t._serverName)) return;
-            if (allow && !allow.has(t.name)) return;
+            if (allow && !this._mcpBypassesAllowlist && !allow.has(t.name)) return;
             const rawSchema = t.inputSchema || { type: 'object', properties: {} };
             // Third-party MCP schemas: convert the ones we safely can to strict
             // form, leave the rest as-is (sent WITHOUT strict).
@@ -711,7 +729,8 @@ class ToolExecutor {
 
         // Enforce per-session tool allowlist (configured via setToolAllowlist).
         // Always permit finish_task so a restricted agent can still terminate.
-        if (this._toolAllowlist && !this._toolAllowlist.has(name)) {
+        const isNative = this.toolDefinitions.some(t => t.name === name);
+        if (isNative && this._toolAllowlist && !this._toolAllowlist.has(name)) {
             return `Error: Tool "${name}" is not enabled for this task. Allowed tools: ${[...this._toolAllowlist].join(', ')}.`;
         }
 
@@ -830,5 +849,3 @@ class ToolExecutor {
         }
     }
 }
-
-export const toolExecutor = new ToolExecutor();

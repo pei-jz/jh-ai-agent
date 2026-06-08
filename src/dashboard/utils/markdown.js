@@ -133,12 +133,64 @@ function fileRow(f) {
         '</tr>';
 }
 
-/** Full result panel: markdown summary + a created/modified file table. */
+/** A compact stats chip row from a structured stats object. */
+function renderStatsChips(stats) {
+    if (!stats || typeof stats !== 'object') return '';
+    const chips = [];
+    if (stats.steps) chips.push(`<span class="rv-chip">🔁 ステップ ${stats.steps}</span>`);
+    const tools = stats.tools && typeof stats.tools === 'object' ? Object.entries(stats.tools) : [];
+    const toolTotal = tools.reduce((n, [, c]) => n + (c || 0), 0);
+    if (toolTotal > 0) {
+        const detail = tools.map(([n, c]) => `${n}×${c}`).join(', ');
+        chips.push(`<span class="rv-chip" title="${escapeHtml(detail)}">🛠 ツール ${toolTotal}</span>`);
+    }
+    if (stats.tokens) {
+        const t = stats.tokens >= 1000 ? (stats.tokens / 1000).toFixed(1) + 'k' : stats.tokens;
+        chips.push(`<span class="rv-chip">🔢 ${t} tok</span>`);
+    }
+    if (stats.durationMs) chips.push(`<span class="rv-chip">⏱ ${Math.round(stats.durationMs / 1000)}s</span>`);
+    if (stats.files) chips.push(`<span class="rv-chip">📄 ${stats.files} 件</span>`);
+    return chips.length ? `<div class="rv-chips">${chips.join('')}</div>` : '';
+}
+
+/**
+ * Full result panel. Prefers the STRUCTURED shape
+ * ({answer, stats, request, plan, files}) → answer-first sections with a compact
+ * stats chip row and a collapsible 詳細 (request/plan). Falls back to the flat
+ * {summary, files} markdown blob for older payloads / API back-compat.
+ */
 export function renderResultSummary(resultSummary) {
     if (!resultSummary) return '<div class="rv-empty">結果サマリはまだありません。</div>';
-    const { summary, files } = resultSummary;
+    const { answer, stats, request, plan, summary, files } = resultSummary;
+
     let html = '';
-    if (summary && summary.trim()) html += `<div class="rv-summary">${renderMarkdown(summary)}</div>`;
+    const hasStructured = (answer && answer.trim()) || stats || (request && request.trim()) || (plan && plan.trim());
+
+    if (hasStructured) {
+        // 1. Answer (headline — the LLM's actual deliverable).
+        if (answer && answer.trim()) {
+            html += `<div class="rv-section-label">💬 回答</div>`;
+            html += `<div class="rv-summary rv-answer">${renderMarkdown(answer)}</div>`;
+        }
+        // 2. Compact stats chips.
+        html += renderStatsChips(stats);
+        // 3. Collapsible details: request + plan.
+        const details = [];
+        if (request && request.trim()) {
+            details.push(`<div class="rv-detail-h">📥 ご依頼内容</div><div class="rv-summary">${renderMarkdown(request)}</div>`);
+        }
+        if (plan && plan.trim()) {
+            details.push(`<div class="rv-detail-h">🗺 実行計画</div><div class="rv-summary">${renderMarkdown(plan)}</div>`);
+        }
+        if (details.length) {
+            html += `<details class="rv-details"><summary>詳細（ご依頼・計画）</summary>${details.join('')}</details>`;
+        }
+    } else if (summary && summary.trim()) {
+        // Back-compat: flat markdown blob.
+        html += `<div class="rv-summary">${renderMarkdown(summary)}</div>`;
+    }
+
+    // File table (shared by both shapes).
     if (Array.isArray(files) && files.length > 0) {
         html += `<div class="rv-files-title">作成・変更されたファイル (${files.length})</div>`;
         html += '<table class="rv-table rv-files"><thead><tr><th>ファイル</th><th>操作</th><th>説明</th></tr></thead><tbody>';
