@@ -87,7 +87,15 @@ export async function handleRunCommand(ctx, args, onConfirm, onAgentStatus) {
             ? "Error: User Denied command execution."
             : "Error: Command execution denied — no approval channel is available to authorize shell commands.";
     }
-    onAgentStatus?.(`Running command: ${args.command}...`);
+    // Resolve the working directory. A caller-supplied cwd (relative → resolved
+    // against the workspace; absolute → used as-is) lets commands run in a
+    // subdirectory (e.g. a monorepo package). The Rust PathGuard still enforces
+    // that the cwd is inside an allowed root, so this can't escape the sandbox.
+    const runCwd = (typeof args.cwd === 'string' && args.cwd.trim())
+        ? ctx.resolvePath(args.cwd.trim())
+        : ctx.workspacePath;
+
+    onAgentStatus?.(`Running command: ${args.command}${args.cwd ? ` (in ${runCwd})` : ''}...`);
 
     // Default 60-second timeout prevents infinite hangs.
     // Agent can pass timeout_ms to override (e.g. long builds).
@@ -121,7 +129,7 @@ export async function handleRunCommand(ctx, args, onConfirm, onAgentStatus) {
 
     const commandPromise = invoke('run_command', {
         command: args.command,
-        cwd: ctx.workspacePath,
+        cwd: runCwd,
         commandId: cmdId
     });
     const timeoutPromise = new Promise((_, reject) =>

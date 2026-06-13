@@ -89,6 +89,26 @@ pub(crate) fn build_openai_messages(
     full
 }
 
+/// Split a system prompt on the cache-break sentinel into (stable, volatile).
+///
+/// OpenAI-family providers cache on EXACT prefix match only (no breakpoints à la
+/// Anthropic `cache_control`). If the volatile tail (task_plan / workflow phase /
+/// artifacts) stays inside the system message, the FIRST message changes every
+/// agent step and the automatic prefix cache never hits. Callers keep the stable
+/// part as the system message and re-inject the volatile part as a trailing user
+/// message instead. Pure.
+pub(crate) fn split_system_on_cache_break(sys: &str, sentinel: &str) -> (String, Option<String>) {
+    match sys.find(sentinel) {
+        Some(idx) => {
+            let stable = sys[..idx].trim_end().to_string();
+            let volatile = sys[idx + sentinel.len()..].trim().to_string();
+            let vol = if volatile.is_empty() { None } else { Some(volatile) };
+            (stable, vol)
+        }
+        None => (sys.to_string(), None),
+    }
+}
+
 // ── Tool-definition helpers (Structured Outputs / strict) ──────────────────
 
 /// Prepare OpenAI-format tools for the request body: strip the `_strict_ok`
@@ -407,5 +427,31 @@ mod provider_helper_tests {
         assert!(content.starts_with("describe this"));
         assert!(content.contains("does not support image input"));
         assert!(!content.contains("image_url"));
+    }
+
+    #[test]
+    fn split_system_separates_stable_and_volatile() {
+        const BREAK: &str = "<<<JHAI_SYSTEM_CACHE_BREAK>>>";
+        let sys = format!("STABLE RULES\n{}\n<task_plan>...</task_plan>", BREAK);
+        let (stable, volatile) = split_system_on_cache_break(&sys, BREAK);
+        assert_eq!(stable, "STABLE RULES");
+        assert_eq!(volatile.as_deref(), Some("<task_plan>...</task_plan>"));
+    }
+
+    #[test]
+    fn split_system_no_sentinel_returns_whole_as_stable() {
+        const BREAK: &str = "<<<JHAI_SYSTEM_CACHE_BREAK>>>";
+        let (stable, volatile) = split_system_on_cache_break("ALL STABLE", BREAK);
+        assert_eq!(stable, "ALL STABLE");
+        assert!(volatile.is_none());
+    }
+
+    #[test]
+    fn split_system_empty_volatile_is_none() {
+        const BREAK: &str = "<<<JHAI_SYSTEM_CACHE_BREAK>>>";
+        let sys = format!("STABLE\n{}\n   \n", BREAK);
+        let (stable, volatile) = split_system_on_cache_break(&sys, BREAK);
+        assert_eq!(stable, "STABLE");
+        assert!(volatile.is_none());
     }
 }

@@ -11,6 +11,7 @@ export const SAFETY_DEFAULTS = {
     identicalCallThreshold: 5,   // soft warn at N×, hard stop at 3N×
     cycleDetectionMinRepeats: 3,
     historyBudgetRatio: 0.7,     // fraction of context window history may use
+    historyCompressRatio: 0.5,   // compress old tool results only above this window fraction (keeps prefix cacheable below it)
     agentTemperature: 0.2,       // low temp → fewer transcription typos
     planMode: 'auto',            // 'off' | 'auto' (plan-gate complex tasks) | 'always'
 };
@@ -38,6 +39,10 @@ export function normalizeSafetyLimits(cfg = {}) {
     const historyBudgetRatio = (Number.isFinite(ratioRaw) && ratioRaw > 0 && ratioRaw <= 1)
         ? ratioRaw : d.historyBudgetRatio;
 
+    const compressRaw = Number(cfg.history_compress_ratio);
+    const historyCompressRatio = (Number.isFinite(compressRaw) && compressRaw > 0 && compressRaw <= 1)
+        ? compressRaw : d.historyCompressRatio;
+
     const tempRaw = Number(cfg.agent_temperature);
     const agentTemperature = (Number.isFinite(tempRaw) && tempRaw >= 0 && tempRaw <= 2)
         ? tempRaw : d.agentTemperature;
@@ -52,6 +57,7 @@ export function normalizeSafetyLimits(cfg = {}) {
         identicalCallThreshold:   num(cfg.identical_call_threshold,    d.identicalCallThreshold),
         cycleDetectionMinRepeats: num(cfg.cycle_detection_min_repeats, d.cycleDetectionMinRepeats),
         historyBudgetRatio,
+        historyCompressRatio,
         agentTemperature,
         planMode,
     };

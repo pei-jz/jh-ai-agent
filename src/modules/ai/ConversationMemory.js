@@ -2,7 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { tokenEstimator } from './TokenEstimator.js';
 import LLMService from './LLMService.js';
 import { sanitizeXmlTags, relevanceScore, scoreMessageImportance } from './memory/MemoryScoring.js';
-import { mergeFacts as mergeFactsInto, selectRelevantFacts } from './memory/FactStore.js';
+import { mergeFacts as mergeFactsInto, selectRelevantFacts, pruneFacts, applyConsolidation } from './memory/FactStore.js';
 
 class ConversationMemory {
     constructor() {
@@ -36,6 +36,17 @@ class ConversationMemory {
         this.outputReserveTokens = 8000;   // room for the model's reply
         this.systemReserveTokens = 8000;   // tool defs + rules + active-file context
         this.safetyMarginTokens  = 2000;   // estimator slack
+
+        // ── Session file-cache re-injection budget ──────────────────────
+        // After compaction, recently read/written files are re-injected so the
+        // agent doesn't re-read them. This budget was a hardcoded 20KB (~5K
+        // tokens) — far too small for a 128K-window model (caused needless
+        // re-reads) and potentially too large for a tiny one. It's now a
+        // fraction of the run's history budget (which already scales with the
+        // model window), clamped to an absolute ceiling. Both are overridable
+        // via setBudgetConfig() for per-task tuning.
+        this.fileCacheBudgetRatio = 0.30;   // share of historyBudget (tokens)
+        this.fileCacheMaxChars    = 120_000; // hard ceiling (~30K tokens)
     }
 
     /**
@@ -54,6 +65,12 @@ class ConversationMemory {
         }
         if (Number.isFinite(cfg.safetyMargin) && cfg.safetyMargin >= 0) {
             this.safetyMarginTokens = cfg.safetyMargin;
+        }
+        if (Number.isFinite(cfg.fileCacheRatio) && cfg.fileCacheRatio > 0 && cfg.fileCacheRatio <= 1) {
+            this.fileCacheBudgetRatio = cfg.fileCacheRatio;
+        }
+        if (Number.isFinite(cfg.fileCacheMaxChars) && cfg.fileCacheMaxChars > 0) {
+            this.fileCacheMaxChars = cfg.fileCacheMaxChars;
         }
     }
 
@@ -112,10 +129,9 @@ class ConversationMemory {
             const dirPath = `${workspacePath}/.agent/long_term`;
             try { await invoke('create_dir', { path: dirPath }); } catch (e) { /* exists */ }
 
-            if (this.facts.length > this.maxFacts) {
-                this.facts.sort((a, b) => (b.hits || 0) - (a.hits || 0) || (b.timestamp || 0) - (a.timestamp || 0));
-                this.facts = this.facts.slice(0, this.maxFacts);
-            }
+            // Prune by retention score (hits decayed with a 90-day half-life) so
+            // stale facts fade out instead of being kept forever by old hit counts.
+            pruneFacts(this.facts, this.maxFacts);
             await invoke('write_file', {
                 path: `${dirPath}/facts.json`,
                 content: JSON.stringify(this.facts, null, 2)
@@ -151,7 +167,29 @@ class ConversationMemory {
                 (actionsStr ? `\n**Actions:**${actionsStr}\n` : '') +
                 `\n**Files:** ${filesStr}\n`;
 
-            await invoke('write_file', { path, content: existing + block });
+            let content = existing + block;
+            // ── Rotation ─────────────────────────────────────────────────
+            // The journal is an append-only AUDIT log (the agent never reads it
+            // back — recall goes through memory.json/facts.json), so unbounded
+            // growth is pure disk bloat. Cap at ~200KB by dropping the OLDEST
+            // session blocks (separated by "\n---\n") while keeping the header.
+            const JOURNAL_MAX_CHARS = 200_000;
+            if (content.length > JOURNAL_MAX_CHARS) {
+                const SEP = '\n---\n';
+                const parts = content.split(SEP);
+                const header = parts.shift() || '';
+                // Drop oldest blocks until the remainder fits.
+                let kept = parts;
+                let total = header.length + kept.reduce((s, p) => s + p.length + SEP.length, 0);
+                while (kept.length > 1 && total > JOURNAL_MAX_CHARS) {
+                    total -= (kept[0].length + SEP.length);
+                    kept = kept.slice(1);
+                }
+                const note = '\n\n_(古いエントリはサイズ上限により切り捨てられました / older entries rotated out)_\n';
+                content = header.trimEnd() + note + (kept.length ? SEP + kept.join(SEP) : '');
+            }
+
+            await invoke('write_file', { path, content });
         } catch (e) {
             console.error('AI Memory: Failed to append journal:', e);
         }
@@ -232,8 +270,66 @@ class ConversationMemory {
                 this.mergeFacts(entry.facts, sessionId);
                 await this.saveFacts(workspacePath);
             }
+            // Consolidation pass (LLM): when the store nears its cap, merge
+            // duplicates and drop stale/contradicted facts. Best-effort.
+            await this.consolidateFacts(workspacePath, onLog);
         } catch (e) {
             console.warn('AI Memory: long-term persistence failed:', e);
+        }
+    }
+
+    /**
+     * LLM consolidation of the facts store: merge re-phrasings, drop transient /
+     * outdated / contradicted facts. Runs only when the store is ≥80% of its cap
+     * (so it self-throttles — after a successful pass the count drops below the
+     * threshold). Best-effort: any failure leaves the store untouched.
+     * @returns {Promise<boolean>} true if a consolidation was applied
+     */
+    async consolidateFacts(workspacePath, onLog = null) {
+        const threshold = Math.floor(this.maxFacts * 0.8);
+        if (!Array.isArray(this.facts) || this.facts.length < threshold) return false;
+        try {
+            const list = this.facts
+                .map((f, i) => `${i}: [${f.date || '?'} hits:${f.hits || 1}] ${f.fact}`)
+                .join('\n');
+            const prompt = `You maintain a long-term memory store of durable project facts for an AI coding agent.
+Review the numbered facts below and output a consolidation plan as a raw JSON object (no markdown):
+{
+  "remove": [indices of facts that are transient, outdated, contradicted by a newer fact, or not durable project knowledge],
+  "merge": [{ "into": index_to_keep, "from": [indices saying the same thing], "text": "optional clearer rewrite (same language)" }]
+}
+Be conservative: when in doubt, keep the fact. Do not remove facts that are still plausibly true.
+
+[Facts]
+${list}`;
+            let raw = '';
+            const sys = 'You are a JSON generator. Output ONLY a valid JSON object, nothing else.';
+            const _t0 = Date.now();
+            const gen = await LLMService.generate(prompt, sys, (chunk) => { raw += chunk; });
+            if (onLog) {
+                try {
+                    onLog({
+                        method: 'CHAT', status: 200, duration: Date.now() - _t0,
+                        stepLabel: '🧹 Facts Consolidation',
+                        usage: gen?.usage,
+                        request: { purpose: 'facts-consolidation', system_prompt: sys, prompt },
+                        response: raw
+                    });
+                } catch (_) {}
+            }
+            const m = raw.match(/\{[\s\S]*\}/);
+            if (!m) return false;
+            const plan = JSON.parse(m[0]);
+            const before = this.facts.length;
+            const next = applyConsolidation(this.facts, plan);
+            if (next === this.facts || next.length === before) return false;
+            this.facts = next;
+            await this.saveFacts(workspacePath);
+            console.log(`AI Memory: Consolidated facts ${before} → ${this.facts.length}.`);
+            return true;
+        } catch (e) {
+            console.warn('AI Memory: facts consolidation failed (kept original):', e);
+            return false;
         }
     }
 
@@ -472,10 +568,16 @@ JSON output format:
             //   2. High read-frequency files (read many times — agent treats them as anchors)
             //   3. Most-recently-read files
             //
-            // Budget: ~20 KB of characters (~5 K tokens).  Files that don't fit are omitted;
-            //   the agent can still read_file them if needed (it just costs one extra step).
+            // Budget scales with the model window (fraction of historyBudget,
+            // clamped to fileCacheMaxChars) instead of a fixed 20 KB — so a
+            // large-window model keeps more files cached (fewer re-reads) while
+            // a small one stays bounded. Files that don't fit are omitted; the
+            // agent can still read_file them (one extra step).
             if (fileCache && fileCache.size > 0) {
-                const FILE_CACHE_CHAR_BUDGET = 20_000;
+                const FILE_CACHE_CHAR_BUDGET = Math.min(
+                    this.fileCacheMaxChars,
+                    Math.floor(historyBudget * this.fileCacheBudgetRatio * 4)
+                );
                 const MAX_LINES_PER_FILE    = 300;
 
                 // Sort entries by priority

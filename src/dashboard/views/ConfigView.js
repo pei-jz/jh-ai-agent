@@ -29,7 +29,13 @@ export class ConfigView {
             cycle_detection_min_repeats: 3
         };
         this.loaded = false;
-        this.activeTab = 'llm'; // Tab: 'llm', 'mcp', 'general', 'logs', 'templates', 'skills'
+        this.activeTab = 'llm'; // Tab: 'llm', 'mcp', 'general', 'logs', 'templates', 'skills', 'rag', 'memory'
+
+        // ── 🧠 Memory tab state ──────────────────────────────────────────
+        // null = not loaded yet (shows the "select a workspace" hint).
+        this.memoryWorkspace = '';
+        this.memoryFacts = null;
+        this.memoryEpisodes = null;
         this.showModal = false;
         this.editingInstance = null; // null if adding new
         this.logsList = [];
@@ -125,6 +131,15 @@ export class ConfigView {
         if (noProgress         !== undefined) this.config.no_progress_window         = noProgress;
         if (identicalThreshold !== undefined) this.config.identical_call_threshold   = identicalThreshold;
         if (cycleRepeats       !== undefined) this.config.cycle_detection_min_repeats = cycleRepeats;
+
+        // History compress ratio is a FLOAT in (0,1] (readNum is integer-only).
+        const compressEl = document.getElementById('cfg-compress-ratio');
+        if (compressEl) {
+            const raw = compressEl.value.trim();
+            const f = parseFloat(raw);
+            // Blank or out-of-range → null (backend falls back to the 0.5 default).
+            this.config.history_compress_ratio = (raw !== '' && Number.isFinite(f) && f > 0 && f <= 1) ? f : null;
+        }
 
         const writeAllowedEl = document.getElementById('cfg-write-allowed');
         if (writeAllowedEl) {
@@ -414,6 +429,18 @@ export class ConfigView {
                                     </p>
                                 </div>
                             </div>
+
+                            <div class="input-group" style="margin-top: 12px;">
+                                <label class="input-label">History Compress Ratio (キャッシュ最適化)</label>
+                                <input type="number" id="cfg-compress-ratio" class="input" value="${this.config.history_compress_ratio ?? 0.5}" min="0.1" max="1" step="0.05" placeholder="0.5">
+                                <p class="input-hint">
+                                    会話履歴がモデルのコンテキスト窓の<strong>この割合を超えたときだけ</strong>、古いツール結果を圧縮します。
+                                    これ未満では履歴をそのまま保ち、LLMのプロンプトキャッシュが履歴を再利用できるため、
+                                    マルチステップのタスクで<strong>トークン消費を大きく削減</strong>します。
+                                    低い値=早めに圧縮（プロンプトは小さいがキャッシュは効きにくい）、
+                                    高い値=長く安定（キャッシュは効くが窓上限に近づく）。<strong>推奨: 0.5</strong>。空欄で既定(0.5)。
+                                </p>
+                            </div>
                         </div>
                         <!-- ── Write-Allowed Directories ──────────────────────── -->
                         <div style="margin-top: 8px; padding: 14px 16px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-secondary);">
@@ -487,6 +514,8 @@ export class ConfigView {
             tabContentHtml = this.renderLogsTabHtml();
         } else if (this.activeTab === 'rag') {
             tabContentHtml = this.renderRagTabHtml();
+        } else if (this.activeTab === 'memory') {
+            tabContentHtml = this.renderMemoryTabHtml();
         }
 
         // Render modal overlay if visible
@@ -603,6 +632,7 @@ export class ConfigView {
                         <button class="settings-tab-btn ${this.activeTab === 'skills' ? 'active' : ''}" data-tab="skills" style="${getTabStyle('skills')}">⚡ Skills</button>
                         <!-- API Logs moved to the Monitor view (per-task raw payloads). -->
                         <button class="settings-tab-btn ${this.activeTab === 'rag' ? 'active' : ''}" data-tab="rag" style="${getTabStyle('rag')}">🔍 RAG Indexing</button>
+                        <button class="settings-tab-btn ${this.activeTab === 'memory' ? 'active' : ''}" data-tab="memory" style="${getTabStyle('memory')}">🧠 Memory</button>
                     </div>
 
                     <!-- Right Column: Active Tab Content Area -->
@@ -661,6 +691,76 @@ export class ConfigView {
                 this.reRender();
             });
         });
+
+        // ── 🧠 Memory tab handlers ───────────────────────────────────────
+        const memLoadBtn = document.getElementById('btn-memory-load');
+        if (memLoadBtn) {
+            const wsInput = document.getElementById('memory-ws-input');
+            memLoadBtn.addEventListener('click', async () => {
+                this.memoryWorkspace = wsInput ? wsInput.value.trim() : '';
+                if (!this.memoryWorkspace) { alert('ワークスペースパスを入力してください。'); return; }
+                await this.loadMemoryData();
+                this.reRender();
+            });
+            document.getElementById('btn-memory-ws-browse')?.addEventListener('click', async () => {
+                try {
+                    const sel = await invoke('select_folder');
+                    if (sel && wsInput) wsInput.value = sel;
+                } catch (_) {}
+            });
+
+            const saveFactsOrAlert = async () => {
+                try { await this.saveMemoryFacts(); }
+                catch (e) { alert(`facts.json の保存に失敗しました: ${e}`); await this.loadMemoryData(); }
+            };
+            const saveEpisodesOrAlert = async () => {
+                try { await this.saveMemoryEpisodes(); }
+                catch (e) { alert(`memory.json の保存に失敗しました: ${e}`); await this.loadMemoryData(); }
+            };
+
+            document.getElementById('memory-facts-list')?.addEventListener('click', async (e) => {
+                const btn = e.target.closest('.memory-fact-del, .memory-fact-edit');
+                if (!btn) return;
+                const idx = parseInt(btn.getAttribute('data-idx'), 10);
+                if (!Number.isInteger(idx) || !this.memoryFacts?.[idx]) return;
+                if (btn.classList.contains('memory-fact-del')) {
+                    if (!confirm('この事実を削除しますか？')) return;
+                    this.memoryFacts.splice(idx, 1);
+                } else {
+                    const next = prompt('事実を編集:', this.memoryFacts[idx].fact || '');
+                    if (next === null) return;
+                    const t = next.trim();
+                    if (!t) return;
+                    this.memoryFacts[idx].fact = t.substring(0, 300);
+                    this.memoryFacts[idx].timestamp = Date.now();
+                }
+                await saveFactsOrAlert();
+                this.reRender();
+            });
+            document.getElementById('btn-memory-facts-clear')?.addEventListener('click', async () => {
+                if (!confirm('恒久的事実をすべて削除しますか？この操作は取り消せません。')) return;
+                this.memoryFacts = [];
+                await saveFactsOrAlert();
+                this.reRender();
+            });
+
+            document.getElementById('memory-episodes-list')?.addEventListener('click', async (e) => {
+                const btn = e.target.closest('.memory-episode-del');
+                if (!btn) return;
+                const idx = parseInt(btn.getAttribute('data-idx'), 10);
+                if (!Number.isInteger(idx) || !this.memoryEpisodes?.[idx]) return;
+                if (!confirm('このセッション記録を削除しますか？')) return;
+                this.memoryEpisodes.splice(idx, 1);
+                await saveEpisodesOrAlert();
+                this.reRender();
+            });
+            document.getElementById('btn-memory-episodes-clear')?.addEventListener('click', async () => {
+                if (!confirm('セッション履歴をすべて削除しますか？この操作は取り消せません。')) return;
+                this.memoryEpisodes = [];
+                await saveEpisodesOrAlert();
+                this.reRender();
+            });
+        }
 
         // RAG tab handlers
         const ragLoadDirsBtn = document.getElementById('btn-rag-load-dirs');
@@ -1321,6 +1421,7 @@ export class ConfigView {
                         identical_call_threshold:    limit(this.config.identical_call_threshold),
                         cycle_detection_min_repeats: limit(this.config.cycle_detection_min_repeats),
                         agent_temperature:           (this.config.agent_temperature ?? null),
+                        history_compress_ratio:      (this.config.history_compress_ratio ?? null),
                         plan_mode:                   (this.config.plan_mode || 'auto'),
                         fast_model_id:               (this.config.fast_model_id || null),
                         deep_model_id:               (this.config.deep_model_id || null),
@@ -1440,6 +1541,140 @@ export class ConfigView {
             this._ragUnlisten();
             this._ragUnlisten = null;
         }
+    }
+
+    // ─── 🧠 Memory tab — view / edit / delete the agent's long-term memory ───
+    // facts.json (durable facts injected into the system prompt) and memory.json
+    // (episodic session summaries) live under <workspace>/.agent/. This tab makes
+    // them visible so wrong or stale memories can be corrected by the user.
+
+    _memoryPaths(ws) {
+        const root = String(ws || '').replace(/[\\/]+$/, '');
+        return {
+            facts: `${root}/.agent/long_term/facts.json`,
+            episodes: `${root}/.agent/memory.json`,
+        };
+    }
+
+    async loadMemoryData() {
+        const ws = this.memoryWorkspace;
+        if (!ws) return;
+        const p = this._memoryPaths(ws);
+        try {
+            const raw = await invoke('read_file', { path: p.facts });
+            const parsed = raw ? JSON.parse(raw) : [];
+            this.memoryFacts = Array.isArray(parsed) ? parsed : [];
+        } catch (_) { this.memoryFacts = []; }
+        try {
+            const raw = await invoke('read_file', { path: p.episodes });
+            const parsed = raw ? JSON.parse(raw) : [];
+            this.memoryEpisodes = Array.isArray(parsed) ? parsed : [];
+        } catch (_) { this.memoryEpisodes = []; }
+    }
+
+    async saveMemoryFacts() {
+        const p = this._memoryPaths(this.memoryWorkspace);
+        await invoke('write_file', { path: p.facts, content: JSON.stringify(this.memoryFacts || [], null, 2) });
+    }
+
+    async saveMemoryEpisodes() {
+        const p = this._memoryPaths(this.memoryWorkspace);
+        await invoke('write_file', { path: p.episodes, content: JSON.stringify(this.memoryEpisodes || [], null, 2) });
+    }
+
+    renderMemoryTabHtml() {
+        const projects = Array.isArray(this.config.approved_projects) ? this.config.approved_projects : [];
+        const ws = this.memoryWorkspace || projects[0] || '';
+        const loaded = Array.isArray(this.memoryFacts) || Array.isArray(this.memoryEpisodes);
+
+        const factsRows = (this.memoryFacts || []).map((f, i) => `
+            <tr>
+                <td style="font-size:12px; line-height:1.5;">${escapeHtml(f.fact || '')}</td>
+                <td style="white-space:nowrap; font-size:11px; color:var(--text-tertiary);">${escapeHtml(f.date || '')}</td>
+                <td style="text-align:center; font-size:11px;">${f.hits || 1}</td>
+                <td style="white-space:nowrap; text-align:right;">
+                    <button class="btn btn-secondary memory-fact-edit" data-idx="${i}" style="padding:2px 8px; font-size:11px;">✏️</button>
+                    <button class="btn btn-secondary memory-fact-del" data-idx="${i}" style="padding:2px 8px; font-size:11px; color:var(--error);">🗑</button>
+                </td>
+            </tr>
+        `).join('');
+
+        const episodeRows = (this.memoryEpisodes || []).map((e, i) => {
+            const icon = e.outcome === 'success' ? '✅' : (e.outcome === 'error' ? '❌' : '⚠️');
+            return `
+            <tr>
+                <td style="white-space:nowrap; font-size:11px; color:var(--text-tertiary);">${escapeHtml(e.date || '')}</td>
+                <td style="font-size:12px;">${icon} <strong>${escapeHtml(e.topic || '')}</strong>
+                    <div style="color:var(--text-secondary); font-size:11.5px; margin-top:2px;">${escapeHtml(e.summary || '')}</div>
+                </td>
+                <td style="white-space:nowrap; text-align:right;">
+                    <button class="btn btn-secondary memory-episode-del" data-idx="${i}" style="padding:2px 8px; font-size:11px; color:var(--error);">🗑</button>
+                </td>
+            </tr>`;
+        }).join('');
+
+        return `
+            <div class="card settings-card" style="height: 100%;">
+                <div class="card-header" style="margin-bottom: 16px;">
+                    <div>
+                        <h3>🧠 Agent Memory</h3>
+                        <p class="subtitle">エージェントの長期記憶（恒久的事実・セッション履歴）の閲覧・編集・削除</p>
+                    </div>
+                </div>
+                <div class="provider-card-fields">
+                    <div class="input-group">
+                        <label class="input-label">Workspace（メモリはワークスペース単位で保存: <code>&lt;workspace&gt;/.agent/</code>）</label>
+                        <div style="display:flex; gap:8px;">
+                            <input type="text" id="memory-ws-input" class="input" value="${escapeHtml(ws)}" list="memory-ws-list" placeholder="C:\\path\\to\\workspace" style="flex:1;">
+                            <datalist id="memory-ws-list">${projects.map(p => `<option value="${escapeHtml(p)}"></option>`).join('')}</datalist>
+                            <button class="btn btn-secondary" id="btn-memory-ws-browse" type="button">📁</button>
+                            <button class="btn btn-primary" id="btn-memory-load" type="button">読み込み</button>
+                        </div>
+                    </div>
+
+                    ${!loaded ? `<div style="color:var(--text-tertiary); font-size:12.5px; padding:14px 0;">ワークスペースを選択して「読み込み」を押すと、保存されている記憶が表示されます。</div>` : `
+
+                    <div style="margin-top:8px; padding:14px 16px; border:1px solid var(--border); border-radius:var(--radius-md); background:var(--bg-secondary);">
+                        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                            <div style="font-size:12px; font-weight:600; color:var(--accent); text-transform:uppercase; letter-spacing:0.06em;">
+                                📌 Durable Facts（システムプロンプトに注入される恒久的事実 — ${(this.memoryFacts || []).length}件）
+                            </div>
+                            <button class="btn btn-secondary" id="btn-memory-facts-clear" style="font-size:11px; padding:3px 10px; color:var(--error); border-color:var(--error);">🗑 全削除</button>
+                        </div>
+                        ${(this.memoryFacts || []).length === 0
+                            ? `<div style="color:var(--text-tertiary); font-size:12px;">事実はまだ保存されていません。</div>`
+                            : `<div style="max-height:320px; overflow-y:auto;" id="memory-facts-list">
+                                <table class="rv-table" style="width:100%; border-collapse:collapse; font-size:12px;">
+                                    <thead><tr>
+                                        <th style="text-align:left; padding:4px 8px;">事実</th>
+                                        <th style="padding:4px 8px;">日付</th>
+                                        <th style="padding:4px 8px;">参照</th>
+                                        <th style="padding:4px 8px;"></th>
+                                    </tr></thead>
+                                    <tbody>${factsRows}</tbody>
+                                </table>
+                               </div>`}
+                    </div>
+
+                    <div style="margin-top:8px; padding:14px 16px; border:1px solid var(--border); border-radius:var(--radius-md); background:var(--bg-secondary);">
+                        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                            <div style="font-size:12px; font-weight:600; color:var(--accent); text-transform:uppercase; letter-spacing:0.06em;">
+                                📚 Episodes（過去セッションの要約 — 直近${(this.memoryEpisodes || []).length}件）
+                            </div>
+                            <button class="btn btn-secondary" id="btn-memory-episodes-clear" style="font-size:11px; padding:3px 10px; color:var(--error); border-color:var(--error);">🗑 全削除</button>
+                        </div>
+                        ${(this.memoryEpisodes || []).length === 0
+                            ? `<div style="color:var(--text-tertiary); font-size:12px;">セッション履歴はまだありません。</div>`
+                            : `<div style="max-height:320px; overflow-y:auto;" id="memory-episodes-list">
+                                <table class="rv-table" style="width:100%; border-collapse:collapse; font-size:12px;">
+                                    <tbody>${episodeRows}</tbody>
+                                </table>
+                               </div>`}
+                    </div>
+                    `}
+                </div>
+            </div>
+        `;
     }
 
     renderRagTabHtml() {

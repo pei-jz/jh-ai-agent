@@ -10,7 +10,13 @@ import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { renderFileList, filesFromModified, ensureResultViewStyles } from '../utils/resultView.js';
 import { escapeHtml, formatMessageContent, formatMarkdown, renderTableHtml } from './chat/chatMarkdown.js';
 import { STORAGE_KEY as CHAT_SESSIONS_KEY, parseSessions, pruneSessions } from './chat/chatSessions.js';
-import { extractToolCall, parseThought, renderAgentSteps, renderMessageHtml } from './chat/chatRenderer.js';
+import { extractToolCall, parseThought, renderAgentSteps, renderMessageHtml, renderResultStatsChips } from './chat/chatRenderer.js';
+
+// Simple-mode tool loop's executor. sendMessage referenced `toolExecutor` but no
+// instance was ever created/imported (latent ReferenceError when tools were
+// enabled in Simple mode) — this module-level instance restores the intended
+// behavior. Agent mode is unaffected (it runs server-side via TaskBridge).
+const toolExecutor = new ToolExecutor();
 
 export class ChatView {
     constructor() {
@@ -62,6 +68,11 @@ export class ChatView {
     }
 
     async loadModels() {
+        // Perf: the model list doesn't change while this view instance is alive,
+        // but reRender() (mode switch, tool toggle, MCP toggle, …) re-runs
+        // render() → loadModels(). Skip the repeat HTTP round-trip.
+        if (this._modelsLoaded) return;
+        this._modelsLoaded = true;
         try {
             if (window.apiClient) {
                 const res = await window.apiClient.getModels();
@@ -94,9 +105,20 @@ export class ChatView {
     }
 
     async loadChatConfig() {
+        // Perf: config / templates / skills / session-file restore only need to
+        // load once per view instance. reRender() re-runs render() frequently
+        // (mode switch, tool toggle, MCP toggle, …) — without this guard each
+        // one repeated several invoke() calls + a full skill-directory scan,
+        // which is a big part of why the UI felt sluggish. Navigating away and
+        // back creates a fresh ChatView, so settings changes still get picked up.
+        if (this._chatConfigLoaded) {
+            this.enabledMcpServers = Array.from(mcpManager.clients.keys());
+            return;
+        }
         try {
             const config = await invoke('get_ai_config');
             this.config = config || {};
+            this._chatConfigLoaded = true;
 
             if (!this.workspacePath && this.config.approved_projects && this.config.approved_projects.length > 0) {
                 this.workspacePath = this.config.approved_projects[0];
@@ -1844,6 +1866,20 @@ Your final responses and messages to the user MUST be in Japanese.
                 let aiResponse = '';
                 let aiBubbleRow = null;
                 let aiContentEl = null;
+                let streamRafPending = false;
+
+                // Perf: re-rendering the WHOLE accumulated markdown on every chunk
+                // is O(n²) over the response and forces a reflow per chunk. Batch
+                // renders to at most one per animation frame instead.
+                const renderStreamed = () => {
+                    streamRafPending = false;
+                    if (!aiContentEl) return;
+                    const wasAtBottom = chatBody.scrollHeight - chatBody.scrollTop - chatBody.clientHeight <= 50;
+                    aiContentEl.innerHTML = formatMessageContent(aiResponse);
+                    if (wasAtBottom) {
+                        chatBody.scrollTop = chatBody.scrollHeight;
+                    }
+                };
 
                 try {
                     const res = await llmService.chat(
@@ -1860,25 +1896,29 @@ Your final responses and messages to the user MUST be in Japanese.
                                 aiBubbleRow.className = 'chat-message-row msg-ai';
                                 aiBubbleRow.innerHTML = `
                                     <div class="message-bubble">
-                                        <div class="message-content" id="streamed-ai-content"></div>
+                                        <div class="message-content"></div>
                                     </div>
                                 `;
                                 chatBody.appendChild(aiBubbleRow);
-                                aiContentEl = document.getElementById('streamed-ai-content');
+                                // Scope the lookup to THIS bubble — a global
+                                // getElementById on a repeated id returned the
+                                // bubble from a PREVIOUS tool-loop iteration.
+                                aiContentEl = aiBubbleRow.querySelector('.message-content');
                             }
 
                             aiResponse += chunk;
-                            if (aiContentEl) {
-                                const wasAtBottom = chatBody.scrollHeight - chatBody.scrollTop - chatBody.clientHeight <= 50;
-                                aiContentEl.innerHTML = formatMessageContent(aiResponse);
-                                if (wasAtBottom) {
-                                    chatBody.scrollTop = chatBody.scrollHeight;
-                                }
+                            if (aiContentEl && !streamRafPending) {
+                                streamRafPending = true;
+                                requestAnimationFrame(renderStreamed);
                             }
                         },
                         this.abortController.signal,
                         loopCount === 0 ? firstMessageImages : []
                     );
+
+                    // Final flush — guarantees the last chunks are rendered even if
+                    // no further animation frame fires (e.g. window minimized).
+                    renderStreamed();
 
                     clearTimer();
                     const indicator = document.getElementById('chat-generating-indicator');
@@ -2288,23 +2328,31 @@ Your final responses and messages to the user MUST be in Japanese.
 
                     } else if (pkt.event === 'complete') {
                         gotFinalEvent = true;
-                        // Prefer the full task response (message). Fall back to any streamed
-                        // text, then a finish_task summary, then a last-resort placeholder.
-                        const finalMsg = pkt.data?.message || streamBuffer || pkt.data?.summary || '(task complete)';
+                        // Prefer the structured result summary: `answer` is the
+                        // LLM-written Markdown completion report (依頼内容/実施内容/結果),
+                        // `summary` its deterministic fallback. The raw `message` is the
+                        // agent's last thought (often a bare "OBSERVE: … | PLAN: … |
+                        // CALL: finish_task" line) — only used as a last resort.
+                        const rs = pkt.data?.resultSummary || null;
+                        const finalMsg = rs?.answer || rs?.summary
+                            || pkt.data?.message || streamBuffer || '(task complete)';
                         // Modified/created files: prefer the structured resultSummary,
                         // else derive from the raw modifiedFiles array.
-                        const resultFiles = (pkt.data?.resultSummary?.files && pkt.data.resultSummary.files.length)
-                            ? pkt.data.resultSummary.files
+                        const resultFiles = (rs?.files && rs.files.length)
+                            ? rs.files
                             : filesFromModified(pkt.data?.modifiedFiles);
-                        aiContentEl.innerHTML = formatMessageContent(finalMsg);
+                        // Compact run-stats chips (steps / tokens / duration / files).
+                        const resultStats = rs?.stats || null;
+                        ensureResultViewStyles();
+                        aiContentEl.innerHTML = formatMessageContent(finalMsg)
+                            + this._renderResultStatsChips(resultStats);
                         if (resultFiles && resultFiles.length > 0) {
-                            ensureResultViewStyles();
                             // Clicks are handled by the delegated [data-open-path]
                             // listener on the chat container — no per-element bind.
                             aiContentEl.insertAdjacentHTML('beforeend', renderFileList(resultFiles));
                         }
-                        // Persist files on the message so loadHistory can re-render the links.
-                        this.messages.push({ role: 'assistant', content: finalMsg, resultFiles });
+                        // Persist files/stats on the message so loadHistory can re-render them.
+                        this.messages.push({ role: 'assistant', content: finalMsg, resultFiles, resultStats });
                         this.saveHistory();
                         resolve();
 
@@ -2359,6 +2407,10 @@ Your final responses and messages to the user MUST be in Japanese.
 
     _renderAgentSteps(steps, currentStep, streamContent) {
         return renderAgentSteps(steps, currentStep, streamContent);
+    }
+
+    _renderResultStatsChips(stats) {
+        return renderResultStatsChips(stats);
     }
 
     updateSendButtonState() {
@@ -2595,6 +2647,40 @@ Your final responses and messages to the user MUST be in Japanese.
         }
     }
 
+    /**
+     * Delete one session from the store (localStorage + file backup).
+     * If it was the active session, re-point at the newest survivor, or create
+     * a fresh empty session when none remain.
+     */
+    _deleteSession(sessionId) {
+        const data = this.getSessions();
+        delete data.sessions[sessionId];
+        if (data.activeSessionId === sessionId) {
+            const remaining = Object.values(data.sessions).sort((a, b) => b.timestamp - a.timestamp);
+            data.activeSessionId = remaining[0]?.id || null;
+        }
+        if (!data.activeSessionId) {
+            const newId = Date.now().toString();
+            data.activeSessionId = newId;
+            data.sessions[newId] = { id: newId, title: '新しいチャット', timestamp: Date.now(), messages: [] };
+        }
+        this.saveSessions(data);
+        this.loadHistory();
+    }
+
+    /** Wipe ALL sessions (localStorage + file backup) and start a fresh one. */
+    _clearAllSessions() {
+        const newId = Date.now().toString();
+        const data = {
+            activeSessionId: newId,
+            sessions: {
+                [newId]: { id: newId, title: '新しいチャット', timestamp: Date.now(), messages: [] }
+            }
+        };
+        this.saveSessions(data);
+        this.loadHistory();
+    }
+
     showHistoryModal() {
         const data = this.getSessions();
         const sessions = Object.values(data.sessions).sort((a, b) => b.timestamp - a.timestamp);
@@ -2623,12 +2709,16 @@ Your final responses and messages to the user MUST be in Japanese.
         `;
         header.innerHTML = `
             <span>Chat History</span>
-            <button class="close-btn" style="background:none; border:none; color:var(--text-primary); cursor:pointer; font-size: 16px;">✖</button>
+            <div style="display:flex; align-items:center; gap:10px;">
+                <button class="clear-all-btn" title="全ての履歴を削除"
+                    style="background:none; border:1px solid var(--error, #c0392b); color:var(--error, #c0392b); cursor:pointer; font-size:11px; border-radius:4px; padding:3px 8px; font-weight:600;">🗑 全削除</button>
+                <button class="close-btn" style="background:none; border:none; color:var(--text-primary); cursor:pointer; font-size: 16px;">✖</button>
+            </div>
         `;
-        
+
         const body = document.createElement('div');
         body.style.cssText = 'padding: 10px; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 8px;';
-        
+
         if (sessions.length === 0) {
             body.innerHTML = '<div style="color:var(--text-secondary); text-align:center; padding:20px;">No history found.</div>';
         } else {
@@ -2645,6 +2735,8 @@ Your final responses and messages to the user MUST be in Japanese.
                 item.innerHTML = `
                     <div style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; font-size:13px;">${escapeHtml(s.title)}</div>
                     <div style="font-size:11px; opacity:0.7; margin-left:10px;">${new Date(s.timestamp).toLocaleDateString()}</div>
+                    <button class="session-delete-btn" title="このチャットを削除"
+                        style="background:none; border:none; cursor:pointer; font-size:13px; margin-left:8px; opacity:0.6; color:inherit;">🗑</button>
                 `;
                 item.onclick = () => {
                     data.activeSessionId = s.id;
@@ -2653,10 +2745,24 @@ Your final responses and messages to the user MUST be in Japanese.
                     this.reRender();
                     document.body.removeChild(overlay);
                 };
+                item.querySelector('.session-delete-btn').onclick = (e) => {
+                    e.stopPropagation();
+                    if (!confirm(`チャット「${s.title}」を削除しますか？`)) return;
+                    this._deleteSession(s.id);
+                    document.body.removeChild(overlay);
+                    this.reRender();
+                    this.showHistoryModal();
+                };
                 body.appendChild(item);
             });
         }
-        
+
+        header.querySelector('.clear-all-btn').onclick = () => {
+            if (!confirm('全てのチャット履歴を削除しますか？この操作は取り消せません。')) return;
+            this._clearAllSessions();
+            document.body.removeChild(overlay);
+            this.reRender();
+        };
         header.querySelector('.close-btn').onclick = () => document.body.removeChild(overlay);
         overlay.onclick = (e) => { if (e.target === overlay) document.body.removeChild(overlay); };
         

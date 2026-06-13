@@ -3,7 +3,7 @@
 // reference DOM APIs at import time. The functions themselves return strings.
 import { describe, it, expect } from 'vitest';
 import {
-    extractToolCall, parseThought, renderAgentSteps, renderMessageHtml
+    extractToolCall, parseThought, renderAgentSteps, renderMessageHtml, renderResultStatsChips
 } from '../chatRenderer.js';
 
 describe('extractToolCall', () => {
@@ -143,5 +143,36 @@ describe('renderMessageHtml', () => {
         const html = renderMessageHtml({ role: 'user', content: 'x', skills: [{ name: 'foo', title: 'Foo' }] });
         expect(html).toContain('skill-chip');
         expect(html).toContain('Foo');
+    });
+
+    it('renders run-stats chips on assistant messages with resultStats', () => {
+        const html = renderMessageHtml({
+            role: 'assistant', content: 'done',
+            resultStats: { steps: 6, tools: { read_file: 3 }, tokens: 30300, durationMs: 488000, files: 2 },
+        });
+        expect(html).toContain('rv-chips');
+        expect(html).toContain('ステップ 6');
+        expect(html).toContain('30.3k tok');
+    });
+});
+
+describe('renderResultStatsChips', () => {
+    it('renders only the chips that have data', () => {
+        const html = renderResultStatsChips({ steps: 3, tools: {}, tokens: 0, durationMs: 0, files: 0 });
+        expect(html).toContain('ステップ 3');
+        expect(html).not.toContain('tok');
+        expect(html).not.toContain('ファイル');
+    });
+    it('sums tool counts and formats tokens/duration/files', () => {
+        const html = renderResultStatsChips({ steps: 2, tools: { a: 2, b: 1 }, tokens: 1500, durationMs: 9500, files: 1 });
+        expect(html).toContain('ツール 3');
+        expect(html).toContain('1.5k tok');
+        expect(html).toContain('10s');
+        expect(html).toContain('ファイル 1件');
+    });
+    it('returns empty string for empty/invalid stats', () => {
+        expect(renderResultStatsChips(null)).toBe('');
+        expect(renderResultStatsChips({})).toBe('');
+        expect(renderResultStatsChips('x')).toBe('');
     });
 });

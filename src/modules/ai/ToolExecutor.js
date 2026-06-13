@@ -9,6 +9,7 @@ import {
     findClosestRegion, visualizeWS
 } from './tools/FileEdit.js';
 import { TOOL_DEFINITIONS } from './tools/toolSchemas.js';
+import { selectMcpTools } from './tools/ToolRelevance.js';
 import {
     handleListFiles, handleReadFile, handleGrepSearch, handleGlob, handleFetchUrl
 } from './tools/handlers/readOnlyHandlers.js';
@@ -20,12 +21,49 @@ import {
 } from './tools/handlers/fsShellHandlers.js';
 import {
     handleProposePlan, handleArtifact, handleFinishTask,
-    handleVerifySyntax, handleTaskProgress, handlePresentResult
+    handleVerifySyntax, handleTaskProgress, handlePresentResult,
+    handleAskUser
 } from './tools/handlers/agentMetaHandlers.js';
+
+// ── Built-in tool dispatch table ───────────────────────────────────────────
+// Replaces the long switch in executeTool: tool name → a thin adapter that
+// calls the matching handler with exactly the args it expects. Each adapter
+// returns the handler's value/promise DIRECTLY (no extra await), so the
+// surrounding try/catch in executeTool behaves identically to the old switch.
+// open_file's tiny inline body lives here too; MCP/unknown tools fall through
+// to _dispatchMcpTool. Keep this in sync when adding/removing a built-in tool.
+const TOOL_HANDLERS = {
+    list_files:  (ex, c) => handleListFiles(ex, c.args, c.onAgentStatus, c.resolvedPath),
+    read_file:   (ex, c) => handleReadFile(ex, c.args, c.onAgentStatus, c.resolvedPath),
+    grep_search: (ex, c) => handleGrepSearch(ex, c.args, c.onAgentStatus),
+    glob:        (ex, c) => handleGlob(ex, c.args, c.onAgentStatus),
+    delete_file: (ex, c) => handleDeleteFile(ex, c.args, c.onConfirm, c.onAgentStatus, c.resolvedPath),
+    move_file:   (ex, c) => handleMoveFile(ex, c.args, c.onConfirm, c.onAgentStatus),
+    write_file:  (ex, c) => handleWriteFile(ex, c.args, c.onConfirm, c.onAgentStatus, c.resolvedPath),
+    run_command: (ex, c) => handleRunCommand(ex, c.args, c.onConfirm, c.onAgentStatus),
+    open_file:   (ex, c) => {
+        c.onAgentStatus?.(`Opening file in editor: ${c.resolvedPath}...`);
+        ex.onToolEvent?.('open_file', { path: c.resolvedPath });
+        return `Success: File ${c.resolvedPath} opened in client editor tab.`;
+    },
+    multi_replace_file_content: (ex, c) => handleMultiReplace(ex, c.args, c.onConfirm, c.onAgentStatus),
+    replace_lines:   (ex, c) => handleReplaceLines(ex, c.args, c.onConfirm, c.onAgentStatus),
+    propose_plan:    (ex, c) => handleProposePlan(ex, c.args, c.onConfirm, c.onAgentStatus),
+    present_result:  (ex, c) => handlePresentResult(ex, c.args, c.onAgentStatus),
+    create_artifact: (ex, c) => handleArtifact(ex, c.args, c.name, c.onAgentStatus),
+    update_artifact: (ex, c) => handleArtifact(ex, c.args, c.name, c.onAgentStatus),
+    fetch_url:       (ex, c) => handleFetchUrl(ex, c.args, c.onAgentStatus),
+    finish_task:     (ex, c) => handleFinishTask(ex, c.args, c.onAgentStatus),
+    ask_user:        (ex, c) => handleAskUser(ex, c.args, c.onAgentStatus),
+    verify_syntax:   (ex, c) => handleVerifySyntax(ex, c.args, c.onAgentStatus, c.resolvedPath),
+    task_progress:   (ex, c) => handleTaskProgress(ex, c.args),
+};
 
 export class ToolExecutor {
     constructor() {
         this._taskCompleted = false;
+        this._awaitingUser = false;
+        this._userQuestion = '';
         this.toolDefinitions = TOOL_DEFINITIONS;
         this.sessionModifiedFiles = new Map();
         this._sessionActive = false;
@@ -45,9 +83,10 @@ export class ToolExecutor {
         // when it's been hammering the same file repeatedly (often a sign of
         // a fundamentally wrong approach).
         this._fileEditCount = new Map();
-        // task_progress tool state (persisted to disk per session).
+        // task_progress tool state (now workspace-persistent across sessions).
         this._taskProgressItems = [];   // [{ id, title, status, note }, ...]
         this._taskProgressLoaded = false;
+        this._taskProgressCarriedOver = false; // incomplete items loaded from a prior session
 
         // ── Tool allowlist (per-session, set by behavior) ─────────────────
         // null  → all tools allowed (default)
@@ -63,6 +102,19 @@ export class ToolExecutor {
         // Injected into every tools/call as params._meta.jhai so an app-hosted
         // MCP server can resolve the live document/window the call targets.
         this._mcpContext = null;
+        // ── MCP tool pruning (interactive callers only) ────────────────────
+        // When a relevance query is set (the task prompt), only the top-5 most
+        // relevant MCP tools are sent to the LLM; the rest are omitted entirely.
+        this._mcpRelevanceQuery = null;
+    }
+
+    /**
+     * Enable MCP tool pruning by relevance to `query` (the task prompt).
+     * null/empty → pruning off (ALL MCP tools sent with full schemas — the
+     * previous behavior; also what external app callers keep).
+     */
+    setMcpRelevanceQuery(query) {
+        this._mcpRelevanceQuery = (typeof query === 'string' && query.trim()) ? query : null;
     }
 
     /** Per-task MCP context object (e.g. {app,windowId,documentId}) or null. */
@@ -75,10 +127,10 @@ export class ToolExecutor {
      * Called by AgentController when behavior.enabled_tools is provided.
      *
      * @param {string[]|null} allowedNames null → unrestricted; array → allowlist.
-     *   The minimal agent-CONTROL tools (finish_task / present_result) are ALWAYS
-     *   implicitly allowed so a capability-scoped task can still terminate and
-     *   deliver its Result Contract — even when the intent only lists domain
-     *   tools (e.g. get_buffer).
+     *   The minimal agent-CONTROL tools (finish_task / present_result / ask_user)
+     *   are ALWAYS implicitly allowed so a capability-scoped task can still
+     *   terminate, deliver its Result Contract, or pause for clarification — even
+     *   when the intent only lists domain tools (e.g. get_buffer).
      * @param {object} [opts]
      * @param {boolean} [opts.includePlanTools] also allow task_progress + propose_plan.
      *   These help multi-step / plan-first tasks but invite needless over-planning
@@ -92,6 +144,7 @@ export class ToolExecutor {
         const set = new Set(allowedNames);
         set.add('finish_task');
         set.add('present_result');
+        set.add('ask_user');
         if (includePlanTools) {
             set.add('task_progress');
             set.add('propose_plan');
@@ -119,13 +172,22 @@ export class ToolExecutor {
         this._currentSessionId = `sess_${Date.now()}`;
         this.sessionModifiedFiles.clear();
         this._fileEditCount.clear();
+        // task_progress is now WORKSPACE-persistent (.agent/tasks.json), not
+        // per-session: items survive across runs so a multi-session project keeps
+        // its checklist. We clear the in-memory copy and reset the loaded flag so
+        // the first task_progress access this session RELOADS from the workspace
+        // file (rather than wiping it).
         this._taskProgressItems = [];
         this._taskProgressLoaded = false;
+        this._taskProgressCarriedOver = false; // reset; set true if prior-session items load
         this._taskCompleted = false;
+        this._awaitingUser = false;    // reset ask_user pause flag per session
+        this._userQuestion = '';
         this._toolAllowlist = null;    // reset; caller may re-set after startSession
         this._mcpBypassesAllowlist = false;
         this._mcpServerFilter = null; // reset MCP server filter
         this._mcpContext = null;      // reset per-task MCP context
+        this._mcpRelevanceQuery = null;        // reset MCP pruning (caller re-sets)
         // Plan gate resets each session (caller sets requirement via setPlanGate).
         this._planRequired = false;
         this._planApproved = false;
@@ -356,12 +418,24 @@ export class ToolExecutor {
     }
 
     /**
-     * Path of the per-session task_progress JSON.
-     * Stored next to other session artifacts so it survives across the loop
-     * but is scoped to one task (cleared on startSession).
+     * Path of the WORKSPACE-level persistent task list.
+     * Stored at <workspace>/.agent/tasks.json so the checklist survives across
+     * SESSIONS (not just the loop) — a multi-run project keeps its tasks. Falls
+     * back to the session artifact dir only when there's no real workspace.
      */
     _taskProgressPath() {
-        return `${this.getSessionArtifactDir()}/task_progress.json`;
+        const root = this.workspacePath && this.workspacePath !== '.'
+            ? this.workspacePath.replace(/[\\/]+$/, '')
+            : null;
+        return root ? `${root}/.agent/tasks.json` : `${this.getSessionArtifactDir()}/task_progress.json`;
+    }
+
+    /** Directory that holds the task list file (create_dir target before write). */
+    _taskProgressDir() {
+        const root = this.workspacePath && this.workspacePath !== '.'
+            ? this.workspacePath.replace(/[\\/]+$/, '')
+            : null;
+        return root ? `${root}/.agent` : this.getSessionArtifactDir();
     }
 
     async _loadTaskProgress() {
@@ -370,7 +444,19 @@ export class ToolExecutor {
             const raw = await invoke('read_file', { path: this._taskProgressPath() });
             if (raw) {
                 const data = JSON.parse(raw);
-                if (Array.isArray(data)) this._taskProgressItems = data;
+                if (Array.isArray(data) && data.length > 0) {
+                    // Cross-session safety: DROP completed items on load so a
+                    // finished project can't haunt the next (possibly unrelated)
+                    // session. Only INCOMPLETE work carries over, and it's flagged
+                    // as a prior-session carryover (rendered with a warning) so the
+                    // agent treats it as old — it can continue it or replace the
+                    // whole list via action="set". Within a session this never
+                    // re-runs (guarded by _taskProgressLoaded), so completed items
+                    // stay visible until the session ends.
+                    const incomplete = data.filter(it => it && it.status !== 'completed');
+                    this._taskProgressItems = incomplete;
+                    this._taskProgressCarriedOver = incomplete.length > 0;
+                }
             }
         } catch (_) { /* file missing on first call — fine */ }
         this._taskProgressLoaded = true;
@@ -378,8 +464,7 @@ export class ToolExecutor {
 
     async _saveTaskProgress() {
         try {
-            const dir = this.getSessionArtifactDir();
-            await invoke('create_dir', { path: dir });
+            await invoke('create_dir', { path: this._taskProgressDir() });
             await invoke('write_file', {
                 path: this._taskProgressPath(),
                 content: JSON.stringify(this._taskProgressItems, null, 2)
@@ -403,7 +488,12 @@ export class ToolExecutor {
         });
         const done = this._taskProgressItems.filter(it => it.status === 'completed').length;
         const total = this._taskProgressItems.length;
-        return `task_progress (${done}/${total} complete):\n${lines.join('\n')}`;
+        const carryNote = this._taskProgressCarriedOver
+            ? '⚠ These tasks were CARRIED OVER from a PREVIOUS session (incomplete items only). ' +
+              'If your current goal continues this work, use them; if this is unrelated new work, ' +
+              'call task_progress(action="set", ...) to replace the list with fresh subtasks.\n'
+            : '';
+        return `${carryNote}task_progress (${done}/${total} complete):\n${lines.join('\n')}`;
     }
 
     /**
@@ -431,6 +521,16 @@ export class ToolExecutor {
 
     isTaskCompleted() {
         return !!this._taskCompleted;
+    }
+
+    /** True when ask_user paused the run waiting for the user's reply. */
+    isAwaitingUser() {
+        return !!this._awaitingUser;
+    }
+
+    /** The clarifying question (+ optional context) ask_user surfaced, if any. */
+    getUserQuestion() {
+        return this._userQuestion || '';
     }
 
     getCurrentSessionId() {
@@ -621,6 +721,16 @@ export class ToolExecutor {
         return dummy.getToolsForNativeAPI();
     }
 
+    /** MCP tools passing the session's server filter + allowlist (pre-pruning). */
+    _eligibleMcpTools() {
+        const allow = this._toolAllowlist;
+        return mcpManager.getAllTools().filter(t => {
+            if (this._mcpServerFilter && !this._mcpServerFilter.has(t._serverName)) return false;
+            if (allow && !this._mcpBypassesAllowlist && !allow.has(t.name)) return false;
+            return true;
+        });
+    }
+
     getToolsForNativeAPI() {
         // Respect the per-session allowlist so the LLM is only PRESENTED tools it
         // may actually use. Otherwise a capability-scoped task (e.g. an app intent
@@ -644,10 +754,15 @@ export class ToolExecutor {
                 }
             }));
 
-        const mcpTools = mcpManager.getAllTools();
+        // MCP tools: when a relevance query is set (interactive callers), only
+        // the top-5 most relevant to the task prompt are sent; the rest are
+        // omitted. With no query (Simple chat, external app callers) ALL
+        // eligible tools load — the previous behavior.
+        const { loaded: mcpTools } = selectMcpTools(
+            this._eligibleMcpTools(),
+            this._mcpRelevanceQuery
+        );
         mcpTools.forEach(t => {
-            if (this._mcpServerFilter && !this._mcpServerFilter.has(t._serverName)) return;
-            if (allow && !this._mcpBypassesAllowlist && !allow.has(t.name)) return;
             const rawSchema = t.inputSchema || { type: 'object', properties: {} };
             // Third-party MCP schemas: convert the ones we safely can to strict
             // form, leave the rest as-is (sent WITHOUT strict).
@@ -757,95 +872,54 @@ export class ToolExecutor {
         const resolvedPath = noAutoResolve.has(name) ? null : this.resolvePath(rawPath);
 
         try {
-            switch (name) {
-                case 'list_files':
-                    return handleListFiles(this, args, onAgentStatus, resolvedPath);
-                case 'read_file':
-                    return handleReadFile(this, args, onAgentStatus, resolvedPath);
-
-                case 'grep_search':
-                    return handleGrepSearch(this, args, onAgentStatus);
-                case 'glob':
-                    return handleGlob(this, args, onAgentStatus);
-                case 'delete_file':
-                    return handleDeleteFile(this, args, onConfirm, onAgentStatus, resolvedPath);
-
-                case 'move_file':
-                    return handleMoveFile(this, args, onConfirm, onAgentStatus);
-
-                case 'write_file':
-                    return handleWriteFile(this, args, onConfirm, onAgentStatus, resolvedPath);
-
-                case 'run_command':
-                    return handleRunCommand(this, args, onConfirm, onAgentStatus);
-
-                case 'open_file':
-                    onAgentStatus?.(`Opening file in editor: ${resolvedPath}...`);
-                    this.onToolEvent?.('open_file', { path: resolvedPath });
-                    return `Success: File ${resolvedPath} opened in client editor tab.`;
-                
-                case 'multi_replace_file_content':
-                    return handleMultiReplace(this, args, onConfirm, onAgentStatus);
-
-                case 'replace_lines':
-                    return handleReplaceLines(this, args, onConfirm, onAgentStatus);
-
-                case 'propose_plan':
-                    return handleProposePlan(this, args, onConfirm, onAgentStatus);
-
-                case 'present_result':
-                    return handlePresentResult(this, args, onAgentStatus);
-
-                case 'create_artifact':
-                case 'update_artifact':
-                    return handleArtifact(this, args, name, onAgentStatus);
-
-                case 'fetch_url':
-                    return handleFetchUrl(this, args, onAgentStatus);
-
-                case 'finish_task':
-                    return handleFinishTask(this, args, onAgentStatus);
-
-                case 'verify_syntax':
-                    return handleVerifySyntax(this, args, onAgentStatus, resolvedPath);
-
-                case 'task_progress':
-                    return handleTaskProgress(this, args);
-
-                default: {
-                    const mcpToolsAll = mcpManager.getAllTools();
-                    const targetTool = mcpToolsAll.find(t => t.name === name);
-                    if (targetTool) {
-                        onAgentStatus?.(`Calling MCP tool: ${name} (${targetTool._serverName})...`);
-                        // Strict Structured Outputs forces the model to emit every
-                        // (now-required) optional field as null. Drop top-level null
-                        // args so MCP servers that distinguish "absent" from "null"
-                        // see the field as omitted.
-                        const cleanArgs = Object.fromEntries(
-                            Object.entries(args || {}).filter(([, v]) => v !== null)
-                        );
-                        const meta = this._mcpContext ? { jhai: this._mcpContext } : null;
-                        const response = await mcpManager.callTool(targetTool._serverName, name, cleanArgs, meta);
-
-                        // MCP tool response format: { content: [{type:"text", text:"..."}], isError: bool }
-                        if (response && typeof response === 'object') {
-                            const isError = response.isError === true;
-                            const contentArr = Array.isArray(response.content) ? response.content : null;
-                            if (contentArr !== null) {
-                                const text = contentArr
-                                    .filter(c => c && c.type === 'text' && typeof c.text === 'string')
-                                    .map(c => c.text)
-                                    .join('\n');
-                                return isError ? `Error (MCP ${name}): ${text}` : (text || '(empty response)');
-                            }
-                        }
-                        return typeof response === 'string' ? response : JSON.stringify(response, null, 2);
-                    }
-                    return `Error: Tool "${name}" not found. Available MCP tools: ${mcpManager.getAllTools().map(t => t.name).join(', ') || 'none'}.`;
-                }
+            // Dispatch built-ins via the registry; everything else is an MCP /
+            // unknown tool. Adapters return the handler's value/promise directly,
+            // so this try/catch wraps them exactly as the old switch did.
+            const handler = TOOL_HANDLERS[name];
+            if (handler) {
+                // MUST await: a bare `return handler(...)` returns the handler's
+                // promise without awaiting, so a rejection (e.g. read_dir → os
+                // error 3 on a missing path) escapes this try/catch and aborts the
+                // whole agent run instead of being returned as a tool-error string.
+                return await handler(this, { args, onConfirm, onAgentStatus, resolvedPath, name });
             }
+            return await this._dispatchMcpTool(name, args, onAgentStatus);
         } catch (e) {
             return `Error executing ${name}: ${e.message || e}`;
         }
+    }
+
+    /**
+     * Dispatch a non-built-in tool to its MCP server (the old switch `default`).
+     * Returns the tool's text result, or an error string if the tool is unknown.
+     */
+    async _dispatchMcpTool(name, args, onAgentStatus) {
+        const targetTool = mcpManager.getAllTools().find(t => t.name === name);
+        if (!targetTool) {
+            return `Error: Tool "${name}" not found. Available MCP tools: ${mcpManager.getAllTools().map(t => t.name).join(', ') || 'none'}.`;
+        }
+        onAgentStatus?.(`Calling MCP tool: ${name} (${targetTool._serverName})...`);
+        // Strict Structured Outputs forces the model to emit every (now-required)
+        // optional field as null. Drop top-level null args so MCP servers that
+        // distinguish "absent" from "null" see the field as omitted.
+        const cleanArgs = Object.fromEntries(
+            Object.entries(args || {}).filter(([, v]) => v !== null)
+        );
+        const meta = this._mcpContext ? { jhai: this._mcpContext } : null;
+        const response = await mcpManager.callTool(targetTool._serverName, name, cleanArgs, meta);
+
+        // MCP tool response format: { content: [{type:"text", text:"..."}], isError: bool }
+        if (response && typeof response === 'object') {
+            const isError = response.isError === true;
+            const contentArr = Array.isArray(response.content) ? response.content : null;
+            if (contentArr !== null) {
+                const text = contentArr
+                    .filter(c => c && c.type === 'text' && typeof c.text === 'string')
+                    .map(c => c.text)
+                    .join('\n');
+                return isError ? `Error (MCP ${name}): ${text}` : (text || '(empty response)');
+            }
+        }
+        return typeof response === 'string' ? response : JSON.stringify(response, null, 2);
     }
 }

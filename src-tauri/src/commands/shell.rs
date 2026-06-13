@@ -196,7 +196,23 @@ fn spawn_line_pump<R: Read + Send + 'static>(
 #[tauri::command]
 pub fn open_path_default<R: Runtime>(app: AppHandle<R>, path: String) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
-    app.opener()
-        .open_path(path, None::<&str>)
-        .map_err(|e| format!("Failed to open path: {}", e))
+    // Try the OS default application first (double-click behavior).
+    match app.opener().open_path(path.clone(), None::<&str>) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // The association-based open failed. Most common on Windows for
+            // extensions with NO default app (e.g. .md → "no application found"),
+            // or when the user cancels the "Open with" dialog (os error 1223).
+            // Fall back to REVEALING the file in the OS file manager (Explorer /
+            // Finder) so the click still lands the user on the file. Reveal does
+            // not depend on a file association, so it works for any extension.
+            match app.opener().reveal_item_in_dir(&path) {
+                Ok(()) => Ok(()),
+                Err(e2) => Err(format!(
+                    "Failed to open path: {} (reveal-in-folder fallback also failed: {})",
+                    e, e2
+                )),
+            }
+        }
+    }
 }

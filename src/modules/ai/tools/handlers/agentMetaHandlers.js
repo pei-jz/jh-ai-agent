@@ -105,8 +105,19 @@ export async function handleArtifact(ctx, args, name, onAgentStatus) {
     const artifactDir = ctx.getSessionArtifactDir();
     const artifactPath = `${artifactDir}/${artifactName}`;
 
+    // Snapshot the pre-write content on update so the modification record keeps
+    // a real `original` (→ action "modified" instead of "created").
+    let original = null;
+    if (name === 'update_artifact') {
+        try { original = await invoke('read_file', { path: artifactPath }); } catch (_) { /* new file */ }
+    }
+
     await invoke('create_dir', { path: artifactDir });
     await invoke('write_file', { path: artifactPath, content: args.content });
+
+    // Track the artifact (e.g. task_plan.md) as a session-modified file so it
+    // shows up in the post-run Result file list (clickable → OS default app).
+    ctx._recordModification?.(artifactPath, original, args.content);
 
     ctx.onToolEvent?.('artifact_modified', { name: artifactName, path: artifactPath, content: args.content });
     return `Success: Artifact ${artifactName} ${name === 'create_artifact' ? 'created' : 'updated'}.`;
@@ -198,6 +209,28 @@ export async function handleFinishTask(ctx, args, onAgentStatus) {
     }
 
     return `Success: Task completion declared. Summary: ${args.summary}${tsNote}`;
+}
+
+/**
+ * ask_user — pause the run and ask the user a clarifying question. Unlike
+ * finish_task (which declares the goal COMPLETE), this declares the agent
+ * BLOCKED on user input: the loop reads ctx._awaitingUser and breaks cleanly,
+ * returning the question as the turn's reply with a 'waiting' status. This is
+ * the missing exit for tasks that genuinely need clarification — without it the
+ * model can only reply text-only (which the loop pushes back on) and grinds
+ * until a safety limit.
+ */
+export async function handleAskUser(ctx, args, onAgentStatus) {
+    const question = String(args?.question || '').trim();
+    if (!question) {
+        return 'Error: ask_user requires a non-empty "question". State exactly what you need from the user and why you cannot proceed.';
+    }
+    const context = (args && typeof args.context === 'string') ? args.context.trim() : '';
+    onAgentStatus?.(`Asking the user: ${question.slice(0, 80)}`);
+    ctx._awaitingUser = true;
+    ctx._userQuestion = context ? `${question}\n\n${context}` : question;
+    ctx.onToolEvent?.('ask_user', { question, context });
+    return `Acknowledged: question surfaced to the user. The run will now pause and wait for their reply. Do not call any further tools.`;
 }
 
 /** verify_syntax — JSON via JSON.parse, JS via `node --check`, TS skipped. */
@@ -312,6 +345,8 @@ export async function handleTaskProgress(ctx, args) {
                 ? it.status : 'pending',
             note: it.note ? String(it.note).slice(0, 200) : ''
         })).filter(it => it.id);
+        // A fresh `set` replaces the whole list → no longer a prior-session carryover.
+        ctx._taskProgressCarriedOver = false;
         await ctx._saveTaskProgress();
         ctx.onToolEvent?.('task_progress', { items: ctx._taskProgressItems });
         return `Set ${ctx._taskProgressItems.length} subtask(s).\n${ctx._renderTaskProgress()}`;

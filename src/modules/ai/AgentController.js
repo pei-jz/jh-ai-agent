@@ -3,6 +3,7 @@ import { workflowManager, WorkflowPhases } from './WorkflowManager.js';
 import { ToolExecutor } from './ToolExecutor.js';
 import { contextBuilder, ContextBuilder } from './ContextBuilder.js';
 import { conversationMemory } from './ConversationMemory.js';
+import { tokenEstimator } from './TokenEstimator.js';
 import { jsonrepair } from 'jsonrepair';
 import { invoke } from '@tauri-apps/api/core';
 import {
@@ -134,7 +135,18 @@ export class AgentController {
                 || (safety.planMode === 'auto' && this._looksComplex(prompt)));
         // Model routing (fast/deep tiers) + auto-escalation. fast = default for
         // quick/app-intent tasks; deep = complex/plan-first tasks and escalation.
-        const tierModels = await this._resolveTierModels();
+        //
+        // EXCEPTION — interactive chat (DirectChat): the user explicitly picks a
+        // model in the chat dropdown (→ llmService.getCurrentModel()). That choice
+        // MUST win, so tier routing / auto-escalation is DISABLED here. Otherwise a
+        // globally-configured Fast/Deep tier model silently overrides the selection
+        // — the reported symptom: the UI shows "GEMINI" but DeepSeek (the Fast tier)
+        // actually runs. Tier routing still applies to app-intent / external /
+        // scheduled callers, which have no live model picker.
+        const userPicksModel = this.caller === 'DirectChat';
+        const tierModels = userPicksModel
+            ? { fast: null, deep: null, initial: null }
+            : await this._resolveTierModels();
         this._deepModelId = tierModels.deep;
         this._modelOverride = this._planRequired
             ? (tierModels.deep || tierModels.fast || null)
@@ -253,6 +265,14 @@ export class AgentController {
         // Apply per-task MCP context (e.g. {app,windowId,documentId}) — injected
         // into tools/call _meta.jhai so app-hosted MCP servers resolve live state.
         this.toolExecutor.setMcpContext(this.behaviorOverrides ? this.behaviorOverrides.mcp_context : null);
+
+        // ── MCP tool pruning (interactive callers only) ─────────────────
+        // Big MCP servers (e.g. Backlog: 58 tools) used to ship EVERY schema to
+        // the LLM each step. With the prompt as relevance query, only the top-5
+        // most relevant MCP tools are sent; the rest are omitted for this run.
+        // External app callers keep the old behavior — their tool set is already
+        // scoped by the intent (enabled_tools / mcp_servers).
+        this.toolExecutor.setMcpRelevanceQuery(isExternalCaller ? null : prompt);
 
         // Bind tool executor event forwarding
         this.toolExecutor.onToolEvent = (event, data) => {
@@ -402,7 +422,26 @@ export class AgentController {
             while (retryCount <= maxRetries) {
                 try {
                     const currentModel = llmService.getCurrentModel() || '';
-                    this._compressToolResultsInHistory(history);
+                    // ── Cache-aware compression gate ───────────────────────────
+                    // Per-step compression of old tool results rewrites middle
+                    // history messages, which BREAKS the LLM prompt cache (the
+                    // cached prefix must be byte-identical). On read-heavy
+                    // multi-step tasks this meant only the system prompt was ever
+                    // cached. So only compress once history grows past
+                    // `historyCompressRatio` of the window; below that, leave it
+                    // byte-stable so the cache reuses it. compactHistory (heavier)
+                    // still runs at its own higher threshold as the backstop.
+                    try {
+                        const compressLimit = (llmService.getEffectiveModelLimit?.() || tokenEstimator.getModelLimit(currentModel));
+                        const histTokens = tokenEstimator.estimateConversation(history, '').totalTokens;
+                        if (compressLimit > 0 && histTokens > compressLimit * safety.historyCompressRatio) {
+                            this._compressToolResultsInHistory(history);
+                        }
+                    } catch (_) {
+                        // Estimation unavailable — fall back to always-compress so
+                        // we never risk overflowing the context window.
+                        this._compressToolResultsInHistory(history);
+                    }
                     let compactedHistory = await conversationMemory.compactHistory(history, currentModel, this.toolExecutor.getFileCache(), onLog);
 
                     // ── Apply caller's behavior overrides ──────────────────
@@ -918,6 +957,28 @@ export class AgentController {
                     }
                 }
 
+                // If ask_user was just executed, the agent is BLOCKED on user input:
+                // pause the run cleanly and return the question. This is the proper
+                // exit for tasks that genuinely need clarification — without it the
+                // model can only reply text-only (which we push back on) and grinds
+                // until a safety limit. The user's reply arrives as the next turn's
+                // prompt (chatContext carries this question forward).
+                if (this.toolExecutor.isAwaitingUser && this.toolExecutor.isAwaitingUser()) {
+                    const question = this.toolExecutor.getUserQuestion();
+                    // Prefer the model's own richer phrasing (its `thought`) when present,
+                    // otherwise fall back to the structured question from the tool args.
+                    let richThought = '';
+                    if (toolCall?.thought) {
+                        richThought = typeof toolCall.thought === 'string'
+                            ? toolCall.thought
+                            : (toolCall.thought.current_task || '');
+                    }
+                    richThought = this._cleanFinalResponse(richThought || '').trim();
+                    finalResponse = (richThought.length >= 40) ? richThought : (question || richThought || response);
+                    onAgentStatus?.({ event: 'status', status: 'waiting', message: '❓ ユーザーの回答待ち（確認のため一時停止）' });
+                    break;
+                }
+
                 // If finish_task was just executed, break immediately with its summary.
                 // This avoids an extra LLM round-trip just to confirm termination.
                 if (this.toolExecutor.isTaskCompleted && this.toolExecutor.isTaskCompleted()) {
@@ -1149,12 +1210,19 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
             }
         }
 
-        // Assemble both a flat markdown `summary` (back-compat: API consumers, chat,
-        // older renderers) AND structured fields for the sectioned Result UI
-        // (answer / stats / request / plan / files rendered as distinct sections).
-        const summary = this._composeDetailedReport(finalResponse, files, meta);
+        // The Result "answer" is an LLM-WRITTEN completion report (依頼→実施→結果),
+        // per user preference. Best-effort: on failure (or no LLM) it falls back to
+        // the present_result content, then the final response, then the deterministic
+        // composed report. Stats chips + collapsible details are unchanged.
         const presented = String(meta.presentedAnswer || '').trim();
-        const answer = (presented.length >= 1) ? presented : String(finalResponse || '');
+        const deterministic = this._composeDetailedReport(finalResponse, files, meta);
+        const llmReport = await this._generateLlmReport(finalResponse, files, meta, onLog);
+        const answer = llmReport
+            || (presented.length >= 1 ? presented : '')
+            || String(finalResponse || '')
+            || deterministic;
+        // `summary` keeps the flat-markdown back-compat contract (API/chat/old UIs).
+        const summary = llmReport || deterministic;
         const stats = {
             steps: meta.iterations || 0,
             tools: meta.toolCounts || {},
@@ -1170,6 +1238,64 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
             plan: String(meta.approvedPlan || ''),
             files,
         };
+    }
+
+    /**
+     * Generate a concise LLM completion report (依頼内容 / 実施内容 / 結果) from the
+     * run's artifacts. Best-effort: returns '' on any failure so callers fall back
+     * to deterministic text. One cheap LLM call, inputs clipped to bound cost.
+     */
+    async _generateLlmReport(finalResponse, files = [], meta = {}, onLog = null) {
+        const { prompt = '', approvedPlan = '', toolCounts = {}, presentedAnswer = '' } = meta;
+        try {
+            const toolList = Object.entries(toolCounts || {}).map(([n, c]) => `${n}×${c}`).join(', ') || 'なし';
+            const fileList = (files || []).map(f => `- ${f.path} (${f.action})`).join('\n') || 'なし';
+            const sys = 'You are a precise technical writer. Write a concise task completion report in the SAME LANGUAGE as the user request. Use short Markdown (## headings + bullet points). Be factual, no filler, no code fences wrapping the whole report.';
+            const reportPrompt =
+`Write a brief completion report for this AI task, with exactly these three sections:
+## 依頼内容
+## 実施内容
+## 結果
+
+Rules: same language as the request; concise; in 実施内容 state concretely what was done (tools/steps); in 結果 state the deliverable/outcome and explicitly list any missing data or required follow-ups.
+
+[User Request]
+${String(prompt).slice(0, 1500)}
+
+[Approved Plan]
+${String(approvedPlan).slice(0, 1000) || '（なし）'}
+
+[Tools used]
+${toolList}
+
+[Files created/modified]
+${fileList}
+
+[Agent's delivered answer (present_result)]
+${String(presentedAnswer || '').slice(0, 2000) || '（なし）'}
+
+[Agent's final message]
+${String(finalResponse || '').slice(0, 2000)}`;
+            let raw = '';
+            const t0 = Date.now();
+            const gen = await llmService.generate(reportPrompt, sys, (c) => { raw += c; });
+            if (onLog) {
+                try {
+                    onLog({
+                        method: 'CHAT', status: 200, duration: Date.now() - t0,
+                        stepLabel: '📋 Result Report',
+                        usage: gen?.usage,
+                        request: { purpose: 'result-report', system_prompt: sys, prompt: reportPrompt },
+                        response: raw,
+                    });
+                } catch (_) { /* logging only */ }
+            }
+            const report = String(raw || gen?.content || '').trim();
+            return report.length >= 20 ? report : '';
+        } catch (e) {
+            console.warn('AgentController: LLM report generation failed:', e);
+            return '';
+        }
     }
 
     /**

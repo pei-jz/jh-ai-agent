@@ -15,6 +15,7 @@ import { scheduleManager } from './modules/ai/ScheduleManager.js';
 import { mcpManager } from './modules/ai/McpManager.js';
 import llmService from './modules/ai/LLMService.js';
 import { renderMarkdown, ensureResultViewStyles } from './dashboard/utils/resultView.js';
+import { STORAGE_KEY as CHAT_SESSIONS_KEY, parseSessions, pruneSessions } from './dashboard/views/chat/chatSessions.js';
 
 // API Client Helper
 class ApiClient {
@@ -438,6 +439,9 @@ function buildSearchOverlayHTML() {
 let _searchUnlisten = null;
 let _searchFocusIndex = -1;
 let _searchItems = [];
+// Task list fetched once per overlay-open; keystrokes filter locally instead of
+// re-hitting the REST API on every input event.
+let _searchTasksCache = null;
 
 function initSearchOverlay() {
     injectSearchOverlayStyles();
@@ -467,6 +471,7 @@ function showSearch() {
     const overlay = document.getElementById('search-overlay');
     if (!overlay) return;
     _searchFocusIndex = -1;
+    _searchTasksCache = null;   // refresh the task list once per open
     overlay.classList.add('visible');
     clearAiAnswer();
     const input = document.getElementById('search-input');
@@ -506,11 +511,13 @@ async function renderSearchResults(query) {
     clearAiAnswer();
     container.style.display = '';
 
-    let tasks = [];
-    try {
-        const list = await window.apiClient?.listTasks();
-        tasks = (list?.tasks || list || []);
-    } catch (_) { /* API not ready */ }
+    if (!_searchTasksCache) {
+        try {
+            const list = await window.apiClient?.listTasks();
+            _searchTasksCache = (list?.tasks || list || []);
+        } catch (_) { _searchTasksCache = []; /* API not ready */ }
+    }
+    const tasks = _searchTasksCache;
 
     const q = query.trim().toLowerCase();
     const filtered = tasks
@@ -691,10 +698,68 @@ async function askAI(query) {
         // Render the final answer as markdown.
         bodyEl.innerHTML = `<div class="rv-summary">${renderMarkdown(full)}</div>`;
         answerEl.scrollTop = 0;
+        // Persist the Q&A to the chat-session store so it shows up in the
+        // Chat → History list when the user switches back to the app.
+        if (full.trim()) {
+            saveQuickSearchToHistory(query, full).catch(e =>
+                console.warn('Quick-search history save failed:', e));
+        }
     } catch (e) {
         if (myAbort.signal.aborted) return;
         bodyEl.innerHTML =
             `<span style="color:hsl(0,75%,65%)">エラー: ${(e?.message || String(e)).replace(/</g, '&lt;')}</span>`;
+    }
+}
+
+/**
+ * Save a quick-search Q&A as a chat session (same store ChatView uses), so the
+ * answer remains visible in Chat → History after the overlay closes.
+ *
+ * Runs in BOTH the in-app overlay and the dedicated spotlight window. Since the
+ * spotlight window's localStorage could in principle be stale, the file backup
+ * is merged in first so we never clobber sessions saved by the main window.
+ * The active session is intentionally NOT changed — an in-progress chat in the
+ * main window must keep writing to its own session.
+ */
+async function saveQuickSearchToHistory(question, answer) {
+    const data = parseSessions(localStorage.getItem(CHAT_SESSIONS_KEY));
+
+    // Merge sessions from the file backup (union, newest wins by id).
+    let configDir = null;
+    try {
+        configDir = await invoke('get_app_config_dir');
+        if (configDir) {
+            const raw = await invoke('read_file', { path: `${configDir}/chat_sessions.json` });
+            if (raw) {
+                const fileData = JSON.parse(raw);
+                for (const [id, s] of Object.entries(fileData.sessions || {})) {
+                    if (!data.sessions[id]) data.sessions[id] = s;
+                }
+                if (!data.activeSessionId) data.activeSessionId = fileData.activeSessionId;
+            }
+        }
+    } catch (_) { /* backup may not exist yet */ }
+
+    const q = question.replace(/\s+/g, ' ').trim();
+    const id = Date.now().toString();
+    data.sessions[id] = {
+        id,
+        title: '🔍 ' + q.substring(0, 28) + (q.length > 28 ? '…' : ''),
+        timestamp: Date.now(),
+        messages: [
+            { role: 'user', content: question, displayContent: question },
+            { role: 'assistant', content: answer }
+        ],
+        chatMode: 'simple',
+    };
+    pruneSessions(data);
+
+    localStorage.setItem(CHAT_SESSIONS_KEY, JSON.stringify(data));
+    if (configDir) {
+        await invoke('write_file', {
+            path: `${configDir}/chat_sessions.json`,
+            content: JSON.stringify(data, null, 2)
+        });
     }
 }
 
@@ -811,7 +876,15 @@ async function initSpotlightWindow() {
     }
 
     // Re-focus / reset the overlay each time the window is re-shown by the shortcut.
-    _searchUnlisten = await listen('show-search', () => showSearch());
+    // Also re-resolve the active LLM connection: this window has its OWN llmService
+    // singleton, so a default-connection change saved in the main window's Settings
+    // would otherwise never reach the spotlight until an app restart (symptom:
+    // quick-search kept using the old provider, e.g. Gemini, after switching the
+    // default to DeepSeek).
+    _searchUnlisten = await listen('show-search', () => {
+        llmService.initFromConfig().catch(() => {});
+        showSearch();
+    });
 
     // Show immediately (the window itself was just shown by the shortcut handler).
     showSearch();

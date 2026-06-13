@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { sanitizeXmlTags, relevanceScore, scoreMessageImportance } from '../MemoryScoring.js';
+import { sanitizeXmlTags, relevanceScore, scoreMessageImportance, textUnits } from '../MemoryScoring.js';
 
 describe('sanitizeXmlTags', () => {
     it('neutralizes active tags', () => {
@@ -23,6 +23,28 @@ describe('relevanceScore', () => {
         expect(relevanceScore(entry, 'auth token')).toBe(1);     // both words hit
         expect(relevanceScore(entry, 'auth missing')).toBe(0.5); // 1 of 2
         expect(relevanceScore(entry, 'unrelated stuff')).toBe(0);
+    });
+    it('matches Japanese queries via character bigrams', () => {
+        const entry = { topic: '認証バグ修正', summary: 'ログイン時のトークン検証エラーを修正した' };
+        const related = relevanceScore(entry, 'ログインの認証エラー');
+        const unrelated = relevanceScore(entry, '帳票印刷のレイアウト調整');
+        expect(related).toBeGreaterThan(0.5);
+        expect(unrelated).toBeLessThan(related);
+    });
+});
+
+describe('textUnits', () => {
+    it('extracts latin words and CJK bigrams together', () => {
+        const units = textUnits('auth.jsの認証処理');
+        expect(units.has('auth.js')).toBe(true);
+        expect(units.has('認証')).toBe(true);
+        expect(units.has('証処')).toBe(true);
+    });
+    it('keeps a lone CJK char as a unit', () => {
+        expect(textUnits('値').has('値')).toBe(true);
+    });
+    it('returns empty set for punctuation-only input', () => {
+        expect(textUnits('?? !!').size).toBe(0);
     });
 });
 

@@ -92,6 +92,15 @@ pub struct AiConfig {
     #[serde(default)]
     pub history_budget_ratio: Option<f32>,
 
+    /// Fraction (0–1) of the model's context window above which the agent
+    /// per-step compresses old tool results in history. None ⇒ frontend default
+    /// (0.5). Below this, history is left BYTE-STABLE so the LLM prompt cache can
+    /// reuse it (big token savings on multi-step tasks); above it, compression
+    /// kicks in to stay under the budget. Lower = compress sooner (less cache,
+    /// smaller prompts); higher = keep history stable longer (more cache hits).
+    #[serde(default)]
+    pub history_compress_ratio: Option<f32>,
+
     /// Sampling temperature for the agent loop (0–2). None ⇒ frontend default (0.2).
     #[serde(default)]
     pub agent_temperature: Option<f32>,
@@ -142,6 +151,7 @@ pub async fn get_ai_config<R: tauri::Runtime>(
             identical_call_threshold: None,
             cycle_detection_min_repeats: None,
             history_budget_ratio: None,
+            history_compress_ratio: None,
             agent_temperature: None,
             plan_mode: None,
             fast_model_id: None,
@@ -256,6 +266,9 @@ pub async fn save_ai_config<R: tauri::Runtime>(
                 if final_config.history_budget_ratio.is_none() {
                     final_config.history_budget_ratio = old_config.history_budget_ratio;
                 }
+                if final_config.history_compress_ratio.is_none() {
+                    final_config.history_compress_ratio = old_config.history_compress_ratio;
+                }
                 if final_config.agent_temperature.is_none() {
                     final_config.agent_temperature = old_config.agent_temperature;
                 }
@@ -318,6 +331,7 @@ pub async fn set_rag_approval<R: tauri::Runtime>(
             identical_call_threshold: None,
             cycle_detection_min_repeats: None,
             history_budget_ratio: None,
+            history_compress_ratio: None,
             agent_temperature: None,
             plan_mode: None,
             fast_model_id: None,

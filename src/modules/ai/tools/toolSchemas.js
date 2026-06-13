@@ -103,7 +103,7 @@ export const TOOL_DEFINITIONS = [
     {
         name: 'write_file',
         isSafe: false,
-        description: 'Create a new file or completely overwrite an existing file. The existing file\'s charset encoding is automatically preserved. SAFETY: (1) if the file already exists but was not read in this session, the call is BLOCKED unless overwrite_unread=true. (2) overwriting a LARGE existing file (full rewrite) is BLOCKED — full rewrites of big files routinely drop content (truncation); use multi_replace_file_content for targeted edits, or pass allow_full_overwrite=true only when you truly have the complete new file content. For partial edits, ALWAYS prefer multi_replace_file_content.',
+        description: 'WHEN TO USE: choose this ONLY for (a) creating a brand-new file, or (b) fully replacing a file whose complete intended content you have. To edit PART of an existing file, use multi_replace_file_content (precise spans) or replace_lines (a large contiguous block) — NOT this. Create a new file or completely overwrite an existing file. The existing file\'s charset encoding is automatically preserved. SAFETY: (1) if the file already exists but was not read in this session, the call is BLOCKED unless overwrite_unread=true. (2) overwriting a LARGE existing file (full rewrite) is BLOCKED — full rewrites of big files routinely drop content (truncation); use multi_replace_file_content for targeted edits, or pass allow_full_overwrite=true only when you truly have the complete new file content. For partial edits, ALWAYS prefer multi_replace_file_content.',
         parameters: {
             type: 'object',
             properties: {
@@ -120,21 +120,22 @@ export const TOOL_DEFINITIONS = [
     {
         name: 'run_command',
         isSafe: false,
-        description: 'Execute a shell command for builds, tests, or system checks. Defaults to a 60-second timeout; set timeout_ms for longer operations.',
+        description: 'Execute a shell command for builds, tests, or system checks. Runs in the workspace root by default; pass cwd to run in a subdirectory (e.g. a monorepo package). Defaults to a 60-second timeout; set timeout_ms for longer operations.',
         parameters: {
             type: 'object',
             properties: {
                 command: { type: 'string', description: 'Command string to run in the shell (e.g., "npm run test", "cargo check")' },
+                cwd: { type: ['string', 'null'], description: 'Optional (null to omit) working directory for the command. Relative paths resolve against the workspace root (e.g. "packages/api"); absolute paths must stay inside an allowed root. Defaults to the workspace root.' },
                 safe_to_auto_run: { type: ['boolean', 'null'], description: 'Optional (null to omit). Set true if command is safe and has no side-effects. Skips user confirmation.' },
                 timeout_ms: { type: ['number', 'null'], description: 'Optional (null to omit). Timeout in milliseconds (default: 60000). Increase for long-running builds (e.g., 120000 for 2 minutes).' }
             },
-            required: ['command', 'safe_to_auto_run', 'timeout_ms'],
+            required: ['command', 'cwd', 'safe_to_auto_run', 'timeout_ms'],
             additionalProperties: false
         }
     },
     {
         name: 'multi_replace_file_content',
-        description: 'Apply one or more content-based search-and-replace edits to an existing file. Each replacement provides the exact original text (old_text) and its replacement (new_text); old_text MUST match EXACTLY once in the file. BEST PRACTICE: keep old_text SHORT — ideally ONE line containing a unique identifier (plus a few words of context only if needed for uniqueness). Short exact anchors succeed far more often than large multi-line blocks, which are easy to mis-transcribe. To disambiguate when a line repeats, add the minimum extra context to make it unique. Set replace_all=true to update every occurrence (useful for renames). Line numbers are NEVER used — only literal string matching. IMPORTANT: when copying text from read_file output, strip the leading `<lineno>\\t` prefix from each line — that prefix is display-only and is NOT part of the file.',
+        description: 'WHEN TO USE: this is the DEFAULT tool for editing an existing file — use it to change one or more specific text spans you can quote exactly. Prefer it over write_file for any partial edit. Switch to replace_lines when the region is a large/awkward contiguous block that is error-prone to retype, or when this tool keeps failing to match. Apply one or more content-based search-and-replace edits to an existing file. Each replacement provides the exact original text (old_text) and its replacement (new_text); old_text MUST match EXACTLY once in the file. BEST PRACTICE: keep old_text SHORT — ideally ONE line containing a unique identifier (plus a few words of context only if needed for uniqueness). Short exact anchors succeed far more often than large multi-line blocks, which are easy to mis-transcribe. To disambiguate when a line repeats, add the minimum extra context to make it unique. Set replace_all=true to update every occurrence (useful for renames). Line numbers are NEVER used — only literal string matching. IMPORTANT: when copying text from read_file output, strip the leading `<lineno>\\t` prefix from each line — that prefix is display-only and is NOT part of the file.',
         parameters: {
             type: 'object',
             properties: {
@@ -161,7 +162,7 @@ export const TOOL_DEFINITIONS = [
     {
         name: 'replace_lines',
         isSafe: false,
-        description: 'Replace a contiguous LINE RANGE [start_line..end_line] (1-indexed, inclusive) with new_text. Unlike multi_replace_file_content (which matches by content), this addresses by LINE NUMBER — ideal for replacing a large or awkward block you can SEE in read_file output without re-typing it exactly (avoids transcription typos on big multi-line blocks). SAFETY (required): you MUST pass expected_first_line and expected_last_line — the exact CURRENT text of the range\'s first and last lines, WITHOUT the read_file "<lineno>\\t" prefix. The edit is REJECTED (nothing written) if they don\'t match the file, so stale line numbers can never clobber the wrong lines. ALWAYS call read_file right before to get fresh line numbers. To DELETE the range, pass new_text="".',
+        description: 'WHEN TO USE: replace a large or awkward CONTIGUOUS block addressed by LINE NUMBER — ideal when retyping the block exactly for multi_replace_file_content is error-prone, or when multi_replace_file_content keeps failing to match. For small precise edits prefer multi_replace_file_content; for a new/whole file use write_file. Replace a contiguous LINE RANGE [start_line..end_line] (1-indexed, inclusive) with new_text. Unlike multi_replace_file_content (which matches by content), this addresses by LINE NUMBER — ideal for replacing a large or awkward block you can SEE in read_file output without re-typing it exactly (avoids transcription typos on big multi-line blocks). SAFETY (required): you MUST pass expected_first_line and expected_last_line — the exact CURRENT text of the range\'s first and last lines, WITHOUT the read_file "<lineno>\\t" prefix. The edit is REJECTED (nothing written) if they don\'t match the file, so stale line numbers can never clobber the wrong lines. ALWAYS call read_file right before to get fresh line numbers. To DELETE the range, pass new_text="".',
         parameters: {
             type: 'object',
             properties: {
@@ -216,6 +217,20 @@ export const TOOL_DEFINITIONS = [
         }
     },
     {
+        name: 'ask_user',
+        isSafe: true,
+        description: "Pause the task and ask the user a clarifying question, then STOP and wait for their reply. Use this ONLY when you genuinely cannot proceed without input the user must supply — e.g. an ambiguous requirement, a missing decision, or attached content you cannot read (an image the current model can't see). This ENDS the current run cleanly: the question is shown to the user and the agent stops. Do NOT use it to report progress or to confirm work that is already done (use finish_task for completion). Prefer making a reasonable assumption and proceeding when you can; reserve ask_user for true blockers.",
+        parameters: {
+            type: 'object',
+            properties: {
+                question: { type: 'string', description: 'The clarifying question to ask the user, in the user\'s language. Be specific about what you need and why you cannot proceed without it.' },
+                context: { type: ['string', 'null'], description: 'Optional brief summary of what you have already done / found, so the user has context when answering. null to omit.' }
+            },
+            required: ['question', 'context'],
+            additionalProperties: false
+        }
+    },
+    {
         name: 'verify_syntax',
         isSafe: true,
         description: 'Validate a file using a real parser. JSON files are parsed in-process; JS/JSX/MJS/CJS files are validated by spawning `node --check` (real V8 parser); TS/TSX files are skipped with guidance (use `run_command npx tsc --noEmit` for type checking). Call after every edit to .json/.js/.jsx/.mjs/.cjs files to catch syntax breakage immediately.',
@@ -257,7 +272,7 @@ export const TOOL_DEFINITIONS = [
     {
         name: 'task_progress',
         isSafe: true,
-        description: 'Track subtask completion state across the agent loop. State persists independently of conversation history (survives context compaction). Use action="set" once at task start to register items, action="update" to mark items complete/in_progress/blocked, action="get" to check current state without re-reading task_plan.md.',
+        description: 'Track subtask state. PERSISTS across the whole workspace (stored in .agent/tasks.json) — items survive context compaction AND carry over between sessions, so a multi-run project keeps one running checklist. At the START of a task call action="get" first to see any tasks left over from earlier sessions; use action="update" to mark items completed/in_progress/blocked; use action="set" to (re)initialize the list — note "set" REPLACES the entire list, so only use it for a genuinely new piece of work, not to append.',
         parameters: {
             type: 'object',
             properties: {

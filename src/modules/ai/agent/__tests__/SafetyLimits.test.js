@@ -33,6 +33,14 @@ describe('normalizeSafetyLimits', () => {
         expect(normalizeSafetyLimits({ history_budget_ratio: 'x' }).historyBudgetRatio).toBe(SAFETY_DEFAULTS.historyBudgetRatio);
     });
 
+    it('clamps history_compress_ratio to (0,1]', () => {
+        expect(normalizeSafetyLimits({ history_compress_ratio: 0.6 }).historyCompressRatio).toBe(0.6);
+        expect(normalizeSafetyLimits({ history_compress_ratio: 1 }).historyCompressRatio).toBe(1);
+        expect(normalizeSafetyLimits({ history_compress_ratio: 0 }).historyCompressRatio).toBe(SAFETY_DEFAULTS.historyCompressRatio);
+        expect(normalizeSafetyLimits({ history_compress_ratio: 2 }).historyCompressRatio).toBe(SAFETY_DEFAULTS.historyCompressRatio);
+        expect(normalizeSafetyLimits({}).historyCompressRatio).toBe(0.5);
+    });
+
     it('validates plan_mode (off/auto/always), defaulting on bad input', () => {
         expect(normalizeSafetyLimits({ plan_mode: 'off' }).planMode).toBe('off');
         expect(normalizeSafetyLimits({ plan_mode: 'always' }).planMode).toBe('always');

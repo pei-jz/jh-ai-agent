@@ -156,6 +156,9 @@ pub(crate) async fn update_config(
                 if final_config.history_budget_ratio.is_none() {
                     final_config.history_budget_ratio = old_config.history_budget_ratio;
                 }
+                if final_config.history_compress_ratio.is_none() {
+                    final_config.history_compress_ratio = old_config.history_compress_ratio;
+                }
                 if final_config.agent_temperature.is_none() {
                     final_config.agent_temperature = old_config.agent_temperature;
                 }

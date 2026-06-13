@@ -8,7 +8,7 @@ use chrono::Local;
 use tauri::Manager;
 use super::ai_providers::{
     model_supports_vision, parse_image_data_url, build_openai_messages,
-    clean_openai_tools, openai_tools_to_gemini,
+    clean_openai_tools, openai_tools_to_gemini, split_system_on_cache_break,
 };
 use super::ai_config::AiConfig;
 
@@ -127,7 +127,7 @@ async fn get_client(proxy_url: Option<String>) -> Result<Client, String> {
 #[tauri::command]
 pub async fn llm_chat_native<R: Runtime>(
     app: AppHandle<R>,
-    payload: LlmRequest,
+    mut payload: LlmRequest,
 ) -> Result<(), String> {
     let client = get_client(payload.proxy).await?;
     let request_id = payload.request_id.clone();
@@ -242,11 +242,35 @@ pub async fn llm_chat_native<R: Runtime>(
     let body = match resolved_provider.as_str() {
         "openai" | "ollama" | "azure" | "generic" => {
             // Message array (incl. vision attach/drop) → build_openai_messages (unit-tested).
-            // OpenAI-compatible endpoints have no prefix-split mechanism here, so the
-            // cache-break sentinel is collapsed back to a newline.
+            //
+            // ── Prompt caching (OpenAI-family: automatic prefix cache) ──
+            // OpenAI/Azure/DeepSeek cache on EXACT prefix match only — no
+            // breakpoints like Anthropic's cache_control. The system prompt's
+            // VOLATILE tail (task_plan / workflow phase / artifacts) used to be
+            // folded into the system message, so the FIRST message changed every
+            // agent step and the prefix cache never hit (observed: cached_tokens
+            // ≈ 0 on Azure). Split on the sentinel instead: the STABLE region
+            // stays the system message (byte-identical all run → system + tools
+            // + history prefix stays cacheable), and the volatile region is
+            // re-injected as a clearly-labeled FINAL user message below.
             let vision_ok = model_supports_vision(&resolved_provider, &payload.model);
-            let sys_clean = payload.system_prompt.map(|s| s.replace(SYS_CACHE_BREAK, "\n"));
-            let full_messages = build_openai_messages(sys_clean, payload.messages, &payload.images, vision_ok);
+            let (sys_stable, sys_volatile) = match payload.system_prompt.take() {
+                Some(s) => {
+                    let (stable, volatile) = split_system_on_cache_break(&s, SYS_CACHE_BREAK);
+                    (Some(stable), volatile)
+                }
+                None => (None, None),
+            };
+            let mut full_messages = build_openai_messages(sys_stable, payload.messages, &payload.images, vision_ok);
+            if let Some(vol) = sys_volatile {
+                full_messages.push(serde_json::json!({
+                    "role": "user",
+                    "content": format!(
+                        "[Current Task Context — treat as system-level instructions; auto-updated each step]\n{}",
+                        vol
+                    )
+                }));
+            }
             let mut body_obj = serde_json::json!({
                 "model": payload.model,
                 "messages": full_messages,

@@ -4,7 +4,7 @@ import { describe, it, expect, vi } from 'vitest';
 // (handlePresentResult itself only uses ctx.onToolEvent).
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 
-const { handlePresentResult } = await import('../agentMetaHandlers.js');
+const { handlePresentResult, handleAskUser } = await import('../agentMetaHandlers.js');
 
 /** Capture the envelope emitted via ctx.onToolEvent('result', {envelope}). */
 function runPresent(args) {
@@ -60,5 +60,39 @@ describe('handlePresentResult — Result Contract envelope', () => {
         expect(captured.payload).toEqual({ text: 'hi' });
         expect(typeof msg).toBe('string');
         expect(msg).toContain('present');
+    });
+});
+
+describe('handleAskUser — pause-for-clarification exit', () => {
+    function makeCtx() {
+        const events = [];
+        return {
+            _awaitingUser: false,
+            _userQuestion: '',
+            onToolEvent: (event, data) => events.push({ event, data }),
+            events,
+        };
+    }
+
+    it('sets the awaiting-user flag and stores the question', async () => {
+        const ctx = makeCtx();
+        const msg = await handleAskUser(ctx, { question: 'Which design phase?', context: null }, () => {});
+        expect(ctx._awaitingUser).toBe(true);
+        expect(ctx._userQuestion).toBe('Which design phase?');
+        expect(msg).toContain('pause');
+        expect(ctx.events.find(e => e.event === 'ask_user')).toBeTruthy();
+    });
+
+    it('appends context to the stored question when provided', async () => {
+        const ctx = makeCtx();
+        await handleAskUser(ctx, { question: 'Proceed?', context: 'I already read main.js.' }, () => {});
+        expect(ctx._userQuestion).toBe('Proceed?\n\nI already read main.js.');
+    });
+
+    it('rejects an empty question without pausing the run', async () => {
+        const ctx = makeCtx();
+        const msg = await handleAskUser(ctx, { question: '   ', context: null }, () => {});
+        expect(ctx._awaitingUser).toBe(false);
+        expect(msg).toMatch(/^Error:/);
     });
 });

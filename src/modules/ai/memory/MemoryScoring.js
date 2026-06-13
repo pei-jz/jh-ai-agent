@@ -13,17 +13,42 @@ export function sanitizeXmlTags(text) {
     );
 }
 
+// CJK ranges: Hiragana/Katakana, CJK Unified Ideographs (+ext A), half-width
+// Katakana, Hangul. Used to detect runs that have no word boundaries.
+const CJK_RUN_RE = /[぀-ヿ㐀-䶿一-鿿ｦ-ﾟ가-힣]+/g;
+
 /**
- * Keyword-overlap relevance of a memory entry to a query (0–1). No external calls.
- * Empty/word-less query ⇒ 0.5 (treat all equally).
+ * Tokenize text into comparable units that work for BOTH spaced languages and
+ * CJK. Latin/digit words (≥3 chars) are kept as-is; CJK runs — which have no
+ * spaces, so the old `split(/\W+/)` produced nothing for Japanese — are broken
+ * into character bigrams. Pure; returns a Set of lowercase strings.
+ */
+export function textUnits(text) {
+    const s = String(text || '').toLowerCase();
+    const units = new Set();
+    for (const w of s.split(/[^a-z0-9_.\-]+/)) {
+        if (w.length > 2) units.add(w);
+    }
+    const runs = s.match(CJK_RUN_RE) || [];
+    for (const run of runs) {
+        if (run.length === 1) { units.add(run); continue; }
+        for (let i = 0; i < run.length - 1; i++) units.add(run.slice(i, i + 2));
+    }
+    return units;
+}
+
+/**
+ * Relevance of a memory entry to a query (0–1). No external calls.
+ * Matching is unit-overlap where a unit is a latin word OR a CJK character
+ * bigram (so Japanese queries actually match — the previous whitespace-token
+ * approach scored ~0 on Japanese). Empty/unit-less query ⇒ 0.5 (treat equally).
  * @param {{topic?:string,summary?:string,actions?:string[],keyFiles?:string[]}} entry
  * @param {string} query
  */
 export function relevanceScore(entry, query) {
     if (!query) return 0.5;
-    const q = query.toLowerCase();
-    const qWords = new Set(q.split(/\W+/).filter(w => w.length > 2));
-    if (qWords.size === 0) return 0.5;
+    const qUnits = textUnits(query);
+    if (qUnits.size === 0) return 0.5;
 
     const fields = [
         entry.topic || '',
@@ -33,8 +58,8 @@ export function relevanceScore(entry, query) {
     ].join(' ').toLowerCase();
 
     let hits = 0;
-    for (const word of qWords) if (fields.includes(word)) hits++;
-    return hits / qWords.size;
+    for (const u of qUnits) if (fields.includes(u)) hits++;
+    return hits / qUnits.size;
 }
 
 /**

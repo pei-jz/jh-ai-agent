@@ -127,6 +127,29 @@ export function renderAgentSteps(steps, currentStep, streamContent) {
     return html;
 }
 
+/**
+ * Render compact run-stats chips (steps / tools / tokens / duration / files)
+ * for a completed agent turn. Returns '' when there is nothing to show.
+ * Uses the rv-chips styles injected by ensureResultViewStyles().
+ */
+export function renderResultStatsChips(stats) {
+    if (!stats || typeof stats !== 'object') return '';
+    const chips = [];
+    if (stats.steps > 0) chips.push(`📍 ステップ ${stats.steps}`);
+    const toolTotal = Object.values(stats.tools || {}).reduce((a, c) => a + (c || 0), 0);
+    if (toolTotal > 0) chips.push(`🛠 ツール ${toolTotal}`);
+    if (stats.tokens > 0) {
+        const tok = stats.tokens >= 1000 ? (stats.tokens / 1000).toFixed(1) + 'k' : String(stats.tokens);
+        chips.push(`🧮 ${tok} tok`);
+    }
+    if (stats.durationMs > 0) chips.push(`⏱ ${Math.round(stats.durationMs / 1000)}s`);
+    if (stats.files > 0) chips.push(`📄 ファイル ${stats.files}件`);
+    if (chips.length === 0) return '';
+    return `<div class="rv-chips" style="margin-top:10px;">`
+        + chips.map(c => `<span class="rv-chip">${escapeHtml(c)}</span>`).join('')
+        + `</div>`;
+}
+
 /** Render a single chat message to an HTML string (user/assistant/tool bubbles). */
 export function renderMessageHtml(msg) {
     // Tool call bubble
@@ -225,8 +248,11 @@ export function renderMessageHtml(msg) {
         attachmentsHtml += `</div>`;
     }
 
-    // Created/modified files from a completed agent turn (clicks open via the
-    // delegated [data-open-path] handler on the chat container).
+    // Run-stats chips + created/modified files from a completed agent turn
+    // (clicks open via the delegated [data-open-path] handler on the container).
+    if (!isUser && msg.resultStats) {
+        attachmentsHtml += renderResultStatsChips(msg.resultStats);
+    }
     if (!isUser && msg.resultFiles && msg.resultFiles.length > 0) {
         attachmentsHtml += renderFileList(msg.resultFiles);
     }

@@ -255,6 +255,18 @@ fn get_free_port() -> Option<u16> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Single-instance guard MUST be the first plugin: launching a second
+        // copy (e.g. `tauri dev` while a previous build still sits in the tray,
+        // since the ✕ button hides instead of exiting) used to crash on the
+        // duplicate Ctrl+Shift+Space hotkey registration. Now the second launch
+        // exits immediately and the EXISTING instance shows/focuses its window.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.show();
+                let _ = w.unminimize();
+                let _ = w.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -551,8 +563,13 @@ pub fn run() {
             }
 
             // ── Global shortcut: Ctrl+Shift+Space → show spotlight overlay ──
+            // Registration can fail when ANOTHER process already holds the key —
+            // most commonly a previous instance of this app still living in the
+            // tray (the titlebar ✕ hides instead of exiting), or another tool.
+            // That must NOT abort startup (it used to `?` → setup panic → the
+            // whole app failed to launch); the spotlight shortcut is optional.
             let shortcut_handle = app.handle().clone();
-            app.handle()
+            let shortcut_result = app.handle()
                 .global_shortcut()
                 .on_shortcut(
                     Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::Space),
@@ -584,7 +601,17 @@ pub fn run() {
                             }
                         }
                     },
-                )?;
+                );
+            if let Err(e) = shortcut_result {
+                eprintln!(
+                    "[JHAI] WARNING: Ctrl+Shift+Space global shortcut registration failed: {}. \
+                     The quick-search spotlight won't open via the shortcut. \
+                     Likely cause: another instance of this app is still running in the tray \
+                     (the ✕ button hides instead of exiting) or another program owns the key. \
+                     Close the other instance and restart to restore the shortcut.",
+                    e
+                );
+            }
 
             Ok(())
         })
