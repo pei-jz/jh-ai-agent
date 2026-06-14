@@ -154,6 +154,93 @@ export class ConfigView {
         }
     }
 
+    /**
+     * Read the current form into this.config, build the wire payload, and
+     * persist it via the API — the single source of truth for "save the whole
+     * config". Both the "Save Settings" button and the connection modal's
+     * "Save Connection" button call this so editing a connection is durable
+     * immediately, without a separate Save Settings click.
+     *
+     * Throws on invalid MCP JSON or API failure; callers own the UI feedback.
+     */
+    async persistConfig() {
+        this.readFormValues();
+
+        let mcpConfig = {};
+        if (this.config.mcp_text) {
+            try {
+                mcpConfig = JSON.parse(this.config.mcp_text);
+            } catch (e) {
+                throw new Error("Invalid MCP configuration JSON format: " + e.message);
+            }
+        }
+
+        // If no active id is set but instances exist, default to the first one
+        let activeId = this.config.active_llm_instance_id;
+        if (!activeId && this.config.llm_instances && this.config.llm_instances.length > 0) {
+            activeId = this.config.llm_instances[0].id;
+        }
+        // If the active id no longer matches a real instance, clear it
+        if (activeId && !this.config.llm_instances.some(i => i.id === activeId)) {
+            activeId = this.config.llm_instances[0]?.id || null;
+        }
+
+        // Helper: serialize an Agent Safety Limit field for the wire.
+        // We send a numeric 0 explicitly (not null) when the user has
+        // chosen "disabled/unlimited" so the backend stores intent clearly.
+        // We send `null` only when the value is genuinely missing so the
+        // backend's preservation logic falls back to the previously-saved value.
+        const limit = (v) => {
+            if (v === null || v === undefined) return null;
+            const n = parseInt(v, 10);
+            return Number.isFinite(n) && n >= 0 ? n : null;
+        };
+
+        const newConfig = {
+            openai_key: this.config.openai_key || null,
+            anthropic_key: this.config.anthropic_key || null,
+            gemini_key: this.config.gemini_key || null,
+            azure_key: this.config.azure_key || null,
+            azure_endpoint: this.config.azure_endpoint || null,
+            azure_deployment: this.config.azure_deployment || null,
+            proxy_url: this.config.proxy_url,
+            output_language:             (this.config.output_language || 'Japanese'),
+            logging_enabled: this.config.logging_enabled,
+            log_dir: this.config.log_dir,
+            max_steps:                   limit(this.config.max_steps),
+            approved_projects: this.config.approved_projects || [],
+            write_allowed_paths: this.config.write_allowed_paths || [],
+            mcp_servers: mcpConfig,
+            llm_instances: this.config.llm_instances,
+            active_llm_instance_id: activeId,
+            // Agent Safety Limits — 0 means "disabled" (sent explicitly, not as null)
+            token_budget:                limit(this.config.token_budget),
+            wall_clock_minutes:          limit(this.config.wall_clock_minutes),
+            no_progress_window:          limit(this.config.no_progress_window),
+            identical_call_threshold:    limit(this.config.identical_call_threshold),
+            cycle_detection_min_repeats: limit(this.config.cycle_detection_min_repeats),
+            agent_temperature:           (this.config.agent_temperature ?? null),
+            history_compress_ratio:      (this.config.history_compress_ratio ?? null),
+            plan_mode:                   (this.config.plan_mode || 'auto'),
+            fast_model_id:               (this.config.fast_model_id || null),
+            deep_model_id:               (this.config.deep_model_id || null),
+            prompt_templates:            promptTemplateManager.toConfigValue()
+        };
+
+        if (window.apiClient) {
+            await window.apiClient.updateConfig(newConfig);
+
+            // Push the active-instance change into LLMService so the
+            // very next agent run / chat uses it without a restart.
+            try {
+                const { default: llmService } = await import('../../modules/ai/LLMService.js');
+                await llmService.initFromConfig();
+            } catch (e) {
+                console.warn('Could not refresh LLMService after save:', e);
+            }
+        }
+    }
+
     getModalValue(field) {
         if (!this.editingInstance) {
             if (field === 'provider') return 'openai';
@@ -1211,7 +1298,7 @@ export class ConfigView {
         // Modal Save/Submit
         const btnModalSave = document.getElementById('btn-modal-save');
         if (btnModalSave) {
-            btnModalSave.addEventListener('click', () => {
+            btnModalSave.addEventListener('click', async () => {
                 const provider = document.getElementById('modal-provider-type').value;
                 const name = document.getElementById('modal-inst-name').value.trim();
                 const model = document.getElementById('modal-inst-model').value.trim();
@@ -1277,6 +1364,21 @@ export class ConfigView {
 
                 this.showModal = false;
                 this.editingInstance = null;
+
+                // Persist immediately so the connection is durable without a
+                // separate "Save Settings" click. On failure we surface the
+                // error but the in-memory change stays so the user can retry.
+                btnModalSave.disabled = true;
+                btnModalSave.innerText = 'Saving...';
+                try {
+                    await this.persistConfig();
+                    showNotification("Connection saved.");
+                    // Reload to update masked strings
+                    this.loaded = false;
+                    await this.loadConfig();
+                } catch (e) {
+                    alert("Error saving connection: " + e.message);
+                }
                 this.reRender();
             });
         }
@@ -1384,89 +1486,15 @@ export class ConfigView {
             btnSave.addEventListener('click', async () => {
                 btnSave.disabled = true;
                 btnSave.innerText = 'Saving...';
-                
+
                 try {
-                    this.readFormValues();
-                    
-                    let mcpConfig = {};
-                    if (this.config.mcp_text) {
-                        try {
-                            mcpConfig = JSON.parse(this.config.mcp_text);
-                        } catch (e) {
-                            throw new Error("Invalid MCP configuration JSON format: " + e.message);
-                        }
-                    }
+                    await this.persistConfig();
+                    showNotification("Settings saved successfully!");
 
-                    // If no active id is set but instances exist, default to the first one
-                    let activeId = this.config.active_llm_instance_id;
-                    if (!activeId && this.config.llm_instances && this.config.llm_instances.length > 0) {
-                        activeId = this.config.llm_instances[0].id;
-                    }
-                    // If the active id no longer matches a real instance, clear it
-                    if (activeId && !this.config.llm_instances.some(i => i.id === activeId)) {
-                        activeId = this.config.llm_instances[0]?.id || null;
-                    }
-
-                    // Helper: serialize an Agent Safety Limit field for the wire.
-                    // We send a numeric 0 explicitly (not null) when the user has
-                    // chosen "disabled/unlimited" so the backend stores intent clearly.
-                    // We send `null` only when the value is genuinely missing so the
-                    // backend's preservation logic falls back to the previously-saved value.
-                    const limit = (v) => {
-                        if (v === null || v === undefined) return null;
-                        const n = parseInt(v, 10);
-                        return Number.isFinite(n) && n >= 0 ? n : null;
-                    };
-
-                    const newConfig = {
-                        openai_key: this.config.openai_key || null,
-                        anthropic_key: this.config.anthropic_key || null,
-                        gemini_key: this.config.gemini_key || null,
-                        azure_key: this.config.azure_key || null,
-                        azure_endpoint: this.config.azure_endpoint || null,
-                        azure_deployment: this.config.azure_deployment || null,
-                        proxy_url: this.config.proxy_url,
-                        output_language:             (this.config.output_language || 'Japanese'),
-                        logging_enabled: this.config.logging_enabled,
-                        log_dir: this.config.log_dir,
-                        max_steps:                   limit(this.config.max_steps),
-                        approved_projects: this.config.approved_projects || [],
-                        write_allowed_paths: this.config.write_allowed_paths || [],
-                        mcp_servers: mcpConfig,
-                        llm_instances: this.config.llm_instances,
-                        active_llm_instance_id: activeId,
-                        // Agent Safety Limits — 0 means "disabled" (sent explicitly, not as null)
-                        token_budget:                limit(this.config.token_budget),
-                        wall_clock_minutes:          limit(this.config.wall_clock_minutes),
-                        no_progress_window:          limit(this.config.no_progress_window),
-                        identical_call_threshold:    limit(this.config.identical_call_threshold),
-                        cycle_detection_min_repeats: limit(this.config.cycle_detection_min_repeats),
-                        agent_temperature:           (this.config.agent_temperature ?? null),
-                        history_compress_ratio:      (this.config.history_compress_ratio ?? null),
-                        plan_mode:                   (this.config.plan_mode || 'auto'),
-                        fast_model_id:               (this.config.fast_model_id || null),
-                        deep_model_id:               (this.config.deep_model_id || null),
-                        prompt_templates:            promptTemplateManager.toConfigValue()
-                    };
-
-                    if (window.apiClient) {
-                        await window.apiClient.updateConfig(newConfig);
-                        showNotification("Settings saved successfully!");
-
-                        // Push the active-instance change into LLMService so the
-                        // very next agent run / chat uses it without a restart.
-                        try {
-                            const { default: llmService } = await import('../../modules/ai/LLMService.js');
-                            await llmService.initFromConfig();
-                        } catch (e) {
-                            console.warn('Could not refresh LLMService after save:', e);
-                        }
-
-                        // Reload to update masked strings
-                        this.loaded = false;
-                        await this.loadConfig();
-                        this.reRender();
-                    }
+                    // Reload to update masked strings
+                    this.loaded = false;
+                    await this.loadConfig();
+                    this.reRender();
                 } catch (e) {
                     alert("Error saving config: " + e.message);
                 } finally {

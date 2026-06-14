@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
     safeParseJSON, extractToolCall, extractAllPossibleToolCalls, extractInvokeToolCalls,
-    extractThoughtFromMalformedText, cleanFinalResponse
+    extractThoughtFromMalformedText, cleanFinalResponse, stripReActPreamble, stripOuterCodeFence
 } from '../ResponseParser.js';
 
 describe('extractInvokeToolCalls', () => {
@@ -116,6 +116,36 @@ describe('extractToolCall', () => {
     it('returns null when nothing parseable', () => {
         expect(extractToolCall('just some words')).toBeNull();
     });
+    it('does NOT truncate a present_result envelope whose markdown holds a ```java block', () => {
+        // Regression: the non-greedy block regex stopped at the inner ```java
+        // fence, so only the first lines of the code answer reached the app.
+        const md = '## Java Stream サンプルコード\\n\\n以下はサンプルです。\\n\\n' +
+            '```java\\nimport java.util.stream.*;\\npublic class S {\\n  public static void main(String[] a){\\n' +
+            '    IntStream.rangeClosed(2,100).filter(S::p).forEach(System.out::println);\\n  }\\n}\\n```\\n\\n' +
+            '### まとめ\\n\\n| 操作 | 説明 |\\n|---|---|\\n| filter | 絞り込み |';
+        const txt = '```json\n{"thought":"OBSERVE: x | PLAN: y | CALL: present_result",' +
+            '"tool_calls":[{"name":"present_result","args":{"kind":"markdown","markdown":"' + md + '"}}]}\n```';
+        const r = extractToolCall(txt);
+        expect(r.tool_calls[0].name).toBe('present_result');
+        const got = r.tool_calls[0].args.markdown;
+        expect(got).toContain('```java');          // code block survived
+        expect(got).toContain('class S');           // body survived
+        expect(got).toContain('### まとめ');         // content AFTER the code block survived
+    });
+});
+
+describe('stripOuterCodeFence', () => {
+    it('strips an outer ```json wrapper but keeps inner fences', () => {
+        const body = '{"md":"a ```java\\nx\\n``` b"}';
+        expect(stripOuterCodeFence('```json\n' + body + '\n```')).toBe(body);
+    });
+    it('returns trimmed input unchanged when there is no outer fence', () => {
+        expect(stripOuterCodeFence('  {"a":1}  ')).toBe('{"a":1}');
+    });
+    it('does not strip when text follows the closing fence', () => {
+        const t = '```json\n{"a":1}\n```\ntrailing';
+        expect(stripOuterCodeFence(t)).toBe(t.trim());
+    });
 });
 
 describe('extractAllPossibleToolCalls', () => {
@@ -177,5 +207,34 @@ describe('cleanFinalResponse', () => {
     it('returns the raw text when JSON parsing inside throws but prose exists', () => {
         const r = cleanFinalResponse('plain answer with a stray { brace that is not json');
         expect(r).toContain('plain answer');
+    });
+});
+
+describe('stripReActPreamble', () => {
+    it('collapses a preamble-only thought (sentence form) to empty', () => {
+        const t = 'OBSERVE: task_progress was blocked but I have all the information needed. ' +
+            'PLAN: Present the Stream sample code with explanation and finish the task. CALL: finish_task';
+        expect(stripReActPreamble(t)).toBe('');
+    });
+    it('strips the pipe form with a CALL terminator', () => {
+        expect(stripReActPreamble('OBSERVE: x | PLAN: y | CALL: present_result')).toBe('');
+    });
+    it('preserves real content placed after the preamble', () => {
+        const t = 'OBSERVE: existing code uses a for-loop. PLAN: show a Stream version. CALL: present_result\n\n```java\nIntStream.rangeClosed(2,100);\n```';
+        const out = stripReActPreamble(t);
+        expect(out).toContain('```java');
+        expect(out).not.toMatch(/^OBSERVE:/);
+    });
+    it('strips native-protocol OBSERVE/PLAN (no CALL token) up to the PLAN line', () => {
+        const out = stripReActPreamble('OBSERVE: the buffer is empty.\nPLAN: write a sample.\nHere is the sample body.');
+        expect(out).toBe('Here is the sample body.');
+    });
+    it('leaves a normal answer that merely starts with the word Observe untouched', () => {
+        const t = 'Observe the output carefully before running again.';
+        expect(stripReActPreamble(t)).toBe(t);
+    });
+    it('returns empty string for falsy input', () => {
+        expect(stripReActPreamble('')).toBe('');
+        expect(stripReActPreamble(null)).toBe('');
     });
 });

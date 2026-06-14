@@ -71,8 +71,25 @@ export function safeParseJSON(str) {
 }
 
 /**
+ * Strip a SINGLE outermost ``` … ``` code fence wrapping the whole payload,
+ * leaving any INNER fences intact. Anchored to the start/end of the (trimmed)
+ * input and greedy, so it spans to the LAST closing fence — used so a JSON
+ * tool-call envelope whose string values contain their own ```lang blocks
+ * (e.g. present_result's `markdown` holding a ```java sample) is not truncated
+ * at the first inner fence. Returns the unwrapped body, or the trimmed input
+ * when there is no clean outermost wrapper.
+ */
+export function stripOuterCodeFence(text) {
+    if (!text || typeof text !== 'string') return text || '';
+    const t = text.trim();
+    const m = t.match(/^```[A-Za-z0-9_-]*[ \t]*\r?\n([\s\S]*)\r?\n```$/);
+    return m ? m[1].trim() : t;
+}
+
+/**
  * Extract a tool-call envelope from arbitrary LLM text. Tries, in order:
  *   1. <thought>/<tool_calls><tool_call .../> XML tags
+ *   1.5 a single outer ```json fence wrapping a JSON envelope (inner-fence safe)
  *   2. ```json``` code blocks
  *   3. a raw whole-string JSON object
  *   4. outermost { … }
@@ -126,6 +143,34 @@ export function extractToolCall(text) {
     }
 
     if (results.tool_calls.length > 0) return results;
+
+    // 1.5 Outer ``` fence wrapping a single JSON envelope whose string values may
+    // THEMSELVES contain ``` fences (e.g. present_result's markdown holding a
+    // ```java block). Step 2's non-greedy block regex stops at the first INNER
+    // fence and truncates the JSON (the truncated string is then "repaired" into
+    // a short value — the bug where only the first lines of a code answer reached
+    // the app). When the whole payload is one fenced block, strip just the
+    // OUTERMOST fence and brace-match the JSON object so inner fences are kept.
+    {
+        const unfenced = stripOuterCodeFence(text);
+        if (unfenced && unfenced !== text.trim()) {
+            const s = unfenced.indexOf('{');
+            const e = unfenced.lastIndexOf('}');
+            if (s !== -1 && e > s) {
+                try {
+                    const data = safeParseJSON(unfenced.substring(s, e + 1));
+                    if (data && (data.thought || data.tool_calls)) {
+                        if (data.thought && !results.thought) results.thought = data.thought;
+                        if (data.tool_calls) {
+                            if (Array.isArray(data.tool_calls)) results.tool_calls.push(...data.tool_calls);
+                            else if (typeof data.tool_calls === 'object' && data.tool_calls.name) results.tool_calls.push(data.tool_calls);
+                        }
+                    }
+                } catch (_) { /* fall through to the block-regex / brace strategies */ }
+            }
+        }
+        if (results.tool_calls.length > 0) return results;
+    }
 
     // 2. JSON code blocks
     const blockRegex = /```(?:json)?\s*([\s\S]*?)\s*```/g;
@@ -320,6 +365,32 @@ export function extractThoughtFromMalformedText(text) {
         }
     }
     return null;
+}
+
+/**
+ * Strip a leading ReAct meta-preamble ("OBSERVE: … | PLAN: … | CALL: tool",
+ * also pipe-less and multi-line forms) from a deliverable. Models are told to
+ * narrate OBSERVE/PLAN before each call; when a model (e.g. MiMo) skips
+ * present_result and that narration ends up as the finish_task thought, this
+ * preamble would otherwise become the app-visible result. Any REAL content the
+ * model placed AFTER the preamble (a code block, prose) is preserved — only the
+ * meta-line is removed. A preamble-only string collapses to '' so the caller's
+ * "no deliverable" path (report synthesis) takes over instead of showing meta.
+ */
+export function stripReActPreamble(text) {
+    if (!text || typeof text !== 'string') return text || '';
+    let t = text.replace(/^\s+/, '');
+    // Form with an explicit "CALL: <tool>" terminator — strip through it.
+    let m = t.match(/^OBSERVE:[\s\S]*?CALL:\s*[A-Za-z_][A-Za-z0-9_]*\b[ \t]*\.?/i);
+    if (m) return t.slice(m[0].length).trim();
+    // Native-protocol form (no CALL token): "OBSERVE: … PLAN: …" up to the end
+    // of the PLAN line. Only strip when both markers are present so we never
+    // eat a legitimate answer that merely happens to start with "OBSERVE".
+    if (/^OBSERVE:/i.test(t) && /\bPLAN:/i.test(t)) {
+        m = t.match(/^OBSERVE:[\s\S]*?PLAN:[^\n]*(\n|$)/i);
+        if (m) return t.slice(m[0].length).trim();
+    }
+    return text.trim();
 }
 
 /**

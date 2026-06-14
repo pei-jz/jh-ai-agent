@@ -28,6 +28,20 @@ describe('handlePresentResult — Result Contract envelope', () => {
         expect(captured.summary).toBe('');
     });
 
+    it('falls back to content/md/text when the model mislabels the body arg', async () => {
+        // Some models (e.g. Xiaomi MiMo) emit the body under `content` (matching
+        // write_file) instead of the schema's `markdown` — must not yield empty.
+        const viaContent = await runPresent({ kind: 'markdown', content: '## Table', summary: null });
+        expect(viaContent.captured.payload).toEqual({ md: '## Table' });
+
+        const viaMd = await runPresent({ kind: 'markdown', md: '## Md', summary: null });
+        expect(viaMd.captured.payload).toEqual({ md: '## Md' });
+
+        // markdown wins when several are present.
+        const both = await runPresent({ kind: 'markdown', markdown: 'win', content: 'lose' });
+        expect(both.captured.payload).toEqual({ md: 'win' });
+    });
+
     it('file-list kind → payload.files', async () => {
         const files = [{ path: 'a.js', line: 3, reason: 'x' }];
         const { captured } = await runPresent({ kind: 'file-list', markdown: null, summary: null, files, edits: null, actions: null });

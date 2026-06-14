@@ -8,7 +8,7 @@ import { jsonrepair } from 'jsonrepair';
 import { invoke } from '@tauri-apps/api/core';
 import {
     safeParseJSON, extractToolCall, extractAllPossibleToolCalls,
-    extractThoughtFromMalformedText, cleanFinalResponse
+    extractThoughtFromMalformedText, cleanFinalResponse, stripReActPreamble
 } from './agent/ResponseParser.js';
 import { detectCycle } from './agent/LoopDetector.js';
 import { normalizeSafetyLimits } from './agent/SafetyLimits.js';
@@ -1002,14 +1002,21 @@ export class AgentController {
                             ? toolCall.thought
                             : (toolCall.thought.current_task || '');
                     }
-                    richThought = this._cleanFinalResponse(richThought || '').trim();
+                    // Strip the ReAct meta-preamble so a model that skipped
+                    // present_result (e.g. MiMo: narrates "OBSERVE…PLAN…CALL:
+                    // finish_task" instead of calling it) doesn't leak that
+                    // meta-text as the deliverable. Real content placed after
+                    // the preamble survives; a preamble-only thought collapses
+                    // to '' → the no-deliverable report synthesis takes over.
+                    richThought = stripReActPreamble(this._cleanFinalResponse(richThought || '')).trim();
                     const ftCall = toolCall.tool_calls.find(c => c.name === 'finish_task');
                     const ftSummaryArg = String(ftCall?.args?.summary || '').trim();
                     // Longest substantive candidate wins (reports are long; the
                     // OBSERVE/PLAN/CALL thought is short meta-text).
                     finalResponse = [ftSummaryArg, richThought]
                         .filter(Boolean)
-                        .sort((a, b) => b.length - a.length)[0] || response;
+                        .sort((a, b) => b.length - a.length)[0]
+                        || stripReActPreamble(this._cleanFinalResponse(response || '')).trim();
                     onAgentStatus?.({ event: 'status', status: 'completed', message: 'Task finished. ✅' });
                     break;
                 }
@@ -1821,11 +1828,26 @@ ${String(finalResponse || '').slice(0, 2000)}`;
 
         // resultKind → appended guidance via extra_instructions
         // (which the loop already merges into the system prompt).
+        //
+        // This is intentionally forceful: weaker models (e.g. MiMo) otherwise
+        // narrate the answer as text / "CALL: present_result" and call
+        // finish_task WITHOUT ever invoking present_result, so the app receives
+        // nothing usable. Each rule below names a concrete failure mode.
         const extra = [];
         if (typeof intent.resultKind === 'string' && intent.resultKind.trim()) {
+            const k = intent.resultKind.trim();
             extra.push(
-                `When the task is complete, deliver the result to the calling app by calling ` +
-                `present_result with kind="${intent.resultKind.trim()}" (then finish_task).`
+                `## Delivering the result (MANDATORY)\n` +
+                `The calling app receives your result ONLY through the present_result tool call. ` +
+                `Plain text in your reply, a fenced code block in your message, or writing "CALL: present_result" ` +
+                `do NOT deliver anything — that content is discarded and the user sees an empty result.\n` +
+                `1. Call \`present_result\` with kind="${k}". Put the COMPLETE deliverable ` +
+                `(full code / full answer, not a summary) in the \`markdown\` argument. ` +
+                `The parameter is literally named \`markdown\` — do NOT use \`content\`, \`text\`, or \`md\`.\n` +
+                `2. Call \`present_result\` FIRST, then call \`finish_task\` with a SHORT one-line summary. ` +
+                `Never skip present_result. Never put the actual result only in finish_task's summary.\n` +
+                `3. Your "OBSERVE / PLAN" reasoning is internal — it is NOT the result. ` +
+                `Never let that meta-text stand in for the deliverable.`
             );
         }
         if (extra.length > 0) {

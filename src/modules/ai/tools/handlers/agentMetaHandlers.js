@@ -57,6 +57,13 @@ export async function handlePresentResult(ctx, args, onAgentStatus) {
     const kind = args.kind || 'answer';
     onAgentStatus?.(`Presenting result (${kind})`);
 
+    // Resolve the markdown/text body. The schema names this `markdown`, but
+    // models frequently emit it under `content` (matching write_file /
+    // create_artifact) or `md`/`text`. Accept all so a mislabelled arg doesn't
+    // silently produce an empty result envelope.
+    const body = [args.markdown, args.content, args.md, args.text]
+        .find(v => typeof v === 'string' && v.length > 0) || '';
+
     // Build the kind-specific payload from the flattened args.
     let payload;
     switch (kind) {
@@ -67,12 +74,12 @@ export async function handlePresentResult(ctx, args, onAgentStatus) {
             payload = { edits: Array.isArray(args.edits) ? args.edits : [] };
             break;
         case 'answer':
-            payload = { text: args.markdown || '' };
+            payload = { text: body };
             break;
         case 'markdown':
         case 'table':
         default:
-            payload = { md: args.markdown || '' };
+            payload = { md: body };
             break;
     }
 
