@@ -33,8 +33,8 @@ const ICONS = {
         <rect x="14" y="3" width="3" height="14" rx="1"/>
     </svg>`,
     config: `<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-        <circle cx="10" cy="10" r="2.8"/>
-        <path d="M10 2.5v1.8M10 15.7v1.8M2.5 10h1.8M15.7 10h1.8M4.5 4.5l1.3 1.3M14.2 14.2l1.3 1.3M4.5 15.5l1.3-1.3M14.2 5.8l1.3-1.3"/>
+        <path d="M18.28 8.09 L18.28 11.91 L15.90 11.92 L15.52 12.81 L17.21 14.50 L14.50 17.21 L12.81 15.52 L11.92 15.90 L11.91 18.28 L8.09 18.28 L8.08 15.90 L7.19 15.52 L5.50 17.21 L2.79 14.50 L4.48 12.81 L4.10 11.92 L1.72 11.91 L1.72 8.09 L4.10 8.08 L4.48 7.19 L2.79 5.50 L5.50 2.79 L7.19 4.48 L8.08 4.10 L8.09 1.72 L11.91 1.72 L11.92 4.10 L12.81 4.48 L14.50 2.79 L17.21 5.50 L15.52 7.19 L15.90 8.08 Z"/>
+        <circle cx="10" cy="10" r="2.7"/>
     </svg>`,
 };
 
@@ -49,7 +49,6 @@ export class Sidebar {
             { id: 'overview',   label: 'Overview',   icon: ICONS.overview },
             { id: 'chat',       label: 'Chat',        icon: ICONS.chat },
             { id: 'monitor',    label: 'Monitor',     icon: ICONS.monitor },
-            { id: 'history',    label: 'History',     icon: ICONS.history },
             { id: 'schedule',   label: 'Schedule',    icon: ICONS.schedule },
             { id: 'config',     label: 'Settings',    icon: ICONS.config },
         ];

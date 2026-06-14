@@ -1,4 +1,28 @@
 import { renderResultSummary, attachFileOpenHandlers, ensureResultViewStyles, renderMarkdown } from '../utils/resultView.js';
+import { invoke } from '@tauri-apps/api/core';
+import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
+import { AGENT_MODES, DEFAULT_MODE_ID, buildBehavior } from '../../modules/ai/AgentModes.js';
+import { mcpManager } from '../../modules/ai/McpManager.js';
+import { ModeDropdown } from '../components/ModeDropdown.js';
+import { SlashCommands } from '../components/SlashCommands.js';
+import { promptTemplateManager } from '../../modules/ai/PromptTemplateManager.js';
+import { skillManager } from '../../modules/ai/SkillManager.js';
+import { icon } from '../utils/icons.js';
+
+// Short-TTL cache of the task list, shared across MonitorView instances so that
+// switching the selected task (which re-routes and rebuilds the view) doesn't
+// re-fetch the whole list every time. Invalidated on task creation.
+let _tasksCache = null;
+let _tasksCacheAt = 0;
+const TASKS_CACHE_MS = 2500;
+function invalidateTasksCache() { _tasksCache = null; _tasksCacheAt = 0; }
+// Remembered task-list grouping preference ('date' | 'workspace').
+let _taskGroupByPref = 'date';
+// Remembered task-list filters (search text + status), folded in from History.
+let _taskSearchPref = '';
+let _taskStatusPref = 'all';
+// Collapsed group keys (persisted across re-routes). Keys are group labels.
+let _collapsedGroups = new Set();
 
 export class MonitorView {
     constructor() {
@@ -20,12 +44,136 @@ export class MonitorView {
         this._chatDataMap = {};          // uid → chat entry[]
         this._activeStepChatEntries = []; // real-time accumulator
         this._activeStepChatUid = null;   // uid for current step's button
+        // Task-list grouping: 'date' (default) or 'workspace'. Persisted across
+        // instances via a module var so it survives re-routes.
+        this._taskGroupBy = _taskGroupByPref;
+        // Task-list filters (History view was folded into Monitor). Persisted in
+        // module vars so they survive the re-route on task selection.
+        this._taskSearch = _taskSearchPref;
+        this._taskStatusFilter = _taskStatusPref;
     }
 
     async loadTasks() {
         try {
-            if (window.apiClient) this.tasks = await window.apiClient.listTasks();
+            if (!window.apiClient) return;
+            // Short-TTL cache: every task click re-routes → new MonitorView →
+            // render() → loadTasks(). Re-fetching the whole list each time was
+            // the main "Monitor feels heavy" cause. Reuse a recent list (running
+            // status updates still flow via the per-task WebSocket, and the cache
+            // is invalidated when a task is created), so switching tasks is snappy.
+            const now = Date.now();
+            if (_tasksCache && (now - _tasksCacheAt) < TASKS_CACHE_MS) {
+                this.tasks = _tasksCache;
+                return;
+            }
+            this.tasks = await window.apiClient.listTasks();
+            _tasksCache = this.tasks;
+            _tasksCacheAt = now;
         } catch (e) { console.error('Failed to load tasks:', e); }
+    }
+
+    /** Group key for a task under the current grouping mode. */
+    _taskGroupKey(task) {
+        if (this._taskGroupBy === 'workspace') {
+            const ws = (task.workspace_path || '').replace(/[\\/]+$/, '');
+            if (!ws) return '(no workspace)';
+            return ws.split(/[\\/]/).pop() || ws;
+        }
+        return (task.started_at || '').slice(0, 10) || '(unknown date)';
+    }
+
+    /** HTML for one task row in the left list. */
+    _taskItemHtml(task) {
+        const isSelected = this.selectedTaskId === task.id;
+        const pct = Math.round((task.progress || 0) * 100);
+        return `
+            <div class="mtask-item ${isSelected ? 'selected' : ''} mtask-${task.status}" data-task-id="${task.id}">
+                <div class="mtask-top">
+                    <span class="mtask-dot dot-${task.status}"></span>
+                    <span class="mtask-id">#${task.id.slice(0, 6)}</span>
+                    ${task.caller ? `<span class="mtask-caller">${escapeHtml(task.caller)}</span>` : ''}
+                    <span class="mtask-time">${formatTime(task.started_at)}</span>
+                </div>
+                <div class="mtask-prompt">${escapeHtml(task.prompt)}</div>
+                ${task.status === 'running' ? `<div class="mtask-progbar"><div style="width:${pct}%"></div></div>` : ''}
+            </div>`;
+    }
+
+    /**
+     * Build the grouped task list. Running tasks float to the top within the
+     * natural sort; groups are ordered by their newest task (so the most-recent
+     * date / most-recently-used workspace comes first).
+     */
+    /** Tasks after applying the search text + status filter. */
+    _filteredTasks() {
+        const q = (this._taskSearch || '').toLowerCase().trim();
+        const status = this._taskStatusFilter || 'all';
+        return (this.tasks || []).filter(t => {
+            if (status !== 'all' && t.status !== status) return false;
+            if (!q) return true;
+            return (t.id || '').toLowerCase().includes(q)
+                || (t.prompt || '').toLowerCase().includes(q)
+                || (t.caller || '').toLowerCase().includes(q);
+        });
+    }
+
+    _renderTaskListHtml() {
+        if (!this.tasks || this.tasks.length === 0) {
+            return `<div class="mtask-empty">No tasks yet</div>`;
+        }
+        const filtered = this._filteredTasks();
+        if (filtered.length === 0) {
+            return `<div class="mtask-empty">No tasks match the filter</div>`;
+        }
+        const sorted = filtered.sort((a, b) => {
+            if (a.status === 'running' && b.status !== 'running') return -1;
+            if (a.status !== 'running' && b.status === 'running') return 1;
+            return new Date(b.started_at) - new Date(a.started_at);
+        });
+        // Preserve sort order while bucketing by group key.
+        const groups = new Map();
+        for (const t of sorted) {
+            const k = this._taskGroupKey(t);
+            if (!groups.has(k)) groups.set(k, []);
+            groups.get(k).push(t);
+        }
+        let html = '';
+        for (const [key, items] of groups) {
+            const collapsed = _collapsedGroups.has(key);
+            html += `<div class="mtask-group-header ${collapsed ? 'collapsed' : ''}" data-group-key="${escapeHtml(key)}">
+                <span class="mgroup-chevron">${collapsed ? '▶' : '▼'}</span>
+                <span class="mgroup-name">${escapeHtml(key)}</span>
+                <span class="mgroup-count">${items.length}</span>
+            </div>`;
+            html += `<div class="mtask-group-items" data-group-items="${escapeHtml(key)}"${collapsed ? ' style="display:none"' : ''}>`;
+            html += items.map(t => this._taskItemHtml(t)).join('');
+            html += `</div>`;
+        }
+        return html;
+    }
+
+    /** Bind task-item clicks + group-header collapse on the (re)rendered list. */
+    _bindTaskListEvents() {
+        const listEl = document.getElementById('mtask-list');
+        if (!listEl) return;
+        listEl.querySelectorAll('.mtask-item').forEach(item => {
+            item.addEventListener('click', () => {
+                const id = item.getAttribute('data-task-id');
+                if (id) window.location.hash = `#monitor?id=${id}`;
+            });
+        });
+        listEl.querySelectorAll('.mtask-group-header').forEach(header => {
+            header.addEventListener('click', () => {
+                const key = header.getAttribute('data-group-key');
+                const itemsEl = listEl.querySelector(`.mtask-group-items[data-group-items="${CSS.escape(key)}"]`);
+                const nowCollapsed = !_collapsedGroups.has(key);
+                if (nowCollapsed) _collapsedGroups.add(key); else _collapsedGroups.delete(key);
+                header.classList.toggle('collapsed', nowCollapsed);
+                const chevron = header.querySelector('.mgroup-chevron');
+                if (chevron) chevron.textContent = nowCollapsed ? '▶' : '▼';
+                if (itemsEl) itemsEl.style.display = nowCollapsed ? 'none' : '';
+            });
+        });
     }
 
     async render() {
@@ -38,30 +186,7 @@ export class MonitorView {
             this.selectedTaskId = this.tasks[0].id;
         }
 
-        const sortedTasks = [...this.tasks].sort((a, b) => {
-            if (a.status === 'running' && b.status !== 'running') return -1;
-            if (a.status !== 'running' && b.status === 'running') return 1;
-            return new Date(b.started_at) - new Date(a.started_at);
-        });
-
-        const taskListHtml = sortedTasks.length > 0
-            ? sortedTasks.map(task => {
-                const isSelected = this.selectedTaskId === task.id;
-                const pct = Math.round((task.progress || 0) * 100);
-                return `
-                    <div class="mtask-item ${isSelected ? 'selected' : ''} mtask-${task.status}" data-task-id="${task.id}">
-                        <div class="mtask-top">
-                            <span class="mtask-dot dot-${task.status}"></span>
-                            <span class="mtask-id">#${task.id.slice(0, 6)}</span>
-                            ${task.caller ? `<span class="mtask-caller">${escapeHtml(task.caller)}</span>` : ''}
-                            <span class="mtask-time">${formatTime(task.started_at)}</span>
-                        </div>
-                        <div class="mtask-prompt">${escapeHtml(task.prompt)}</div>
-                        ${task.status === 'running' ? `<div class="mtask-progbar"><div style="width:${pct}%"></div></div>` : ''}
-                    </div>
-                `;
-            }).join('')
-            : `<div class="mtask-empty">No tasks yet</div>`;
+        const taskListHtml = this._renderTaskListHtml();
 
         let rightHtml = '';
         if (this.selectedTaskId) {
@@ -105,6 +230,69 @@ export class MonitorView {
                     align-items: center;
                     justify-content: space-between;
                 }
+                .mtask-filter {
+                    display: flex;
+                    flex-direction: column;
+                    gap: 5px;
+                    padding: 7px 8px;
+                    border-bottom: 1px solid var(--border);
+                    background: var(--bg-secondary);
+                }
+                .mtask-search, .mtask-status {
+                    width: 100%;
+                    height: 26px;
+                    font-size: 11.5px;
+                    background: var(--bg-input);
+                    border: 1px solid var(--border);
+                    border-radius: 5px;
+                    color: var(--text-primary);
+                    padding: 0 8px;
+                    outline: none;
+                }
+                .mtask-search:focus, .mtask-status:focus { border-color: var(--accent); }
+                .mtask-status { cursor: pointer; }
+                .mgroup-toggle {
+                    display: flex;
+                    gap: 3px;
+                    padding: 6px 8px;
+                    border-bottom: 1px solid var(--border);
+                    background: var(--bg-secondary);
+                }
+                .mgroup-btn {
+                    flex: 1;
+                    padding: 4px 0;
+                    font-size: 11px;
+                    font-weight: 600;
+                    border: 1px solid var(--border);
+                    background: var(--bg-tertiary);
+                    color: var(--text-secondary);
+                    border-radius: 5px;
+                    cursor: pointer;
+                    transition: background 0.12s, color 0.12s;
+                }
+                .mgroup-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
+                .mgroup-btn.active { background: var(--accent); color: #000; border-color: var(--accent); }
+                .mtask-group-header {
+                    display: flex;
+                    align-items: center;
+                    gap: 6px;
+                    font-size: 12px;
+                    font-weight: 700;
+                    letter-spacing: 0.02em;
+                    color: var(--accent);
+                    padding: 9px 8px 5px;
+                    position: sticky;
+                    top: 0;
+                    background: var(--bg-secondary);
+                    z-index: 1;
+                    cursor: pointer;
+                    user-select: none;
+                    border-bottom: 1px solid var(--border-light);
+                }
+                .mtask-group-header:hover { color: var(--accent-hover); }
+                .mgroup-chevron { font-size: 9px; width: 11px; flex-shrink: 0; opacity: 0.8; }
+                .mgroup-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+                .mgroup-count { font-size: 11px; opacity: 0.6; font-weight: 600; color: var(--text-secondary); }
                 .mpanel-left-list {
                     flex: 1;
                     overflow-y: auto;
@@ -723,8 +911,20 @@ export class MonitorView {
                 <!-- Left panel -->
                 <div class="mpanel-left">
                     <div class="mpanel-left-header">
-                        <span>Executions</span>
-                        <span style="font-weight:400;opacity:0.6">${this.tasks.length}</span>
+                        <span>Executions <span style="font-weight:400;opacity:0.6">${this.tasks.length}</span></span>
+                        <button id="btn-new-task" class="btn btn-primary" style="height:24px;padding:0 8px;font-size:11px;font-weight:600;" title="Create a new task">＋ New</button>
+                    </div>
+                    <div class="mtask-filter">
+                        <input type="text" id="mtask-search" class="mtask-search" placeholder="🔍 Search prompt, ID, caller…" value="${escapeHtml(this._taskSearch || '')}">
+                        <select id="mtask-status" class="mtask-status">
+                            ${['all','running','paused','completed','failed','aborted'].map(s =>
+                                `<option value="${s}" ${this._taskStatusFilter === s ? 'selected' : ''}>${s === 'all' ? 'All statuses' : s}</option>`
+                            ).join('')}
+                        </select>
+                    </div>
+                    <div class="mgroup-toggle" id="mgroup-toggle">
+                        <button class="mgroup-btn ${this._taskGroupBy === 'date' ? 'active' : ''}" data-group="date">${icon('calendar', 13)} Date</button>
+                        <button class="mgroup-btn ${this._taskGroupBy === 'workspace' ? 'active' : ''}" data-group="workspace">${icon('folder', 13)} WS</button>
                     </div>
                     <div class="mpanel-left-list" id="mtask-list">
                         ${taskListHtml}
@@ -754,8 +954,10 @@ export class MonitorView {
                 ${task.caller ? `<span class="mtask-caller">${escapeHtml(task.caller)}</span>` : ''}
                 <span class="task-badge badge-${task.status}">${task.status}</span>
                 <span class="mdetail-prompt-text" title="${escapeHtml(task.prompt)}">${escapeHtml(task.prompt)}</span>
-                <span class="mdetail-tokens">Tokens: <strong id="val-total-tokens">${tokens.toLocaleString()}</strong><span class="mdetail-tokens-bd" style="font-size:11px;font-weight:400;color:var(--text-tertiary);margin-left:4px;">(<span id="val-in-tokens" title="入力（cached除く・全額課金分）">↑${inInit.toLocaleString()}</span> · <span id="val-cache-tokens" title="キャッシュ読出（約10%課金 = 節約分）">⚡${cachedInit.toLocaleString()}</span> · <span id="val-out-tokens" title="出力">↓${outInit.toLocaleString()}</span>)</span></span>
-                ${task.status === 'running' ? `<button class="btn btn-error" id="btn-abort-task" style="height:28px;padding:0 12px;font-size:11px;flex-shrink:0">⏹ Abort</button>` : ''}
+                <span class="mdetail-tokens">Tokens: <strong id="val-total-tokens">${tokens.toLocaleString()}</strong><span class="mdetail-tokens-bd" style="font-size:11px;font-weight:400;color:var(--text-tertiary);margin-left:4px;">(<span id="val-in-tokens" title="Input (excl. cached, full-price)">↑${inInit.toLocaleString()}</span> · <span id="val-cache-tokens" title="Cache reads (~10% price = savings)">⚡${cachedInit.toLocaleString()}</span> · <span id="val-out-tokens" title="Output">↓${outInit.toLocaleString()}</span>)</span></span>
+                ${task.status === 'running'
+                    ? `<button class="btn btn-error" id="btn-abort-task" style="height:28px;padding:0 12px;font-size:11px;flex-shrink:0">⏹ Abort</button>`
+                    : `<button class="btn btn-secondary" id="btn-delete-task" style="height:28px;padding:0 12px;font-size:11px;flex-shrink:0;color:var(--error);border-color:var(--error)" title="Delete this task from history">🗑 Delete</button>`}
             </div>
             <div class="mdetail-progress">
                 <div class="mdetail-progbar-track">
@@ -1342,9 +1544,9 @@ export class MonitorView {
                   `<button type="button" class="mconfirm-plan-toggle" data-confirm-id="${cid}" ` +
                     `style="height:24px;padding:0 10px;font-size:11px;cursor:pointer;` +
                     `background:var(--bg-secondary);color:var(--text-secondary);` +
-                    `border:1px solid var(--border);border-radius:4px;">✏️ 編集</button>` +
+                    `border:1px solid var(--border);border-radius:4px;">✏️ Edit</button>` +
                 `</div>` +
-                `<p class="mconfirm-hint" style="font-size:11px;color:var(--text-tertiary);margin:0 0 6px">承認前に「編集」で修正できます。承認すると（編集後の）計画に従います。</p>` +
+                `<p class="mconfirm-hint" style="font-size:11px;color:var(--text-tertiary);margin:0 0 6px">You can revise the plan with "Edit" before approving. On approval the (edited) plan is followed.</p>` +
                 `<div class="mconfirm-plan-preview rv-root" id="plan-preview-${cid}" ` +
                   `style="max-height:420px;overflow:auto;background:var(--bg-primary);` +
                   `border:1px solid var(--border);border-radius:6px;padding:10px 14px;">` +
@@ -1691,7 +1893,7 @@ export class MonitorView {
                         this._taskFinished = true;
                         const si = document.getElementById('input-steering');
                         const sb = document.getElementById('btn-send-steering');
-                        if (si) { si.disabled = false; si.placeholder = '✓ 完了。追記してタスクを続行 (Ctrl+Enter)'; }
+                        if (si) { si.disabled = false; si.placeholder = '✓ Done. Add a message to continue the task (Ctrl+Enter)'; }
                         if (sb) sb.disabled = false;
                     } else {
                         disableSteering();
@@ -1732,7 +1934,7 @@ export class MonitorView {
                 this._taskFinished = true;
                 const si = document.getElementById('input-steering');
                 const sb = document.getElementById('btn-send-steering');
-                if (si) { si.disabled = false; si.placeholder = '✓ 完了。追記してタスクを続行 (Ctrl+Enter)'; }
+                if (si) { si.disabled = false; si.placeholder = '✓ Done. Add a message to continue the task (Ctrl+Enter)'; }
                 if (sb) sb.disabled = false;
             }
         } catch (e) {
@@ -1747,7 +1949,7 @@ export class MonitorView {
         if (runs.length === 1) return renderResultSummary(runs[0]);
         // Multiple runs (continue-after-complete) — label each.
         return runs.map((r, i) =>
-            `<div class="mresult-run"><div class="mresult-run-label">実行 #${i + 1}</div>${renderResultSummary(r)}</div>`
+            `<div class="mresult-run"><div class="mresult-run-label">Run #${i + 1}</div>${renderResultSummary(r)}</div>`
         ).join('<hr style="border:none;border-top:1px solid var(--border);margin:18px 0">');
     }
 
@@ -2268,7 +2470,10 @@ export class MonitorView {
                         ${d.duration ? `<span class="mlog-tele-dur">${d.duration}ms</span>` : ''}
                         ${usage ? `<span class="mchat-usage">${usage}</span>` : ''}
                     </div>
-                    <div class="mchat-subtabs">${tabBtns}</div>
+                    <div class="mchat-subtabs">
+                        ${tabBtns}
+                        <button class="mchat-copy" data-grp="${grp}" title="Copy the visible tab" style="margin-left:auto;background:var(--bg-tertiary);border:1px solid var(--border);color:var(--text-secondary);font-size:11px;padding:2px 8px;border-radius:5px;cursor:pointer;">📋 Copy</button>
+                    </div>
                     ${tabPanels}
                 </div>
             `;
@@ -2286,6 +2491,22 @@ export class MonitorView {
             });
         });
 
+        // Per-entry "Copy" — copies the CURRENTLY-VISIBLE tab's raw text.
+        body.querySelectorAll('.mchat-copy').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const grp = btn.getAttribute('data-grp');
+                const panels = [...body.querySelectorAll(`.mchat-panel[data-grp="${grp}"]`)];
+                const panel = panels.find(p => p.style.display !== 'none');
+                const text = panel ? panel.textContent : '';
+                try {
+                    await navigator.clipboard.writeText(text);
+                    const orig = btn.textContent;
+                    btn.textContent = '✓ Copied';
+                    setTimeout(() => { btn.textContent = orig; }, 1500);
+                } catch (_) { /* clipboard blocked */ }
+            });
+        });
+
         overlay.classList.add('open');
     }
 
@@ -2295,11 +2516,60 @@ export class MonitorView {
         // Setup CHAT modal overlay (once, appended to body)
         this._setupChatModal();
 
-        // Task list clicks
-        document.querySelectorAll('.mtask-item').forEach(item => {
-            item.addEventListener('click', () => {
-                const id = item.getAttribute('data-task-id');
-                if (id) window.location.hash = `#monitor?id=${id}`;
+        // Task list clicks + group-header collapse
+        this._bindTaskListEvents();
+
+        // New-task button → creation modal (DirectChat replacement; Phase 1)
+        const newTaskBtn = document.getElementById('btn-new-task');
+        if (newTaskBtn) {
+            newTaskBtn.addEventListener('click', () => this._openNewTaskModal());
+        }
+        // Auto-open the modal when arriving from the Dashboard's "New Task" button.
+        try {
+            if (localStorage.getItem('jh_open_new_task')) {
+                localStorage.removeItem('jh_open_new_task');
+                this._openNewTaskModal();
+            }
+        } catch (_) {}
+
+        // Search + status filter (History folded into Monitor) — re-render list.
+        const reRenderList = () => {
+            const listEl = document.getElementById('mtask-list');
+            if (!listEl) return;
+            listEl.innerHTML = this._renderTaskListHtml();
+            this._bindTaskListEvents();
+        };
+        const searchEl = document.getElementById('mtask-search');
+        if (searchEl) {
+            searchEl.addEventListener('input', () => {
+                this._taskSearch = searchEl.value;
+                _taskSearchPref = this._taskSearch;
+                reRenderList();
+            });
+        }
+        const statusEl = document.getElementById('mtask-status');
+        if (statusEl) {
+            statusEl.addEventListener('change', () => {
+                this._taskStatusFilter = statusEl.value;
+                _taskStatusPref = this._taskStatusFilter;
+                reRenderList();
+            });
+        }
+
+        // Group-by toggle (date / workspace) — re-renders the list in place.
+        document.querySelectorAll('#mgroup-toggle .mgroup-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const g = btn.getAttribute('data-group');
+                if (!g || g === this._taskGroupBy) return;
+                this._taskGroupBy = g;
+                _taskGroupByPref = g; // remember across re-routes
+                document.querySelectorAll('#mgroup-toggle .mgroup-btn')
+                    .forEach(b => b.classList.toggle('active', b === btn));
+                const listEl = document.getElementById('mtask-list');
+                if (listEl) {
+                    listEl.innerHTML = this._renderTaskListHtml();
+                    this._bindTaskListEvents(); // re-bind clicks + collapse
+                }
             });
         });
 
@@ -2315,6 +2585,28 @@ export class MonitorView {
                     }
                     abortBtn.disabled = true;
                     abortBtn.textContent = 'Aborting…';
+                }
+            });
+        }
+
+        // Delete button (History folded into Monitor) — removes the task from
+        // history (memory + disk), then returns to the list.
+        const deleteBtn = document.getElementById('btn-delete-task');
+        if (deleteBtn && this.selectedTaskId) {
+            deleteBtn.addEventListener('click', async () => {
+                if (!confirm('Delete this task from history? This cannot be undone.')) return;
+                deleteBtn.disabled = true;
+                deleteBtn.textContent = 'Deleting…';
+                try {
+                    await window.apiClient.deleteTaskHistory(this.selectedTaskId);
+                    invalidateTasksCache();
+                    this.selectedTaskId = null;
+                    // We were at #monitor?id=X, so this hash change re-renders the view.
+                    window.location.hash = '#monitor';
+                } catch (e) {
+                    alert('Failed to delete: ' + (e.message || e));
+                    deleteBtn.disabled = false;
+                    deleteBtn.textContent = '🗑 Delete';
                 }
             });
         }
@@ -2352,11 +2644,11 @@ export class MonitorView {
                             pv.innerHTML = renderMarkdown(ta.value);
                             ta.style.display = 'none';
                             pv.style.display = 'block';
-                            btnPlanToggle.textContent = '✏️ 編集';
+                            btnPlanToggle.textContent = '✏️ Edit';
                         } else {
                             ta.style.display = 'block';
                             pv.style.display = 'none';
-                            btnPlanToggle.textContent = '👁 プレビュー';
+                            btnPlanToggle.textContent = '👁 Preview';
                         }
                     }
                     return;
@@ -2503,7 +2795,7 @@ export class MonitorView {
                     } catch (e) {
                         console.error('continueTask failed:', e);
                         steerInput.disabled = false; steerBtn.disabled = false;
-                        alert(`続行に失敗しました: ${e.message || e}`);
+                        alert(`Failed to continue: ${e.message || e}`);
                     }
                     return;
                 }
@@ -2531,6 +2823,270 @@ export class MonitorView {
                 else this.loadHistoricalLogs(this.selectedTaskId);
             }
         }
+    }
+
+    /**
+     * New-task creation modal (Phase 1 — the DirectChat-as-launcher replacement).
+     * Keeps the useful chat settings (agent mode, workspace, MCP servers) and a
+     * large prompt box, WITHOUT the chat transcript. On send it creates an agent
+     * task via POST /tasks (same path as DirectChat agent mode) and navigates to
+     * that task in the Monitor so you watch it where it runs.
+     */
+    /** Full-size image lightbox (click an attachment thumbnail to zoom). */
+    _openImageZoom(src) {
+        const z = document.createElement('div');
+        z.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:5000;display:flex;align-items:center;justify-content:center;cursor:zoom-out;padding:24px;';
+        z.innerHTML = `<img src="${src}" style="max-width:96vw;max-height:92vh;border-radius:8px;box-shadow:0 8px 40px rgba(0,0,0,0.6);">`;
+        const close = () => { try { document.body.removeChild(z); } catch (_) {} document.removeEventListener('keydown', onEsc); };
+        const onEsc = (e) => { if (e.key === 'Escape') close(); };
+        z.addEventListener('click', close);
+        document.addEventListener('keydown', onEsc);
+        document.body.appendChild(z);
+    }
+
+    async _openNewTaskModal() {
+        let config = {};
+        try { config = (await invoke('get_ai_config')) || {}; } catch (_) {}
+        const projects = Array.isArray(config.approved_projects) ? config.approved_projects : [];
+        const defaultWs = this._lastNewTaskWs || projects[0] || '';
+        const mcpServers = config.mcp_servers || {};
+        const running = new Set(mcpManager.clients.keys());
+
+        const modeDropdown = new ModeDropdown(this._lastNewTaskMode || DEFAULT_MODE_ID);
+
+        const wsDatalist = projects.map(p => `<option value="${escapeHtml(p)}"></option>`).join('');
+
+        const mcpHtml = Object.keys(mcpServers).length === 0
+            ? `<div style="font-size:11.5px;color:var(--text-tertiary)">No MCP servers configured (Settings → MCP).</div>`
+            : Object.keys(mcpServers).map(name => `
+                <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;user-select:none;">
+                    <input type="checkbox" class="nt-mcp-cb" data-name="${escapeHtml(name)}" ${running.has(name) ? 'checked' : ''}>
+                    <span>${escapeHtml(name)}</span>
+                </label>`).join('');
+
+        const overlay = document.createElement('div');
+        overlay.style.cssText = `position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:4000;display:flex;align-items:center;justify-content:center;`;
+        overlay.innerHTML = `
+            <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:12px;width:640px;max-width:92vw;max-height:88vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 12px 40px rgba(0,0,0,0.5);">
+                <div style="padding:14px 18px;border-bottom:1px solid var(--border);background:var(--bg-tertiary);display:flex;justify-content:space-between;align-items:center;">
+                    <strong style="font-size:15px;display:flex;align-items:center;gap:7px;"><span style="color:var(--accent);display:inline-flex">${icon('bolt')}</span>New Task</strong>
+                    <button class="nt-close" style="background:none;border:none;color:var(--text-primary);cursor:pointer;font-size:18px;">✖</button>
+                </div>
+                <div style="padding:16px 18px;overflow-y:auto;display:flex;flex-direction:column;gap:14px;">
+                    <div>
+                        <label class="input-label" style="font-size:11px;">Workspace (required for agent tasks)</label>
+                        <div style="display:flex;gap:8px;">
+                            <input type="text" id="nt-ws" class="input" value="${escapeHtml(defaultWs)}" list="nt-ws-list" placeholder="C:\\path\\to\\project" style="flex:1;">
+                            <datalist id="nt-ws-list">${wsDatalist}</datalist>
+                            <button class="btn btn-secondary nt-browse" type="button" style="padding:0 12px;display:flex;align-items:center;">${icon('folder')}</button>
+                        </div>
+                    </div>
+                    <div style="display:flex;gap:14px;flex-wrap:wrap;">
+                        <div style="flex:1;min-width:180px;">
+                            <label class="input-label" style="font-size:11px;">Agent mode</label>
+                            ${modeDropdown.render()}
+                        </div>
+                    </div>
+                    <div>
+                        <label class="input-label" style="font-size:11px;">MCP servers to use (optional)</label>
+                        <div style="display:flex;flex-wrap:wrap;gap:14px;padding:8px 10px;border:1px solid var(--border-light);border-radius:6px;background:var(--bg-tertiary);">
+                            ${mcpHtml}
+                        </div>
+                    </div>
+                    <div style="position:relative;">
+                        <div style="display:flex;justify-content:space-between;align-items:center;">
+                            <label class="input-label" style="font-size:11px;margin:0;">Task <span style="opacity:0.6">(/ to expand a template or attach a skill)</span></label>
+                            <button class="btn btn-secondary nt-attach" type="button" style="height:24px;padding:0 8px;font-size:11px;display:flex;align-items:center;gap:4px;" title="Attach image or file">📎 Attach</button>
+                            <input type="file" id="nt-file-input" style="display:none;" multiple accept="image/*,text/*,.log,.json,.md,.js,.py,.rs,.csv,.xlsx,.xls">
+                        </div>
+                        <div id="nt-skill-chips" class="sc-chips" style="display:none;margin-top:6px;"></div>
+                        <div id="nt-previews" style="display:none;flex-wrap:wrap;gap:8px;margin-top:6px;"></div>
+                        <div id="nt-slash-popup" class="slash-popup" style="display:none;"></div>
+                        <textarea id="nt-prompt" class="input" rows="8" placeholder="Describe the task to run…  (/ for commands, Ctrl+Enter to create, paste images too)" style="width:100%;resize:vertical;min-height:160px;font-size:13.5px;line-height:1.6;margin-top:6px;"></textarea>
+                    </div>
+                </div>
+                <div style="padding:12px 18px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px;">
+                    <button class="btn btn-secondary nt-cancel">Cancel</button>
+                    <button class="btn btn-primary nt-send">Create & Run ▶</button>
+                </div>
+            </div>`;
+        document.body.appendChild(overlay);
+
+        let dragUnlisten = null;
+        const close = () => {
+            if (dragUnlisten) { try { dragUnlisten(); } catch (_) {} dragUnlisten = null; }
+            try { document.body.removeChild(overlay); } catch (_) {}
+        };
+        overlay.querySelector('.nt-close').onclick = close;
+        overlay.querySelector('.nt-cancel').onclick = close;
+        overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) close(); });
+
+        const wsInput = overlay.querySelector('#nt-ws');
+        const textarea = overlay.querySelector('#nt-prompt');
+        const sendBtn = overlay.querySelector('.nt-send');
+        modeDropdown.init(); // custom dropdown (SVG icons + per-row descriptions)
+
+        // "/" command popup — templates EXPAND, skills ATTACH as chips (same as
+        // ChatView); skill bodies are injected at send via slash.buildPrompt().
+        promptTemplateManager.loadFromConfig(config);
+        skillManager.refresh().catch(() => {});
+        const slash = new SlashCommands(textarea, overlay.querySelector('#nt-slash-popup'), overlay.querySelector('#nt-skill-chips'));
+
+        // ── Image / file attachments ─────────────────────────────────────
+        // Images → sent to the LLM (task `images`). Text/Excel files → their
+        // content is appended to the prompt at send (same as ChatView).
+        const attachments = [];
+        const fileInput = overlay.querySelector('#nt-file-input');
+        const previews = overlay.querySelector('#nt-previews');
+        const renderPreviews = () => {
+            if (attachments.length === 0) { previews.style.display = 'none'; previews.innerHTML = ''; return; }
+            previews.style.display = 'flex';
+            previews.innerHTML = attachments.map(a => a.type === 'image'
+                ? `<div class="nt-prev" data-id="${a.id}" style="position:relative;border:1px solid var(--border);border-radius:6px;padding:4px;background:var(--bg-tertiary);">
+                       <img src="${a.dataUrl}" style="width:40px;height:40px;object-fit:cover;border-radius:4px;display:block;">
+                       <button class="nt-prev-x" title="Remove" style="position:absolute;top:-6px;right:-6px;background:var(--error);border:none;color:#fff;width:16px;height:16px;border-radius:50%;font-size:9px;cursor:pointer;">✕</button>
+                   </div>`
+                : `<div class="nt-prev" data-id="${a.id}" style="position:relative;display:flex;align-items:center;gap:6px;border:1px solid var(--border);border-radius:6px;padding:4px 20px 4px 8px;background:var(--bg-tertiary);font-size:11px;color:var(--text-secondary);max-width:180px;">
+                       <span>📄</span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(a.name)}</span>
+                       <button class="nt-prev-x" title="Remove" style="position:absolute;top:2px;right:2px;background:none;border:none;color:var(--error);cursor:pointer;font-size:10px;">✕</button>
+                   </div>`).join('');
+            previews.querySelectorAll('.nt-prev-x').forEach(btn => btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const id = btn.closest('.nt-prev').getAttribute('data-id');
+                const i = attachments.findIndex(a => a.id === id);
+                if (i >= 0) { attachments.splice(i, 1); renderPreviews(); }
+            }));
+            // Click an image thumbnail → zoom (#2).
+            previews.querySelectorAll('.nt-prev img').forEach(img => {
+                img.style.cursor = 'zoom-in';
+                img.addEventListener('click', () => this._openImageZoom(img.src));
+            });
+        };
+        const handleFile = (file) => {
+            if (!file) return;
+            if (file.size > 10 * 1024 * 1024) { alert('File is too large (max 10MB).'); return; }
+            const isImage = file.type.startsWith('image/');
+            const isExcel = /\.(xlsx|xls|ods)$/i.test(file.name);
+            const reader = new FileReader();
+            reader.onload = async (e) => {
+                let dataUrl = null, content = null;
+                if (isImage) {
+                    dataUrl = e.target.result;
+                } else if (isExcel) {
+                    try {
+                        const bytes = new Uint8Array(e.target.result);
+                        content = await invoke('parse_excel_to_html', { bytes: Array.from(bytes), ext: file.name.split('.').pop() || '' });
+                    } catch (err) { alert(`Failed to parse Excel: ${err.message || err}`); return; }
+                } else {
+                    content = reader.result;
+                }
+                attachments.push({ id: Math.random().toString(36).slice(2, 8), name: file.name, type: isImage ? 'image' : 'file', dataUrl, content });
+                renderPreviews();
+            };
+            if (isImage) reader.readAsDataURL(file);
+            else if (isExcel) reader.readAsArrayBuffer(file);
+            else reader.readAsText(file);
+        };
+        overlay.querySelector('.nt-attach').onclick = () => fileInput.click();
+        fileInput.addEventListener('change', (e) => { for (const f of e.target.files) handleFile(f); fileInput.value = ''; });
+        textarea.addEventListener('paste', (e) => {
+            for (const it of (e.clipboardData?.items || [])) {
+                if (it.type.indexOf('image') !== -1) handleFile(it.getAsFile());
+            }
+        });
+
+        // ── Drag & drop (#1) — Tauri native file drops from Explorer/Finder ──
+        // HTML5 drop doesn't receive OS files in Tauri; use the window drag-drop
+        // event (gives file PATHS), read each, then feed into handleFile. Only
+        // active while this modal is open (unlistened on close).
+        const modalBox = overlay.firstElementChild;
+        const setDragHL = (on) => { modalBox.style.outline = on ? '2px dashed var(--accent)' : ''; modalBox.style.outlineOffset = on ? '-4px' : ''; };
+        const readDroppedPath = async (path) => {
+            try {
+                const fd = await invoke('read_file_bytes', { path });
+                const bytes = new Uint8Array(fd.bytes);
+                const ext = (fd.ext || '').toLowerCase();
+                const mimeMap = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp', svg: 'image/svg+xml' };
+                const mime = mimeMap[ext] || 'application/octet-stream';
+                handleFile(new File([new Blob([bytes], { type: mime })], fd.name, { type: mime }));
+            } catch (e) { console.error('Dropped file read failed:', e); }
+        };
+        getCurrentWebviewWindow().onDragDropEvent((event) => {
+            const t = event.payload.type;
+            if (t === 'enter' || t === 'over') setDragHL(true);
+            else if (t === 'drop') { setDragHL(false); for (const p of (event.payload.paths || [])) readDroppedPath(p); }
+            else setDragHL(false);
+        }).then(un => { dragUnlisten = un; }).catch(() => {});
+
+        textarea.focus();
+
+        overlay.querySelector('.nt-browse').onclick = async () => {
+            try { const sel = await invoke('select_folder'); if (sel) wsInput.value = sel; } catch (_) {}
+        };
+
+        const send = async () => {
+            const rawText = textarea.value.trim();
+            const ws = wsInput.value.trim();
+            if (!slash.hasContent(rawText) && attachments.length === 0) { textarea.focus(); return; }
+            if (!ws) { alert('Please specify a workspace (required for agent tasks).'); wsInput.focus(); return; }
+            // Inject any attached skill bodies (preamble), then append file contents.
+            let prompt = await slash.buildPrompt(rawText);
+            const fileAtts = attachments.filter(a => a.type === 'file');
+            if (fileAtts.length > 0) {
+                prompt += '\n\n' + fileAtts.map(f => `[Attached File: ${f.name}]\n\`\`\`\n${f.content}\n\`\`\`\n`).join('\n');
+            }
+            const images = attachments.filter(a => a.type === 'image').map(a => a.dataUrl);
+            const modeId = modeDropdown.value;
+            const selectedMcp = [...overlay.querySelectorAll('.nt-mcp-cb')]
+                .filter(c => c.checked).map(c => c.getAttribute('data-name'));
+            // Remember for next time (per view instance).
+            this._lastNewTaskWs = ws;
+            this._lastNewTaskMode = modeId;
+
+            sendBtn.disabled = true;
+            sendBtn.textContent = 'Creating…';
+            try {
+                // Start any selected MCP server that isn't running yet (best-effort).
+                for (const name of selectedMcp) {
+                    if (!mcpManager.clients.has(name)) {
+                        try { await mcpManager.startClient(name, mcpServers[name]); }
+                        catch (e) { console.warn(`MCP start failed for ${name}:`, e); }
+                    }
+                }
+                // NOTE: do NOT pass behavior.mcp_servers — that flags the run as
+                // an "external caller" in AgentController and strips the built-in
+                // toolset. The selected servers are simply STARTED above; their
+                // tools then surface globally (relevance-pruned), same as DirectChat.
+                const behavior = { mode: 'iterative_agent', ...buildBehavior(modeId) };
+                const res = await window.apiClient.request('/tasks', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        prompt, workspace_path: ws, caller: 'NewTask', behavior,
+                        images: images.length > 0 ? images : undefined,
+                    })
+                });
+                const taskId = res.task_id;
+                close();
+                // Navigate to the new task in the Monitor (#2 — auto-select).
+                // Invalidate the list cache so the just-created task shows up.
+                invalidateTasksCache();
+                this.selectedTaskId = taskId;
+                window.location.hash = `#monitor?id=${taskId}`;
+            } catch (e) {
+                alert('Failed to create task: ' + (e.message || e));
+                sendBtn.disabled = false;
+                sendBtn.textContent = 'Create & Run ▶';
+            }
+        };
+        sendBtn.onclick = send;
+        const slashPopupEl = overlay.querySelector('#nt-slash-popup');
+        textarea.addEventListener('keydown', (e) => {
+            // Defer Enter/Escape/arrows to the "/" command popup when it's open.
+            const slashOpen = slashPopupEl && slashPopupEl.style.display !== 'none';
+            if (slashOpen && ['Enter', 'Escape', 'ArrowUp', 'ArrowDown'].includes(e.key)) return;
+            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(); }
+            if (e.key === 'Escape') { e.preventDefault(); close(); }
+        });
     }
 
     destroy() {

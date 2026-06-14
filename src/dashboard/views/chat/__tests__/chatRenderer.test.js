@@ -118,9 +118,9 @@ describe('renderMessageHtml', () => {
             content: '{"thought":"because"}',
             toolCalls: [{ name: 'write_file', args: { path: 'x' } }],
         });
-        expect(html).toContain('ツール呼び出し中');
+        expect(html).toContain('Calling tools');
         expect(html).toContain('write_file');
-        expect(html).toContain('思考プロセス');
+        expect(html).toContain('Thought process');
     });
 
     it('renders a tool-result bubble, flagging errors', () => {
@@ -128,7 +128,7 @@ describe('renderMessageHtml', () => {
             isToolResult: true,
             results: [{ tool_call_name: 'run_command', result: 'Error: boom' }],
         });
-        expect(html).toContain('ツール実行結果');
+        expect(html).toContain('Tool results');
         expect(html).toContain('run_command');
         expect(html).toContain('Error: boom');
     });
@@ -151,7 +151,7 @@ describe('renderMessageHtml', () => {
             resultStats: { steps: 6, tools: { read_file: 3 }, tokens: 30300, durationMs: 488000, files: 2 },
         });
         expect(html).toContain('rv-chips');
-        expect(html).toContain('ステップ 6');
+        expect(html).toContain('Steps 6');
         expect(html).toContain('30.3k tok');
     });
 });
@@ -159,16 +159,16 @@ describe('renderMessageHtml', () => {
 describe('renderResultStatsChips', () => {
     it('renders only the chips that have data', () => {
         const html = renderResultStatsChips({ steps: 3, tools: {}, tokens: 0, durationMs: 0, files: 0 });
-        expect(html).toContain('ステップ 3');
+        expect(html).toContain('Steps 3');
         expect(html).not.toContain('tok');
         expect(html).not.toContain('ファイル');
     });
     it('sums tool counts and formats tokens/duration/files', () => {
         const html = renderResultStatsChips({ steps: 2, tools: { a: 2, b: 1 }, tokens: 1500, durationMs: 9500, files: 1 });
-        expect(html).toContain('ツール 3');
+        expect(html).toContain('Tools 3');
         expect(html).toContain('1.5k tok');
         expect(html).toContain('10s');
-        expect(html).toContain('ファイル 1件');
+        expect(html).toContain('Files 1');
     });
     it('returns empty string for empty/invalid stats', () => {
         expect(renderResultStatsChips(null)).toBe('');

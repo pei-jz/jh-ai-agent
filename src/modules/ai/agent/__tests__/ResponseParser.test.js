@@ -1,8 +1,42 @@
 import { describe, it, expect } from 'vitest';
 import {
-    safeParseJSON, extractToolCall, extractAllPossibleToolCalls,
+    safeParseJSON, extractToolCall, extractAllPossibleToolCalls, extractInvokeToolCalls,
     extractThoughtFromMalformedText, cleanFinalResponse
 } from '../ResponseParser.js';
+
+describe('extractInvokeToolCalls', () => {
+    it('parses Anthropic-style <function_calls><invoke> XML', () => {
+        const text = `まず構造を把握します。
+<function_calls>
+<invoke name="list_files">
+<parameter name="path" string="true">C:/cusor_workspace/MiMo-Code</parameter>
+</invoke>
+</function_calls>`;
+        const calls = extractInvokeToolCalls(text);
+        expect(calls).toEqual([{ name: 'list_files', args: { path: 'C:/cusor_workspace/MiMo-Code' } }]);
+    });
+    it('JSON-parses non-string params and keeps string="true" as text', () => {
+        const text = `<invoke name="read_file"><parameter name="path" string="true">a/b.js</parameter><parameter name="max_lines">50</parameter></invoke>`;
+        expect(extractInvokeToolCalls(text)).toEqual([
+            { name: 'read_file', args: { path: 'a/b.js', max_lines: 50 } },
+        ]);
+    });
+    it('handles multiple invokes and returns [] for plain text', () => {
+        const two = `<invoke name="a"></invoke><invoke name="b"></invoke>`;
+        expect(extractInvokeToolCalls(two).map(c => c.name)).toEqual(['a', 'b']);
+        expect(extractInvokeToolCalls('just prose')).toEqual([]);
+    });
+});
+
+describe('extractToolCall — invoke XML integration', () => {
+    it('extracts invoke-style tool calls + leading prose as thought', () => {
+        const text = `プロジェクトを調査します。
+<function_calls><invoke name="list_files"><parameter name="path" string="true">.</parameter></invoke></function_calls>`;
+        const r = extractToolCall(text);
+        expect(r.tool_calls).toEqual([{ name: 'list_files', args: { path: '.' } }]);
+        expect(r.thought).toContain('調査');
+    });
+});
 
 describe('safeParseJSON', () => {
     it('parses plain JSON', () => {

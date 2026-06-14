@@ -38,12 +38,24 @@ export class AnalyticsView {
         // When embedded in the Overview dashboard, skip the page header and the
         // recent-tasks table (the task list lives in the History view).
         this.embed = !!opts.embed;
+        // True once tasks are populated (own fetch OR injected by the parent),
+        // so render() doesn't re-fetch listTasks. The Overview dashboard fetches
+        // the list ONCE and hands it here via setTasks() to avoid a duplicate
+        // round-trip (the old double-fetch was a big part of the dashboard lag).
+        this._dataLoaded = false;
+    }
+
+    /** Inject a pre-fetched task list so render() skips its own listTasks call. */
+    setTasks(tasks) {
+        this.tasks = Array.isArray(tasks) ? tasks : [];
+        this._dataLoaded = true;
     }
 
     async loadData() {
         try {
             if (window.apiClient) this.tasks = await window.apiClient.listTasks();
         } catch { this.tasks = []; }
+        this._dataLoaded = true;
     }
 
     _tok(t) { return (t.token_usage && t.token_usage.total_tokens) || 0; }
@@ -76,7 +88,7 @@ export class AnalyticsView {
     }
 
     _barChart(groups) {
-        if (!groups.length) return '<div style="color:var(--text-tertiary);font-size:12px;padding:20px;text-align:center">データなし</div>';
+        if (!groups.length) return '<div style="color:var(--text-tertiary);font-size:12px;padding:20px;text-align:center">No data</div>';
         const max = Math.max(...groups.map(g => g.total), 1);
         return groups.map((g, i) => {
             const pct = Math.round((g.total / max) * 100);
@@ -95,7 +107,7 @@ export class AnalyticsView {
     }
 
     _timelineChart(tasks) {
-        if (!tasks.length) return '<div style="color:var(--text-tertiary);font-size:12px;padding:20px;text-align:center">データなし</div>';
+        if (!tasks.length) return '<div style="color:var(--text-tertiary);font-size:12px;padding:20px;text-align:center">No data</div>';
         const days = this.range === '7d' ? 7 : 30;
         const dayMap = {};
         for (let i = days - 1; i >= 0; i--) {
@@ -124,7 +136,7 @@ export class AnalyticsView {
     }
 
     async render() {
-        await this.loadData();
+        if (!this._dataLoaded) await this.loadData();
         const tasks = this._filteredTasks();
         const groups = this._groupData(tasks);
         const totalTokens = tasks.reduce((s, t) => s + this._tok(t), 0);
@@ -151,7 +163,7 @@ export class AnalyticsView {
                     </tr>
                 `;
             }).join('')
-            : `<tr><td colspan="6" style="text-align:center;padding:30px;color:var(--text-tertiary)">データなし</td></tr>`;
+            : `<tr><td colspan="6" style="text-align:center;padding:30px;color:var(--text-tertiary)">No data</td></tr>`;
 
         return `
             <style>
@@ -201,58 +213,58 @@ export class AnalyticsView {
                 <div class="view-header">
                     <div>
                         <h1>Analytics</h1>
-                        <p class="subtitle">タスク単位の Token 使用量・実行統計（モデル/レイテンシ詳細は Monitor 参照）</p>
+                        <p class="subtitle">Per-task token usage & run stats (model/latency details are in Monitor)</p>
                     </div>
                 </div>`}
 
                 <div class="an-controls">
-                    <span class="an-controls-label">期間</span>
+                    <span class="an-controls-label">Range</span>
                     <div class="an-seg" id="range-seg">
-                        <button class="an-seg-btn ${this.range==='7d'?'active':''}" data-range="7d">7日間</button>
-                        <button class="an-seg-btn ${this.range==='30d'?'active':''}" data-range="30d">30日間</button>
-                        <button class="an-seg-btn ${this.range==='all'?'active':''}" data-range="all">全期間</button>
+                        <button class="an-seg-btn ${this.range==='7d'?'active':''}" data-range="7d">7 days</button>
+                        <button class="an-seg-btn ${this.range==='30d'?'active':''}" data-range="30d">30 days</button>
+                        <button class="an-seg-btn ${this.range==='all'?'active':''}" data-range="all">All time</button>
                     </div>
-                    <span class="an-controls-label" style="margin-left:16px">集計軸</span>
+                    <span class="an-controls-label" style="margin-left:16px">Group by</span>
                     <div class="an-seg" id="group-seg">
-                        <button class="an-seg-btn ${this.groupBy==='caller'?'active':''}" data-group="caller">呼出元別</button>
-                        <button class="an-seg-btn ${this.groupBy==='date'?'active':''}" data-group="date">日付別</button>
-                        <button class="an-seg-btn ${this.groupBy==='status'?'active':''}" data-group="status">状態別</button>
+                        <button class="an-seg-btn ${this.groupBy==='caller'?'active':''}" data-group="caller">Caller</button>
+                        <button class="an-seg-btn ${this.groupBy==='date'?'active':''}" data-group="date">Date</button>
+                        <button class="an-seg-btn ${this.groupBy==='status'?'active':''}" data-group="status">Status</button>
                     </div>
                 </div>
 
                 <div class="an-kpi-grid">
                     <div class="an-kpi">
-                        <div class="an-kpi-label">総Token数</div>
+                        <div class="an-kpi-label">Total Tokens</div>
                         <div class="an-kpi-value">${fmtNum(totalTokens)}</div>
                         <div class="an-kpi-sub">↑${fmtNum(totalPrompt)} prompt / ↓${fmtNum(totalCompl)} completion</div>
                     </div>
                     <div class="an-kpi">
-                        <div class="an-kpi-label">タスク数</div>
+                        <div class="an-kpi-label">Tasks</div>
                         <div class="an-kpi-value">${fmtNum(totalTasks)}</div>
-                        <div class="an-kpi-sub">完了: ${completedCount} / 失敗: ${failCount}</div>
+                        <div class="an-kpi-sub">Completed: ${completedCount} / Failed: ${failCount}</div>
                     </div>
                     <div class="an-kpi">
-                        <div class="an-kpi-label">平均Token/タスク</div>
+                        <div class="an-kpi-label">Avg Tokens/Task</div>
                         <div class="an-kpi-value">${totalTasks ? fmtNum(Math.round(totalTokens / totalTasks)) : '—'}</div>
-                        <div class="an-kpi-sub">期間: ${this.range === 'all' ? '全期間' : this.range}</div>
+                        <div class="an-kpi-sub">Range: ${this.range === 'all' ? 'All time' : this.range}</div>
                     </div>
                     <div class="an-kpi">
-                        <div class="an-kpi-label">成功率</div>
+                        <div class="an-kpi-label">Success Rate</div>
                         <div class="an-kpi-value">${totalTasks ? Math.round((completedCount / totalTasks) * 100) + '%' : '—'}</div>
-                        <div class="an-kpi-sub">呼出元: ${new Set(tasks.map(t => t.caller || 'direct')).size}種</div>
+                        <div class="an-kpi-sub">Callers: ${new Set(tasks.map(t => t.caller || 'direct')).size}</div>
                     </div>
                 </div>
 
                 <div class="an-panels">
                     <div class="an-panel">
                         <div class="an-panel-header">
-                            <span id="bar-chart-title">${this.groupBy === 'caller' ? '呼出元別 Token使用量' : this.groupBy === 'date' ? '日付別 Token使用量' : '状態別 Token使用量'}</span>
-                            <span style="font-size:10.5px;font-weight:400;color:var(--text-tertiary)">${groups.length}グループ</span>
+                            <span id="bar-chart-title">${this.groupBy === 'caller' ? 'Token usage by caller' : this.groupBy === 'date' ? 'Token usage by date' : 'Token usage by status'}</span>
+                            <span style="font-size:10.5px;font-weight:400;color:var(--text-tertiary)">${groups.length} groups</span>
                         </div>
                         <div class="an-panel-body" id="bar-chart-body">${barChart}</div>
                     </div>
                     <div class="an-panel">
-                        <div class="an-panel-header"><span>日別 Token推移 (${this.range === 'all' ? '30日間表示' : this.range})</span></div>
+                        <div class="an-panel-header"><span>Daily token trend (${this.range === 'all' ? 'last 30 days' : this.range})</span></div>
                         <div class="an-panel-body">${timeline}</div>
                     </div>
                 </div>
@@ -260,18 +272,18 @@ export class AnalyticsView {
                 ${this.embed ? '' : `
                 <div class="an-log-table-card">
                     <div class="an-panel-header" style="padding:10px 14px;background:var(--bg-tertiary);border-bottom:1px solid var(--border)">
-                        <span>タスク (直近${Math.min(recent.length, 50)}件 — 新しい順)</span>
+                        <span>Tasks (latest ${Math.min(recent.length, 50)} — newest first)</span>
                     </div>
                     <div style="overflow-x:auto;">
                         <table class="an-log-table">
                             <thead>
                                 <tr>
-                                    <th style="min-width:160px">日時</th>
-                                    <th style="min-width:200px">プロンプト</th>
-                                    <th style="min-width:80px">呼出元</th>
-                                    <th style="min-width:80px;text-align:right">Token</th>
-                                    <th style="min-width:70px;text-align:right">所要時間</th>
-                                    <th style="min-width:80px">状態</th>
+                                    <th style="min-width:160px">Time</th>
+                                    <th style="min-width:200px">Prompt</th>
+                                    <th style="min-width:80px">Caller</th>
+                                    <th style="min-width:80px;text-align:right">Tokens</th>
+                                    <th style="min-width:70px;text-align:right">Duration</th>
+                                    <th style="min-width:80px">Status</th>
                                 </tr>
                             </thead>
                             <tbody id="an-log-tbody">${recentRows}</tbody>
@@ -306,9 +318,9 @@ export class AnalyticsView {
         if (barBody) barBody.innerHTML = this._barChart(groups);
         const barTitle = document.getElementById('bar-chart-title');
         if (barTitle) {
-            barTitle.textContent = this.groupBy === 'caller' ? '呼出元別 Token使用量'
-                                  : this.groupBy === 'date' ? '日付別 Token使用量'
-                                  : '状態別 Token使用量';
+            barTitle.textContent = this.groupBy === 'caller' ? 'Token usage by caller'
+                                  : this.groupBy === 'date' ? 'Token usage by date'
+                                  : 'Token usage by status';
         }
         const recent = [...tasks].sort((a, b) => new Date(b.started_at) - new Date(a.started_at)).slice(0, 50);
         const tbody = document.getElementById('an-log-tbody');
@@ -324,7 +336,7 @@ export class AnalyticsView {
                         <td><span class="task-badge badge-${t.status}">${t.status}</span></td>
                     </tr>
                 `).join('')
-                : `<tr><td colspan="6" style="text-align:center;padding:30px;color:var(--text-tertiary)">データなし</td></tr>`;
+                : `<tr><td colspan="6" style="text-align:center;padding:30px;color:var(--text-tertiary)">No data</td></tr>`;
         }
     }
 }

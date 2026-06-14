@@ -81,9 +81,9 @@ export class HistoryView {
         if (n === 0) return '';
         return `
             <div class="hist-bulk-bar">
-                <span class="hist-bulk-count">${n}件を選択中</span>
-                <button id="hist-bulk-delete" class="hist-bulk-btn-danger">🗑 選択したタスクを削除</button>
-                <button id="hist-bulk-clear" class="hist-bulk-btn">選択解除</button>
+                <span class="hist-bulk-count">${n} selected</span>
+                <button id="hist-bulk-delete" class="hist-bulk-btn-danger">🗑 Delete selected</button>
+                <button id="hist-bulk-clear" class="hist-bulk-btn">Clear selection</button>
             </div>
         `;
     }
@@ -305,10 +305,10 @@ export class HistoryView {
     async _deleteSelected() {
         const ids = [...this.selectedIds];
         if (ids.length === 0) return;
-        if (!confirm(`選択した ${ids.length} 件のタスクを削除しますか？\nこの操作は取り消せません。`)) return;
+        if (!confirm(`Delete the ${ids.length} selected task(s)?\nThis cannot be undone.`)) return;
 
         const delBtn = document.getElementById('hist-bulk-delete');
-        if (delBtn) { delBtn.disabled = true; delBtn.textContent = '削除中…'; }
+        if (delBtn) { delBtn.disabled = true; delBtn.textContent = 'Deleting…'; }
 
         let failed = 0;
         for (const id of ids) {
@@ -323,7 +323,7 @@ export class HistoryView {
         }
         this.applyTaskFilter();
         this._updateTaskTable();
-        if (failed > 0) alert(`${failed} 件の削除に失敗しました。`);
+        if (failed > 0) alert(`Failed to delete ${failed} item(s).`);
     }
 
     init() {

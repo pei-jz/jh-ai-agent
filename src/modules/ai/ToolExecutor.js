@@ -103,9 +103,12 @@ export class ToolExecutor {
         // MCP server can resolve the live document/window the call targets.
         this._mcpContext = null;
         // ── MCP tool pruning (interactive callers only) ────────────────────
-        // When a relevance query is set (the task prompt), only the top-5 most
-        // relevant MCP tools are sent to the LLM; the rest are omitted entirely.
+        // When a relevance query is set (the task prompt), only the most relevant
+        // MCP tools are sent to the LLM; the rest are omitted. `_mcpPruneOpts`
+        // tunes selectMcpTools (e.g. Simple chat uses a score threshold so it
+        // sends NO MCP tools when none are relevant — see setMcpPruneOptions).
         this._mcpRelevanceQuery = null;
+        this._mcpPruneOpts = {};
     }
 
     /**
@@ -115,6 +118,11 @@ export class ToolExecutor {
      */
     setMcpRelevanceQuery(query) {
         this._mcpRelevanceQuery = (typeof query === 'string' && query.trim()) ? query : null;
+    }
+
+    /** Tune MCP pruning (selectMcpTools opts: { top, minScore, minCount }). */
+    setMcpPruneOptions(opts) {
+        this._mcpPruneOpts = (opts && typeof opts === 'object') ? opts : {};
     }
 
     /** Per-task MCP context object (e.g. {app,windowId,documentId}) or null. */
@@ -188,6 +196,7 @@ export class ToolExecutor {
         this._mcpServerFilter = null; // reset MCP server filter
         this._mcpContext = null;      // reset per-task MCP context
         this._mcpRelevanceQuery = null;        // reset MCP pruning (caller re-sets)
+        this._mcpPruneOpts = {};               // reset MCP prune tuning
         // Plan gate resets each session (caller sets requirement via setPlanGate).
         this._planRequired = false;
         this._planApproved = false;
@@ -760,7 +769,8 @@ export class ToolExecutor {
         // eligible tools load — the previous behavior.
         const { loaded: mcpTools } = selectMcpTools(
             this._eligibleMcpTools(),
-            this._mcpRelevanceQuery
+            this._mcpRelevanceQuery,
+            this._mcpPruneOpts
         );
         mcpTools.forEach(t => {
             const rawSchema = t.inputSchema || { type: 'object', properties: {} };

@@ -123,7 +123,12 @@ export class AgentController {
         // meaningless click). So plan-first applies ONLY to interactive callers
         // (JHAI's own chat = 'DirectChat', and scheduled runs). Computed once here
         // and reused below for the tool-allowlist decision.
-        const isExternalCaller = (this.caller && !['DirectChat', 'Schedule'].includes(this.caller))
+        // NewTask = the Monitor "new task" modal (interactive, human-watched) →
+        // must keep the FULL built-in toolset like DirectChat. Without it the
+        // external-caller branch below strips tools to finish/present only, so a
+        // NewTask agent couldn't even read_file its workspace.
+        const INTERACTIVE_CALLERS = ['DirectChat', 'Schedule', 'NewTask'];
+        const isExternalCaller = (this.caller && !INTERACTIVE_CALLERS.includes(this.caller))
             || !!(this.behaviorOverrides && (this.behaviorOverrides.mcp_servers || this.behaviorOverrides.intent));
         this._isExternalCaller = isExternalCaller;
         // Plan-first gate: a complex task (or planMode='always') must propose a plan
@@ -982,10 +987,15 @@ export class AgentController {
                 // If finish_task was just executed, break immediately with its summary.
                 // This avoids an extra LLM round-trip just to confirm termination.
                 if (this.toolExecutor.isTaskCompleted && this.toolExecutor.isTaskCompleted()) {
-                    const ftResult = results.find(r => r.tool_call_name === 'finish_task');
-                    // Prefer the model's FULL answer (its `thought` on the finishing turn,
-                    // e.g. a rich markdown reply) over finish_task's one-line `summary`,
-                    // so the Result tab shows the actual content, not just a recap.
+                    // The DELIVERABLE is whatever substantive content the model
+                    // produced. Agents place it in different spots: ideally via
+                    // present_result (captured separately as _lastResultEnvelope),
+                    // but often in finish_task's `summary` ARG (a full report), and
+                    // sometimes only in the finishing `thought`. Pick the most
+                    // substantial of {finish_task summary arg, cleaned thought} so a
+                    // long report in finish_task's summary isn't lost behind a short
+                    // "OBSERVE/PLAN/CALL" thought (the previous bug: the report was
+                    // nowhere visible because the thought won the ≥40-char check).
                     let richThought = '';
                     if (toolCall?.thought) {
                         richThought = typeof toolCall.thought === 'string'
@@ -993,8 +1003,13 @@ export class AgentController {
                             : (toolCall.thought.current_task || '');
                     }
                     richThought = this._cleanFinalResponse(richThought || '').trim();
-                    const ftSummary = (ftResult?.result || '').trim();
-                    finalResponse = (richThought.length >= 40) ? richThought : (ftSummary || richThought || response);
+                    const ftCall = toolCall.tool_calls.find(c => c.name === 'finish_task');
+                    const ftSummaryArg = String(ftCall?.args?.summary || '').trim();
+                    // Longest substantive candidate wins (reports are long; the
+                    // OBSERVE/PLAN/CALL thought is short meta-text).
+                    finalResponse = [ftSummaryArg, richThought]
+                        .filter(Boolean)
+                        .sort((a, b) => b.length - a.length)[0] || response;
                     onAgentStatus?.({ event: 'status', status: 'completed', message: 'Task finished. ✅' });
                     break;
                 }
@@ -1210,19 +1225,29 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
             }
         }
 
-        // The Result "answer" is an LLM-WRITTEN completion report (依頼→実施→結果),
-        // per user preference. Best-effort: on failure (or no LLM) it falls back to
-        // the present_result content, then the final response, then the deterministic
-        // composed report. Stats chips + collapsible details are unchanged.
+        // ── Result "answer" priority: DELIVERABLE first ──────────────────
+        // The headline must be the agent's actual deliverable when it produced
+        // one — i.e. a report/answer delivered via present_result, or a
+        // substantial finalResponse (e.g. the report it put in finish_task's
+        // summary). Only when there's NO real prose deliverable (e.g. a pure
+        // code-edit task whose finalResponse is just "done") do we synthesize the
+        // 依頼/実施/結果 process report via the LLM. This fixes the case where a
+        // produced report was buried because the process-summary overrode it —
+        // AND skips the extra LLM call when a deliverable already exists.
         const presented = String(meta.presentedAnswer || '').trim();
-        const deterministic = this._composeDetailedReport(finalResponse, files, meta);
-        const llmReport = await this._generateLlmReport(finalResponse, files, meta, onLog);
-        const answer = llmReport
-            || (presented.length >= 1 ? presented : '')
-            || String(finalResponse || '')
-            || deterministic;
-        // `summary` keeps the flat-markdown back-compat contract (API/chat/old UIs).
-        const summary = llmReport || deterministic;
+        const fr = String(finalResponse || '').trim();
+        const deliverable = presented || (fr.length >= 80 ? fr : '');
+
+        let answer, summary;
+        if (deliverable) {
+            answer = deliverable;
+            summary = deliverable;
+        } else {
+            const deterministic = this._composeDetailedReport(finalResponse, files, meta);
+            const llmReport = await this._generateLlmReport(finalResponse, files, meta, onLog);
+            answer = llmReport || fr || deterministic;
+            summary = llmReport || deterministic;
+        }
         const stats = {
             steps: meta.iterations || 0,
             tools: meta.toolCounts || {},

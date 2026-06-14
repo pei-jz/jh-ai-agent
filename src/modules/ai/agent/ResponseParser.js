@@ -108,6 +108,23 @@ export function extractToolCall(text) {
         }
     }
 
+    // 1b. Anthropic-style <function_calls><invoke name="X"><parameter ...>…</invoke>.
+    //     Some models (e.g. DeepSeek) emit tool calls in this XML form as plain
+    //     text instead of using the native function-call API or the JSON envelope.
+    //     Parse it so those calls actually execute instead of being treated as a
+    //     text-only "no tool call" reply (which stalled the agent loop).
+    if (results.tool_calls.length === 0) {
+        const invokeCalls = extractInvokeToolCalls(text);
+        if (invokeCalls.length > 0) {
+            results.tool_calls.push(...invokeCalls);
+            if (!results.thought) {
+                const idx = text.search(/<function_calls>|<invoke\b/);
+                const pre = idx > 0 ? text.slice(0, idx).trim() : '';
+                if (pre) results.thought = pre;
+            }
+        }
+    }
+
     if (results.tool_calls.length > 0) return results;
 
     // 2. JSON code blocks
@@ -181,6 +198,47 @@ export function extractToolCall(text) {
 
     if (results.tool_calls.length > 0 || results.thought) return results;
     return null;
+}
+
+/**
+ * Parse Anthropic/XML-style tool calls:
+ *   <function_calls>
+ *     <invoke name="list_files">
+ *       <parameter name="path" string="true">C:/foo</parameter>
+ *     </invoke>
+ *   </function_calls>
+ * Returns [{ name, args }]. Parameter values are kept as strings when the tag
+ * has string="true", otherwise JSON-parsed (so numbers/bools/arrays/objects come
+ * through typed), falling back to the raw string when not valid JSON.
+ */
+export function extractInvokeToolCalls(text) {
+    const calls = [];
+    if (typeof text !== 'string' || (!text.includes('<invoke') && !text.includes('<function_calls'))) {
+        return calls;
+    }
+    const invokeRe = /<invoke\s+name="([^"]+)"\s*>([\s\S]*?)<\/invoke>/g;
+    let m;
+    while ((m = invokeRe.exec(text)) !== null) {
+        const name = m[1];
+        const inner = m[2];
+        const args = {};
+        const paramRe = /<parameter\s+name="([^"]+)"([^>]*)>([\s\S]*?)<\/parameter>/g;
+        let p;
+        while ((p = paramRe.exec(inner)) !== null) {
+            const pname = p[1];
+            const attrs = p[2] || '';
+            // Strip the single newline the XML pretty-printing usually adds.
+            const raw = p[3].replace(/^\n/, '').replace(/\n\s*$/, '');
+            if (/\bstring\s*=\s*"true"/.test(attrs)) {
+                args[pname] = raw;
+            } else {
+                try { args[pname] = JSON.parse(raw); }
+                catch { args[pname] = raw; }
+            }
+        }
+        calls.push({ name, args });
+    }
+    return calls;
 }
 
 /**

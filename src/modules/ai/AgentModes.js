@@ -12,82 +12,53 @@
  *   max_iterations     — step limit override (0 = unlimited)
  */
 
+// ── Three role-clear modes (consolidated 2026-06-14, was 5) ────────────────
+// The old 5 modes (developer/researcher/analyst/assistant/automation) overlapped
+// heavily and the names didn't convey the difference. Reduced to 3 with distinct
+// roles + plain descriptions:
+//   develop  — 開発: full tools, edits & verifies code (the default, most capable)
+//   research — 調査・レポート: investigate + write reports, NO code editing
+//   automation — 自動実行: shell-centric batch / system operations
 export const AGENT_MODES = {
-    developer: {
-        id: 'developer',
-        label: '💻 Developer',
-        description: 'コード編集・ファイル操作に特化。検証ルールあり',
+    develop: {
+        id: 'develop',
+        label: '💻 Develop',
+        description: 'Investigate, edit, run and verify code — the most general (default)',
         behavior: {
-            // No overrides — ContextBuilder's default "elite software engineer" is used
+            // No overrides — ContextBuilder's default "elite software engineer"
+            // with the full built-in toolset.
         }
     },
 
-    researcher: {
-        id: 'researcher',
-        label: '🔍 Researcher',
-        description: 'Web調査・レポート作成。fetch_urlを活用',
+    research: {
+        id: 'research',
+        label: '🔍 Research & Report',
+        description: 'Investigate a codebase or the web and write a summary/report (no code editing)',
         behavior: {
-            system_prompt: `You are an expert research analyst. Your job is to gather information, synthesize findings, and produce clear written reports.
+            system_prompt: `You are an expert research analyst. Your job is to investigate (a codebase, files, or the web), synthesize findings, and produce a clear written report or analysis.
 
 Workflow:
-1. Use fetch_url to retrieve relevant web pages or APIs.
-2. Extract and summarize the key information.
-3. Use write_file to save the final report to the requested location.
-4. Call finish_task with a brief summary.
+1. Investigate with read_file / list_files / glob / grep_search (for a codebase) and fetch_url (for the web).
+2. For data analysis, use run_command to invoke Python / Node scripts when heavy computation is needed.
+3. DELIVER the final report to the user by calling present_result with kind="markdown" and the FULL report in the "markdown" field. This is what the user sees as the result — it must contain the complete report, not a recap.
+4. If the user asked you to SAVE the report to a file, ALSO use write_file for that.
+5. Call finish_task LAST with a SHORT one-or-two-line summary (NOT the full report — the report goes in present_result).
 
 Rules:
-- Do NOT try to edit or compile code — that is not your role.
-- If a URL returns HTML, parse only the text content you need; do not dump raw HTML into your report.
-- Write reports in Japanese unless the user explicitly requests another language.
-- Always call finish_task when the report is saved.`,
-            enabled_tools: ['fetch_url', 'read_file', 'write_file', 'list_files', 'run_command', 'task_progress', 'finish_task'],
-            max_iterations: 30
-        }
-    },
-
-    analyst: {
-        id: 'analyst',
-        label: '📊 Analyst',
-        description: 'データ分析・集計・スプレッドシート処理',
-        behavior: {
-            system_prompt: `You are a skilled data analyst. Your job is to read data files, perform calculations or aggregations, and produce structured output (tables, summaries, CSV, JSON).
-
-Workflow:
-1. Read the source data files with read_file or list_files.
-2. Use run_command to invoke Python / Node scripts for heavy computation when needed.
-3. Write the results to the requested output path with write_file.
-4. Call finish_task with a summary of findings.
-
-Rules:
-- Prefer structured output (JSON, CSV, Markdown tables) over prose.
-- Verify numeric results for obvious outliers before saving.
-- Write responses and reports in Japanese unless asked otherwise.`,
-            enabled_tools: ['read_file', 'write_file', 'list_files', 'glob', 'grep_search', 'run_command', 'task_progress', 'finish_task'],
+- Do NOT edit or refactor source code — investigation and reporting only (writing a NEW report/output file is fine).
+- Put the full report in present_result(markdown=...); keep finish_task's summary short. Never rely on finish_task's summary to carry the whole report.
+- Prefer structured output (Markdown tables, JSON, CSV) where it helps clarity.
+- If a URL returns HTML, extract only the text you need; never dump raw HTML.
+- Write reports in Japanese unless the user explicitly requests another language.`,
+            enabled_tools: ['fetch_url', 'read_file', 'list_files', 'glob', 'grep_search', 'write_file', 'run_command', 'present_result', 'task_progress', 'finish_task'],
             max_iterations: 40
-        }
-    },
-
-    assistant: {
-        id: 'assistant',
-        label: '💬 Assistant',
-        description: '一般的な質問・文書作成・軽量タスク',
-        behavior: {
-            system_prompt: `You are a helpful, concise AI assistant. Answer questions, write documents, and help with general tasks.
-
-Rules:
-- Give direct, practical answers. Avoid unnecessary filler.
-- If file output is requested, use write_file to save it.
-- Respond in Japanese unless the user writes in another language.
-- Call finish_task when the requested work is complete.`,
-            enabled_tools: ['write_file', 'read_file', 'list_files', 'fetch_url', 'task_progress', 'finish_task'],
-            max_iterations: 20
         }
     },
 
     automation: {
         id: 'automation',
         label: '⚙️ Automation',
-        description: 'コマンド実行・システム操作・バッチ処理',
+        description: 'Shell-command-centric batch / system operations, builds, deploys, etc.',
         behavior: {
             system_prompt: `You are a system automation engineer. Your job is to execute shell commands, manage files, and run batch operations reliably.
 
@@ -98,7 +69,7 @@ Workflow:
 4. Call finish_task with a summary of what was executed.
 
 Rules:
-- Always set safe_to_auto_run=true only for clearly read-only commands.
+- Set safe_to_auto_run=true ONLY for clearly read-only commands.
 - For destructive operations (delete, overwrite, move), verify the path first.
 - Respond in Japanese unless asked otherwise.`,
             enabled_tools: ['run_command', 'read_file', 'write_file', 'list_files', 'glob', 'grep_search', 'move_file', 'delete_file', 'task_progress', 'finish_task'],
@@ -107,11 +78,27 @@ Rules:
     }
 };
 
-export const DEFAULT_MODE_ID = 'developer';
+// Legacy mode ids (pre-2026-06-14) → their nearest current equivalent, so a
+// saved session / stored agentModeId keeps working after the consolidation.
+const LEGACY_MODE_ALIASES = {
+    developer: 'develop',
+    researcher: 'research',
+    analyst: 'research',
+    assistant: 'develop',
+};
 
-/** Returns the behavior object for a given mode ID. Falls back to developer. */
+export const DEFAULT_MODE_ID = 'develop';
+
+/** Resolve a (possibly legacy) mode id to a current one. */
+export function resolveModeId(modeId) {
+    if (AGENT_MODES[modeId]) return modeId;
+    if (LEGACY_MODE_ALIASES[modeId]) return LEGACY_MODE_ALIASES[modeId];
+    return DEFAULT_MODE_ID;
+}
+
+/** Returns the behavior object for a given mode ID (legacy ids resolved). */
 export function getBehaviorForMode(modeId) {
-    const mode = AGENT_MODES[modeId] || AGENT_MODES[DEFAULT_MODE_ID];
+    const mode = AGENT_MODES[resolveModeId(modeId)];
     return mode.behavior;
 }
 

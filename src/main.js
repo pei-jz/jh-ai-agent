@@ -6,7 +6,6 @@ import { Sidebar } from './dashboard/components/Sidebar.js';
 import { OverviewView } from './dashboard/views/OverviewView.js';
 import { ChatView } from './dashboard/views/ChatView.js';
 import { MonitorView } from './dashboard/views/MonitorView.js';
-import { HistoryView } from './dashboard/views/HistoryView.js';
 import { ConfigView } from './dashboard/views/ConfigView.js';
 import { ScheduleView } from './dashboard/views/ScheduleView.js';
 // AnalyticsView is now embedded inside the Overview dashboard (no standalone route).
@@ -134,9 +133,8 @@ async function handleRoute() {
         case 'monitor':
             viewInstance = new MonitorView();
             break;
-        case 'history':
-            viewInstance = new HistoryView();
-            break;
+        // 'history' route removed — its search/filter folded into Monitor.
+        // Legacy #history links fall through to the default (Overview).
         case 'schedule':
             viewInstance = new ScheduleView();
             break;
@@ -415,7 +413,7 @@ function buildSearchOverlayHTML() {
         <div class="search-container" role="dialog" aria-label="Quick Search">
             <div class="search-input-row">
                 <span class="search-input-icon">🔍</span>
-                <textarea id="search-input" rows="1" placeholder="検索 / AIに質問…  (Enter送信・Shift+Enterで改行)" autocomplete="off" spellcheck="false"></textarea>
+                <textarea id="search-input" rows="1" placeholder="Search / Ask AI…  (Enter to send, Shift+Enter for newline)" autocomplete="off" spellcheck="false"></textarea>
                 <button class="search-expand-btn" id="search-expand-btn" title="Open full app (Ctrl+Enter)">
                     <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
                         <path d="M6 2H2v4M10 2h4v4M6 14H2v-4M10 14h4v-4"/>
@@ -427,8 +425,8 @@ function buildSearchOverlayHTML() {
             <div id="search-ai-answer" style="display:none"></div>
             <div class="search-footer">
                 <span><kbd>↑</kbd><kbd>↓</kbd> Navigate</span>
-                <span><kbd>↵</kbd> 送信 / Open</span>
-                <span><kbd>Shift+↵</kbd> 改行</span>
+                <span><kbd>↵</kbd> Send / Open</span>
+                <span><kbd>Shift+↵</kbd> Newline</span>
                 <span><kbd>Ctrl+↵</kbd> Full app</span>
                 <span style="margin-left:auto"><kbd>Esc</kbd> Close</span>
             </div>
@@ -531,7 +529,7 @@ async function renderSearchResults(query) {
     const askAiHtml = q ? `
         <div class="search-ask-ai-row" id="search-ask-ai-row">
             <span class="search-ask-ai-icon">✨</span>
-            <span class="search-ask-ai-label">AIに質問: ${q.replace(/</g, '&lt;')}</span>
+            <span class="search-ask-ai-label">Ask AI: ${q.replace(/</g, '&lt;')}</span>
             <span style="font-size:11px;opacity:0.6">Shift+↵</span>
         </div>` : '';
 
@@ -665,7 +663,7 @@ async function askAI(query) {
     answerEl.style.display = 'block';
     answerEl.innerHTML =
         `<div class="search-ai-q"><span>🧑</span><span>${query.replace(/</g, '&lt;')}</span></div>` +
-        `<div class="search-ai-body"><span class="search-ai-thinking">✨ 考え中…</span></div>`;
+        `<div class="search-ai-body"><span class="search-ai-thinking">✨ Thinking…</span></div>`;
     const bodyEl = answerEl.querySelector('.search-ai-body');
     answerEl.scrollTop = answerEl.scrollHeight;
 
@@ -707,7 +705,7 @@ async function askAI(query) {
     } catch (e) {
         if (myAbort.signal.aborted) return;
         bodyEl.innerHTML =
-            `<span style="color:hsl(0,75%,65%)">エラー: ${(e?.message || String(e)).replace(/</g, '&lt;')}</span>`;
+            `<span style="color:hsl(0,75%,65%)">Error: ${(e?.message || String(e)).replace(/</g, '&lt;')}</span>`;
     }
 }
 
@@ -805,10 +803,10 @@ function _sendApprovalNotification(taskId, data) {
     if (!('Notification' in window) || Notification.permission !== 'granted') return;
 
     const isCommand = data?.type === 'command_confirm';
-    const title = isCommand ? '🛡 承認が必要です' : '📋 プラン承認が必要です';
+    const title = isCommand ? '🛡 Approval required' : '📋 Plan approval required';
     const body = isCommand
-        ? `コマンド実行の許可を求めています:\n${(data.command || '').slice(0, 120)}`
-        : `プランの承認を求めています:\n${(data.title || data.message || '').slice(0, 120)}`;
+        ? `Requesting permission to run a command:\n${(data.command || '').slice(0, 120)}`
+        : `Requesting plan approval:\n${(data.title || data.message || '').slice(0, 120)}`;
 
     const n = new Notification(title, { body, tag: `approval-${data.confirmId}`, requireInteraction: true });
 
@@ -823,16 +821,16 @@ function _sendApprovalNotification(taskId, data) {
 async function _sendTaskDoneNotification(taskId, data, isError) {
     if (!('Notification' in window) || Notification.permission !== 'granted') return;
 
-    const title = isError ? '❌ タスク失敗' : '✅ タスク完了';
+    const title = isError ? '❌ Task failed' : '✅ Task completed';
     let body = isError
-        ? (data?.error || 'エラーが発生しました').slice(0, 120)
-        : 'タスクが正常に完了しました';
+        ? (data?.error || 'An error occurred').slice(0, 120)
+        : 'The task completed successfully';
 
     // Fetch task prompt for a meaningful notification body
     try {
         const task = await window.apiClient?.getTask(taskId);
         if (task?.prompt) {
-            body = (isError ? '[失敗] ' : '') + task.prompt.slice(0, 120);
+            body = (isError ? '[Failed] ' : '') + task.prompt.slice(0, 120);
         }
     } catch (_) {}
 

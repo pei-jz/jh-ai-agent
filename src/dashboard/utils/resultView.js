@@ -29,7 +29,7 @@ export function attachFileOpenHandlers(rootEl) {
             } catch (err) {
                 console.error('Failed to open path:', path, err);
                 el.classList.add('rv-open-error');
-                el.title = `開けませんでした: ${err}`;
+                el.title = `Could not open: ${err}`;
             }
         });
     });

@@ -165,6 +165,9 @@ pub(crate) async fn update_config(
                 if final_config.plan_mode.is_none() {
                     final_config.plan_mode = old_config.plan_mode;
                 }
+                if final_config.output_language.is_none() {
+                    final_config.output_language = old_config.output_language;
+                }
                 if final_config.fast_model_id.is_none() {
                     final_config.fast_model_id = old_config.fast_model_id;
                 }

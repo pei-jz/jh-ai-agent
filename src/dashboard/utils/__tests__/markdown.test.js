@@ -70,7 +70,7 @@ describe('filesFromModified', () => {
 
 describe('renderResultSummary', () => {
     it('shows placeholder when null', () => {
-        expect(renderResultSummary(null)).toContain('結果サマリはまだ');
+        expect(renderResultSummary(null)).toContain('No result summary');
     });
     it('renders summary markdown + a file table with open-path links', () => {
         const html = renderResultSummary({
@@ -79,11 +79,11 @@ describe('renderResultSummary', () => {
         });
         expect(html).toContain('<h1 class="rv-h">Done</h1>');
         expect(html).toContain('data-open-path="src/x.js"');
-        expect(html).toContain('🆕 作成');
+        expect(html).toContain('🆕 Created');
         expect(html).toContain('entry');
     });
     it('shows "なし" when there are no files', () => {
-        expect(renderResultSummary({ summary: 'x', files: [] })).toContain('なし');
+        expect(renderResultSummary({ summary: 'x', files: [] })).toContain('None');
     });
     it('renders the structured shape: answer headline + stats chips + collapsible details', () => {
         const html = renderResultSummary({
@@ -98,8 +98,8 @@ describe('renderResultSummary', () => {
         expect(html).toContain('<h1 class="rv-h">回答</h1>');
         // stats chips (tool total = 2, tokens shown as k, duration in s)
         expect(html).toContain('rv-chip');
-        expect(html).toContain('ステップ 2');
-        expect(html).toContain('ツール 2');
+        expect(html).toContain('Steps 2');
+        expect(html).toContain('Tools 2');
         expect(html).toContain('5.2k');
         // collapsible details holds request + plan
         expect(html).toContain('<details');
@@ -123,7 +123,7 @@ describe('renderFileList', () => {
         expect(html).toContain('rv-filelist');
         expect(html).toContain('data-open-path="a/b.tsx"');
         expect(html).toContain('b.tsx');
-        expect(html).toContain('✏️ 変更');
+        expect(html).toContain('✏️ Modified');
     });
     it('honors a custom title', () => {
         expect(renderFileList([{ path: 'x' }], { title: 'CUSTOM' })).toContain('CUSTOM');

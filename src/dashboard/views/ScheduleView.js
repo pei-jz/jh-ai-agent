@@ -17,31 +17,31 @@ function makeId() {
     return Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 }
 
-const DAY_LABELS = ['日', '月', '火', '水', '木', '金', '土'];
+const DAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
 const INTERVAL_OPTIONS = [
-    { value: 15,   label: '15分ごと' },
-    { value: 30,   label: '30分ごと' },
-    { value: 60,   label: '1時間ごと' },
-    { value: 120,  label: '2時間ごと' },
-    { value: 360,  label: '6時間ごと' },
-    { value: 720,  label: '12時間ごと' },
+    { value: 15,   label: 'Every 15 min' },
+    { value: 30,   label: 'Every 30 min' },
+    { value: 60,   label: 'Every 1 hour' },
+    { value: 120,  label: 'Every 2 hours' },
+    { value: 360,  label: 'Every 6 hours' },
+    { value: 720,  label: 'Every 12 hours' },
 ];
 
 function nextRunText(schedule) {
-    if (!schedule.enabled) return '停止中';
+    if (!schedule.enabled) return 'Stopped';
     const now = new Date();
     const type = schedule.scheduleType || 'fixed';
 
     if (type === 'once') {
         if (!schedule.onceAt) return '—';
         const t = new Date(schedule.onceAt);
-        if (t <= now) return '実行済み / 期限切れ';
+        if (t <= now) return 'Ran / expired';
         const diff = t - now;
         const diffH = Math.floor(diff / 3600000);
         const diffM = Math.floor((diff % 3600000) / 60000);
-        if (diffH < 24) return `${diffH}時間${diffM}分後`;
-        return `${Math.floor(diffH / 24)}日後`;
+        if (diffH < 24) return `in ${diffH}h ${diffM}m`;
+        return `in ${Math.floor(diffH / 24)}d`;
     }
 
     if (type === 'interval') {
@@ -49,8 +49,8 @@ function nextRunText(schedule) {
         const curMin = now.getMinutes();
         const nextMin = (Math.floor(curMin / intervalMin) + 1) * intervalMin;
         const waitMin = nextMin - curMin;
-        if (waitMin <= intervalMin) return `約${waitMin}分後`;
-        return `約${Math.round(waitMin / 60)}時間後`;
+        if (waitMin <= intervalMin) return `~${waitMin}m`;
+        return `~${Math.round(waitMin / 60)}h`;
     }
 
     // fixed
@@ -64,8 +64,8 @@ function nextRunText(schedule) {
             const diff = d - now;
             const diffH = Math.floor(diff / 3600000);
             const diffM = Math.floor((diff % 3600000) / 60000);
-            if (diffH < 24) return `${diffH}時間${diffM}分後`;
-            return `${Math.floor(diffH / 24)}日後`;
+            if (diffH < 24) return `in ${diffH}h ${diffM}m`;
+            return `in ${Math.floor(diffH / 24)}d`;
         }
     }
     return '—';
@@ -352,15 +352,15 @@ export class ScheduleView {
                 <div class="view-header">
                     <div>
                         <h1>Schedule</h1>
-                        <p class="subtitle">定常タスク — 曜日・時刻を指定して自動実行</p>
+                        <p class="subtitle">Recurring tasks — run automatically on chosen days/times</p>
                     </div>
                 </div>
                 <div class="sch-layout">
                     <!-- Left: list -->
                     <div class="sch-list-panel">
                         <div class="sch-list-header">
-                            <span>スケジュール (${this.schedules.length})</span>
-                            <button class="btn btn-primary" id="btn-new-schedule" style="height:24px;padding:0 10px;font-size:11px">+ 新規</button>
+                            <span>Schedules (${this.schedules.length})</span>
+                            <button class="btn btn-primary" id="btn-new-schedule" style="height:24px;padding:0 10px;font-size:11px">+ New</button>
                         </div>
                         <div class="sch-list-body" id="sch-list">
                             ${this._renderList()}
@@ -381,9 +381,9 @@ export class ScheduleView {
         if (servers.length === 0) {
             return `
                 <div class="sch-field">
-                    <label>MCPサーバー</label>
+                    <label>MCP Servers</label>
                     <div style="font-size:12px;color:var(--text-tertiary);padding:8px 0">
-                        MCPサーバーが設定されていません。設定画面から追加できます。
+                        No MCP servers configured. You can add them in Settings.
                     </div>
                 </div>`;
         }
@@ -398,7 +398,7 @@ export class ScheduleView {
         `).join('');
         return `
             <div class="sch-field">
-                <label>MCPサーバー <span style="font-weight:400;text-transform:none;font-size:10px;color:var(--text-tertiary)">(未選択 = 全て使用)</span></label>
+                <label>MCP Servers <span style="font-weight:400;text-transform:none;font-size:10px;color:var(--text-tertiary)">(none selected = use all)</span></label>
                 <div id="sch-mcp-servers" style="background:var(--bg-input);border:1px solid var(--border);border-radius:var(--radius-sm);padding:6px 12px">
                     ${checkboxes}
                 </div>
@@ -409,22 +409,22 @@ export class ScheduleView {
         const type = s.scheduleType || 'fixed';
         if (type === 'interval') {
             const min = s.intervalMinutes || 60;
-            return min < 60 ? `${min}分ごと` : `${min / 60}h ごと`;
+            return min < 60 ? `every ${min}m` : `every ${min / 60}h`;
         }
-        if (type === 'once') return '1回のみ';
+        if (type === 'once') return 'Once';
         return s.time || '09:00';
     }
 
     _renderList() {
         if (this.schedules.length === 0) {
-            return `<div class="sch-empty">スケジュールがありません<br>「＋ 新規」で追加</div>`;
+            return `<div class="sch-empty">No schedules<br>Add one with "+ New"</div>`;
         }
         return this.schedules.map(s => {
             const isSelected = this._editingId === s.id;
             const type = s.scheduleType || 'fixed';
             const days = s.days || [1, 2, 3, 4, 5];
             const daysHtml = type === 'once'
-                ? `<span style="font-size:10px;color:var(--accent)">${s.onceAt ? new Date(s.onceAt).toLocaleString() : '未設定'}</span>`
+                ? `<span style="font-size:10px;color:var(--accent)">${s.onceAt ? new Date(s.onceAt).toLocaleString() : 'not set'}</span>`
                 : DAY_LABELS.map((d, i) =>
                     `<span class="sch-day-chip ${days.includes(i) ? 'active' : 'inactive'}">${d}</span>`
                 ).join('');
@@ -433,11 +433,11 @@ export class ScheduleView {
                     <div class="sch-item-top">
                         <span class="sch-dot ${s.enabled ? 'on' : 'off'}"></span>
                         <span class="sch-time-badge">${escapeHtml(this._scheduleTypeBadge(s))}</span>
-                        <span style="font-size:10px;color:var(--text-tertiary);margin-left:auto">${s.enabled ? '有効' : '停止'}</span>
+                        <span style="font-size:10px;color:var(--text-tertiary);margin-left:auto">${s.enabled ? 'On' : 'Off'}</span>
                     </div>
                     <div class="sch-days-row">${daysHtml}</div>
-                    <div class="sch-prompt-preview">${escapeHtml(s.name || s.prompt || '(名称未設定)')}</div>
-                    <div class="sch-next">次回: ${nextRunText(s)}</div>
+                    <div class="sch-prompt-preview">${escapeHtml(s.name || s.prompt || '(untitled)')}</div>
+                    <div class="sch-next">Next: ${nextRunText(s)}</div>
                 </div>
             `;
         }).join('');
@@ -457,8 +457,8 @@ export class ScheduleView {
                         <line x1="16" y1="2" x2="16" y2="6"/>
                         <line x1="3" y1="10" x2="21" y2="10"/>
                     </svg>
-                    <h3 style="margin:0 0 6px;font-size:15px">スケジュールを選択</h3>
-                    <p style="font-size:12px;margin:0">左のリストから選択するか、「+ 新規」で作成</p>
+                    <h3 style="margin:0 0 6px;font-size:15px">Select a schedule</h3>
+                    <p style="font-size:12px;margin:0">Pick one from the list, or create one with "+ New"</p>
                 </div>
             `;
         }
@@ -496,25 +496,25 @@ export class ScheduleView {
                     <span style="margin-left:auto;font-size:11px;color:${r.status === 'completed' ? 'var(--success)' : 'var(--error)'}">${r.status}</span>
                 </div>
             `).join('')
-            : `<div class="sch-run-row" style="color:var(--text-tertiary)">実行履歴なし</div>`;
+            : `<div class="sch-run-row" style="color:var(--text-tertiary)">No run history</div>`;
 
         return `
             <div class="sch-detail-header">
-                <span>${s.name ? escapeHtml(s.name) : '(名称未設定)'}</span>
-                <span style="margin-left:auto;font-size:11px;font-weight:400;color:var(--text-tertiary)">次回: ${nextRunText(s)}</span>
+                <span>${s.name ? escapeHtml(s.name) : '(untitled)'}</span>
+                <span style="margin-left:auto;font-size:11px;font-weight:400;color:var(--text-tertiary)">Next: ${nextRunText(s)}</span>
             </div>
             <div class="sch-detail-body">
                 <div class="sch-field">
-                    <label>名称</label>
-                    <input type="text" class="sch-input" id="sch-name" value="${escapeHtml(s.name || '')}" placeholder="スケジュール名 (任意)">
+                    <label>Name</label>
+                    <input type="text" class="sch-input" id="sch-name" value="${escapeHtml(s.name || '')}" placeholder="Schedule name (optional)">
                 </div>
                 <div class="sch-field">
-                    <label>プロンプト / タスク指示</label>
+                    <label>Prompt / task instruction</label>
                     <textarea class="sch-textarea" id="sch-prompt" rows="4">${escapeHtml(s.prompt || '')}</textarea>
                 </div>
 
                 <div class="sch-field">
-                    <label>エージェントモード</label>
+                    <label>Agent mode</label>
                     <select class="sch-select" id="sch-agent-mode">
                         ${Object.values(AGENT_MODES).map(m =>
                             `<option value="${m.id}" ${(s.agentModeId || DEFAULT_MODE_ID) === m.id ? 'selected' : ''}>${m.label} — ${m.description}</option>`
@@ -525,60 +525,60 @@ export class ScheduleView {
                 ${this._renderMcpField(s)}
 
                 <div class="sch-field">
-                    <label>スケジュール種別</label>
+                    <label>Schedule type</label>
                     <div class="sch-type-group">
-                        <button class="sch-type-btn ${type === 'fixed'    ? 'selected' : ''}" data-type="fixed">固定時刻</button>
-                        <button class="sch-type-btn ${type === 'interval' ? 'selected' : ''}" data-type="interval">繰り返し間隔</button>
-                        <button class="sch-type-btn ${type === 'once'     ? 'selected' : ''}" data-type="once">1回のみ</button>
+                        <button class="sch-type-btn ${type === 'fixed'    ? 'selected' : ''}" data-type="fixed">Fixed time</button>
+                        <button class="sch-type-btn ${type === 'interval' ? 'selected' : ''}" data-type="interval">Interval</button>
+                        <button class="sch-type-btn ${type === 'once'     ? 'selected' : ''}" data-type="once">Once</button>
                     </div>
                 </div>
 
                 <!-- Fixed time section -->
                 <div class="sch-field" id="sch-section-fixed" ${type !== 'fixed' ? 'style="display:none"' : ''}>
-                    <label>実行時刻</label>
+                    <label>Run time</label>
                     <div class="sch-time-row">
                         <input type="time" class="sch-time-input" id="sch-time" value="${escapeHtml(s.time || '09:00')}">
-                        <span style="font-size:12px;color:var(--text-secondary)">毎週指定曜日のこの時刻</span>
+                        <span style="font-size:12px;color:var(--text-secondary)">at this time on the selected weekdays</span>
                     </div>
                 </div>
 
                 <!-- Interval section -->
                 <div class="sch-field" id="sch-section-interval" ${type !== 'interval' ? 'style="display:none"' : ''}>
-                    <label>繰り返し間隔</label>
+                    <label>Interval</label>
                     <select class="sch-select" id="sch-interval">${intervalOptionsHtml}</select>
                 </div>
 
                 <!-- Once section -->
                 <div class="sch-field" id="sch-section-once" ${type !== 'once' ? 'style="display:none"' : ''}>
-                    <label>実行日時 (1回のみ)</label>
+                    <label>Run at (once)</label>
                     <input type="datetime-local" class="sch-datetime-input" id="sch-once-at" value="${escapeHtml(onceAtValue)}">
                 </div>
 
                 <!-- Days picker (hidden for "once") -->
                 <div class="sch-field" id="sch-section-days" ${type === 'once' ? 'style="display:none"' : ''}>
-                    <label>実行曜日</label>
+                    <label>Run on days</label>
                     <div class="sch-days-picker" id="sch-days-picker">${daysPickerHtml}</div>
                 </div>
 
                 <div class="sch-field">
-                    <label>有効 / 停止</label>
+                    <label>Enabled / stopped</label>
                     <div class="sch-toggle-row">
                         <label class="sch-toggle">
                             <input type="checkbox" id="sch-enabled" ${s.enabled ? 'checked' : ''}>
                             <div class="sch-toggle-track"><div class="sch-toggle-thumb"></div></div>
                         </label>
-                        <span style="font-size:13px;color:var(--text-secondary)" id="sch-enabled-label">${s.enabled ? '有効 — 指定時刻に自動実行します' : '停止中'}</span>
+                        <span style="font-size:13px;color:var(--text-secondary)" id="sch-enabled-label">${s.enabled ? 'Enabled — runs automatically at the set time' : 'Stopped'}</span>
                     </div>
                 </div>
                 <div class="sch-field">
-                    <label>直近の実行履歴</label>
+                    <label>Recent runs</label>
                     <div class="sch-run-history">${runsHtml}</div>
                 </div>
             </div>
             <div class="sch-actions">
-                <button class="btn btn-primary" id="btn-save-schedule">保存</button>
-                <button class="btn btn-secondary" id="btn-run-now">今すぐ実行</button>
-                <button class="btn btn-error" id="btn-delete-schedule" style="margin-left:auto">削除</button>
+                <button class="btn btn-primary" id="btn-save-schedule">Save</button>
+                <button class="btn btn-secondary" id="btn-run-now">Run now</button>
+                <button class="btn btn-error" id="btn-delete-schedule" style="margin-left:auto">Delete</button>
             </div>
         `;
     }
@@ -610,7 +610,7 @@ export class ScheduleView {
     _bindDetail() {
         document.getElementById('sch-enabled')?.addEventListener('change', (e) => {
             const lbl = document.getElementById('sch-enabled-label');
-            if (lbl) lbl.textContent = e.target.checked ? '有効 — 指定時刻に自動実行します' : '停止中';
+            if (lbl) lbl.textContent = e.target.checked ? 'Enabled — runs automatically at the set time' : 'Stopped';
         });
 
         document.querySelectorAll('.sch-day-btn').forEach(btn => {
@@ -653,11 +653,11 @@ export class ScheduleView {
 
         document.getElementById('btn-run-now')?.addEventListener('click', async () => {
             const s = this.schedules.find(x => x.id === this._editingId);
-            if (!s || !s.prompt) { alert('プロンプトを入力してください'); return; }
-            if (!window.apiClient) { alert('バックエンドに接続されていません'); return; }
+            if (!s || !s.prompt) { alert('Please enter a prompt'); return; }
+            if (!window.apiClient) { alert('Not connected to the backend'); return; }
             const btn = document.getElementById('btn-run-now');
             btn.disabled = true;
-            btn.textContent = '実行中...';
+            btn.textContent = 'Running…';
             try {
                 const mcpServers = s.mcpServers && s.mcpServers.length > 0 ? s.mcpServers : null;
                 const behavior = {
@@ -678,14 +678,14 @@ export class ScheduleView {
                 s.runs = s.runs || [];
                 s.runs.push({ at: new Date().toISOString(), status: 'failed', error: err.message });
                 saveSchedules(this.schedules);
-                alert(`実行失敗: ${err.message}`);
+                alert(`Run failed: ${err.message}`);
                 btn.disabled = false;
-                btn.textContent = '今すぐ実行';
+                btn.textContent = 'Run now';
             }
         });
 
         document.getElementById('btn-delete-schedule')?.addEventListener('click', () => {
-            if (!confirm('このスケジュールを削除しますか？')) return;
+            if (!confirm('Delete this schedule?')) return;
             this.schedules = this.schedules.filter(x => x.id !== this._editingId);
             this._editingId = null;
             saveSchedules(this.schedules);
@@ -727,7 +727,7 @@ export class ScheduleView {
             const nextEl = document.querySelector('.sch-detail-header span:last-child');
             if (nextEl) {
                 const s = this.schedules.find(x => x.id === this._editingId);
-                if (s) nextEl.textContent = `次回: ${nextRunText(s)}`;
+                if (s) nextEl.textContent = `Next: ${nextRunText(s)}`;
             }
         }, 30 * 1000);
 

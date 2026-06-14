@@ -135,15 +135,15 @@ export function renderAgentSteps(steps, currentStep, streamContent) {
 export function renderResultStatsChips(stats) {
     if (!stats || typeof stats !== 'object') return '';
     const chips = [];
-    if (stats.steps > 0) chips.push(`📍 ステップ ${stats.steps}`);
+    if (stats.steps > 0) chips.push(`📍 Steps ${stats.steps}`);
     const toolTotal = Object.values(stats.tools || {}).reduce((a, c) => a + (c || 0), 0);
-    if (toolTotal > 0) chips.push(`🛠 ツール ${toolTotal}`);
+    if (toolTotal > 0) chips.push(`🛠 Tools ${toolTotal}`);
     if (stats.tokens > 0) {
         const tok = stats.tokens >= 1000 ? (stats.tokens / 1000).toFixed(1) + 'k' : String(stats.tokens);
         chips.push(`🧮 ${tok} tok`);
     }
     if (stats.durationMs > 0) chips.push(`⏱ ${Math.round(stats.durationMs / 1000)}s`);
-    if (stats.files > 0) chips.push(`📄 ファイル ${stats.files}件`);
+    if (stats.files > 0) chips.push(`📄 Files ${stats.files}`);
     if (chips.length === 0) return '';
     return `<div class="rv-chips" style="margin-top:10px;">`
         + chips.map(c => `<span class="rv-chip">${escapeHtml(c)}</span>`).join('')
@@ -160,7 +160,7 @@ export function renderMessageHtml(msg) {
         if (parsed && parsed.thought) {
             thoughtsHtml = `
                 <details class="thought-process-block" open>
-                    <summary>思考プロセス（ツール選択）</summary>
+                    <summary>Thought process (tool selection)</summary>
                     <div class="thought-process-content">${formatMarkdown(parsed.thought)}</div>
                 </details>
             `;
@@ -170,7 +170,7 @@ export function renderMessageHtml(msg) {
                 <div class="message-bubble" style="background: var(--bg-secondary); border-color: var(--border-light); max-width: 85%; width: 100%; border-radius: 12px 12px 12px 2px; padding: 12px 16px; margin-bottom: 8px;">
                     ${thoughtsHtml}
                     <div style="display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: var(--accent); margin-bottom: 8px;">
-                        <span>🛠️ ツール呼び出し中</span>
+                        <span>🛠️ Calling tools</span>
                     </div>
                     <div style="display: flex; flex-direction: column; gap: 8px;">
                         ${toolCalls.map(tc => `
@@ -193,7 +193,7 @@ export function renderMessageHtml(msg) {
                 <div class="message-bubble" style="background: hsla(185, 100%, 55%, 0.03); border-color: var(--border-light); max-width: 85%; width: 100%; border-radius: 12px 12px 2px 12px; padding: 10px 14px; margin-bottom: 8px;">
                     <details style="outline: none;">
                         <summary style="cursor: pointer; font-size: 12.5px; font-weight: 500; color: var(--text-secondary); user-select: none;">
-                            ➜ ツール実行結果 (${results.length}件)
+                            ➜ Tool results (${results.length})
                         </summary>
                         <div style="margin-top: 8px; display: flex; flex-direction: column; gap: 8px;">
                             ${results.map(r => {
@@ -201,7 +201,7 @@ export function renderMessageHtml(msg) {
                                 return `
                                     <div style="border-top: 1px solid var(--border-light); padding-top: 8px;">
                                         <div style="font-size: 11.5px; font-weight: 600; color: ${isErr ? 'var(--error)' : 'var(--text-secondary)'}; margin-bottom: 4px;">
-                                            <strong>${escapeHtml(r.tool_call_name)}</strong> の結果:
+                                            <strong>${escapeHtml(r.tool_call_name)}</strong> result:
                                         </div>
                                         <pre style="margin: 0; background: var(--bg-primary); padding: 8px; border-radius: 6px; overflow-x: auto; font-family: var(--font-mono); font-size: 11.5px; color: ${isErr ? 'var(--error)' : 'var(--text-primary)'}; white-space: pre-wrap; max-height: 250px; overflow-y: auto;"><code>${escapeHtml(typeof r.result === 'string' ? r.result : JSON.stringify(r.result, null, 2))}</code></pre>
                                     </div>

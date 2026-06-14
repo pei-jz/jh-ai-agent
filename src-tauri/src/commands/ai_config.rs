@@ -110,6 +110,12 @@ pub struct AiConfig {
     #[serde(default)]
     pub plan_mode: Option<String>,
 
+    /// Language the agent uses for its final user-facing responses (e.g.
+    /// "Japanese", "English"). Injected into the system prompt by the frontend
+    /// ContextBuilder. None ⇒ frontend default ("Japanese").
+    #[serde(default)]
+    pub output_language: Option<String>,
+
     /// Model routing — the "fast" tier model id ("{instance_id}:{model}"). Used for
     /// quick / single-shot tasks (app intents, freeform). None ⇒ no routing (active model).
     #[serde(default)]
@@ -154,6 +160,7 @@ pub async fn get_ai_config<R: tauri::Runtime>(
             history_compress_ratio: None,
             agent_temperature: None,
             plan_mode: None,
+            output_language: None,
             fast_model_id: None,
             deep_model_id: None,
             prompt_templates: None,
@@ -275,6 +282,9 @@ pub async fn save_ai_config<R: tauri::Runtime>(
                 if final_config.plan_mode.is_none() {
                     final_config.plan_mode = old_config.plan_mode;
                 }
+                if final_config.output_language.is_none() {
+                    final_config.output_language = old_config.output_language;
+                }
                 if final_config.fast_model_id.is_none() {
                     final_config.fast_model_id = old_config.fast_model_id;
                 }
@@ -334,6 +344,7 @@ pub async fn set_rag_approval<R: tauri::Runtime>(
             history_compress_ratio: None,
             agent_temperature: None,
             plan_mode: None,
+            output_language: None,
             fast_model_id: None,
             deep_model_id: None,
             prompt_templates: None,

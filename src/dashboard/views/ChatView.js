@@ -4,13 +4,15 @@ import { mcpManager } from '../../modules/ai/McpManager.js';
 import { workflowManager } from '../../modules/ai/WorkflowManager.js';
 import { promptTemplateManager } from '../../modules/ai/PromptTemplateManager.js';
 import { skillManager } from '../../modules/ai/SkillManager.js';
-import { AGENT_MODES, DEFAULT_MODE_ID, buildBehavior } from '../../modules/ai/AgentModes.js';
+import { AGENT_MODES, DEFAULT_MODE_ID, buildBehavior, resolveModeId } from '../../modules/ai/AgentModes.js';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { renderFileList, filesFromModified, ensureResultViewStyles } from '../utils/resultView.js';
 import { escapeHtml, formatMessageContent, formatMarkdown, renderTableHtml } from './chat/chatMarkdown.js';
 import { STORAGE_KEY as CHAT_SESSIONS_KEY, parseSessions, pruneSessions } from './chat/chatSessions.js';
 import { extractToolCall, parseThought, renderAgentSteps, renderMessageHtml, renderResultStatsChips } from './chat/chatRenderer.js';
+import { ModeDropdown } from '../components/ModeDropdown.js';
+import { icon } from '../utils/icons.js';
 
 // Simple-mode tool loop's executor. sendMessage referenced `toolExecutor` but no
 // instance was ever created/imported (latent ReferenceError when tools were
@@ -164,7 +166,7 @@ export class ChatView {
                     // Failed badge: hover for full detail (native tooltip) + click for full dialog.
                     badge = `<span class="chat-mcp-error-badge" data-name="${escapeHtml(name)}"
                         title="${escapeHtml(err.message)}"
-                        style="font-size: 10px; background: var(--error, #c0392b); color: #fff; border-radius: 4px; padding: 1px 6px; font-weight: 600; cursor: pointer;">⚠ 起動失敗 (詳細)</span>`;
+                        style="font-size: 10px; background: var(--error, #c0392b); color: #fff; border-radius: 4px; padding: 1px 6px; font-weight: 600; cursor: pointer;">⚠ Failed to start (details)</span>`;
                 }
                 return `
                     <label style="display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; user-select: none;">
@@ -197,16 +199,17 @@ export class ChatView {
             ? `
                 <div class="chat-empty-state">
                     <div class="chat-empty-icon">💬</div>
-                    <h3>会話を始めましょう</h3>
-                    <p>選択したAIモデルに質問したり、コードを書いたり、アイデアを探索したりできます。</p>
+                    <h3>Start a conversation</h3>
+                    <p>Ask the selected AI model questions, draft text, or explore ideas.</p>
                 </div>
             `
             : this.messages.map((msg, index) => this._renderMessageHtml(msg, index)).join('');
 
-        const headerTitle = this.chatMode === 'agent' ? 'Agent Chat' : 'Direct Chat';
-        const headerSubtitle = this.chatMode === 'agent'
-            ? 'Full agent loop — ContextBuilder safety rules, tools, anti-loop, retries'
-            : 'Direct LLM call with your system prompt (fast, no agent loop)';
+        // ChatView is now a SIMPLE chat surface only (agent tasks live in the
+        // Monitor "new task" flow). Web search + relevant MCP tools are available;
+        // there is no mode toggle / workspace / agent picker here.
+        const headerTitle = 'Chat';
+        const headerSubtitle = 'Chat with AI (web search + relevant MCP tools available). Run agents from Monitor → New Task';
 
         return `
             <style>
@@ -959,11 +962,6 @@ export class ChatView {
                             <p class="subtitle">${headerSubtitle}</p>
                         </div>
                         <div class="chat-header-actions">
-                            <!-- Mode toggle: always visible in header -->
-                            <div class="chat-mode-pills">
-                                <button class="chat-mode-pill ${this.chatMode === 'simple' ? 'active' : ''}" data-mode="simple">⚡ Simple</button>
-                                <button class="chat-mode-pill ${this.chatMode === 'agent' ? 'active' : ''}" data-mode="agent">🤖 Agent</button>
-                            </div>
                             <select id="chat-model-select" class="select chat-models-select">
                                 ${modelOptions}
                             </select>
@@ -973,59 +971,23 @@ export class ChatView {
                         </div>
                     </div>
 
-                    <!-- Agent workspace bar: visible directly below header in agent mode -->
-                    ${this.chatMode === 'agent' ? `
-                    <div class="agent-workspace-bar">
-                        <label>📁 Workspace:</label>
-                        <input type="text" id="chat-workspace-inline" class="input" value="${escapeHtml(this.workspacePath || '')}"
-                            placeholder="ワークスペースパス (例: C:\\projects\\myapp)" style="flex: 1; height: 28px; font-size: 12px; padding: 0 8px;">
-                        <button id="btn-workspace-select-inline" class="btn btn-secondary" style="height: 28px; padding: 0 10px; font-size: 12px;" type="button">📁 参照</button>
-                        <select id="chat-agent-mode-select" style="height:28px;font-size:12px;padding:0 8px;background:var(--bg-input);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);cursor:pointer;outline:none;">
-                            ${Object.values(AGENT_MODES).map(m =>
-                                `<option value="${m.id}" ${this.agentModeId === m.id ? 'selected' : ''}>${m.label}</option>`
-                            ).join('')}
-                        </select>
-                        <span id="agent-mode-desc" style="font-size:11px;color:var(--text-tertiary);white-space:nowrap">${AGENT_MODES[this.agentModeId]?.description || ''}</span>
-                    </div>
-                    ` : ''}
-
                     <!-- System Prompt & Chat Settings Collapsible -->
                     <div class="chat-system-prompt-container">
                         <div class="chat-system-prompt-toggle" id="prompt-toggle-btn">
-                            <span>⚙️</span> Chat Settings & Tools
+                            <span>⚙️</span> Chat Settings
                         </div>
                         <div class="chat-system-prompt-panel" id="prompt-panel" style="display: ${this.settingsExpanded ? 'block' : 'none'};">
                             <div class="provider-card-fields" style="display: flex; flex-direction: column; gap: 12px;">
                                 <div class="input-group">
-                                    <label class="input-label" style="font-size: 11px; margin-bottom: 4px;">System Prompt <span style="opacity:0.6">(Simple mode のみ使用。Agentモードは内部 ContextBuilder プロンプトを使用)</span></label>
+                                    <label class="input-label" style="font-size: 11px; margin-bottom: 4px;">System Prompt</label>
                                     <input type="text" id="chat-system-input" class="input" value="${escapeHtml(this.systemPrompt)}" placeholder="e.g. You are a helpful AI assistant.">
                                 </div>
-                                <div class="input-group">
-                                    <label class="input-label" style="font-size: 11px; margin-bottom: 4px;">Workspace Directory</label>
-                                    <div style="display: flex; gap: 8px;">
-                                        <input type="text" id="chat-workspace-input" class="input" value="${escapeHtml(this.workspacePath || '')}" placeholder="C:\\path\\to\\workspace" style="flex: 1; height: 36px;">
-                                        <button class="btn btn-secondary" id="btn-select-workspace" style="padding: 0 12px; display: flex; align-items: center; justify-content: center; height: 36px; border: 1px solid var(--border);" type="button">📁 Select</button>
-                                    </div>
-                                </div>
-                                <div class="input-group">
-                                    <div class="toggle-wrap" id="chat-tools-enabled-wrap">
-                                        <div class="toggle ${this.toolsEnabled ? 'active' : ''}" id="chat-tools-enabled-toggle"></div>
-                                        <span class="toggle-label" style="font-size: 12px; font-weight: 500;">Enable Tool Execution (Simple / Agent 両対応)</span>
-                                    </div>
-                                </div>
                                 <div class="input-group" style="border-top: 1px solid var(--border-light); padding-top: 12px;">
-                                    <label class="input-label" style="font-size: 11px; margin-bottom: 6px; display: block; font-weight: 600;">🔌 Enabled MCP Servers</label>
+                                    <label class="input-label" style="font-size: 11px; margin-bottom: 6px; display: block; font-weight: 600;">🔌 MCP Servers</label>
+                                    <p style="font-size: 11px; color: var(--text-tertiary); margin: 0 0 8px;">Only MCP tools relevant to your message are sent automatically (irrelevant ones are skipped). Web search is always available.</p>
                                     <div style="display: flex; flex-wrap: wrap; gap: 16px;">
                                         ${mcpServersHtml}
                                     </div>
-                                </div>
-                                <div class="input-group" style="border-top: 1px solid var(--border-light); padding-top: 12px;">
-                                    <details style="outline: none;" ${this.toolsEnabled ? 'open' : ''}>
-                                        <summary style="font-size: 12px; font-weight: 600; cursor: pointer; color: var(--text-secondary); user-select: none;">🛠️ Available Tools (${activeTools.length})</summary>
-                                        <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; margin-top: 8px; max-height: 180px; overflow-y: auto; padding-right: 4px;">
-                                            ${toolsListHtml}
-                                        </div>
-                                    </details>
                                 </div>
                             </div>
                         </div>
@@ -1110,7 +1072,7 @@ export class ChatView {
                         invoke('open_path_default', { path }).catch(err => {
                             console.error('Failed to open path:', path, err);
                             fileLink.classList.add('rv-open-error');
-                            fileLink.title = `開けませんでした: ${err}`;
+                            fileLink.title = `Could not open: ${err}`;
                         });
                     }
                 }
@@ -1229,95 +1191,11 @@ export class ChatView {
             });
         }
 
-        // Workspace Input change listener
-        if (workspaceInput) {
-            workspaceInput.addEventListener('change', (e) => {
-                this.workspacePath = e.target.value.trim();
-            });
-        }
-
-        // Workspace Folder dialog button click
-        if (btnSelectWorkspace) {
-            btnSelectWorkspace.addEventListener('click', async () => {
-                try {
-                    const selected = await invoke('select_folder');
-                    if (selected) {
-                        if (workspaceInput) workspaceInput.value = selected;
-                        this.workspacePath = selected;
-                    }
-                } catch (e) {
-                    console.error('Failed to select workspace folder:', e);
-                }
-            });
-        }
-
-        // Agent Mode toggle click
-        if (toolsToggle && toolsWrap) {
-            toolsWrap.addEventListener('click', () => {
-                this.toolsEnabled = !this.toolsEnabled;
-                toolsToggle.classList.toggle('active', this.toolsEnabled);
-                this.reRender();
-                // Tools work in Simple mode too — make sure MCP servers are up.
-                if (this.toolsEnabled) this._startEnabledMcpServers();
-            });
-        }
-
-        // Chat Mode pills in header (Simple / Agent)
-        document.querySelectorAll('.chat-mode-pill').forEach(btn => {
-            btn.addEventListener('click', async () => {
-                const mode = btn.getAttribute('data-mode');
-                if (!mode || mode === this.chatMode) return;
-                this.chatMode = mode;
-                if (mode === 'agent') {
-                    // Agent mode always runs with tools.
-                    this.toolsEnabled = true;
-                    this.reRender();
-                    this._startEnabledMcpServers();
-                } else {
-                    // Simple mode: KEEP the user's current tool setting (tools/MCP
-                    // such as Backlog are usable in Simple mode too — was previously
-                    // force-disabled here). Start MCP servers if tools are on.
-                    this.reRender();
-                    if (this.toolsEnabled) this._startEnabledMcpServers();
-                }
-            });
-        });
-
-        // Inline workspace selector (shown in agent mode bar)
-        const inlineWorkspaceInput = document.getElementById('chat-workspace-inline');
-        if (inlineWorkspaceInput) {
-            inlineWorkspaceInput.addEventListener('change', (e) => {
-                this.workspacePath = e.target.value.trim();
-                const settingsInput = document.getElementById('chat-workspace-input');
-                if (settingsInput) settingsInput.value = this.workspacePath;
-            });
-        }
-        const btnWorkspaceInline = document.getElementById('btn-workspace-select-inline');
-        if (btnWorkspaceInline) {
-            btnWorkspaceInline.addEventListener('click', async () => {
-                try {
-                    const selected = await invoke('select_folder');
-                    if (selected) {
-                        this.workspacePath = selected;
-                        if (inlineWorkspaceInput) inlineWorkspaceInput.value = selected;
-                        const settingsInput = document.getElementById('chat-workspace-input');
-                        if (settingsInput) settingsInput.value = selected;
-                    }
-                } catch (e) {
-                    console.error('Failed to select workspace folder:', e);
-                }
-            });
-        }
-
-        // Agent mode selector (agent workspace bar)
-        const agentModeSelect = document.getElementById('chat-agent-mode-select');
-        if (agentModeSelect) {
-            agentModeSelect.addEventListener('change', (e) => {
-                this.agentModeId = e.target.value;
-                const descEl = document.getElementById('agent-mode-desc');
-                if (descEl) descEl.textContent = AGENT_MODES[this.agentModeId]?.description || '';
-            });
-        }
+        // ChatView is simple-chat only: no workspace, no agent-mode toggle, no
+        // tools-enable toggle. Web search + relevant MCP tools are always on.
+        // Ensure any configured MCP servers are running so their tools can be
+        // relevance-pruned into the chat.
+        this._startEnabledMcpServers();
 
         // MCP checkbox event listeners
         const mcpCheckboxes = document.querySelectorAll('.chat-mcp-checkbox');
@@ -1356,7 +1234,7 @@ export class ChatView {
                 const err = mcpManager.getError(name);
                 if (err) {
                     const when = err.at ? new Date(err.at).toLocaleString() : '';
-                    alert(`MCP サーバー "${name}" 起動失敗\n発生時刻: ${when}\n\n${err.message}`);
+                    alert(`MCP server "${name}" failed to start\nTime: ${when}\n\n${err.message}`);
                 }
             });
         });
@@ -1380,7 +1258,7 @@ export class ChatView {
         // Clear Chat History (current conversation only)
         if (clearBtn) {
             clearBtn.addEventListener('click', () => {
-                if (!confirm('現在のチャットの内容を削除しますか？')) return;
+                if (!confirm('Clear the contents of the current chat?')) return;
                 this.messages = [];
                 // Reset the active session's messages + title and persist to BOTH
                 // localStorage and the file backup so it can't be restored.
@@ -1439,7 +1317,7 @@ export class ChatView {
         data.activeSessionId = newId;
         data.sessions[newId] = {
             id: newId,
-            title: '新しいチャット',
+            title: 'New Chat',
             timestamp: Date.now(),
             messages: [],
             chatMode: 'simple',
@@ -1631,18 +1509,27 @@ export class ChatView {
      */
     async _startEnabledMcpServers() {
         if (!this.allMcpServers || Object.keys(this.allMcpServers).length === 0) return;
+        // Re-entry guard: this is called from init(), and the reRender() below
+        // re-runs init() — without the guard that's an infinite loop.
+        if (this._mcpStarting) return;
+        this._mcpStarting = true;
         try {
             await mcpManager.loadConfig();
             const servers = mcpManager.serversConfig.mcpServers || {};
+            let startedAny = false;
             for (const [name, config] of Object.entries(servers)) {
                 if (!mcpManager.clients.has(name)) {
                     await mcpManager.startClient(name, config);
+                    startedAny = true;
                 }
             }
-            // Refresh the tools/MCP panel counts now that servers are up.
-            this.reRender();
+            // Refresh the MCP panel counts ONLY if we actually started something
+            // (avoids a needless re-render every time the view mounts).
+            if (startedAny) this.reRender();
         } catch (e) {
             console.warn('Failed to start MCP servers:', e);
+        } finally {
+            this._mcpStarting = false;
         }
     }
 
@@ -1652,12 +1539,6 @@ export class ChatView {
         const text = textarea.value.trim();
         if (!text && this.attachments.length === 0 && this.activeSkills.length === 0) return;
         if (this.isGenerating) return;
-
-        // Guard: Agent mode requires a workspace path
-        if (this.chatMode === 'agent' && !this.workspacePath?.trim()) {
-            this._appendSystemMessage('⚠️ Agentモードではワークスペースの設定が必要です。「Workspace Directory」にプロジェクトのパスを入力してください。');
-            return;
-        }
 
         // Clear input area
         textarea.value = '';
@@ -1682,7 +1563,7 @@ export class ChatView {
                     bodies.push(`# Skill: ${s.title} (/${s.name})\n${body}`);
                 } catch (e) {
                     console.error(`Failed to load skill "${s.name}":`, e);
-                    this._appendSystemMessage(`⚠️ スキル「${s.name}」の読み込みに失敗しました: ${e.message || e}`);
+                    this._appendSystemMessage(`⚠️ Failed to load skill "${s.name}": ${e.message || e}`);
                 }
             }
             if (bodies.length > 0) {
@@ -1744,25 +1625,17 @@ export class ChatView {
             return apiMsgs.slice(-MAX_HISTORY_MESSAGES);
         };
 
-        // ── Branch: Agent mode goes through TaskBridge for the full safety stack ──
-        // This is the same code path JHEditor uses when calling the JH AI Agent
-        // REST API. Direct Chat in Agent mode inherits all the improvements
-        // (anti-loop detection, verify_syntax, task_progress, retries, ...).
-        if (this.chatMode === 'agent') {
-            try {
-                await this._sendViaAgent(processedText, attachedImages.map(img => img.dataUrl));
-            } catch (e) {
-                console.error('Agent send failed:', e);
-            } finally {
-                this.isGenerating = false;
-                this.updateSendButtonState();
-            }
-            return;
-        }
-
-        if (this.toolsEnabled) {
-            await toolExecutor.startSession(this.workspacePath);
-        }
+        // ── Simple-chat tool set ─────────────────────────────────────────
+        // ChatView has no workspace, so file/shell tools make no sense. Expose
+        // only web search (fetch_url) from the built-ins, plus MCP tools that are
+        // RELEVANT to this message (score threshold — sends none when nothing is
+        // relevant, so casual chat costs no extra tokens). MCP servers were
+        // started on mount; here we just scope + relevance-prune.
+        await toolExecutor.startSession('.');
+        toolExecutor.setToolAllowlist(['fetch_url']);  // + finish_task/present_result implicitly
+        toolExecutor._mcpBypassesAllowlist = true;     // don't let the allowlist block MCP tools
+        toolExecutor.setMcpRelevanceQuery(text);
+        toolExecutor.setMcpPruneOptions({ minScore: 0.12, top: 5 });
 
         try {
             let loopCount = 0;
@@ -1823,7 +1696,7 @@ export class ChatView {
                     dynamicSystemPrompt += `\n\n${workflowManager.getPromptContext()}`;
                 }
 
-                if (this.toolsEnabled) {
+                {
                     const toolDefs = toolExecutor.getToolsForNativeAPI().map(t => {
                         return `<tool name="${t.function.name}">
 <description>${t.function.description}</description>
@@ -1925,7 +1798,7 @@ Your final responses and messages to the user MUST be in Japanese.
                     if (indicator) indicator.remove();
 
                     // Check for tool calls
-                    const toolCall = this.toolsEnabled ? this._extractToolCall(res.content) : null;
+                    const toolCall = this._extractToolCall(res.content);
 
                     if (toolCall && toolCall.tool_calls && toolCall.tool_calls.length > 0) {
                         loopCount++;
@@ -2017,9 +1890,7 @@ Your final responses and messages to the user MUST be in Japanese.
                   this.saveHistory();
               }
           } finally {
-              if (this.toolsEnabled) {
-                  toolExecutor.endSession();
-              }
+              toolExecutor.endSession();
               this.isGenerating = false;
               this.abortController = null;
               this.updateSendButtonState();
@@ -2070,8 +1941,8 @@ Your final responses and messages to the user MUST be in Japanese.
         if (this._slashItems.length === 0) {
             popup.style.display = 'block';
             popup.innerHTML = `
-                <div class="slash-popup-header">コマンド / Commands</div>
-                <div class="slash-popup-empty">一致するテンプレート・スキルがありません</div>
+                <div class="slash-popup-header">Commands</div>
+                <div class="slash-popup-empty">No matching template or skill</div>
             `;
             return;
         }
@@ -2090,7 +1961,7 @@ Your final responses and messages to the user MUST be in Japanese.
 
         popup.style.display = 'flex';
         popup.innerHTML = `
-            <div class="slash-popup-header">コマンド / Commands — ↑↓ 選択、Enter 確定、Esc 閉じる</div>
+            <div class="slash-popup-header">Commands — ↑↓ select, Enter confirm, Esc close</div>
             <div class="slash-popup-list">${itemsHtml}</div>
         `;
 
@@ -2283,11 +2154,11 @@ Your final responses and messages to the user MUST be in Japanese.
                         // Approval happens in the Monitor view (an OS notification also
                         // fires) — show a clear pending indicator here.
                         const isPlan = pkt.data?.type === 'plan_review';
-                        const label = isPlan ? '📋 プラン承認待ち' : '🛡 承認待ち';
+                        const label = isPlan ? '📋 Plan approval pending' : '🛡 Approval pending';
                         const tid = this._activeAgentTaskId || '';
                         aiContentEl.innerHTML = this._renderAgentSteps(steps, currentStep, streamBuffer || null) +
                             `<div style="margin-top:10px;padding:10px 12px;border:1px solid var(--accent);border-radius:8px;background:var(--accent-glow,rgba(0,200,255,0.07));font-size:13px;">` +
-                            `<strong>${label}</strong> — <a href="#monitor?id=${tid}" style="color:var(--accent)">Monitorで内容を確認して承認/編集</a>してください。承認後に処理を続行します。</div>`;
+                            `<strong>${label}</strong> — <a href="#monitor?id=${tid}" style="color:var(--accent)">review & approve/edit in Monitor</a>. Processing continues after approval.</div>`;
                         chatBody.scrollTop = chatBody.scrollHeight;
                         return;
                     }
@@ -2363,7 +2234,7 @@ Your final responses and messages to the user MUST be in Japanese.
                         reject(new Error(errMsg));
                     }
                 };
-                ws.onerror = () => reject(new Error('WebSocket接続エラーが発生しました'));
+                ws.onerror = () => reject(new Error('A WebSocket connection error occurred'));
                 ws.onclose = () => {
                     if (!gotFinalEvent) {
                         if (streamBuffer) {
@@ -2371,7 +2242,7 @@ Your final responses and messages to the user MUST be in Japanese.
                             this.saveHistory();
                             resolve();
                         } else {
-                            reject(new Error('接続が予期せず切断されました。エージェントサーバーが起動しているか確認してください。'));
+                            reject(new Error('The connection closed unexpectedly. Check that the agent server is running.'));
                         }
                     }
                 };
@@ -2411,6 +2282,16 @@ Your final responses and messages to the user MUST be in Japanese.
 
     _renderResultStatsChips(stats) {
         return renderResultStatsChips(stats);
+    }
+
+    /**
+     * Build (and remember) the agent-mode dropdown for this render pass. A fresh
+     * instance is created each render() because reRender() replaces the DOM; the
+     * onChange keeps this.agentModeId in sync. init() is called from ChatView.init().
+     */
+    _buildModeDropdown() {
+        this._modeDropdown = new ModeDropdown(this.agentModeId, (id) => { this.agentModeId = id; });
+        return this._modeDropdown;
     }
 
     updateSendButtonState() {
@@ -2593,7 +2474,7 @@ Your final responses and messages to the user MUST be in Japanese.
         data.activeSessionId = newId;
         data.sessions[newId] = {
             id: newId,
-            title: '新しいチャット',
+            title: 'New Chat',
             timestamp: Date.now(),
             messages: [],
             // Carry over current settings to the new session
@@ -2625,7 +2506,7 @@ Your final responses and messages to the user MUST be in Japanese.
             if (!data.sessions[data.activeSessionId]) {
                 data.sessions[data.activeSessionId] = {
                     id: data.activeSessionId,
-                    title: '新しいチャット',
+                    title: 'New Chat',
                     timestamp: Date.now(),
                     messages: []
                 };
@@ -2636,7 +2517,7 @@ Your final responses and messages to the user MUST be in Japanese.
             // Restore settings saved with this session
             if (activeSession) {
                 if (activeSession.chatMode) this.chatMode = activeSession.chatMode;
-                if (activeSession.agentModeId) this.agentModeId = activeSession.agentModeId;
+                if (activeSession.agentModeId) this.agentModeId = resolveModeId(activeSession.agentModeId);
                 if (activeSession.workspacePath) this.workspacePath = activeSession.workspacePath;
                 if (activeSession.toolsEnabled !== undefined) this.toolsEnabled = activeSession.toolsEnabled;
                 if (activeSession.systemPrompt) this.systemPrompt = activeSession.systemPrompt;
@@ -2662,7 +2543,7 @@ Your final responses and messages to the user MUST be in Japanese.
         if (!data.activeSessionId) {
             const newId = Date.now().toString();
             data.activeSessionId = newId;
-            data.sessions[newId] = { id: newId, title: '新しいチャット', timestamp: Date.now(), messages: [] };
+            data.sessions[newId] = { id: newId, title: 'New Chat', timestamp: Date.now(), messages: [] };
         }
         this.saveSessions(data);
         this.loadHistory();
@@ -2674,7 +2555,7 @@ Your final responses and messages to the user MUST be in Japanese.
         const data = {
             activeSessionId: newId,
             sessions: {
-                [newId]: { id: newId, title: '新しいチャット', timestamp: Date.now(), messages: [] }
+                [newId]: { id: newId, title: 'New Chat', timestamp: Date.now(), messages: [] }
             }
         };
         this.saveSessions(data);
@@ -2710,8 +2591,8 @@ Your final responses and messages to the user MUST be in Japanese.
         header.innerHTML = `
             <span>Chat History</span>
             <div style="display:flex; align-items:center; gap:10px;">
-                <button class="clear-all-btn" title="全ての履歴を削除"
-                    style="background:none; border:1px solid var(--error, #c0392b); color:var(--error, #c0392b); cursor:pointer; font-size:11px; border-radius:4px; padding:3px 8px; font-weight:600;">🗑 全削除</button>
+                <button class="clear-all-btn" title="Delete all history"
+                    style="background:none; border:1px solid var(--error, #c0392b); color:var(--error, #c0392b); cursor:pointer; font-size:11px; border-radius:4px; padding:3px 8px; font-weight:600;">🗑 Clear All</button>
                 <button class="close-btn" style="background:none; border:none; color:var(--text-primary); cursor:pointer; font-size: 16px;">✖</button>
             </div>
         `;
@@ -2735,7 +2616,7 @@ Your final responses and messages to the user MUST be in Japanese.
                 item.innerHTML = `
                     <div style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; font-size:13px;">${escapeHtml(s.title)}</div>
                     <div style="font-size:11px; opacity:0.7; margin-left:10px;">${new Date(s.timestamp).toLocaleDateString()}</div>
-                    <button class="session-delete-btn" title="このチャットを削除"
+                    <button class="session-delete-btn" title="Delete this chat"
                         style="background:none; border:none; cursor:pointer; font-size:13px; margin-left:8px; opacity:0.6; color:inherit;">🗑</button>
                 `;
                 item.onclick = () => {
@@ -2747,7 +2628,7 @@ Your final responses and messages to the user MUST be in Japanese.
                 };
                 item.querySelector('.session-delete-btn').onclick = (e) => {
                     e.stopPropagation();
-                    if (!confirm(`チャット「${s.title}」を削除しますか？`)) return;
+                    if (!confirm(`Delete the chat "${s.title}"?`)) return;
                     this._deleteSession(s.id);
                     document.body.removeChild(overlay);
                     this.reRender();
@@ -2758,7 +2639,7 @@ Your final responses and messages to the user MUST be in Japanese.
         }
 
         header.querySelector('.clear-all-btn').onclick = () => {
-            if (!confirm('全てのチャット履歴を削除しますか？この操作は取り消せません。')) return;
+            if (!confirm('Delete all chat history? This cannot be undone.')) return;
             this._clearAllSessions();
             document.body.removeChild(overlay);
             this.reRender();

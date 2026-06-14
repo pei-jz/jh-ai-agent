@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { promptTemplateManager } from '../../modules/ai/PromptTemplateManager.js';
 import { skillManager } from '../../modules/ai/SkillManager.js';
+import { icon } from '../utils/icons.js';
 
 export class ConfigView {
     constructor() {
@@ -94,6 +95,9 @@ export class ConfigView {
         // Read general settings if visible in DOM
         const proxyEl = document.getElementById('cfg-proxy-url');
         if (proxyEl) this.config.proxy_url = proxyEl.value.trim() || null;
+
+        const outputLangEl = document.getElementById('cfg-output-language');
+        if (outputLangEl) this.config.output_language = outputLangEl.value || 'Japanese';
 
         const loggingToggle = document.getElementById('cfg-logging-enabled-toggle');
         if (loggingToggle) this.config.logging_enabled = loggingToggle.classList.contains('active');
@@ -329,6 +333,23 @@ export class ConfigView {
                             <label class="input-label">HTTP Proxy URL (Optional)</label>
                             <input type="text" id="cfg-proxy-url" class="input" value="${this.config.proxy_url || ''}" placeholder="http://127.0.0.1:7890">
                         </div>
+                        <div class="input-group">
+                            <label class="input-label">Agent Output Language</label>
+                            <select id="cfg-output-language" class="input">
+                                ${[
+                                    ['Japanese', '日本語 (Japanese)'],
+                                    ['English', 'English'],
+                                    ['Korean', '한국어 (Korean)'],
+                                    ['Chinese', '中文 (Chinese)'],
+                                    ['Spanish', 'Español (Spanish)'],
+                                    ['French', 'Français (French)'],
+                                    ['German', 'Deutsch (German)'],
+                                ].map(([val, label]) =>
+                                    `<option value="${val}"${(this.config.output_language || 'Japanese') === val ? ' selected' : ''}>${label}</option>`
+                                ).join('')}
+                            </select>
+                            <p class="input-hint">The language the agent uses for <strong>final responses to you</strong>. Injected automatically into the system prompt; internal reasoning may use any language. This is separate from the UI language.</p>
+                        </div>
                         <!-- ── Agent Safety Limits ────────────────────────────── -->
                         <div style="margin-top: 8px; padding: 14px 16px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-secondary);">
                             <div style="font-size: 12px; font-weight: 600; color: var(--accent); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 4px;">
@@ -357,25 +378,25 @@ export class ConfigView {
                             <div class="input-group" style="margin-bottom: 12px;">
                                 <label class="input-label">Model Routing — Fast tier</label>
                                 <select id="cfg-fast-model" class="input">
-                                    <option value="">(未設定 — アクティブモデルを使用)</option>
+                                    <option value="">(not set — use the active model)</option>
                                     ${(this.config.llm_instances || []).map(inst => {
                                         const id = `${inst.id}:${inst.model}`;
                                         return `<option value="${id}"${(this.config.fast_model_id || '') === id ? ' selected' : ''}>${inst.name} (${inst.model})</option>`;
                                     }).join('')}
                                 </select>
-                                <p class="input-hint">即時応答向けの軽量モデル。単発タスク(アプリ連携の intent / freeform)や、複雑判定されないタスクで使われます。</p>
+                                <p class="input-hint">A lightweight model for fast responses. Used for single-shot tasks (app intents / freeform) and tasks not judged complex.</p>
                             </div>
 
                             <div class="input-group" style="margin-bottom: 12px;">
                                 <label class="input-label">Model Routing — Deep tier</label>
                                 <select id="cfg-deep-model" class="input">
-                                    <option value="">(未設定 — アクティブモデルを使用)</option>
+                                    <option value="">(not set — use the active model)</option>
                                     ${(this.config.llm_instances || []).map(inst => {
                                         const id = `${inst.id}:${inst.model}`;
                                         return `<option value="${id}"${(this.config.deep_model_id || '') === id ? ' selected' : ''}>${inst.name} (${inst.model})</option>`;
                                     }).join('')}
                                 </select>
-                                <p class="input-hint">長考向けの高性能モデル。プラン必須/複雑タスク、および長時間タスクの自動エスカレーション(step 半ば到達時)で使われます。両方未設定ならルーティング無効(常にアクティブモデル)。</p>
+                                <p class="input-hint">A high-capability model for deep reasoning. Used for plan-required/complex tasks and auto-escalation on long runs (around mid-step). If both are unset, routing is disabled (always the active model).</p>
                             </div>
 
                             <div class="input-group" style="margin-bottom: 12px;">
@@ -431,14 +452,13 @@ export class ConfigView {
                             </div>
 
                             <div class="input-group" style="margin-top: 12px;">
-                                <label class="input-label">History Compress Ratio (キャッシュ最適化)</label>
+                                <label class="input-label">History Compress Ratio (cache optimization)</label>
                                 <input type="number" id="cfg-compress-ratio" class="input" value="${this.config.history_compress_ratio ?? 0.5}" min="0.1" max="1" step="0.05" placeholder="0.5">
                                 <p class="input-hint">
-                                    会話履歴がモデルのコンテキスト窓の<strong>この割合を超えたときだけ</strong>、古いツール結果を圧縮します。
-                                    これ未満では履歴をそのまま保ち、LLMのプロンプトキャッシュが履歴を再利用できるため、
-                                    マルチステップのタスクで<strong>トークン消費を大きく削減</strong>します。
-                                    低い値=早めに圧縮（プロンプトは小さいがキャッシュは効きにくい）、
-                                    高い値=長く安定（キャッシュは効くが窓上限に近づく）。<strong>推奨: 0.5</strong>。空欄で既定(0.5)。
+                                    Old tool results are compressed ONLY once the conversation history exceeds <strong>this fraction</strong> of the model's context window.
+                                    Below it, history is kept verbatim so the LLM's prompt cache can reuse it, which <strong>greatly reduces token usage</strong> on multi-step tasks.
+                                    Lower = compress sooner (smaller prompts, less cache reuse); higher = stay stable longer (more cache hits, closer to the window limit).
+                                    <strong>Recommended: 0.5</strong>. Blank = default (0.5).
                                 </p>
                             </div>
                         </div>
@@ -448,9 +468,9 @@ export class ConfigView {
                                 📂 Write-Allowed Directories
                             </div>
                             <p style="font-size: 11.5px; color: var(--text-tertiary); margin: 0 0 12px 0; line-height: 1.5;">
-                                エージェントが<strong>承認なしで書き込めるディレクトリ</strong>を1行に1つ記入します。
-                                ここに含まれるパス（とその配下）への <code>write_file</code> / 編集は承認ダイアログをスキップします。
-                                現在のワークスペースと承認済みプロジェクトは常に許可されます。リスト外への書き込みは引き続き承認が必要です。
+                                One directory per line where the agent may <strong>write without approval</strong>.
+                                <code>write_file</code> / edits to paths under these (and their subfolders) skip the approval dialog.
+                                The current workspace and approved projects are always allowed. Writes outside this list still require approval.
                             </p>
                             <textarea id="cfg-write-allowed" class="input" rows="4" placeholder="C:\\work\\reports&#10;C:\\data\\output" style="font-family: var(--font-mono, monospace); font-size: 12px; resize: vertical;">${(this.config.write_allowed_paths || []).join('\n')}</textarea>
                         </div>
@@ -468,16 +488,16 @@ export class ConfigView {
                             </div>
                         </div>
                         <div class="input-group" style="border-top: 1px solid var(--border-light); padding-top: 16px; margin-top: 16px;">
-                            <label class="input-label">🗄 ストレージ使用量</label>
+                            <label class="input-label">🗄 Storage Usage</label>
                             <div id="cfg-storage-usage" style="font-size:12px;color:var(--text-secondary);background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px;line-height:1.7;">
-                                <em style="color:var(--text-tertiary)">「更新」を押すと表示します</em>
+                                <em style="color:var(--text-tertiary)">Press "Refresh" to show</em>
                             </div>
                             <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;">
-                                <button class="btn btn-secondary" id="btn-storage-refresh" type="button" style="font-size:12px;">↻ 更新</button>
-                                <button class="btn btn-secondary" id="btn-purge-apilogs" type="button" style="font-size:12px;color:var(--error);border-color:var(--error)">旧APIログ(localStorage)を削除</button>
-                                <button class="btn btn-secondary" id="btn-clear-commlog" type="button" style="font-size:12px;color:var(--error);border-color:var(--error)">通信ログファイルをクリア</button>
+                                <button class="btn btn-secondary" id="btn-storage-refresh" type="button" style="font-size:12px;">↻ Refresh</button>
+                                <button class="btn btn-secondary" id="btn-purge-apilogs" type="button" style="font-size:12px;color:var(--error);border-color:var(--error)">Delete old API logs (localStorage)</button>
+                                <button class="btn btn-secondary" id="btn-clear-commlog" type="button" style="font-size:12px;color:var(--error);border-color:var(--error)">Clear communication log file</button>
                             </div>
-                            <p class="input-hint">LLMコールの確認は <strong>Monitor</strong>（タスク別）に一本化されました。タスク履歴の削除は <strong>History</strong> から行えます。</p>
+                            <p class="input-hint">LLM-call inspection and task history (search, filter, delete) are consolidated in <strong>Monitor</strong>.</p>
                         </div>
                         <div class="input-group" style="border-top: 1px solid var(--border-light); padding-top: 16px; margin-top: 16px;">
                             <label class="input-label">J.H AI Agent Connection Token (API Key)</label>
@@ -625,14 +645,14 @@ export class ConfigView {
                     
                     <!-- Left Column: Vertical Tabs Sidebar -->
                     <div class="tabs-vertical" style="width: 220px; display: flex; flex-direction: column; gap: 4px; border-right: 1px solid var(--border); padding-right: 16px; flex-shrink: 0;">
-                        <button class="settings-tab-btn ${this.activeTab === 'llm' ? 'active' : ''}" data-tab="llm" style="${getTabStyle('llm')}">🧠 LLM Settings</button>
-                        <button class="settings-tab-btn ${this.activeTab === 'mcp' ? 'active' : ''}" data-tab="mcp" style="${getTabStyle('mcp')}">🔌 MCP Settings</button>
-                        <button class="settings-tab-btn ${this.activeTab === 'general' ? 'active' : ''}" data-tab="general" style="${getTabStyle('general')}">⚙️ General Settings</button>
-                        <button class="settings-tab-btn ${this.activeTab === 'templates' ? 'active' : ''}" data-tab="templates" style="${getTabStyle('templates')}">📝 Templates</button>
-                        <button class="settings-tab-btn ${this.activeTab === 'skills' ? 'active' : ''}" data-tab="skills" style="${getTabStyle('skills')}">⚡ Skills</button>
+                        <button class="settings-tab-btn ${this.activeTab === 'llm' ? 'active' : ''}" data-tab="llm" style="${getTabStyle('llm')}">${icon('llm')} LLM Settings</button>
+                        <button class="settings-tab-btn ${this.activeTab === 'mcp' ? 'active' : ''}" data-tab="mcp" style="${getTabStyle('mcp')}">${icon('mcp')} MCP Settings</button>
+                        <button class="settings-tab-btn ${this.activeTab === 'general' ? 'active' : ''}" data-tab="general" style="${getTabStyle('general')}">${icon('gear')} General Settings</button>
+                        <button class="settings-tab-btn ${this.activeTab === 'templates' ? 'active' : ''}" data-tab="templates" style="${getTabStyle('templates')}">${icon('template')} Templates</button>
+                        <button class="settings-tab-btn ${this.activeTab === 'skills' ? 'active' : ''}" data-tab="skills" style="${getTabStyle('skills')}">${icon('bolt')} Skills</button>
                         <!-- API Logs moved to the Monitor view (per-task raw payloads). -->
-                        <button class="settings-tab-btn ${this.activeTab === 'rag' ? 'active' : ''}" data-tab="rag" style="${getTabStyle('rag')}">🔍 RAG Indexing</button>
-                        <button class="settings-tab-btn ${this.activeTab === 'memory' ? 'active' : ''}" data-tab="memory" style="${getTabStyle('memory')}">🧠 Memory</button>
+                        <button class="settings-tab-btn ${this.activeTab === 'rag' ? 'active' : ''}" data-tab="rag" style="${getTabStyle('rag')}">${icon('search')} RAG Indexing</button>
+                        <button class="settings-tab-btn ${this.activeTab === 'memory' ? 'active' : ''}" data-tab="memory" style="${getTabStyle('memory')}">${icon('memory')} Memory</button>
                     </div>
 
                     <!-- Right Column: Active Tab Content Area -->
@@ -698,7 +718,7 @@ export class ConfigView {
             const wsInput = document.getElementById('memory-ws-input');
             memLoadBtn.addEventListener('click', async () => {
                 this.memoryWorkspace = wsInput ? wsInput.value.trim() : '';
-                if (!this.memoryWorkspace) { alert('ワークスペースパスを入力してください。'); return; }
+                if (!this.memoryWorkspace) { alert('Please enter a workspace path.'); return; }
                 await this.loadMemoryData();
                 this.reRender();
             });
@@ -711,11 +731,11 @@ export class ConfigView {
 
             const saveFactsOrAlert = async () => {
                 try { await this.saveMemoryFacts(); }
-                catch (e) { alert(`facts.json の保存に失敗しました: ${e}`); await this.loadMemoryData(); }
+                catch (e) { alert(`Failed to save facts.json: ${e}`); await this.loadMemoryData(); }
             };
             const saveEpisodesOrAlert = async () => {
                 try { await this.saveMemoryEpisodes(); }
-                catch (e) { alert(`memory.json の保存に失敗しました: ${e}`); await this.loadMemoryData(); }
+                catch (e) { alert(`Failed to save memory.json: ${e}`); await this.loadMemoryData(); }
             };
 
             document.getElementById('memory-facts-list')?.addEventListener('click', async (e) => {
@@ -724,10 +744,10 @@ export class ConfigView {
                 const idx = parseInt(btn.getAttribute('data-idx'), 10);
                 if (!Number.isInteger(idx) || !this.memoryFacts?.[idx]) return;
                 if (btn.classList.contains('memory-fact-del')) {
-                    if (!confirm('この事実を削除しますか？')) return;
+                    if (!confirm('Delete this fact?')) return;
                     this.memoryFacts.splice(idx, 1);
                 } else {
-                    const next = prompt('事実を編集:', this.memoryFacts[idx].fact || '');
+                    const next = prompt('Edit fact:', this.memoryFacts[idx].fact || '');
                     if (next === null) return;
                     const t = next.trim();
                     if (!t) return;
@@ -738,7 +758,7 @@ export class ConfigView {
                 this.reRender();
             });
             document.getElementById('btn-memory-facts-clear')?.addEventListener('click', async () => {
-                if (!confirm('恒久的事実をすべて削除しますか？この操作は取り消せません。')) return;
+                if (!confirm('Delete all durable facts? This cannot be undone.')) return;
                 this.memoryFacts = [];
                 await saveFactsOrAlert();
                 this.reRender();
@@ -749,13 +769,13 @@ export class ConfigView {
                 if (!btn) return;
                 const idx = parseInt(btn.getAttribute('data-idx'), 10);
                 if (!Number.isInteger(idx) || !this.memoryEpisodes?.[idx]) return;
-                if (!confirm('このセッション記録を削除しますか？')) return;
+                if (!confirm('Delete this session record?')) return;
                 this.memoryEpisodes.splice(idx, 1);
                 await saveEpisodesOrAlert();
                 this.reRender();
             });
             document.getElementById('btn-memory-episodes-clear')?.addEventListener('click', async () => {
-                if (!confirm('セッション履歴をすべて削除しますか？この操作は取り消せません。')) return;
+                if (!confirm('Delete all session history? This cannot be undone.')) return;
                 this.memoryEpisodes = [];
                 await saveEpisodesOrAlert();
                 this.reRender();
@@ -896,11 +916,11 @@ export class ConfigView {
                 const icon = iconEl ? iconEl.value.trim() || '📝' : '📝';
 
                 if (!key || !/^[a-zA-Z0-9_\-]+$/.test(key)) {
-                    alert('コマンド名には英数字・ハイフン・アンダースコアのみ使用できます。');
+                    alert('Command names may only contain letters, numbers, hyphens, and underscores.');
                     return;
                 }
-                if (!label) { alert('表示名を入力してください。'); return; }
-                if (!prompt) { alert('プロンプトテキストを入力してください。'); return; }
+                if (!label) { alert('Please enter a display name.'); return; }
+                if (!prompt) { alert('Please enter the prompt text.'); return; }
 
                 promptTemplateManager.set(key, label, prompt, icon);
                 await this._saveTemplates();
@@ -925,7 +945,7 @@ export class ConfigView {
         document.querySelectorAll('.btn-tpl-delete').forEach(btn => {
             btn.addEventListener('click', async () => {
                 const key = btn.getAttribute('data-key');
-                if (confirm(`テンプレート "/${key}" を削除しますか？`)) {
+                if (confirm(`Delete the template "/${key}"?`)) {
                     promptTemplateManager.remove(key);
                     await this._saveTemplates();
                     this.reRender();
@@ -963,11 +983,11 @@ export class ConfigView {
                 const name = this.editingSkill ? this.editingSkill.name : (nameEl ? nameEl.value.trim() : '');
                 const content = contentEl.value;
 
-                if (!name) { alert('スキル名を入力してください。'); return; }
-                if (!content.trim()) { alert('コンテンツを入力してください。'); return; }
+                if (!name) { alert('Please enter a skill name.'); return; }
+                if (!content.trim()) { alert('Please enter the content.'); return; }
 
                 btnSkillSave.disabled = true;
-                btnSkillSave.innerText = '保存中...';
+                btnSkillSave.innerText = 'Saving…';
                 try {
                     await skillManager.save(name, content);
                     this.skillsList = skillManager.getAll();
@@ -975,10 +995,10 @@ export class ConfigView {
                     this.editingSkill = null;
                     this.reRender();
                 } catch (e) {
-                    alert('保存に失敗しました: ' + (e.message || e));
+                    alert('Failed to save: ' + (e.message || e));
                 } finally {
                     btnSkillSave.disabled = false;
-                    btnSkillSave.innerText = '💾 保存';
+                    btnSkillSave.innerText = '💾 Save';
                 }
             });
         }
@@ -993,7 +1013,7 @@ export class ConfigView {
                     this.showSkillForm = true;
                     this.reRender();
                 } catch (e) {
-                    alert('スキルの読み込みに失敗しました: ' + (e.message || e));
+                    alert('Failed to load skill: ' + (e.message || e));
                 } finally {
                     btn.disabled = false;
                 }
@@ -1003,14 +1023,14 @@ export class ConfigView {
         document.querySelectorAll('.btn-skill-delete').forEach(btn => {
             btn.addEventListener('click', async () => {
                 const name = btn.getAttribute('data-name');
-                if (confirm(`スキル "/${name}" を削除しますか？`)) {
+                if (confirm(`Delete the skill "/${name}"?`)) {
                     btn.disabled = true;
                     try {
                         await skillManager.delete(name);
                         this.skillsList = skillManager.getAll();
                         this.reRender();
                     } catch (e) {
-                        alert('削除に失敗しました: ' + (e.message || e));
+                        alert('Failed to delete: ' + (e.message || e));
                     }
                 }
             });
@@ -1288,7 +1308,7 @@ export class ConfigView {
         const purgeApiLogs = document.getElementById('btn-purge-apilogs');
         if (purgeApiLogs) {
             purgeApiLogs.addEventListener('click', () => {
-                if (!confirm('旧APIログ(localStorageのjh_api_logs)を削除しますか？\nMonitorのタスク別ログには影響しません。')) return;
+                if (!confirm('Delete the old API logs (localStorage jh_api_logs)?\nThis does not affect Monitor per-task logs.')) return;
                 try { localStorage.removeItem('jh_api_logs'); } catch (_) {}
                 this._renderStorageUsage();
             });
@@ -1296,7 +1316,7 @@ export class ConfigView {
         const clearCommLog = document.getElementById('btn-clear-commlog');
         if (clearCommLog) {
             clearCommLog.addEventListener('click', async () => {
-                if (!confirm('通信ログファイル(ai_communication.log)を空にしますか？')) return;
+                if (!confirm('Empty the communication log file (ai_communication.log)?')) return;
                 try { await invoke('clear_comm_log'); } catch (e) { console.error(e); }
                 this._renderStorageUsage();
             });
@@ -1406,6 +1426,7 @@ export class ConfigView {
                         azure_endpoint: this.config.azure_endpoint || null,
                         azure_deployment: this.config.azure_deployment || null,
                         proxy_url: this.config.proxy_url,
+                        output_language:             (this.config.output_language || 'Japanese'),
                         logging_enabled: this.config.logging_enabled,
                         log_dir: this.config.log_dir,
                         max_steps:                   limit(this.config.max_steps),
@@ -1617,38 +1638,38 @@ export class ConfigView {
             <div class="card settings-card" style="height: 100%;">
                 <div class="card-header" style="margin-bottom: 16px;">
                     <div>
-                        <h3>🧠 Agent Memory</h3>
-                        <p class="subtitle">エージェントの長期記憶（恒久的事実・セッション履歴）の閲覧・編集・削除</p>
+                        <h3>${icon('memory')} Agent Memory</h3>
+                        <p class="subtitle">View, edit, and delete the agent's long-term memory (durable facts & session history)</p>
                     </div>
                 </div>
                 <div class="provider-card-fields">
                     <div class="input-group">
-                        <label class="input-label">Workspace（メモリはワークスペース単位で保存: <code>&lt;workspace&gt;/.agent/</code>）</label>
+                        <label class="input-label">Workspace (memory is stored per workspace: <code>&lt;workspace&gt;/.agent/</code>)</label>
                         <div style="display:flex; gap:8px;">
                             <input type="text" id="memory-ws-input" class="input" value="${escapeHtml(ws)}" list="memory-ws-list" placeholder="C:\\path\\to\\workspace" style="flex:1;">
                             <datalist id="memory-ws-list">${projects.map(p => `<option value="${escapeHtml(p)}"></option>`).join('')}</datalist>
                             <button class="btn btn-secondary" id="btn-memory-ws-browse" type="button">📁</button>
-                            <button class="btn btn-primary" id="btn-memory-load" type="button">読み込み</button>
+                            <button class="btn btn-primary" id="btn-memory-load" type="button">Load</button>
                         </div>
                     </div>
 
-                    ${!loaded ? `<div style="color:var(--text-tertiary); font-size:12.5px; padding:14px 0;">ワークスペースを選択して「読み込み」を押すと、保存されている記憶が表示されます。</div>` : `
+                    ${!loaded ? `<div style="color:var(--text-tertiary); font-size:12.5px; padding:14px 0;">Select a workspace and press "Load" to show the stored memory.</div>` : `
 
                     <div style="margin-top:8px; padding:14px 16px; border:1px solid var(--border); border-radius:var(--radius-md); background:var(--bg-secondary);">
                         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
                             <div style="font-size:12px; font-weight:600; color:var(--accent); text-transform:uppercase; letter-spacing:0.06em;">
-                                📌 Durable Facts（システムプロンプトに注入される恒久的事実 — ${(this.memoryFacts || []).length}件）
+                                📌 Durable Facts (durable facts injected into the system prompt — ${(this.memoryFacts || []).length})
                             </div>
-                            <button class="btn btn-secondary" id="btn-memory-facts-clear" style="font-size:11px; padding:3px 10px; color:var(--error); border-color:var(--error);">🗑 全削除</button>
+                            <button class="btn btn-secondary" id="btn-memory-facts-clear" style="font-size:11px; padding:3px 10px; color:var(--error); border-color:var(--error);">🗑 Clear All</button>
                         </div>
                         ${(this.memoryFacts || []).length === 0
-                            ? `<div style="color:var(--text-tertiary); font-size:12px;">事実はまだ保存されていません。</div>`
+                            ? `<div style="color:var(--text-tertiary); font-size:12px;">No facts stored yet.</div>`
                             : `<div style="max-height:320px; overflow-y:auto;" id="memory-facts-list">
                                 <table class="rv-table" style="width:100%; border-collapse:collapse; font-size:12px;">
                                     <thead><tr>
-                                        <th style="text-align:left; padding:4px 8px;">事実</th>
-                                        <th style="padding:4px 8px;">日付</th>
-                                        <th style="padding:4px 8px;">参照</th>
+                                        <th style="text-align:left; padding:4px 8px;">Fact</th>
+                                        <th style="padding:4px 8px;">Date</th>
+                                        <th style="padding:4px 8px;">Hits</th>
                                         <th style="padding:4px 8px;"></th>
                                     </tr></thead>
                                     <tbody>${factsRows}</tbody>
@@ -1659,12 +1680,12 @@ export class ConfigView {
                     <div style="margin-top:8px; padding:14px 16px; border:1px solid var(--border); border-radius:var(--radius-md); background:var(--bg-secondary);">
                         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
                             <div style="font-size:12px; font-weight:600; color:var(--accent); text-transform:uppercase; letter-spacing:0.06em;">
-                                📚 Episodes（過去セッションの要約 — 直近${(this.memoryEpisodes || []).length}件）
+                                📚 Episodes (summaries of past sessions — latest ${(this.memoryEpisodes || []).length})
                             </div>
-                            <button class="btn btn-secondary" id="btn-memory-episodes-clear" style="font-size:11px; padding:3px 10px; color:var(--error); border-color:var(--error);">🗑 全削除</button>
+                            <button class="btn btn-secondary" id="btn-memory-episodes-clear" style="font-size:11px; padding:3px 10px; color:var(--error); border-color:var(--error);">🗑 Clear All</button>
                         </div>
                         ${(this.memoryEpisodes || []).length === 0
-                            ? `<div style="color:var(--text-tertiary); font-size:12px;">セッション履歴はまだありません。</div>`
+                            ? `<div style="color:var(--text-tertiary); font-size:12px;">No session history yet.</div>`
                             : `<div style="max-height:320px; overflow-y:auto;" id="memory-episodes-list">
                                 <table class="rv-table" style="width:100%; border-collapse:collapse; font-size:12px;">
                                     <tbody>${episodeRows}</tbody>
@@ -1735,12 +1756,11 @@ export class ConfigView {
                     </div>
 
                     <div style="display:flex;align-items:center;gap:12px;margin-top:8px;">
-                        <button class="btn btn-primary" id="btn-rag-start" ${this.ragProgress > 0 && this.ragProgress < 100 ? 'disabled' : ''}>
-                            ${this.ragProgress > 0 && this.ragProgress < 100 ? '⏳ Indexing...' : '▶ Start Indexing'}
+                        <button class="btn btn-primary" id="btn-rag-start" disabled style="opacity:0.55;cursor:not-allowed;">
+                            🚧 Coming soon
                         </button>
-                        ${this.ragStatus ? `<span style="font-size:13px;color:var(--text-secondary);">${escapeHtml(this.ragStatus)}</span>` : ''}
+                        <span style="font-size:13px;color:var(--text-tertiary);">Semantic indexing is not available yet — this feature is under development.</span>
                     </div>
-                    ${progressBar}
                 </div>
             </div>
         `;
@@ -1753,37 +1773,37 @@ export class ConfigView {
         const formHtml = this.showTemplateForm ? `
             <div style="background: var(--bg-tertiary); border: 1px solid var(--border-focus); border-radius: var(--radius-md); padding: 16px; margin-bottom: 16px;">
                 <h4 style="margin: 0 0 14px 0; font-size: 13px; color: var(--accent);">
-                    ${ef ? '✏️ テンプレートを編集' : '➕ 新しいテンプレート'}
+                    ${ef ? '✏️ Edit template' : '➕ New template'}
                 </h4>
                 <div class="provider-card-fields">
                     <div class="grid-2" style="gap: 12px;">
                         <div class="input-group">
-                            <label class="input-label">スラッシュコマンド名 <span style="color:var(--error)">*</span></label>
+                            <label class="input-label">Slash command name <span style="color:var(--error)">*</span></label>
                             <input type="text" id="tpl-key" class="input" value="${escapeHtml(ef?.key || '')}"
-                                placeholder="例: backlog (英数字・ハイフン)"
+                                placeholder="e.g. backlog (letters, numbers, hyphens)"
                                 ${ef ? 'readonly style="background:var(--bg-primary);cursor:not-allowed;"' : ''}>
-                            <p class="input-hint">チャットで <code>/名前</code> と入力して呼び出します</p>
+                            <p class="input-hint">Invoke by typing <code>/name</code> in chat</p>
                         </div>
                         <div class="input-group">
-                            <label class="input-label">表示名 <span style="color:var(--error)">*</span></label>
-                            <input type="text" id="tpl-label" class="input" value="${escapeHtml(ef?.label || '')}" placeholder="例: BackLog タスク登録">
+                            <label class="input-label">Display name <span style="color:var(--error)">*</span></label>
+                            <input type="text" id="tpl-label" class="input" value="${escapeHtml(ef?.label || '')}" placeholder="e.g. Backlog task registration">
                         </div>
                     </div>
                     <div class="input-group">
-                        <label class="input-label">プロンプトテキスト <span style="color:var(--error)">*</span></label>
+                        <label class="input-label">Prompt text <span style="color:var(--error)">*</span></label>
                         <textarea id="tpl-prompt" class="textarea" rows="5"
-                            placeholder="ここに定型プロンプトを書きます。例:\n次のタスクをBackLogに登録してください...">${escapeHtml(ef?.prompt || '')}</textarea>
-                        <p class="input-hint">スラッシュコマンド選択時にチャット入力欄にこのテキストが展開されます</p>
+                            placeholder="Write the reusable prompt here. e.g.\nRegister the following task in Backlog...">${escapeHtml(ef?.prompt || '')}</textarea>
+                        <p class="input-hint">This text is expanded into the chat input when the slash command is selected</p>
                     </div>
                     <div class="input-group">
-                        <label class="input-label">アイコン</label>
+                        <label class="input-label">Icon</label>
                         <input type="text" id="tpl-icon" class="input" value="${escapeHtml(ef?.icon || '📝')}"
                             placeholder="📝" style="width: 80px;">
                     </div>
                 </div>
                 <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px;">
-                    <button class="btn btn-secondary" id="btn-tpl-cancel">キャンセル</button>
-                    <button class="btn btn-primary" id="btn-tpl-save">💾 保存</button>
+                    <button class="btn btn-secondary" id="btn-tpl-cancel">Cancel</button>
+                    <button class="btn btn-primary" id="btn-tpl-save">💾 Save</button>
                 </div>
             </div>
         ` : '';
@@ -1791,7 +1811,7 @@ export class ConfigView {
         const listHtml = templates.length === 0 ? `
             <div style="padding: 32px; text-align: center; color: var(--text-secondary);">
                 <span style="font-size: 32px; display: block; margin-bottom: 12px;">📝</span>
-                <p>テンプレートが登録されていません。<br>「新規追加」ボタンからテンプレートを作成してください。</p>
+                <p>No templates yet.<br>Create one with the "Add new" button.</p>
             </div>
         ` : `
             <div class="table-wrap">
@@ -1799,10 +1819,10 @@ export class ConfigView {
                     <thead>
                         <tr>
                             <th style="width:40px;text-align:center;">Icon</th>
-                            <th>コマンド</th>
-                            <th>表示名</th>
-                            <th>プロンプト (先頭)</th>
-                            <th style="width:140px;text-align:right;">操作</th>
+                            <th>Command</th>
+                            <th>Display name</th>
+                            <th>Prompt (start)</th>
+                            <th style="width:140px;text-align:right;">Actions</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -1816,7 +1836,7 @@ export class ConfigView {
                                 </td>
                                 <td>
                                     <div style="display:flex;gap:6px;justify-content:flex-end;">
-                                        <button class="btn btn-secondary btn-sm btn-tpl-edit" data-key="${escapeHtml(t.key)}">✏️ 編集</button>
+                                        <button class="btn btn-secondary btn-sm btn-tpl-edit" data-key="${escapeHtml(t.key)}">✏️ Edit</button>
                                         <button class="btn btn-danger btn-sm btn-tpl-delete" data-key="${escapeHtml(t.key)}">🗑️</button>
                                     </div>
                                 </td>
@@ -1831,10 +1851,10 @@ export class ConfigView {
             <div class="card settings-card" style="height:100%;display:flex;flex-direction:column;">
                 <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-shrink:0;">
                     <div>
-                        <h3>📝 プロンプトテンプレート</h3>
-                        <p class="subtitle">チャットで /コマンド名 と入力して呼び出せる定型プロンプトを管理します</p>
+                        <h3>📝 Prompt Templates</h3>
+                        <p class="subtitle">Manage reusable prompts you can invoke by typing /command in chat</p>
                     </div>
-                    <button class="btn btn-primary" id="btn-tpl-new">➕ 新規追加</button>
+                    <button class="btn btn-primary" id="btn-tpl-new">➕ Add new</button>
                 </div>
                 <div style="flex:1;overflow-y:auto;">
                     ${formHtml}
@@ -1851,28 +1871,28 @@ export class ConfigView {
         const formHtml = this.showSkillForm ? `
             <div style="background: var(--bg-tertiary); border: 1px solid var(--border-focus); border-radius: var(--radius-md); padding: 16px; margin-bottom: 16px;">
                 <h4 style="margin: 0 0 14px 0; font-size: 13px; color: var(--accent);">
-                    ${es ? `✏️ スキルを編集: ${escapeHtml(es.name)}` : '➕ 新しいスキル'}
+                    ${es ? `✏️ Edit skill: ${escapeHtml(es.name)}` : '➕ New skill'}
                 </h4>
                 <div class="provider-card-fields">
                     ${!es ? `
                     <div class="input-group">
-                        <label class="input-label">スキル名 <span style="color:var(--error)">*</span></label>
+                        <label class="input-label">Skill name <span style="color:var(--error)">*</span></label>
                         <input type="text" id="skill-name" class="input" value=""
-                            placeholder="例: backlog-register (英数字・ハイフン・アンダースコア)">
-                        <p class="input-hint">チャットで <code>/スキル名</code> と入力して呼び出します</p>
+                            placeholder="e.g. backlog-register (letters, numbers, hyphens, underscores)">
+                        <p class="input-hint">Invoke by typing <code>/skill-name</code> in chat</p>
                     </div>
                     ` : ''}
                     <div class="input-group">
-                        <label class="input-label">コンテンツ (Markdown) <span style="color:var(--error)">*</span></label>
+                        <label class="input-label">Content (Markdown) <span style="color:var(--error)">*</span></label>
                         <textarea id="skill-content" class="textarea" rows="12"
                             style="font-family:var(--font-mono);font-size:12.5px;"
-                            placeholder="# スキルタイトル\n\n1行目 (#から始まる) がタイトルになります。\n\n## 使い方\n\nここにスキルの詳細なプロンプトを記述します...">${escapeHtml(es?.content || '')}</textarea>
-                        <p class="input-hint">先頭行 <code># タイトル</code> が表示名になります。スラッシュコマンドで選択するとこのテキスト全体がプロンプトに展開されます。</p>
+                            placeholder="# Skill title\n\nThe first line (starting with #) becomes the title.\n\n## Usage\n\nWrite the skill's detailed prompt here...">${escapeHtml(es?.content || '')}</textarea>
+                        <p class="input-hint">The first line <code># Title</code> becomes the display name. Selecting the slash command expands this entire text into the prompt.</p>
                     </div>
                 </div>
                 <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px;">
-                    <button class="btn btn-secondary" id="btn-skill-cancel">キャンセル</button>
-                    <button class="btn btn-primary" id="btn-skill-save">💾 保存</button>
+                    <button class="btn btn-secondary" id="btn-skill-cancel">Cancel</button>
+                    <button class="btn btn-primary" id="btn-skill-save">💾 Save</button>
                 </div>
             </div>
         ` : '';
@@ -1880,16 +1900,16 @@ export class ConfigView {
         const listHtml = skills.length === 0 ? `
             <div style="padding:32px;text-align:center;color:var(--text-secondary);">
                 <span style="font-size:32px;display:block;margin-bottom:12px;">⚡</span>
-                <p>スキルが登録されていません。<br>「新規作成」ボタンからスキルを作成してください。</p>
+                <p>No skills yet.<br>Create one with the "Create new" button.</p>
             </div>
         ` : `
             <div class="table-wrap">
                 <table>
                     <thead>
                         <tr>
-                            <th>コマンド</th>
-                            <th>タイトル</th>
-                            <th style="width:160px;text-align:right;">操作</th>
+                            <th>Command</th>
+                            <th>Title</th>
+                            <th style="width:160px;text-align:right;">Actions</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -1899,7 +1919,7 @@ export class ConfigView {
                                 <td style="font-weight:600;">${escapeHtml(s.title)}</td>
                                 <td>
                                     <div style="display:flex;gap:6px;justify-content:flex-end;">
-                                        <button class="btn btn-secondary btn-sm btn-skill-edit" data-name="${escapeHtml(s.name)}">✏️ 編集</button>
+                                        <button class="btn btn-secondary btn-sm btn-skill-edit" data-name="${escapeHtml(s.name)}">✏️ Edit</button>
                                         <button class="btn btn-danger btn-sm btn-skill-delete" data-name="${escapeHtml(s.name)}">🗑️</button>
                                     </div>
                                 </td>
@@ -1915,9 +1935,9 @@ export class ConfigView {
                 <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-shrink:0;">
                     <div>
                         <h3>⚡ Skills</h3>
-                        <p class="subtitle">Claude Code の /skill のような呼び出し可能プロシージャ。<code>~/.config/JH AI Agent/skills/</code> に保存されます。</p>
+                        <p class="subtitle">Invocable procedures like Claude Code's /skill. Saved in <code>~/.config/JH AI Agent/skills/</code>.</p>
                     </div>
-                    <button class="btn btn-primary" id="btn-skill-new">➕ 新規作成</button>
+                    <button class="btn btn-primary" id="btn-skill-new">➕ Create new</button>
                 </div>
                 <div style="flex:1;overflow-y:auto;">
                     ${formHtml}
@@ -1950,20 +1970,20 @@ export class ConfigView {
         const apiLogBytes = lsSize('jh_api_logs');
         const schedBytes = lsSize('jh_schedules');
 
-        el.innerHTML = '<em style="color:var(--text-tertiary)">読み込み中…</em>';
+        el.innerHTML = '<em style="color:var(--text-tertiary)">Loading…</em>';
         let server = {};
         try { server = await invoke('get_storage_usage'); } catch (_) {}
 
         el.innerHTML = `
-            <div style="font-weight:600;color:var(--text-primary);margin-bottom:4px">ローカル (localStorage)</div>
-            ・チャット履歴 (direct_ai_sessions): ${fmtBytes(chatBytes)}<br>
-            ・旧APIログ (jh_api_logs): ${fmtBytes(apiLogBytes)} ${apiLogBytes > 0 ? '<span style="color:var(--text-tertiary)">（撤去済み・削除可）</span>' : ''}<br>
-            ・スケジュール (jh_schedules): ${fmtBytes(schedBytes)}<br>
-            ・localStorage合計: <strong>${fmtBytes(lsTotal)}</strong>
-            <div style="font-weight:600;color:var(--text-primary);margin:8px 0 4px">サーバ (タスク履歴)</div>
-            ・task_history.json: ${fmtBytes(server.task_history_bytes)}<br>
-            ・task_logs/ (${server.task_logs_count || 0}ファイル): ${fmtBytes(server.task_logs_bytes)}<br>
-            ・通信ログ ai_communication.log: ${fmtBytes(server.comm_log_bytes)} ${server.log_dir ? '' : '<span style="color:var(--text-tertiary)">（未設定）</span>'}
+            <div style="font-weight:600;color:var(--text-primary);margin-bottom:4px">Local (localStorage)</div>
+            · Chat history (direct_ai_sessions): ${fmtBytes(chatBytes)}<br>
+            · Old API logs (jh_api_logs): ${fmtBytes(apiLogBytes)} ${apiLogBytes > 0 ? '<span style="color:var(--text-tertiary)">(retired · safe to delete)</span>' : ''}<br>
+            · Schedules (jh_schedules): ${fmtBytes(schedBytes)}<br>
+            · localStorage total: <strong>${fmtBytes(lsTotal)}</strong>
+            <div style="font-weight:600;color:var(--text-primary);margin:8px 0 4px">Server (task history)</div>
+            · task_history.json: ${fmtBytes(server.task_history_bytes)}<br>
+            · task_logs/ (${server.task_logs_count || 0} files): ${fmtBytes(server.task_logs_bytes)}<br>
+            · Communication log ai_communication.log: ${fmtBytes(server.comm_log_bytes)} ${server.log_dir ? '' : '<span style="color:var(--text-tertiary)">(not set)</span>'}
         `;
     }
 

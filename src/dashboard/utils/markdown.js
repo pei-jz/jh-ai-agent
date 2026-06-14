@@ -117,9 +117,9 @@ export function renderMarkdown(md) {
 }
 
 const ACTION_LABEL = {
-    created: '🆕 作成',
-    modified: '✏️ 変更',
-    deleted: '🗑 削除',
+    created: '🆕 Created',
+    modified: '✏️ Modified',
+    deleted: '🗑 Deleted',
 };
 
 function fileRow(f) {
@@ -137,19 +137,19 @@ function fileRow(f) {
 function renderStatsChips(stats) {
     if (!stats || typeof stats !== 'object') return '';
     const chips = [];
-    if (stats.steps) chips.push(`<span class="rv-chip">🔁 ステップ ${stats.steps}</span>`);
+    if (stats.steps) chips.push(`<span class="rv-chip">🔁 Steps ${stats.steps}</span>`);
     const tools = stats.tools && typeof stats.tools === 'object' ? Object.entries(stats.tools) : [];
     const toolTotal = tools.reduce((n, [, c]) => n + (c || 0), 0);
     if (toolTotal > 0) {
         const detail = tools.map(([n, c]) => `${n}×${c}`).join(', ');
-        chips.push(`<span class="rv-chip" title="${escapeHtml(detail)}">🛠 ツール ${toolTotal}</span>`);
+        chips.push(`<span class="rv-chip" title="${escapeHtml(detail)}">🛠 Tools ${toolTotal}</span>`);
     }
     if (stats.tokens) {
         const t = stats.tokens >= 1000 ? (stats.tokens / 1000).toFixed(1) + 'k' : stats.tokens;
         chips.push(`<span class="rv-chip">🔢 ${t} tok</span>`);
     }
     if (stats.durationMs) chips.push(`<span class="rv-chip">⏱ ${Math.round(stats.durationMs / 1000)}s</span>`);
-    if (stats.files) chips.push(`<span class="rv-chip">📄 ${stats.files} 件</span>`);
+    if (stats.files) chips.push(`<span class="rv-chip">📄 ${stats.files} files</span>`);
     return chips.length ? `<div class="rv-chips">${chips.join('')}</div>` : '';
 }
 
@@ -160,7 +160,7 @@ function renderStatsChips(stats) {
  * {summary, files} markdown blob for older payloads / API back-compat.
  */
 export function renderResultSummary(resultSummary) {
-    if (!resultSummary) return '<div class="rv-empty">結果サマリはまだありません。</div>';
+    if (!resultSummary) return '<div class="rv-empty">No result summary yet.</div>';
     const { answer, stats, request, plan, summary, files } = resultSummary;
 
     let html = '';
@@ -169,7 +169,7 @@ export function renderResultSummary(resultSummary) {
     if (hasStructured) {
         // 1. Answer (headline — the LLM's actual deliverable).
         if (answer && answer.trim()) {
-            html += `<div class="rv-section-label">💬 回答</div>`;
+            html += `<div class="rv-section-label">💬 Answer</div>`;
             html += `<div class="rv-summary rv-answer">${renderMarkdown(answer)}</div>`;
         }
         // 2. Compact stats chips.
@@ -177,13 +177,13 @@ export function renderResultSummary(resultSummary) {
         // 3. Collapsible details: request + plan.
         const details = [];
         if (request && request.trim()) {
-            details.push(`<div class="rv-detail-h">📥 ご依頼内容</div><div class="rv-summary">${renderMarkdown(request)}</div>`);
+            details.push(`<div class="rv-detail-h">📥 Request</div><div class="rv-summary">${renderMarkdown(request)}</div>`);
         }
         if (plan && plan.trim()) {
-            details.push(`<div class="rv-detail-h">🗺 実行計画</div><div class="rv-summary">${renderMarkdown(plan)}</div>`);
+            details.push(`<div class="rv-detail-h">🗺 Plan</div><div class="rv-summary">${renderMarkdown(plan)}</div>`);
         }
         if (details.length) {
-            html += `<details class="rv-details"><summary>詳細（ご依頼・計画）</summary>${details.join('')}</details>`;
+            html += `<details class="rv-details"><summary>Details (request & plan)</summary>${details.join('')}</details>`;
         }
     } else if (summary && summary.trim()) {
         // Back-compat: flat markdown blob.
@@ -192,12 +192,12 @@ export function renderResultSummary(resultSummary) {
 
     // File table (shared by both shapes).
     if (Array.isArray(files) && files.length > 0) {
-        html += `<div class="rv-files-title">作成・変更されたファイル (${files.length})</div>`;
-        html += '<table class="rv-table rv-files"><thead><tr><th>ファイル</th><th>操作</th><th>説明</th></tr></thead><tbody>';
+        html += `<div class="rv-files-title">Created / modified files (${files.length})</div>`;
+        html += '<table class="rv-table rv-files"><thead><tr><th>File</th><th>Action</th><th>Description</th></tr></thead><tbody>';
         for (const f of files) html += fileRow(f);
         html += '</tbody></table>';
     } else {
-        html += '<div class="rv-files-title">作成・変更されたファイル</div><div class="rv-empty">なし</div>';
+        html += '<div class="rv-files-title">Created / modified files</div><div class="rv-empty">None</div>';
     }
     return html;
 }
@@ -205,9 +205,9 @@ export function renderResultSummary(resultSummary) {
 /** Just the file table (no summary). Returns '' when there are no files. */
 export function renderFileList(files, opts = {}) {
     if (!Array.isArray(files) || files.length === 0) return '';
-    const title = opts.title || `📁 作成・変更されたファイル (${files.length})`;
+    const title = opts.title || `📁 Created / modified files (${files.length})`;
     let html = `<div class="rv-filelist"><div class="rv-files-title">${escapeHtml(title)}</div>`;
-    html += '<table class="rv-table rv-files"><thead><tr><th>ファイル</th><th>操作</th><th>説明</th></tr></thead><tbody>';
+    html += '<table class="rv-table rv-files"><thead><tr><th>File</th><th>Action</th><th>Description</th></tr></thead><tbody>';
     for (const f of files) html += fileRow(f);
     html += '</tbody></table></div>';
     return html;

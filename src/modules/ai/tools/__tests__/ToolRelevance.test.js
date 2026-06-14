@@ -55,4 +55,23 @@ describe('selectMcpTools', () => {
         expect(selectMcpTools([], 'q')).toEqual({ loaded: [], deferred: [] });
         expect(selectMcpTools(null, 'q')).toEqual({ loaded: [], deferred: [] });
     });
+
+    it('minScore mode sends ONLY tools at/above the threshold (none when irrelevant)', () => {
+        const tools = [
+            { name: 'add_issue', description: 'create a backlog issue 課題' },
+            ...mkTools(10, 'noise'),
+        ];
+        // Relevant query → only the matching tool passes the threshold.
+        const r1 = selectMcpTools(tools, 'create issue', { minScore: 0.2, top: 5 });
+        expect(r1.loaded.map(t => t.name)).toEqual(['add_issue']);
+        // Unrelated query → nothing scores above threshold → send NONE.
+        const r2 = selectMcpTools(tools, '天気を教えて', { minScore: 0.2, top: 5 });
+        expect(r2.loaded).toEqual([]);
+    });
+
+    it('minScore mode ignores the small-set minCount bypass', () => {
+        const tools = mkTools(3); // ≤ minCount would normally send all
+        const r = selectMcpTools(tools, 'totally unrelated', { minScore: 0.5 });
+        expect(r.loaded).toEqual([]); // score-pruned anyway
+    });
 });
