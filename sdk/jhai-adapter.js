@@ -300,7 +300,8 @@ class JhaiAdapter {
                     lastEnvelope = data.envelope;
                     this._dispatchResult(data.envelope);
                 } else if (event === 'complete') {
-                    done(resolve, lastEnvelope);
+                    const finalEnv = lastEnvelope || { kind: 'markdown', summary: data.summary, payload: { md: data.summary || '' } };
+                    done(resolve, finalEnv);
                 } else if (event === 'error') {
                     done(reject, new Error(data.error || 'task error'));
                 }
