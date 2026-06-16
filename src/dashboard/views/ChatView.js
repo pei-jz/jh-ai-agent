@@ -4,14 +4,12 @@ import { mcpManager } from '../../modules/ai/McpManager.js';
 import { workflowManager } from '../../modules/ai/WorkflowManager.js';
 import { promptTemplateManager } from '../../modules/ai/PromptTemplateManager.js';
 import { skillManager } from '../../modules/ai/SkillManager.js';
-import { AGENT_MODES, DEFAULT_MODE_ID, buildBehavior, resolveModeId } from '../../modules/ai/AgentModes.js';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { renderFileList, filesFromModified, ensureResultViewStyles } from '../utils/resultView.js';
 import { escapeHtml, formatMessageContent, formatMarkdown, renderTableHtml } from './chat/chatMarkdown.js';
 import { STORAGE_KEY as CHAT_SESSIONS_KEY, parseSessions, pruneSessions } from './chat/chatSessions.js';
-import { extractToolCall, parseThought, renderAgentSteps, renderMessageHtml, renderResultStatsChips } from './chat/chatRenderer.js';
-import { ModeDropdown } from '../components/ModeDropdown.js';
+import { extractToolCall, renderMessageHtml } from './chat/chatRenderer.js';
 import { icon } from '../utils/icons.js';
 
 // Simple-mode tool loop's executor. sendMessage referenced `toolExecutor` but no
@@ -48,17 +46,10 @@ export class ChatView {
         this.enabledMcpServers = [];
         this.settingsExpanded = false;
 
-        // ── Behavior mode for the new unified flow ──────────────────
-        // 'simple'  → direct llmService.chat call with this.systemPrompt
-        //             (existing fast path; no agent loop, no tools, no retries)
-        // 'agent'   → goes through TaskBridge with mode=iterative_agent so the
-        //             user gets the full ContextBuilder safety rules, verify,
-        //             anti-loop, task_progress, retries, etc. — the same as
-        //             external apps like JHEditor see.
-        this.chatMode = 'simple';
-        this.agentModeId = DEFAULT_MODE_ID; // agent execution mode
-        this._activeAgentWs = null;   // active WebSocket for in-flight agent task
-        this._activeAgentTaskId = null;
+        // ChatView is a SIMPLE-CHAT surface: direct llmService.chat calls with a
+        // small tool loop (web search + relevance-pruned MCP). The former 'agent'
+        // mode (TaskBridge / iterative_agent) was removed — background agent runs
+        // now go through Monitor's "New Task". No mode toggle here anymore.
 
         // Slash-command popup state
         this._slashItems = [];      // [{type, key, label, icon, prompt?}]
@@ -1310,8 +1301,7 @@ export class ChatView {
         if (!pending) return;
         try { localStorage.removeItem('jh_pending_chat_question'); } catch (_) {}
 
-        // Force Direct Chat (simple) mode and open a fresh session so the question stands alone.
-        this.chatMode = 'simple';
+        // Open a fresh session so the question stands alone.
         const data = this.getSessions();
         const newId = Date.now().toString();
         data.activeSessionId = newId;
@@ -1320,7 +1310,6 @@ export class ChatView {
             title: 'New Chat',
             timestamp: Date.now(),
             messages: [],
-            chatMode: 'simple',
         };
         this.saveSessions(data);
         this.messages = [];
@@ -1632,11 +1621,21 @@ export class ChatView {
         // relevant, so casual chat costs no extra tokens). MCP servers were
         // started on mount; here we just scope + relevance-prune.
         await toolExecutor.startSession('.');
-        toolExecutor.setToolAllowlist(['fetch_url']);  // + finish_task/present_result implicitly
+        toolExecutor.setToolAllowlist(['web_search', 'fetch_url']);  // + finish_task/present_result implicitly
         toolExecutor._mcpBypassesAllowlist = true;     // don't let the allowlist block MCP tools
         toolExecutor.setMcpRelevanceQuery(text);
         toolExecutor.setMcpPruneOptions({ minScore: 0.12, top: 5 });
 
+        // Agent output language is config-driven (Settings → General → Agent Output
+        // Language), shared with the AgentController path. Fetched once per send so
+        // we don't read config on every tool-loop iteration. Defaults to Japanese.
+        let outputLanguage = 'Japanese';
+        try { outputLanguage = (await invoke('get_ai_config'))?.output_language || 'Japanese'; } catch (_) {}
+
+        // Only the catch block (error / abort) pushes a message that the `finally`
+        // must render. On the SUCCESS path the final answer is already on screen as
+        // the streamed bubble, so re-appending it in `finally` duplicated the reply.
+        let needsFinalAppend = false;
         try {
             let loopCount = 0;
             const maxLoops = 10;
@@ -1730,7 +1729,7 @@ Example:
 If no tool execution is needed, or if you have finished all tasks, you can reply normally in plain text.
 Always write your thoughts and tool calls in the JSON structure if you use tools.
 When you finish a task, call the \`finish_task\` tool.
-Your final responses and messages to the user MUST be in Japanese.
+Your final responses and messages to the user MUST be in ${outputLanguage}.
 </instructions>
 `;
                 }
@@ -1748,7 +1747,16 @@ Your final responses and messages to the user MUST be in Japanese.
                     streamRafPending = false;
                     if (!aiContentEl) return;
                     const wasAtBottom = chatBody.scrollHeight - chatBody.scrollTop - chatBody.clientHeight <= 50;
-                    aiContentEl.innerHTML = formatMessageContent(aiResponse);
+                    // When the model is emitting a tool-call JSON block, don't render
+                    // the raw JSON forming in the chat — show a compact "researching"
+                    // placeholder instead. The compact tool indicator replaces this
+                    // bubble once the call is parsed. A plain prose answer (the common
+                    // case) renders as markdown as before.
+                    const trimmed = aiResponse.trimStart();
+                    const looksLikeToolCall = trimmed.startsWith('```json') || trimmed.startsWith('{"thought"') || trimmed.startsWith('{ "thought"');
+                    aiContentEl.innerHTML = looksLikeToolCall
+                        ? `<span style="font-size:12.5px;color:var(--text-secondary);">🔍 Using tools to research…</span>`
+                        : formatMessageContent(aiResponse);
                     if (wasAtBottom) {
                         chatBody.scrollTop = chatBody.scrollHeight;
                     }
@@ -1802,7 +1810,12 @@ Your final responses and messages to the user MUST be in Japanese.
 
                     if (toolCall && toolCall.tool_calls && toolCall.tool_calls.length > 0) {
                         loopCount++;
-                        
+
+                        // Drop the streamed bubble (it only held the "researching…"
+                        // placeholder / raw JSON) — the compact tool indicator pushed
+                        // below replaces it, so the chat stays clean.
+                        if (aiBubbleRow) { aiBubbleRow.remove(); aiBubbleRow = null; aiContentEl = null; }
+
                         // Push tool call message to history
                         this.messages.push({
                             role: 'assistant',
@@ -1828,8 +1841,6 @@ Your final responses and messages to the user MUST be in Japanese.
                                 return confirm(`AI wants to run this command:\n\n${req.command}\n\nDo you approve?`);
                             } else if (req.type === 'diff_review') {
                                 return confirm(`AI wants to modify/write file outside workspace:\n\n${req.path}\n\nDo you approve?`);
-                            } else if (req.type === 'plan_review') {
-                                return confirm(`AI proposed this plan:\n\n${req.message}\n\nDo you approve?`);
                             }
                             return true;
                           };
@@ -1889,13 +1900,16 @@ Your final responses and messages to the user MUST be in Japanese.
                   });
                   this.saveHistory();
               }
+              needsFinalAppend = true;  // the message just pushed isn't on screen yet
           } finally {
               toolExecutor.endSession();
               this.isGenerating = false;
               this.abortController = null;
               this.updateSendButtonState();
-              // Append any final/error message that was pushed in the catch block
-              this._appendLastMessage();
+              // Render the error/abort message pushed in the catch block. On the
+              // success path the answer is already shown (streamed bubble), so we
+              // must NOT append again — that caused the duplicated reply.
+              if (needsFinalAppend) this._appendLastMessage();
           }
       }
 
@@ -2061,238 +2075,8 @@ Your final responses and messages to the user MUST be in Japanese.
         }
     }
 
-    /**
-     * Agent-mode send: creates a task on the JH AI Agent server and streams
-     * progress into the chat bubble with a structured step-by-step display.
-     *
-     * Each agent iteration is rendered as a collapsible step showing:
-     *   • The full thought text (not truncated)
-     *   • Tool calls executed within that step
-     * The final LLM response is shown below the steps when streaming completes.
-     *
-     * Conversation history (chatContext) is forwarded so the agent has full
-     * context from previous messages in this session.
-     */
-    async _sendViaAgent(promptText, images = []) {
-        const chatBody = document.getElementById('chat-messages-container');
-        if (!chatBody) return;
 
-        const prevIndicator = document.getElementById('chat-generating-indicator');
-        if (prevIndicator) prevIndicator.remove();
 
-        const aiBubbleRow = document.createElement('div');
-        aiBubbleRow.className = 'chat-message-row msg-ai';
-        aiBubbleRow.innerHTML = `<div class="message-bubble"><div class="message-content"><em>🤖 Agent starting…</em></div></div>`;
-        chatBody.appendChild(aiBubbleRow);
-        chatBody.scrollTop = chatBody.scrollHeight;
-        const aiContentEl = aiBubbleRow.querySelector('.message-content');
-
-        if (!window.apiClient) {
-            aiContentEl.innerHTML = `<span style="color: var(--error)">❌ API client not ready.</span>`;
-            return;
-        }
-
-        let taskId = null;
-        let ws = null;
-        try {
-            const userEditedPrompt = this.systemPrompt && this.systemPrompt !== 'You are a helpful AI assistant.'
-                ? this.systemPrompt
-                : null;
-
-            // Build conversation context from previous messages so agent has history (fix #6)
-            const chatContext = this.messages
-                .slice(0, -1)
-                .filter(m => !m.isToolCall && !m.isToolResult)
-                .map(m => ({ role: m.role, content: m.displayContent || m.content }))
-                .slice(-8);
-
-            const modeBehavior = buildBehavior(this.agentModeId,
-                userEditedPrompt ? { system_prompt: userEditedPrompt } : {}
-            );
-            const taskRes = await window.apiClient.request('/tasks', {
-                method: 'POST',
-                body: JSON.stringify({
-                    prompt: promptText,
-                    workspace_path: this.workspacePath || null,
-                    caller: 'DirectChat',
-                    images: images.length > 0 ? images : undefined,
-                    chat_context: chatContext.length > 0 ? chatContext : undefined,
-                    behavior: {
-                        mode: 'iterative_agent',
-                        ...modeBehavior,
-                    }
-                })
-            });
-            taskId = taskRes.task_id;
-            this._activeAgentTaskId = taskId;
-
-            const wsUrl = `ws://localhost:${window.apiClient.port}/ws/tasks/${taskId}?token=${window.apiClient.token}`;
-            ws = new WebSocket(wsUrl);
-            this._activeAgentWs = ws;
-
-            // Agent progress state — accumulated steps, each with thought + tool calls (fixes #4, #5)
-            let steps = [];          // [{thought, toolCalls:[{name,status}], completed}]
-            let currentStep = null;
-            let streamBuffer = '';
-
-            const updateProgressUI = () => {
-                aiContentEl.innerHTML = this._renderAgentSteps(steps, currentStep, streamBuffer || null);
-                const wasAtBottom = chatBody.scrollHeight - chatBody.scrollTop - chatBody.clientHeight <= 60;
-                if (wasAtBottom) chatBody.scrollTop = chatBody.scrollHeight;
-            };
-
-            await new Promise((resolve, reject) => {
-                let gotFinalEvent = false;
-
-                ws.onmessage = (ev) => {
-                    let pkt;
-                    try { pkt = JSON.parse(ev.data); } catch (_) { return; }
-                    if (!pkt) return;
-
-                    if (pkt.event === 'confirm_request') {
-                        // The agent paused for approval (plan / command / file write).
-                        // Approval happens in the Monitor view (an OS notification also
-                        // fires) — show a clear pending indicator here.
-                        const isPlan = pkt.data?.type === 'plan_review';
-                        const label = isPlan ? '📋 Plan approval pending' : '🛡 Approval pending';
-                        const tid = this._activeAgentTaskId || '';
-                        aiContentEl.innerHTML = this._renderAgentSteps(steps, currentStep, streamBuffer || null) +
-                            `<div style="margin-top:10px;padding:10px 12px;border:1px solid var(--accent);border-radius:8px;background:var(--accent-glow,rgba(0,200,255,0.07));font-size:13px;">` +
-                            `<strong>${label}</strong> — <a href="#monitor?id=${tid}" style="color:var(--accent)">review & approve/edit in Monitor</a>. Processing continues after approval.</div>`;
-                        chatBody.scrollTop = chatBody.scrollHeight;
-                        return;
-                    }
-
-                    if (pkt.event === 'thought' && pkt.data?.text) {
-                        // New thought = new step; mark previous step's tool calls done
-                        if (currentStep) {
-                            currentStep.toolCalls.forEach(tc => { if (tc.status === 'running') tc.status = 'done'; });
-                            currentStep.completed = true;
-                            steps.push(currentStep);
-                        }
-                        const thoughtText = typeof pkt.data.text === 'string'
-                            ? pkt.data.text : JSON.stringify(pkt.data.text);
-                        currentStep = { thought: thoughtText, toolCalls: [], completed: false };
-                        updateProgressUI();
-
-                    } else if (pkt.event === 'tool_call' && pkt.data?.name) {
-                        if (!currentStep) {
-                            currentStep = { thought: null, toolCalls: [], completed: false };
-                        }
-                        currentStep.toolCalls.push({ name: pkt.data.name, status: 'running' });
-                        updateProgressUI();
-
-                    } else if (pkt.event === 'stream' && pkt.data?.chunk) {
-                        // Streaming final response — commit current step and show streamed content
-                        if (currentStep) {
-                            currentStep.toolCalls.forEach(tc => { if (tc.status === 'running') tc.status = 'done'; });
-                            currentStep.completed = true;
-                            steps.push(currentStep);
-                            currentStep = null;
-                        }
-                        streamBuffer += pkt.data.chunk;
-                        aiContentEl.innerHTML = this._renderAgentSteps(steps, null, streamBuffer);
-                        chatBody.scrollTop = chatBody.scrollHeight;
-
-                    } else if (pkt.event === 'status' && pkt.data?.message && !streamBuffer && !currentStep && steps.length === 0) {
-                        aiContentEl.innerHTML = `<em>🤖 ${escapeHtml(pkt.data.message.slice(0, 100))}</em>`;
-
-                    } else if (pkt.event === 'complete') {
-                        gotFinalEvent = true;
-                        // Prefer the structured result summary: `answer` is the
-                        // LLM-written Markdown completion report (依頼内容/実施内容/結果),
-                        // `summary` its deterministic fallback. The raw `message` is the
-                        // agent's last thought (often a bare "OBSERVE: … | PLAN: … |
-                        // CALL: finish_task" line) — only used as a last resort.
-                        const rs = pkt.data?.resultSummary || null;
-                        const finalMsg = rs?.answer || rs?.summary
-                            || pkt.data?.message || streamBuffer || '(task complete)';
-                        // Modified/created files: prefer the structured resultSummary,
-                        // else derive from the raw modifiedFiles array.
-                        const resultFiles = (rs?.files && rs.files.length)
-                            ? rs.files
-                            : filesFromModified(pkt.data?.modifiedFiles);
-                        // Compact run-stats chips (steps / tokens / duration / files).
-                        const resultStats = rs?.stats || null;
-                        ensureResultViewStyles();
-                        aiContentEl.innerHTML = formatMessageContent(finalMsg)
-                            + this._renderResultStatsChips(resultStats);
-                        if (resultFiles && resultFiles.length > 0) {
-                            // Clicks are handled by the delegated [data-open-path]
-                            // listener on the chat container — no per-element bind.
-                            aiContentEl.insertAdjacentHTML('beforeend', renderFileList(resultFiles));
-                        }
-                        // Persist files/stats on the message so loadHistory can re-render them.
-                        this.messages.push({ role: 'assistant', content: finalMsg, resultFiles, resultStats });
-                        this.saveHistory();
-                        resolve();
-
-                    } else if (pkt.event === 'error') {
-                        gotFinalEvent = true;
-                        const errMsg = pkt.data?.error || 'Agent task failed';
-                        aiContentEl.innerHTML = `<span style="color: var(--error)">❌ ${escapeHtml(errMsg)}</span>`;
-                        reject(new Error(errMsg));
-                    }
-                };
-                ws.onerror = () => reject(new Error('A WebSocket connection error occurred'));
-                ws.onclose = () => {
-                    if (!gotFinalEvent) {
-                        if (streamBuffer) {
-                            this.messages.push({ role: 'assistant', content: streamBuffer });
-                            this.saveHistory();
-                            resolve();
-                        } else {
-                            reject(new Error('The connection closed unexpectedly. Check that the agent server is running.'));
-                        }
-                    }
-                };
-            });
-        } catch (e) {
-            console.error('_sendViaAgent error:', e);
-            aiContentEl.innerHTML = `<span style="color: var(--error)">❌ ${escapeHtml(e.message || String(e))}</span>`;
-        } finally {
-            if (ws) { try { ws.close(); } catch (_) {} }
-            this._activeAgentWs = null;
-            this._activeAgentTaskId = null;
-        }
-    }
-
-    /**
-     * Render accumulated agent steps as collapsible HTML blocks.
-     * @param {Array}  steps        Completed steps [{thought, toolCalls, completed}]
-     * @param {Object} currentStep  In-progress step (null when done)
-     * @param {string} streamContent  Partial streaming text from the final response
-     */
-    /**
-     * Parse an OBSERVE/PLAN/CALL thought string into structured parts.
-     * Handles formats:
-     *   - "<thought>\nOBSERVE: ...\nPLAN: ...\nCALL: ...\n</thought>"  (native XML)
-     *   - "OBSERVE: ... | PLAN: ... | CALL: ..."                        (JSON pipe)
-     *   - "OBSERVE: ...\nPLAN: ...\nCALL: ..."                          (native plain)
-     *   - any other string (treated as unstructured plan text)
-     * Returns { observe, plan, call, raw } — fields are null if absent.
-     */
-    _parseThought(raw) {
-        return parseThought(raw);
-    }
-
-    _renderAgentSteps(steps, currentStep, streamContent) {
-        return renderAgentSteps(steps, currentStep, streamContent);
-    }
-
-    _renderResultStatsChips(stats) {
-        return renderResultStatsChips(stats);
-    }
-
-    /**
-     * Build (and remember) the agent-mode dropdown for this render pass. A fresh
-     * instance is created each render() because reRender() replaces the DOM; the
-     * onChange keeps this.agentModeId in sync. init() is called from ChatView.init().
-     */
-    _buildModeDropdown() {
-        this._modeDropdown = new ModeDropdown(this.agentModeId, (id) => { this.agentModeId = id; });
-        return this._modeDropdown;
-    }
 
     updateSendButtonState() {
         const sendBtn = document.getElementById('btn-send-message');
@@ -2315,8 +2099,6 @@ Your final responses and messages to the user MUST be in Japanese.
                 session.messages = this.messages;
                 session.timestamp = Date.now();
                 // Persist UI settings so they survive navigation and app restart
-                session.chatMode = this.chatMode;
-                session.agentModeId = this.agentModeId;
                 session.workspacePath = this.workspacePath;
                 session.toolsEnabled = this.toolsEnabled;
                 session.systemPrompt = this.systemPrompt;
@@ -2478,7 +2260,6 @@ Your final responses and messages to the user MUST be in Japanese.
             timestamp: Date.now(),
             messages: [],
             // Carry over current settings to the new session
-            chatMode: this.chatMode,
             workspacePath: this.workspacePath,
             toolsEnabled: this.toolsEnabled,
             systemPrompt: this.systemPrompt,
@@ -2516,8 +2297,6 @@ Your final responses and messages to the user MUST be in Japanese.
             this.messages = activeSession ? (activeSession.messages || []) : [];
             // Restore settings saved with this session
             if (activeSession) {
-                if (activeSession.chatMode) this.chatMode = activeSession.chatMode;
-                if (activeSession.agentModeId) this.agentModeId = resolveModeId(activeSession.agentModeId);
                 if (activeSession.workspacePath) this.workspacePath = activeSession.workspacePath;
                 if (activeSession.toolsEnabled !== undefined) this.toolsEnabled = activeSession.toolsEnabled;
                 if (activeSession.systemPrompt) this.systemPrompt = activeSession.systemPrompt;

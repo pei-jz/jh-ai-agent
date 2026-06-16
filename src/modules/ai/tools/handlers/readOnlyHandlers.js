@@ -244,3 +244,59 @@ export async function handleFetchUrl(ctx, args, onAgentStatus) {
         return `Error fetching URL: ${e.message}`;
     }
 }
+
+/**
+ * web_search — self-built, no-API-key web search. The LLM passes a QUERY (not a
+ * URL); we return ranked {title, url, snippet} so it can fetch_url a REAL link
+ * instead of guessing endpoints from memory (the main cause of 404 thrash).
+ *
+ * The HTTP request runs server-side (Rust `web_search` command) to bypass the
+ * webview's CORS — DuckDuckGo's HTML endpoint sends no CORS headers, so a browser
+ * fetch would be blocked. We parse the returned HTML here with DOMParser.
+ */
+export async function handleWebSearch(ctx, args, onAgentStatus) {
+    const query = (args?.query ?? args?.q ?? '').toString().trim();
+    if (!query) return 'Error: web_search requires a non-empty "query" string.';
+    const maxResults = Math.min(Math.max(parseInt(args?.max_results, 10) || 5, 1), 10);
+    onAgentStatus?.(`Searching the web: ${query}`);
+    try {
+        // Honor the configured proxy (best-effort).
+        let proxy = null;
+        try { proxy = (await invoke('get_ai_config'))?.proxy_url || null; } catch (_) {}
+
+        const html = await invoke('web_search', { query, proxy });
+        const doc = new DOMParser().parseFromString(String(html), 'text/html');
+
+        const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
+        // DDG wraps result links: //duckduckgo.com/l/?uddg=<encoded-url>&rut=...
+        const decode = (href) => {
+            if (!href) return '';
+            const m = href.match(/[?&]uddg=([^&]+)/);
+            if (m) { try { return decodeURIComponent(m[1]); } catch (_) { return ''; } }
+            if (href.startsWith('//')) return 'https:' + href;
+            return href;
+        };
+
+        const out = [];
+        for (const row of doc.querySelectorAll('.result, .web-result')) {
+            const a = row.querySelector('.result__a');
+            if (!a) continue;
+            const url = decode(a.getAttribute('href'));
+            const title = clean(a.textContent);
+            const snippet = clean(row.querySelector('.result__snippet')?.textContent);
+            if (title && /^https?:\/\//i.test(url)) out.push({ title, url, snippet });
+            if (out.length >= maxResults) break;
+        }
+
+        if (out.length === 0) {
+            return `No web results for "${query}". The search page may have been rate-limited or its markup changed. Rephrase the query, or if you already know a specific URL call fetch_url directly.`;
+        }
+        const list = out.map((r, i) =>
+            `${i + 1}. ${r.title}\n   ${r.url}${r.snippet ? `\n   ${r.snippet}` : ''}`
+        ).join('\n\n');
+        return `Web search results for "${query}" (top ${out.length}):\n\n${list}\n\n` +
+            `NEXT: pick the most relevant result and call fetch_url on its URL above — do NOT invent a different URL.`;
+    } catch (e) {
+        return `Error: web_search failed (${e.message || e}). If you already know a likely URL, use fetch_url directly instead of guessing.`;
+    }
+}

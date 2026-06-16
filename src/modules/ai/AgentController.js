@@ -131,15 +131,13 @@ export class AgentController {
         const isExternalCaller = (this.caller && !INTERACTIVE_CALLERS.includes(this.caller))
             || !!(this.behaviorOverrides && (this.behaviorOverrides.mcp_servers || this.behaviorOverrides.intent));
         this._isExternalCaller = isExternalCaller;
-        // Plan-first gate: a complex task (or planMode='always') must propose a plan
-        // and get USER approval before any mutating tool runs. Applied to the tool
-        // executor AFTER startSession() (which resets the gate). 'off' disables it.
-        // Skipped entirely for external callers (no human to approve).
-        this._planRequired = !isExternalCaller
-            && (safety.planMode === 'always'
-                || (safety.planMode === 'auto' && this._looksComplex(prompt)));
+        // (Plan-first approval gate removed — it required a synchronous human
+        // approver, which only DirectChat had, and DirectChat no longer routes
+        // through AgentController. Multi-step tasks now self-organize via the
+        // task_progress nudge injected on the first iteration below.)
+        //
         // Model routing (fast/deep tiers) + auto-escalation. fast = default for
-        // quick/app-intent tasks; deep = complex/plan-first tasks and escalation.
+        // quick/app-intent tasks; deep = complex tasks and long-run escalation.
         //
         // EXCEPTION — interactive chat (DirectChat): the user explicitly picks a
         // model in the chat dropdown (→ llmService.getCurrentModel()). That choice
@@ -153,12 +151,10 @@ export class AgentController {
             ? { fast: null, deep: null, initial: null }
             : await this._resolveTierModels();
         this._deepModelId = tierModels.deep;
-        this._modelOverride = this._planRequired
-            ? (tierModels.deep || tierModels.fast || null)
-            : (tierModels.initial || null);
+        this._modelOverride = tierModels.initial || null;
         this._escalateAtStep = Math.max(6, Math.ceil((safety.maxIterations || 30) * 0.5));
         if (this._modelOverride) {
-            onAgentStatus?.({ event: 'status', status: 'running', message: `🧭 モデル: ${this._modelOverride}${this._planRequired ? ' (deep / plan-first)' : ''}` });
+            onAgentStatus?.({ event: 'status', status: 'running', message: `🧭 モデル: ${this._modelOverride}` });
         }
 
         // ── Vision routing ──────────────────────────────────────────────
@@ -226,13 +222,10 @@ export class AgentController {
             'create_artifact', 'update_artifact',
             'run_command',     // count as progress — conservative (avoids false stops)
             'delete_file', 'move_file',
-            'propose_plan',    // planning counts as progress (avoids no-progress stop while investigating)
             'finish_task',     // terminal — also counts as "progress" (will end loop)
         ]);
 
         await this.toolExecutor.startSession(workspacePath);
-        // Arm the plan gate for this session (mutating tools blocked until approval).
-        this.toolExecutor.setPlanGate(this._planRequired);
 
         // Invalidate ContextBuilder's static cache so the new session gets a
         // fresh build (picks up any persona/config changes since last run).
@@ -253,11 +246,10 @@ export class AgentController {
         }
 
         if (Array.isArray(enabledTools)) {
-            // Only add the planning/progress control tools when this task is
-            // plan-required or complex; single-shot app intents stay minimal
-            // (finish_task + present_result) to avoid needless over-planning.
+            // Add task_progress only for complex tasks; single-shot app intents
+            // stay minimal (finish_task + present_result) to avoid over-planning.
             this.toolExecutor.setToolAllowlist(enabledTools, {
-                includePlanTools: this._planRequired,
+                includeTaskTools: this._looksComplex(prompt),
             });
         }
         // Apply MCP server filter (if any) — restricts which MCP servers contribute tools.
@@ -396,26 +388,13 @@ export class AgentController {
                 onAgentStatus?.({ event: 'status', status: 'running', message: `📌 Steering applied: "${preview}"` });
             }
 
-            // First-iteration planning injection. With the plan gate ON (complex
-            // task / planMode), enforce investigate → propose_plan → APPROVAL →
-            // execute. Otherwise fall back to the lighter "register subtasks" nudge.
-            if (iteration === 1) {
-                if (this._planRequired) {
-                    history.push({
-                        role: 'user',
-                        content: '[Plan-First Required] This is a complex task. Workflow you MUST follow:\n' +
-                            '1. INVESTIGATE only (read_file / grep_search / list_files) until you understand the change and its impact across the codebase.\n' +
-                            '2. Call `propose_plan` with the work split into ordered PHASES (e.g. Investigation → Implementation → Verification). The user reviews and may EDIT it.\n' +
-                            '3. WAIT for approval. Editing files or running commands is BLOCKED until the plan is approved.\n' +
-                            '4. After approval, execute PHASE BY PHASE, tracking progress with `task_progress`.\n' +
-                            'Do NOT make any changes before the plan is approved.'
-                    });
-                } else if (this._looksComplex(prompt)) {
-                    history.push({
-                        role: 'user',
-                        content: '[Planning Required] This task has multiple steps. Your VERY FIRST tool call MUST be `task_progress(action="set", items=[...])` — list every subtask before touching any file or running any command. After registering, proceed immediately with execution without waiting for confirmation.'
-                    });
-                }
+            // First-iteration planning injection: for a multi-step task, nudge the
+            // agent to register subtasks up front, then proceed without waiting.
+            if (iteration === 1 && this._looksComplex(prompt)) {
+                history.push({
+                    role: 'user',
+                    content: '[Planning Required] This task has multiple steps. Your VERY FIRST tool call MUST be `task_progress(action="set", items=[...])` — list every subtask before touching any file or running any command. After registering, proceed immediately with execution without waiting for confirmation.'
+                });
             }
 
             const startTime = Date.now();
@@ -1145,7 +1124,6 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
         // than a bare one-liner.
         const resultSummary = await this._buildResultSummary(finalResponse, modifiedFiles, onLog, {
             prompt,
-            approvedPlan: this.toolExecutor._approvedPlan || '',
             toolCounts: toolUsageCounts,
             iterations: iteration,
             durationMs: Date.now() - taskStartMs,

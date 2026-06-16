@@ -3,7 +3,6 @@ import { mcpManager } from './McpManager.js';
 import { workflowManager } from './WorkflowManager.js';
 import { toStrictSchema } from './strictSchema.js';
 import { levenshtein, pickClosestFile } from './tools/FuzzyPath.js';
-import { shouldBlock as planShouldBlock, planGateMessage } from './tools/PlanGate.js';
 import {
     detectLineEnding, normalizeLE, countOccurrences, replaceAllLiteral,
     findClosestRegion, visualizeWS
@@ -11,7 +10,7 @@ import {
 import { TOOL_DEFINITIONS } from './tools/toolSchemas.js';
 import { selectMcpTools } from './tools/ToolRelevance.js';
 import {
-    handleListFiles, handleReadFile, handleGrepSearch, handleGlob, handleFetchUrl
+    handleListFiles, handleReadFile, handleGrepSearch, handleGlob, handleFetchUrl, handleWebSearch
 } from './tools/handlers/readOnlyHandlers.js';
 import {
     handleWriteFile, handleMultiReplace, handleReplaceLines
@@ -20,7 +19,7 @@ import {
     handleDeleteFile, handleMoveFile, handleRunCommand
 } from './tools/handlers/fsShellHandlers.js';
 import {
-    handleProposePlan, handleArtifact, handleFinishTask,
+    handleArtifact, handleFinishTask,
     handleVerifySyntax, handleTaskProgress, handlePresentResult,
     handleAskUser
 } from './tools/handlers/agentMetaHandlers.js';
@@ -48,11 +47,11 @@ const TOOL_HANDLERS = {
     },
     multi_replace_file_content: (ex, c) => handleMultiReplace(ex, c.args, c.onConfirm, c.onAgentStatus),
     replace_lines:   (ex, c) => handleReplaceLines(ex, c.args, c.onConfirm, c.onAgentStatus),
-    propose_plan:    (ex, c) => handleProposePlan(ex, c.args, c.onConfirm, c.onAgentStatus),
     present_result:  (ex, c) => handlePresentResult(ex, c.args, c.onAgentStatus),
     create_artifact: (ex, c) => handleArtifact(ex, c.args, c.name, c.onAgentStatus),
     update_artifact: (ex, c) => handleArtifact(ex, c.args, c.name, c.onAgentStatus),
     fetch_url:       (ex, c) => handleFetchUrl(ex, c.args, c.onAgentStatus),
+    web_search:      (ex, c) => handleWebSearch(ex, c.args, c.onAgentStatus),
     finish_task:     (ex, c) => handleFinishTask(ex, c.args, c.onAgentStatus),
     ask_user:        (ex, c) => handleAskUser(ex, c.args, c.onAgentStatus),
     verify_syntax:   (ex, c) => handleVerifySyntax(ex, c.args, c.onAgentStatus, c.resolvedPath),
@@ -70,13 +69,6 @@ export class ToolExecutor {
         this._currentSessionId = null;
         this.workspacePath = null;
         this.onToolEvent = null; // Callback for notifying UI/Client on tool execution events
-
-        // ── Plan gate (investigate → plan → approve → execute) ──────────
-        // When _planRequired is set (by AgentController for complex tasks) and the
-        // user hasn't approved a plan yet, mutating tools are blocked. Reset per session.
-        this._planRequired = false;
-        this._planApproved = false;
-        this._approvedPlan = null;
 
         // ── New per-session state introduced for the safety/UX upgrade ──
         // edit count per file (normalized path → count). Used to warn the LLM
@@ -140,11 +132,11 @@ export class ToolExecutor {
      *   terminate, deliver its Result Contract, or pause for clarification — even
      *   when the intent only lists domain tools (e.g. get_buffer).
      * @param {object} [opts]
-     * @param {boolean} [opts.includePlanTools] also allow task_progress + propose_plan.
-     *   These help multi-step / plan-first tasks but invite needless over-planning
-     *   on single-shot app intents, so the caller opts in (plan-mode / complex task).
+     * @param {boolean} [opts.includeTaskTools] also allow task_progress. Helps
+     *   multi-step tasks but invites needless over-planning on single-shot app
+     *   intents, so the caller opts in (complex task).
      */
-    setToolAllowlist(allowedNames, { includePlanTools = false } = {}) {
+    setToolAllowlist(allowedNames, { includeTaskTools = false } = {}) {
         if (allowedNames === null || allowedNames === undefined) {
             this._toolAllowlist = null;
             return;
@@ -153,9 +145,8 @@ export class ToolExecutor {
         set.add('finish_task');
         set.add('present_result');
         set.add('ask_user');
-        if (includePlanTools) {
+        if (includeTaskTools) {
             set.add('task_progress');
-            set.add('propose_plan');
         }
         this._toolAllowlist = set;
     }
@@ -197,10 +188,6 @@ export class ToolExecutor {
         this._mcpContext = null;      // reset per-task MCP context
         this._mcpRelevanceQuery = null;        // reset MCP pruning (caller re-sets)
         this._mcpPruneOpts = {};               // reset MCP prune tuning
-        // Plan gate resets each session (caller sets requirement via setPlanGate).
-        this._planRequired = false;
-        this._planApproved = false;
-        this._approvedPlan = null;
         this.workspacePath = workspacePath || '.';
 
         // ── Write-allowed directories ──────────────────────────────────
@@ -841,12 +828,6 @@ export class ToolExecutor {
         return `${safeRoot}/${relativePart}`.replace(/\/+/g, '/');
     }
 
-    /** Configure the plan gate for the current session (called by AgentController). */
-    setPlanGate(required) {
-        this._planRequired = !!required;
-        if (!required) this._planApproved = true; // gate off ⇒ nothing to approve
-    }
-
     async executeTool(call, onAgentStatus, onConfirm) {
         const { name } = call;
         const args = call.args || {};
@@ -857,13 +838,6 @@ export class ToolExecutor {
         const isNative = this.toolDefinitions.some(t => t.name === name);
         if (isNative && this._toolAllowlist && !this._toolAllowlist.has(name)) {
             return `Error: Tool "${name}" is not enabled for this task. Allowed tools: ${[...this._toolAllowlist].join(', ')}.`;
-        }
-
-        // ── Plan gate ───────────────────────────────────────────────────
-        // Block mutating tools until an approved plan exists (complex tasks).
-        // Investigation tools and propose_plan are always allowed.
-        if (planShouldBlock(name, this._planRequired, this._planApproved)) {
-            return planGateMessage(name);
         }
 
         const rawPath = args.path || args.file_path || args.filepath || args.file || args.dir || args.directory;

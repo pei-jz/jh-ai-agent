@@ -152,62 +152,61 @@ export function renderResultStatsChips(stats) {
 
 /** Render a single chat message to an HTML string (user/assistant/tool bubbles). */
 export function renderMessageHtml(msg) {
-    // Tool call bubble
+    // Tool call — compact "researching" indicator. Simple-chat should read like a
+    // conversation, so we no longer dump the thought + raw args inline. We show a
+    // one-line "using tools" notice with the tool name(s); the full args stay
+    // available behind a collapsed (closed) "Details" disclosure for debugging.
     if (msg.isToolCall) {
         const toolCalls = msg.toolCalls || [];
-        let thoughtsHtml = '';
-        const parsed = extractToolCall(msg.content);
-        if (parsed && parsed.thought) {
-            thoughtsHtml = `
-                <details class="thought-process-block" open>
-                    <summary>Thought process (tool selection)</summary>
-                    <div class="thought-process-content">${formatMarkdown(parsed.thought)}</div>
-                </details>
-            `;
-        }
+        const names = toolCalls.map(tc => escapeHtml(tc.name)).join(', ') || 'tools';
+        const argsHtml = toolCalls.map(tc => `
+            <div style="margin-top: 6px;">
+                <div style="font-family: var(--font-mono); font-size: 11.5px; font-weight: 600; color: var(--text-secondary);">${escapeHtml(tc.name)}</div>
+                <pre style="margin: 3px 0 0 0; background: var(--bg-primary); padding: 6px; border-radius: 4px; overflow-x: auto; font-family: var(--font-mono); font-size: 11px; color: var(--text-tertiary);"><code>${escapeHtml(JSON.stringify(tc.args, null, 2))}</code></pre>
+            </div>
+        `).join('');
         return `
             <div class="chat-message-row msg-ai" style="width: 100%;">
-                <div class="message-bubble" style="background: var(--bg-secondary); border-color: var(--border-light); max-width: 85%; width: 100%; border-radius: 12px 12px 12px 2px; padding: 12px 16px; margin-bottom: 8px;">
-                    ${thoughtsHtml}
-                    <div style="display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: var(--accent); margin-bottom: 8px;">
-                        <span>🛠️ Calling tools</span>
+                <div class="chat-tool-activity" style="display: flex; flex-direction: column; gap: 0; font-size: 12.5px; color: var(--text-secondary); background: transparent; border-left: 2px solid var(--accent); padding: 2px 0 2px 10px; margin: 2px 0;">
+                    <div style="display: flex; align-items: center; gap: 7px;">
+                        <span class="chat-tool-spinner" style="opacity: 0.85;">🔍</span>
+                        <span>Using tools to research… <span style="font-family: var(--font-mono); font-size: 11.5px; color: var(--text-tertiary);">${names}</span></span>
                     </div>
-                    <div style="display: flex; flex-direction: column; gap: 8px;">
-                        ${toolCalls.map(tc => `
-                            <div style="background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px;">
-                                <div style="font-family: var(--font-mono); font-size: 12.5px; font-weight: 600; color: var(--text-primary);">${escapeHtml(tc.name)}</div>
-                                <pre style="margin: 4px 0 0 0; background: var(--bg-primary); padding: 6px; border-radius: 4px; overflow-x: auto; font-family: var(--font-mono); font-size: 11.5px; color: var(--text-secondary);"><code>${escapeHtml(JSON.stringify(tc.args, null, 2))}</code></pre>
-                            </div>
-                        `).join('')}
-                    </div>
+                    <details style="outline: none; margin-top: 2px;">
+                        <summary style="cursor: pointer; font-size: 11px; color: var(--text-tertiary); user-select: none; list-style: none;">Details</summary>
+                        ${argsHtml}
+                    </details>
                 </div>
             </div>
         `;
     }
 
-    // Tool result bubble
+    // Tool result — compact confirmation. Successful results collapse to a single
+    // muted line (raw payload behind a closed disclosure); errors stay visible so
+    // the user notices a failed lookup. The final answer is a separate assistant
+    // message rendered normally below this.
     if (msg.isToolResult) {
         const results = msg.results || [];
+        const hasErr = results.some(r => typeof r.result === 'string' && r.result.startsWith('Error'));
+        const detailHtml = results.map(r => {
+            const isErr = typeof r.result === 'string' && r.result.startsWith('Error');
+            return `
+                <div style="border-top: 1px solid var(--border-light); padding-top: 6px; margin-top: 6px;">
+                    <div style="font-size: 11px; font-weight: 600; color: ${isErr ? 'var(--error)' : 'var(--text-tertiary)'}; margin-bottom: 3px;">
+                        <strong>${escapeHtml(r.tool_call_name)}</strong>
+                    </div>
+                    <pre style="margin: 0; background: var(--bg-primary); padding: 7px; border-radius: 5px; overflow-x: auto; font-family: var(--font-mono); font-size: 11px; color: ${isErr ? 'var(--error)' : 'var(--text-secondary)'}; white-space: pre-wrap; max-height: 220px; overflow-y: auto;"><code>${escapeHtml(typeof r.result === 'string' ? r.result : JSON.stringify(r.result, null, 2))}</code></pre>
+                </div>
+            `;
+        }).join('');
         return `
-            <div class="chat-message-row msg-user" style="width: 100%; justify-content: flex-end;">
-                <div class="message-bubble" style="background: hsla(185, 100%, 55%, 0.03); border-color: var(--border-light); max-width: 85%; width: 100%; border-radius: 12px 12px 2px 12px; padding: 10px 14px; margin-bottom: 8px;">
+            <div class="chat-message-row msg-ai" style="width: 100%;">
+                <div class="chat-tool-activity${hasErr ? ' is-error' : ''}" style="display: flex; flex-direction: column; gap: 0; font-size: 12.5px; color: ${hasErr ? 'var(--error)' : 'var(--text-tertiary)'}; background: transparent; border-left: 2px solid ${hasErr ? 'var(--error)' : 'var(--border)'}; padding: 2px 0 2px 10px; margin: 2px 0 6px;">
                     <details style="outline: none;">
-                        <summary style="cursor: pointer; font-size: 12.5px; font-weight: 500; color: var(--text-secondary); user-select: none;">
-                            ➜ Tool results (${results.length})
+                        <summary style="cursor: pointer; user-select: none; list-style: none;">
+                            ${hasErr ? '⚠️ Tool returned an error' : `✓ Research data retrieved (${results.length})`}
                         </summary>
-                        <div style="margin-top: 8px; display: flex; flex-direction: column; gap: 8px;">
-                            ${results.map(r => {
-                                const isErr = typeof r.result === 'string' && r.result.startsWith('Error');
-                                return `
-                                    <div style="border-top: 1px solid var(--border-light); padding-top: 8px;">
-                                        <div style="font-size: 11.5px; font-weight: 600; color: ${isErr ? 'var(--error)' : 'var(--text-secondary)'}; margin-bottom: 4px;">
-                                            <strong>${escapeHtml(r.tool_call_name)}</strong> result:
-                                        </div>
-                                        <pre style="margin: 0; background: var(--bg-primary); padding: 8px; border-radius: 6px; overflow-x: auto; font-family: var(--font-mono); font-size: 11.5px; color: ${isErr ? 'var(--error)' : 'var(--text-primary)'}; white-space: pre-wrap; max-height: 250px; overflow-y: auto;"><code>${escapeHtml(typeof r.result === 'string' ? r.result : JSON.stringify(r.result, null, 2))}</code></pre>
-                                    </div>
-                                `;
-                            }).join('')}
-                        </div>
+                        ${detailHtml}
                     </details>
                 </div>
             </div>

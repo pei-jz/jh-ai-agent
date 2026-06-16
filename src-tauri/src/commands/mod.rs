@@ -6,3 +6,4 @@ pub mod shell;
 pub mod indexer;
 pub mod mcp;
 pub mod search;
+pub mod web;

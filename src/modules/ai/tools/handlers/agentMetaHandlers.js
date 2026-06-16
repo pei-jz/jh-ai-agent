@@ -1,51 +1,14 @@
-// agentMetaHandlers — planning / artifact / lifecycle tool handlers extracted
-// from ToolExecutor (Part A refactor): propose_plan, create_artifact &
-// update_artifact, finish_task, verify_syntax, task_progress.
+// agentMetaHandlers — artifact / lifecycle tool handlers extracted from
+// ToolExecutor (Part A refactor): create_artifact & update_artifact,
+// finish_task, verify_syntax, task_progress, present_result.
 //
 // Each takes the ToolExecutor instance as `ctx` and uses its helpers/fields
-// verbatim (_planApproved, _approvedPlan, getSessionArtifactDir,
-// sessionModifiedFiles, workspacePath, _loadTaskProgress, _saveTaskProgress,
-// _renderTaskProgress, _taskProgressItems, onToolEvent, _taskCompleted).
-// Behavior is identical to the inline switch bodies — only `this` → `ctx`.
-// I/O glue (excluded from the unit-coverage gate).
+// verbatim (getSessionArtifactDir, sessionModifiedFiles, workspacePath,
+// _loadTaskProgress, _saveTaskProgress, _renderTaskProgress, _taskProgressItems,
+// onToolEvent, _taskCompleted). Behavior is identical to the inline switch
+// bodies — only `this` → `ctx`. I/O glue (excluded from the unit-coverage gate).
 
 import { invoke } from '@tauri-apps/api/core';
-
-/** propose_plan — phased plan presented for USER approval (plan-first gate). */
-export async function handleProposePlan(ctx, args, onConfirm, onAgentStatus) {
-    onAgentStatus?.(`Proposing plan: ${args.title || 'Plan'}`);
-    // Build markdown from phases (back-compat: accept a flat `steps` array too).
-    const phases = Array.isArray(args.phases) ? args.phases
-        : (Array.isArray(args.steps) ? [{ title: 'Plan', steps: args.steps, rationale: null }] : []);
-    const planText = `# ${args.title || 'Plan'}\n\n` + phases.map((ph, pi) => {
-        const head = `## ${ph.title || `Phase ${pi + 1}`}`;
-        const rat = ph.rationale ? `\n_${ph.rationale}_\n` : '';
-        const steps = (ph.steps || []).map((s, si) => `${si + 1}. ${s}`).join('\n');
-        return `${head}\n${rat}${steps}`;
-    }).join('\n\n');
-
-    ctx.onToolEvent?.('plan_proposed', { title: args.title, phases });
-
-    if (onConfirm) {
-        const res = await onConfirm({ type: 'plan_review', title: args.title, message: planText });
-        if (res === false || res === null) {
-            return 'Error: User REJECTED the plan. Reconsider based on their feedback (or ask what to change), then propose a revised plan. Do NOT start making changes.';
-        }
-        // Approved (true) or approved-with-edits (string = edited plan markdown).
-        const edited = (typeof res === 'string' && res.trim()) ? res.trim() : '';
-        const finalPlan = edited || planText;
-        ctx._planApproved = true;
-        ctx._approvedPlan = finalPlan;
-        const editedNote = (edited && edited !== planText.trim())
-            ? ' (the user EDITED the plan — follow the edited version below)' : '';
-        return `Success: Plan APPROVED${editedNote}. You may now execute it phase by phase; use task_progress to track each phase. Approved plan:\n\n${finalPlan}`;
-    }
-
-    // No approval channel (e.g. headless API) — record + proceed so the agent isn't stuck.
-    ctx._planApproved = true;
-    ctx._approvedPlan = planText;
-    return `Success: Plan recorded (no approval channel available; proceeding). Plan:\n\n${planText}`;
-}
 
 /**
  * present_result — deliver the FINAL structured result to the calling app

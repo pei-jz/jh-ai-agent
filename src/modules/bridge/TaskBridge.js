@@ -265,7 +265,7 @@ class TaskBridge {
 
     emitTaskEvent(taskId, eventType, data) {
         // Classify event priority for client-side filtering
-        const HIGH_PRIORITY_EVENTS = ['confirm_request', 'plan_review', 'complete', 'error'];
+        const HIGH_PRIORITY_EVENTS = ['confirm_request', 'complete', 'error'];
         const priority = HIGH_PRIORITY_EVENTS.includes(eventType) ? 'high' : 'low';
 
         // Broadcast task event to Tauri backend so it can pipe it to WebSocket clients

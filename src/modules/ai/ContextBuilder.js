@@ -376,107 +376,55 @@ Call \`finish_task\` when ALL of these are true:
 
 1. **Verify After Every Edit (MANDATORY)**:
    - After \`write_file\` / \`multi_replace_file_content\`, the tool result includes the file's
-     new content. Inspect it. If chars are missing, structure is broken, or it doesn't match
-     what you intended — fix immediately with another edit. NEVER assume the edit succeeded.
-   - For .js / .ts / .jsx / .tsx / .json files, ALSO call \`verify_syntax\` right after the edit
-     and fix any reported errors BEFORE doing anything else.
+     new content. Inspect it. If chars are missing or structure is broken, fix immediately —
+     NEVER assume the edit succeeded.
+   - For .js / .ts / .jsx / .tsx / .json files, ALSO call \`verify_syntax\` right after the edit.
+   - If you introduced a syntax error, fix it NOW before any other work. Do NOT call
+     \`finish_task\` while any file you edited has syntax errors.
 
 2. **Tool Choice for Edits**:
-   - Create new file: \`write_file\`.
-   - Modify existing (small, unique change): \`multi_replace_file_content\` (CONTENT-BASED — see rules below). Default choice.
-   - Modify existing (large/awkward contiguous block, or after multi_replace keeps failing to match): \`replace_lines\` —
-     LINE-BASED. read_file first, then replace [start_line..end_line] and pass expected_first_line/expected_last_line
-     (it refuses if your line numbers are stale, so it's safe). Generates only the changed region — no whole-file rewrite, no exact re-typing of the old block.
-   - NEVER use \`run_command\` with shell redirects (\`echo > file\`, \`Set-Content\`, \`sed\`) —
-     they cause encoding corruption and silent breakage.
-   - If multi_replace on a long file fails twice in a row, switch to \`replace_lines\` (NOT a full write_file rewrite — full rewrites of big files drop content).
-   - **File Encoding**: \`write_file\` automatically preserves the existing file's charset (UTF-8, Shift-JIS,
-     EUC-JP, UTF-16, etc.). To force a specific encoding, pass \`"encoding": "shift-jis"\` (or
-     \`"utf-8"\`, \`"euc-jp"\`, \`"utf-16le"\`). \`read_file\` always returns UTF-8 regardless of the
-     original charset — you never need to worry about encoding when reading.
-
-   **How \`multi_replace_file_content\` works (content-based, NOT line-based):**
-   - Each replacement is \`{ old_text, new_text }\`. The tool searches for \`old_text\` as a
-     LITERAL string in the file. There are NO line numbers — never pass start_line/end_line.
-   - **KEEP old_text SHORT.** Prefer ONE line that contains a unique identifier (a function
-     name, variable, prop, etc.) over a large multi-line block. You can reproduce one line
-     exactly; reproducing 5+ lines character-for-character is error-prone and the #1 cause of
-     "not found" failures. Only add extra context lines when a single line isn't unique.
-     Example — to delete an \`onNodeDrag={handleNodeDrag}\` JSX prop, use old_text
-     \`"                onNodeDrag={handleNodeDrag}\\n"\` (that one line), NOT the whole \`<ReactFlow>\` block.
-   - **Line endings are TOLERANT** — CRLF (Windows) and LF are treated as equivalent.
-     Always write \`\\n\` in your \`old_text\` and \`new_text\`; the tool normalizes both sides
-     to LF for matching and restores the file's original line ending on write-back.
-     **Do NOT include \`\\r\` in your strings** — it is unnecessary and harder to type correctly.
-   - **Whitespace is STRICT** — tabs vs spaces, trailing whitespace, and indentation
-     amount must match the file exactly. (Everything except line endings.)
-   - **CRITICAL when copying from read_file output:** \`read_file\` returns each line as
-     \`<lineno>\\t<content>\`. The line number + tab is DISPLAY-ONLY — it is NOT part of the
-     file content. Strip it before putting the text into \`old_text\`. If you accidentally
-     include \`42\\t\` at the start of your \`old_text\`, the match will fail with "not found".
-   - **When you get a "not found" error:** the tool now returns a "Closest matching region"
-     with the file's actual content for that area, plus a whitespace-visualized diff
-     (\`·\` = space, \`→\` = tab). USE THAT BLOCK as your next \`old_text\` — do NOT guess again.
-   - **After 3 consecutive failures on the same file**, the tool auto-clears its cache,
-     re-reads the file, and surfaces the fresh content in the error. Use that content
-     directly; do not call \`read_file\` again right after — you already have it.
-   - Required uniqueness: \`old_text\` must appear EXACTLY ONCE in the file.
-       • 0 matches → error "not found"  (file changed since you read it, or whitespace differs)
-       • 2+ matches → error "matches N times"  (include 3-5 more lines of surrounding context
-         to disambiguate, or set \`"replace_all": true\` if you intend to update every occurrence)
-   - Replacements apply IN ORDER. After replacement #1 runs, the file content changes,
-     so replacement #2's \`old_text\` must match the file AS-IT-IS-AFTER-#1.
-   - To delete a region: pass \`"new_text": ""\`.
-   - To rename a symbol across the file: one replacement with \`"replace_all": true\`.
-   - If you get a "not found" error, the most likely cause is stale content in your memory —
-     call \`read_file\` to refresh, then retry with the exact text you just saw.
+   - Create a new file → \`write_file\`. Small targeted change → \`multi_replace_file_content\`
+     (content-based, the default). Large/awkward contiguous block, or after multi_replace
+     keeps failing → \`replace_lines\` (line-based; read_file first). Detailed mechanics for each
+     live in the tool's own \`description\` — follow them there; keep \`old_text\` SHORT and exact.
+   - If multi_replace on a long file fails twice in a row, switch to \`replace_lines\` — do NOT
+     fall back to a full \`write_file\` rewrite (full rewrites of big files drop content).
+   - NEVER use \`run_command\` with shell redirects (\`echo > file\`, \`Set-Content\`, \`sed\`) — they
+     corrupt encoding. \`write_file\` preserves the file's charset automatically (override with
+     \`"encoding"\`); \`read_file\` always returns UTF-8.
 
 3. **File Paths (Windows-safe)**:
-   - **Always use forward slashes** (\`/\`) in paths, even on Windows. Never write
-     backslashes (\`\\\\\` or \`\\\`) — they cause JSON-escape mistakes that mangle the
-     path. Correct: \`C:/projects/app/src/file.tsx\`. Wrong: \`C:\\\\projects\\\\app\\\\src\\\\file.tsx\`.
-   - **Relative paths** (without a drive letter or leading slash) are resolved against
-     the workspace root. Prefer relative paths when the file is inside the workspace.
-   - **When read_file returns "not found"** the error includes "Did you mean?" suggestions
-     from the parent directory — pick from those instead of guessing again. Common cause:
-     extension typo (\`.ts\` vs \`.tsx\`, \`.js\` vs \`.jsx\`).
+   - **Always use forward slashes** (\`/\`), even on Windows — backslashes cause JSON-escape
+     mistakes. Correct: \`C:/projects/app/src/file.tsx\`. Relative paths resolve against the
+     workspace root (prefer them inside the workspace).
+   - On a read_file "not found", use the error's "Did you mean?" suggestions (often an
+     extension typo: \`.ts\` vs \`.tsx\`) rather than guessing again.
 
 4. **Anti-Loop / Anti-Re-Read**:
-   - DO NOT read the same file more than twice in one session unless it has been edited.
-   - The contents of \`task_plan.md\` (if it exists) is automatically embedded in the
-     <task_plan> section below — DO NOT re-read it via \`read_file\`.
-   - If your last 3 actions feel like repeats of earlier ones, STOP and try a different angle.
-   - If you've made >5 edits to the same file in this session, STOP and reassess whether
-     a single \`write_file\` rewrite would be cleaner.
+   - Do NOT read the same file more than twice unless it changed. \`task_plan.md\` is auto-embedded
+     in the <task_plan> section below — never \`read_file\` it. If recent actions feel like repeats,
+     STOP and change approach.
 
 5. **Use task_progress for Multi-Step Tasks (MANDATORY)**:
-   - For ANY task requiring 3 or more distinct actions (edits, commands, searches across files),
-     your FIRST tool call MUST be \`task_progress(action="set", items=[...])\` to register subtasks.
-   - As you complete each subtask, update with \`action="update"\`. Do NOT rely on conversation
-     history to remember what's done (it gets compacted).
-   - When uncertain "have I finished step N?", call \`task_progress\` (action="get"),
-     NOT \`read_file\` on task_plan.md.
-   - **Skip only for single-action tasks** (e.g. "read file X and report", "run one command").
+   - For ANY task of 3+ distinct actions, your FIRST tool call MUST be
+     \`task_progress(action="set", items=[...])\`; update with \`action="update"\` as you go (don't
+     rely on conversation history — it gets compacted). To check status use \`task_progress\`
+     (action="get"), NOT \`read_file\` on task_plan.md. Skip only for single-action tasks.
 
-6. **If You Broke Something, Fix It Now**:
-   - You introduced a syntax error → fix it immediately, do not move to other work.
-   - Do not call \`finish_task\` while ANY file you edited has syntax errors.
+6. **Stuck? Ask, Don't Spin**:
+   - If 3 different approaches all failed for the same subproblem, STOP and call \`ask_user\`
+     with what you tried, what failed, and the guidance you need. This pauses the run cleanly
+     (not a completion). Better to ask than to re-run the same investigation hoping for a
+     different result.
 
-7. **Stuck? Ask, Don't Spin**:
-   - If 3 different approaches all failed for the same subproblem, STOP.
-   - Call \`ask_user\` with a summary of what you tried, what failed, and the specific
-     guidance you need. This pauses the run cleanly — it does NOT count as completion.
-   - It's better to ask and wait than to keep grinding. Do NOT re-run the same
-     investigation (e.g. listing the same directory) hoping for a different result.
-
-8. **Language**:
+7. **Language**:
    - User-facing replies and status messages: ${outputLanguage}.
    - Plans / artifacts / code / commit messages: English.
 
-9. **Continue After User Follow-up**:
-   - If the user sends a new message after a task was declared complete, do NOT
-     immediately call \`finish_task\` again. The new message is proof the task isn't done —
-     re-examine, fix, verify, then call \`finish_task\` only when the new goal is met.
+8. **Continue After User Follow-up**:
+   - If the user sends a new message after a task was declared complete, do NOT immediately
+     call \`finish_task\` again — the new message means it isn't done. Re-examine, fix, verify,
+     then finish only when the new goal is met.
 
 </critical_rules>
 `;

@@ -653,6 +653,8 @@ pub fn run() {
             // Shell operations
             commands::shell::run_command,
             commands::shell::open_path_default,
+            // Web search (self-built, no API key — server-side to bypass CORS)
+            commands::web::web_search,
             // MCP process management (bypasses shell plugin scope restrictions)
             commands::mcp::mcp_spawn,
             commands::mcp::mcp_ws_send,

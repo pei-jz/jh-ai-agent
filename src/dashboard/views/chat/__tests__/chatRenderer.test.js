@@ -112,25 +112,34 @@ describe('renderMessageHtml', () => {
         expect(html).toContain('hello');
     });
 
-    it('renders a tool-call bubble with tool names + args', () => {
+    it('renders a compact tool-call indicator with tool names (args in details)', () => {
         const html = renderMessageHtml({
             isToolCall: true,
             content: '{"thought":"because"}',
             toolCalls: [{ name: 'write_file', args: { path: 'x' } }],
         });
-        expect(html).toContain('Calling tools');
+        expect(html).toContain('Using tools to research');
         expect(html).toContain('write_file');
-        expect(html).toContain('Thought process');
+        expect(html).toContain('Details');
     });
 
-    it('renders a tool-result bubble, flagging errors', () => {
+    it('renders a compact tool-result indicator, flagging errors', () => {
         const html = renderMessageHtml({
             isToolResult: true,
             results: [{ tool_call_name: 'run_command', result: 'Error: boom' }],
         });
-        expect(html).toContain('Tool results');
+        expect(html).toContain('Tool returned an error');
         expect(html).toContain('run_command');
         expect(html).toContain('Error: boom');
+    });
+
+    it('renders a success tool-result as a retrieved-data line', () => {
+        const html = renderMessageHtml({
+            isToolResult: true,
+            results: [{ tool_call_name: 'fetch_url', result: '{"ok":true}' }],
+        });
+        expect(html).toContain('Research data retrieved');
+        expect(html).toContain('fetch_url');
     });
 
     it('renders attached image thumbnails', () => {

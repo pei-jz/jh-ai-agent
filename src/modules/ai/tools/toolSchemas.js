@@ -135,7 +135,7 @@ export const TOOL_DEFINITIONS = [
     },
     {
         name: 'multi_replace_file_content',
-        description: 'WHEN TO USE: this is the DEFAULT tool for editing an existing file — use it to change one or more specific text spans you can quote exactly. Prefer it over write_file for any partial edit. Switch to replace_lines when the region is a large/awkward contiguous block that is error-prone to retype, or when this tool keeps failing to match. Apply one or more content-based search-and-replace edits to an existing file. Each replacement provides the exact original text (old_text) and its replacement (new_text); old_text MUST match EXACTLY once in the file. BEST PRACTICE: keep old_text SHORT — ideally ONE line containing a unique identifier (plus a few words of context only if needed for uniqueness). Short exact anchors succeed far more often than large multi-line blocks, which are easy to mis-transcribe. To disambiguate when a line repeats, add the minimum extra context to make it unique. Set replace_all=true to update every occurrence (useful for renames). Line numbers are NEVER used — only literal string matching. IMPORTANT: when copying text from read_file output, strip the leading `<lineno>\\t` prefix from each line — that prefix is display-only and is NOT part of the file.',
+        description: 'WHEN TO USE: this is the DEFAULT tool for editing an existing file — use it to change one or more specific text spans you can quote exactly. Prefer it over write_file for any partial edit. Switch to replace_lines when the region is a large/awkward contiguous block that is error-prone to retype, or when this tool keeps failing to match. Apply one or more content-based search-and-replace edits to an existing file. Each replacement provides the exact original text (old_text) and its replacement (new_text); old_text MUST match EXACTLY once in the file. BEST PRACTICE: keep old_text SHORT — ideally ONE line containing a unique identifier (plus a few words of context only if needed for uniqueness). Short exact anchors succeed far more often than large multi-line blocks, which are easy to mis-transcribe. To disambiguate when a line repeats, add the minimum extra context to make it unique. Set replace_all=true to update every occurrence (useful for renames). Line numbers are NEVER used — only literal string matching. IMPORTANT: when copying text from read_file output, strip the leading `<lineno>\\t` prefix from each line — that prefix is display-only and is NOT part of the file. MECHANICS: line endings are tolerant (write `\\n`; CRLF/LF both match), but whitespace/indentation must match exactly. Replacements apply IN ORDER — replacement #2 must match the file AS-IT-IS-AFTER #1. To delete a region, pass new_text="". On a "not found" error the tool returns the file\'s actual "Closest matching region" (with a `·`=space/`→`=tab diff) — copy that as your next old_text instead of guessing; after 3 failures on one file it auto-refreshes and surfaces the live content.',
         parameters: {
             type: 'object',
             properties: {
@@ -244,9 +244,23 @@ export const TOOL_DEFINITIONS = [
         }
     },
     {
+        name: 'web_search',
+        isSafe: true,
+        description: 'Search the web by QUERY and get back ranked results (title, URL, snippet). Use this FIRST whenever you need current/online information — do NOT guess or recall a URL from memory (that is the #1 cause of 404 errors). Then call fetch_url on the most relevant result URL to read its content. No API key required.',
+        parameters: {
+            type: 'object',
+            properties: {
+                query: { type: 'string', description: 'The search query, e.g. "JPY USD exchange rate today" or "Tauri v2 global shortcut docs".' },
+                max_results: { type: ['integer', 'null'], description: 'Optional (null to omit). Max results to return, 1–10. Default 5.' }
+            },
+            required: ['query', 'max_results'],
+            additionalProperties: false
+        }
+    },
+    {
         name: 'fetch_url',
         isSafe: true,
-        description: 'Fetch the content of a URL via HTTP GET and return the response body as text. Use this to retrieve web pages, APIs, RSS feeds, or any publicly accessible URL. For JSON APIs, the raw JSON string is returned. For HTML pages, the full HTML is returned (use run_command with a parser or extract what you need). Maximum response size is 500 KB.',
+        description: 'Fetch the content of a specific KNOWN URL via HTTP GET and return the response body as text. Use this to read a page/API/RSS whose URL you got from web_search or the user. Do NOT invent or recall URLs from memory — if you are not sure of the exact URL, call web_search first. For JSON APIs the raw JSON is returned; for HTML the full HTML is returned. Maximum response size is 500 KB.',
         parameters: {
             type: 'object',
             properties: {
@@ -302,37 +316,6 @@ export const TOOL_DEFINITIONS = [
                 }
             },
             required: ['action', 'items'],
-            additionalProperties: false
-        }
-    },
-    {
-        name: 'propose_plan',
-        isSafe: true,
-        description: 'Present a PHASED implementation plan for USER APPROVAL before changing anything. For a complex task you MUST investigate first (read_file / grep_search / list_files), then call this with the work broken into ordered phases. File edits and shell commands are BLOCKED until the user approves. The user may EDIT the plan before approving — if they do, follow the edited plan. After approval, execute phase by phase.',
-        parameters: {
-            type: 'object',
-            properties: {
-                title: { type: 'string', description: 'Short title of the overall goal/plan.' },
-                phases: {
-                    type: 'array',
-                    description: 'Ordered phases. Each groups related steps toward a sub-goal (e.g. Investigation → Implementation → Verification).',
-                    items: {
-                        type: 'object',
-                        properties: {
-                            title: { type: 'string', description: 'Phase title, e.g. "Phase 2: Implement the API change".' },
-                            steps: {
-                                type: 'array',
-                                description: 'Concrete, ordered steps in this phase.',
-                                items: { type: 'string' }
-                            },
-                            rationale: { type: ['string', 'null'], description: 'Optional: why this phase / what it de-risks. null to omit.' }
-                        },
-                        required: ['title', 'steps', 'rationale'],
-                        additionalProperties: false
-                    }
-                }
-            },
-            required: ['title', 'phases'],
             additionalProperties: false
         }
     },

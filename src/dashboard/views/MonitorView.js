@@ -1361,14 +1361,6 @@ export class MonitorView {
             if (resultStr) {
                 customContentHtml = `<pre style="margin:0;font-family:var(--font-mono);font-size:10.5px;white-space:pre;overflow-x:auto;color:inherit;">${escapeHtml(resultStr)}</pre>`;
             }
-        } else if (name === 'propose_plan') {
-            toolIcon = '📋';
-            const title = args.title || '';
-            toolTitle = `Proposed Plan: <strong>${escapeHtml(title)}</strong>`;
-            toolClass = 'log-tool';
-            if (resultStr) {
-                customContentHtml = `<pre style="margin:0;font-family:var(--font-mono);font-size:10.5px;white-space:pre;overflow-x:auto;color:inherit;">${escapeHtml(resultStr)}</pre>`;
-            }
         } else if (name === 'create_artifact' || name === 'update_artifact') {
             toolIcon = '📄';
             const artName = args.name || '';
@@ -1532,29 +1524,6 @@ export class MonitorView {
         let inner = '';
         if (data.type === 'command_confirm') {
             inner = `<h4>🛡 Command Approval</h4><p>${escapeHtml(data.message || '')}</p><pre><code>${escapeHtml(data.command || '')}</code></pre>`;
-        } else if (data.type === 'plan_review') {
-            // Plan shown as a rendered Markdown PREVIEW by default; an "edit" toggle
-            // swaps to a raw textarea. The textarea is the source of truth read back
-            // by sendConfirmResponse, so editing still flows through unchanged.
-            ensureResultViewStyles();
-            const planText = data.message || '';
-            inner = `<h4>📋 Plan Approval</h4>` +
-                `<div style="display:flex;align-items:center;gap:8px;margin:0 0 6px">` +
-                  `<strong style="flex:1">${escapeHtml(data.title || '')}</strong>` +
-                  `<button type="button" class="mconfirm-plan-toggle" data-confirm-id="${cid}" ` +
-                    `style="height:24px;padding:0 10px;font-size:11px;cursor:pointer;` +
-                    `background:var(--bg-secondary);color:var(--text-secondary);` +
-                    `border:1px solid var(--border);border-radius:4px;">✏️ Edit</button>` +
-                `</div>` +
-                `<p class="mconfirm-hint" style="font-size:11px;color:var(--text-tertiary);margin:0 0 6px">You can revise the plan with "Edit" before approving. On approval the (edited) plan is followed.</p>` +
-                `<div class="mconfirm-plan-preview rv-root" id="plan-preview-${cid}" ` +
-                  `style="max-height:420px;overflow:auto;background:var(--bg-primary);` +
-                  `border:1px solid var(--border);border-radius:6px;padding:10px 14px;">` +
-                  `${renderMarkdown(planText)}</div>` +
-                `<textarea class="mconfirm-plan-edit" id="plan-edit-${cid}" rows="14" ` +
-                  `style="display:none;width:100%;box-sizing:border-box;font-family:var(--font-mono);font-size:12px;` +
-                  `background:var(--bg-primary);color:var(--text-primary);border:1px solid var(--border);` +
-                  `border-radius:6px;padding:10px;resize:vertical;">${escapeHtml(planText)}</textarea>`;
         } else if (data.type === 'diff_review') {
             inner = `<h4>📝 File Modification</h4><p><code>${escapeHtml(data.path || '')}</code></p><p>${escapeHtml(data.message || '')}</p>${this.renderSimpleDiff(data.oldContent || '', data.newContent || '')}`;
         }
@@ -2108,15 +2077,8 @@ export class MonitorView {
     }
 
     sendConfirmResponse(confirmId, approved) {
-        // For an approved plan_review, send the (possibly edited) plan text back so
-        // the agent follows the user's revised plan.
-        let modifiedContent = null;
-        if (approved) {
-            const planEdit = document.getElementById(`plan-edit-${confirmId}`);
-            if (planEdit && typeof planEdit.value === 'string') modifiedContent = planEdit.value;
-        }
         if (this.socket?.readyState === WebSocket.OPEN) {
-            this.socket.send(JSON.stringify({ event: 'confirm_response', data: { confirmId, approved, modifiedContent } }));
+            this.socket.send(JSON.stringify({ event: 'confirm_response', data: { confirmId, approved, modifiedContent: null } }));
         }
         // Optimistically mark the card as resolved on this client.
         // The server will also fan-out a `confirm_resolved` event that hits any
@@ -2630,29 +2592,6 @@ export class MonitorView {
                 const btnReject  = e.target.closest('.btn-reject');
                 if (btnApprove) { this.sendConfirmResponse(btnApprove.getAttribute('data-confirm-id'), true); return; }
                 if (btnReject)  { this.sendConfirmResponse(btnReject.getAttribute('data-confirm-id'), false); return; }
-
-                // ②b Plan preview ⇄ edit toggle
-                const btnPlanToggle = e.target.closest('.mconfirm-plan-toggle');
-                if (btnPlanToggle) {
-                    const pcid = btnPlanToggle.getAttribute('data-confirm-id');
-                    const pv = document.getElementById(`plan-preview-${pcid}`);
-                    const ta = document.getElementById(`plan-edit-${pcid}`);
-                    if (pv && ta) {
-                        const editing = ta.style.display !== 'none';
-                        if (editing) {
-                            // Leaving edit mode → re-render preview from the edited text.
-                            pv.innerHTML = renderMarkdown(ta.value);
-                            ta.style.display = 'none';
-                            pv.style.display = 'block';
-                            btnPlanToggle.textContent = '✏️ Edit';
-                        } else {
-                            ta.style.display = 'block';
-                            pv.style.display = 'none';
-                            btnPlanToggle.textContent = '👁 Preview';
-                        }
-                    }
-                    return;
-                }
 
                 // ③ Step header toggle (skip if CHAT button was clicked — already handled above)
                 const stepHeader = e.target.closest('.mstep-header');
