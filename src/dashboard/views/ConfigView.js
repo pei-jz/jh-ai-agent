@@ -13,6 +13,7 @@ export class ConfigView {
             azure_key: '',
             azure_endpoint: '',
             azure_deployment: '',
+            tavily_api_key: '',
             proxy_url: '',
             logging_enabled: false,
             log_dir: '',
@@ -95,6 +96,15 @@ export class ConfigView {
         // Read general settings if visible in DOM
         const proxyEl = document.getElementById('cfg-proxy-url');
         if (proxyEl) this.config.proxy_url = proxyEl.value.trim() || null;
+
+        const tavilyEl = document.getElementById('cfg-tavily-key');
+        if (tavilyEl) {
+            // Keep the literal string if it is masked, otherwise update
+            const val = tavilyEl.value.trim();
+            if (val !== '********') {
+                this.config.tavily_api_key = val || null;
+            }
+        }
 
         const outputLangEl = document.getElementById('cfg-output-language');
         if (outputLangEl) this.config.output_language = outputLangEl.value || 'Japanese';
@@ -203,6 +213,7 @@ export class ConfigView {
             azure_key: this.config.azure_key || null,
             azure_endpoint: this.config.azure_endpoint || null,
             azure_deployment: this.config.azure_deployment || null,
+            tavily_api_key: this.config.tavily_api_key || null,
             proxy_url: this.config.proxy_url,
             output_language:             (this.config.output_language || 'Japanese'),
             logging_enabled: this.config.logging_enabled,
@@ -419,6 +430,11 @@ export class ConfigView {
                         <div class="input-group">
                             <label class="input-label">HTTP Proxy URL (Optional)</label>
                             <input type="text" id="cfg-proxy-url" class="input" value="${this.config.proxy_url || ''}" placeholder="http://127.0.0.1:7890">
+                        </div>
+                        <div class="input-group">
+                            <label class="input-label">Tavily API Key (Search)</label>
+                            <input type="password" id="cfg-tavily-key" class="input" value="${this.config.tavily_api_key || ''}" placeholder="tvly-...">
+                            <p class="input-hint">Required for web_search capability. Get a free API key at <a href="https://tavily.com" target="_blank" style="color: var(--accent);">tavily.com</a>.</p>
                         </div>
                         <div class="input-group">
                             <label class="input-label">Agent Output Language</label>

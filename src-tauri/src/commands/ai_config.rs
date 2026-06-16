@@ -40,6 +40,7 @@ pub struct AiConfig {
     pub azure_key: Option<String>,
     pub azure_endpoint: Option<String>,
     pub azure_deployment: Option<String>,
+    pub tavily_api_key: Option<String>,
     pub proxy_url: Option<String>,
     pub logging_enabled: Option<bool>,
     pub log_dir: Option<String>,
@@ -143,7 +144,7 @@ pub async fn get_ai_config<R: tauri::Runtime>(
         return Ok(AiConfig {
             connection_token: None,
             openai_key: None, anthropic_key: None, gemini_key: None, azure_key: None,
-            azure_endpoint: None, azure_deployment: None,
+            azure_endpoint: None, azure_deployment: None, tavily_api_key: None,
             proxy_url: None, logging_enabled: None, log_dir: None,
             max_steps: Some(100),
             approved_projects: Some(Vec::new()),
@@ -175,6 +176,7 @@ pub async fn get_ai_config<R: tauri::Runtime>(
     if config.anthropic_key.is_some() { config.anthropic_key = Some("********".to_string()); }
     if config.gemini_key.is_some() { config.gemini_key = Some("********".to_string()); }
     if config.azure_key.is_some() { config.azure_key = Some("********".to_string()); }
+    if config.tavily_api_key.is_some() { config.tavily_api_key = Some("********".to_string()); }
     
     if let Some(instances) = &mut config.llm_instances {
         for inst in instances {
@@ -221,6 +223,9 @@ pub async fn save_ai_config<R: tauri::Runtime>(
                 }
                 if final_config.azure_key == Some("********".to_string()) || final_config.azure_key.is_none() {
                     final_config.azure_key = old_config.azure_key;
+                }
+                if final_config.tavily_api_key == Some("********".to_string()) || final_config.tavily_api_key.is_none() {
+                    final_config.tavily_api_key = old_config.tavily_api_key;
                 }
                 if final_config.approved_projects.is_none() {
                     final_config.approved_projects = old_config.approved_projects;
@@ -326,6 +331,7 @@ pub async fn set_rag_approval<R: tauri::Runtime>(
             azure_key: None,
             azure_endpoint: None,
             azure_deployment: None,
+            tavily_api_key: None,
             proxy_url: None,
             logging_enabled: None,
             log_dir: None,

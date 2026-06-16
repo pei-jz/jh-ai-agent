@@ -192,7 +192,6 @@ export async function handleGlob(ctx, args, onAgentStatus) {
     }
 }
 
-/** fetch_url — HTTP GET capped at 500 KB. */
 export async function handleFetchUrl(ctx, args, onAgentStatus) {
     const { url, headers: extraHeaders } = args;
     if (!url || !/^https?:\/\//i.test(url)) {
@@ -200,59 +199,39 @@ export async function handleFetchUrl(ctx, args, onAgentStatus) {
     }
     onAgentStatus?.(`Fetching: ${url}`);
     try {
-        // headers is now a strict [{name,value}] array (or null). Also
-        // accept a legacy plain object for backward compatibility.
-        const headerMap = {};
+        const headerList = [];
         if (Array.isArray(extraHeaders)) {
             for (const h of extraHeaders) {
-                if (h && typeof h.name === 'string' && h.name) headerMap[h.name] = h.value ?? '';
+                if (h && typeof h.name === 'string' && h.name) {
+                    headerList.push([h.name, String(h.value ?? '')]);
+                }
             }
         } else if (extraHeaders && typeof extraHeaders === 'object') {
-            Object.assign(headerMap, extraHeaders);
-        }
-        const fetchHeaders = { 'User-Agent': 'Mozilla/5.0 (compatible; JH-AI-Agent/1.0)', ...headerMap };
-        const resp = await fetch(url, { headers: fetchHeaders });
-        const contentType = resp.headers.get('content-type') || '';
-        // Cap response at 500 KB to avoid flooding context
-        const MAX_BYTES = 500 * 1024;
-        const reader = resp.body.getReader();
-        const chunks = [];
-        let totalBytes = 0;
-        let truncated = false;
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            totalBytes += value.byteLength;
-            if (totalBytes > MAX_BYTES) {
-                // Only add up to the cap
-                const remaining = MAX_BYTES - (totalBytes - value.byteLength);
-                if (remaining > 0) chunks.push(value.slice(0, remaining));
-                truncated = true;
-                reader.cancel();
-                break;
+            for (const [k, v] of Object.entries(extraHeaders)) {
+                headerList.push([k, String(v)]);
             }
-            chunks.push(value);
         }
-        const merged = new Uint8Array(chunks.reduce((sum, c) => sum + c.byteLength, 0));
-        let offset = 0;
-        for (const c of chunks) { merged.set(c, offset); offset += c.byteLength; }
-        const text = new TextDecoder().decode(merged);
-        const statusLine = `HTTP ${resp.status} ${resp.statusText} — Content-Type: ${contentType}`;
-        const truncNote = truncated ? '\n[Response truncated at 500 KB]' : '';
-        return `${statusLine}\n\n${text}${truncNote}`;
+        
+        let proxy = null;
+        try { proxy = (await invoke('get_ai_config'))?.proxy_url || null; } catch (_) {}
+
+        const text = await invoke('fetch_url', { 
+            url, 
+            headers: headerList.length > 0 ? headerList : null,
+            proxy 
+        });
+        return text;
     } catch (e) {
-        return `Error fetching URL: ${e.message}`;
+        return `Error fetching URL: ${e.message || e}`;
     }
 }
 
 /**
- * web_search — self-built, no-API-key web search. The LLM passes a QUERY (not a
+ * web_search — Tavily API web search. The LLM passes a QUERY (not a
  * URL); we return ranked {title, url, snippet} so it can fetch_url a REAL link
  * instead of guessing endpoints from memory (the main cause of 404 thrash).
  *
- * The HTTP request runs server-side (Rust `web_search` command) to bypass the
- * webview's CORS — DuckDuckGo's HTML endpoint sends no CORS headers, so a browser
- * fetch would be blocked. We parse the returned HTML here with DOMParser.
+ * The HTTP request runs server-side (Rust `web_search` command) via Tavily.
  */
 export async function handleWebSearch(ctx, args, onAgentStatus) {
     const query = (args?.query ?? args?.q ?? '').toString().trim();
@@ -264,32 +243,17 @@ export async function handleWebSearch(ctx, args, onAgentStatus) {
         let proxy = null;
         try { proxy = (await invoke('get_ai_config'))?.proxy_url || null; } catch (_) {}
 
-        const html = await invoke('web_search', { query, proxy });
-        const doc = new DOMParser().parseFromString(String(html), 'text/html');
-
-        const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
-        // DDG wraps result links: //duckduckgo.com/l/?uddg=<encoded-url>&rut=...
-        const decode = (href) => {
-            if (!href) return '';
-            const m = href.match(/[?&]uddg=([^&]+)/);
-            if (m) { try { return decodeURIComponent(m[1]); } catch (_) { return ''; } }
-            if (href.startsWith('//')) return 'https:' + href;
-            return href;
-        };
-
-        const out = [];
-        for (const row of doc.querySelectorAll('.result, .web-result')) {
-            const a = row.querySelector('.result__a');
-            if (!a) continue;
-            const url = decode(a.getAttribute('href'));
-            const title = clean(a.textContent);
-            const snippet = clean(row.querySelector('.result__snippet')?.textContent);
-            if (title && /^https?:\/\//i.test(url)) out.push({ title, url, snippet });
-            if (out.length >= maxResults) break;
-        }
+        const data = await invoke('web_search', { query, proxy });
+        
+        const results = data.results || [];
+        const out = results.slice(0, maxResults).map(r => ({
+            title: r.title,
+            url: r.url,
+            snippet: r.content
+        }));
 
         if (out.length === 0) {
-            return `No web results for "${query}". The search page may have been rate-limited or its markup changed. Rephrase the query, or if you already know a specific URL call fetch_url directly.`;
+            return `No web results for "${query}". The search API returned empty results. Rephrase the query, or if you already know a specific URL call fetch_url directly.`;
         }
         const list = out.map((r, i) =>
             `${i + 1}. ${r.title}\n   ${r.url}${r.snippet ? `\n   ${r.snippet}` : ''}`

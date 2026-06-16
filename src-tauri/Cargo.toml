@@ -54,3 +54,7 @@ globset = "0.4"
 
 # Encoding detection and conversion for file I/O
 encoding_rs = "0.8"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+wiremock = "0.6.5"

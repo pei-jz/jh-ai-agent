@@ -101,6 +101,7 @@ export class ToolExecutor {
         // sends NO MCP tools when none are relevant — see setMcpPruneOptions).
         this._mcpRelevanceQuery = null;
         this._mcpPruneOpts = {};
+        this._tavilyEnabled = false; // Add state for Tavily availability
     }
 
     /**
@@ -162,8 +163,14 @@ export class ToolExecutor {
 
     /** Returns the tool definitions filtered by the active allowlist. */
     getActiveToolDefinitions() {
-        if (!this._toolAllowlist) return this.toolDefinitions;
-        return this.toolDefinitions.filter(t => this._toolAllowlist.has(t.name));
+        let defs = this.toolDefinitions;
+        if (this._toolAllowlist) {
+            defs = defs.filter(t => this._toolAllowlist.has(t.name));
+        }
+        if (!this._tavilyEnabled) {
+            defs = defs.filter(t => t.name !== 'web_search');
+        }
+        return defs;
     }
 
     async startSession(workspacePath) {
@@ -199,6 +206,8 @@ export class ToolExecutor {
         this._writeAllowedPaths = [];
         try {
             const cfg = await invoke('get_ai_config');
+            this._tavilyEnabled = !!cfg?.tavily_api_key && cfg.tavily_api_key.trim() !== '';
+
             const explicit = Array.isArray(cfg?.write_allowed_paths) ? cfg.write_allowed_paths : [];
             const projects = Array.isArray(cfg?.approved_projects) ? cfg.approved_projects : [];
             this._writeAllowedPaths = [...explicit, ...projects]
@@ -712,8 +721,11 @@ export class ToolExecutor {
         }
     }
 
-    static getAllAvailableToolsForNativeAPI() {
+    static getAllAvailableToolsForNativeAPI(cfg) {
         const dummy = new ToolExecutor();
+        if (cfg) {
+            dummy._tavilyEnabled = !!cfg?.tavily_api_key && cfg.tavily_api_key.trim() !== '';
+        }
         return dummy.getToolsForNativeAPI();
     }
 
@@ -740,6 +752,7 @@ export class ToolExecutor {
         // is read by the Rust layer, which sets function.strict per provider.
         const nativeTools = this.toolDefinitions
             .filter(t => !allow || allow.has(t.name))
+            .filter(t => t.name !== 'web_search' || this._tavilyEnabled)
             .map(t => ({
                 type: 'function',
                 _strict_ok: true,

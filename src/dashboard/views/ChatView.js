@@ -170,7 +170,7 @@ export class ChatView {
         }
 
         // Generate tools list
-        const activeTools = ToolExecutor.getAllAvailableToolsForNativeAPI();
+        const activeTools = ToolExecutor.getAllAvailableToolsForNativeAPI(this.config);
         let toolsListHtml = '';
         if (activeTools.length === 0) {
             toolsListHtml = `<div style="font-size: 11.5px; color: var(--text-tertiary);">No tools available.</div>`;
