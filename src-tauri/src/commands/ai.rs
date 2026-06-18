@@ -492,6 +492,24 @@ pub async fn llm_chat_native<R: Runtime>(
         _ => unreachable!(),
     };
 
+    // ── Surface the EXACT assembled request body to the frontend ──────────
+    // This is the real wire payload (provider-specific: cache_control breakpoints,
+    // the system stable/volatile split, the trailing volatile user message for
+    // OpenAI, messages in send order, tools). The Monitor "API logs" modal shows
+    // it as a "Sent (raw)" tab so caching behavior can be judged from what was
+    // actually thrown. base64 image data is truncated to keep the payload small.
+    {
+        let mut sent = body.clone();
+        truncate_base64_in_place(&mut sent);
+        let _ = app.emit("llm-request-sent", serde_json::json!({
+            "request_id": payload.request_id,
+            "url": url,
+            "provider": resolved_provider,
+            "model": payload.model,
+            "body": sent,
+        }));
+    }
+
     // ── Optional raw-request dump (opt-in via env JHAI_DEBUG_LLM_BODY=1) ──
     // Writes the EXACT request body actually sent to the provider — with base64
     // image data truncated so the file stays small — to the system temp dir.

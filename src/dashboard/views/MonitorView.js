@@ -2395,7 +2395,7 @@ export class MonitorView {
             // Scalar request params (model / tool_calling / temperature / max_tokens / …).
             const paramsObj = {};
             for (const k of Object.keys(r)) {
-                if (['system_prompt', 'history', 'messages', 'tools', 'url', 'headers'].includes(k)) continue;
+                if (['system_prompt', 'history', 'messages', 'tools', 'url', 'headers', 'sent_request'].includes(k)) continue;
                 if (typeof r[k] === 'string' && r[k].trim() === '') continue;
                 paramsObj[k] = r[k];
             }
@@ -2403,17 +2403,26 @@ export class MonitorView {
                 ? d.response
                 : (d.response ? JSON.stringify(d.response, null, 2) : (d.error || '')));
 
+            // The EXACT assembled body sent to the provider (cache_control, system
+            // stable/volatile split, trailing volatile message, messages in send
+            // order). Shown FIRST so you can read the request as actually thrown.
+            const sentRaw = r.sent_request != null
+                ? (typeof r.sent_request === 'string' ? r.sent_request : JSON.stringify(r.sent_request, null, 2))
+                : '';
+
             // Build the tab set (only include tabs that have content).
             const tabs = [];
+            if (sentRaw) tabs.push({ key: 'sent', label: '📡 Sent (raw)', content: sentRaw });
             if (Object.keys(paramsObj).length) tabs.push({ key: 'params', label: '⚙ Params', content: JSON.stringify(paramsObj, null, 2) });
-            if (systemText) tabs.push({ key: 'system', label: '🧾 System', content: systemText });
+            if (systemText) tabs.push({ key: 'system', label: '🧾 System (pre-assembly)', content: systemText });
             if (historyArr) tabs.push({ key: 'history', label: `💬 History (${historyArr.length})`, content: fmtMsgArray(historyArr, 'history') });
             if (toolsArr) tabs.push({ key: 'tools', label: `🛠 Tools (${toolsArr.length})`, content: JSON.stringify(toolsArr, null, 2) });
             tabs.push({ key: 'response', label: '📤 Response', content: responseText || '(empty)' });
             if (d.headers) tabs.push({ key: 'headers', label: '🔖 Headers', content: JSON.stringify(d.headers, null, 2) });
 
-            // Default to History (the part people inspect most); fall back to first.
-            const defaultIdx = Math.max(0, tabs.findIndex(t => t.key === 'history'));
+            // Default to the as-sent body when available, else History.
+            const preferred = tabs.findIndex(t => t.key === 'sent');
+            const defaultIdx = Math.max(0, preferred >= 0 ? preferred : tabs.findIndex(t => t.key === 'history'));
             const grp = `g${i}`;
 
             const tabBtns = tabs.map((t, ti) =>

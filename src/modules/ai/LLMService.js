@@ -5,6 +5,10 @@ import { tokenEstimator } from './TokenEstimator.js';
 class LLMService {
     constructor() {
         this.activeRequestStreams = new Map();
+        // request_id → the EXACT assembled wire body the Rust layer sent (emitted
+        // via 'llm-request-sent'). Consumed once by chat()/the native path so the
+        // Monitor "Sent (raw)" tab can show what was actually thrown.
+        this._sentRequests = new Map();
         // Filled in by initFromConfig() once apiClient is ready.
         // Format: "{instance_id}:{model_name}" — instance_id is resolved server-side
         // back to provider/api_key/base_url, so this string IS the routing key.
@@ -117,6 +121,13 @@ class LLMService {
     }
 
     async _initNativeListener() {
+        // The Rust layer emits the EXACT assembled request body once per call,
+        // just before sending. Stash it by request_id; the chat paths attach it to
+        // their result (and clean it up) so the Monitor modal can display it.
+        await listen('llm-request-sent', (event) => {
+            const p = event.payload || {};
+            if (p.request_id) this._sentRequests.set(p.request_id, p.body ?? p);
+        });
         await listen('llm-chunk', (event) => {
             const { request_id, delta, done, error, usage } = event.payload;
             const callback = this.activeRequestStreams.get(request_id);
@@ -154,7 +165,10 @@ class LLMService {
         // Cache breakdown (Anthropic: additive to input; OpenAI/Gemini: subset of prompt).
         const cr = reported?.cache_read_input_tokens || 0;
         const cc = reported?.cache_creation_input_tokens || 0;
-        if (p > 0 || c > 0 || t > 0 || cr > 0 || cc > 0) {
+
+        // Trust the provider's usage when it reported ANY input-side signal
+        // (prompt / total / cache). That's the normal, fully-reported case.
+        if (p > 0 || t > 0 || cr > 0 || cc > 0) {
             return {
                 prompt_tokens: p,
                 completion_tokens: c,
@@ -164,11 +178,17 @@ class LLMService {
                 estimated: false
             };
         }
-        // Estimate from text (prompt = system + all messages, completion = response).
+
+        // Otherwise we have NO input-side count. Two cases land here:
+        //   • provider reported nothing            → estimate prompt AND completion
+        //   • provider reported ONLY output_tokens → keep the real completion, but
+        //     estimate the prompt so the input column isn't a misleading "0".
+        // (Seen on Anthropic-SHAPED third-party endpoints like Xiaomi mimo, which
+        // return output_tokens but omit input_tokens / cache_* entirely.)
         const promptText = (systemPrompt || '') + '\n' +
             (messages || []).map(m => typeof m.content === 'string' ? m.content : JSON.stringify(m.content)).join('\n');
         const prompt_tokens = tokenEstimator.estimateTokens(promptText);
-        const completion_tokens = tokenEstimator.estimateTokens(response || '');
+        const completion_tokens = c > 0 ? c : tokenEstimator.estimateTokens(response || '');
         return {
             prompt_tokens,
             completion_tokens,
@@ -338,10 +358,13 @@ class LLMService {
                 if (error) {
                     // Per-call LLM logging is now consolidated into per-task logs
                     // (MonitorView). The old global ApiLogStore (localStorage) was retired.
+                    this._sentRequests.delete(requestId);
                     reject(new Error(error));
                 } else if (done) {
                     const usage = this._resolveUsage(reportedUsage, messages, systemPrompt, fullResponse);
-                    resolve({ content: fullResponse, usage });
+                    const sentRequest = this._sentRequests.get(requestId) || null;
+                    this._sentRequests.delete(requestId);
+                    resolve({ content: fullResponse, usage, sentRequest });
                 } else {
                     fullResponse += delta;
                     onStream?.(delta);
@@ -437,12 +460,15 @@ class LLMService {
 
             this.activeRequestStreams.set(requestId, (delta, done, error, reportedUsage) => {
                 if (error) {
+                    this._sentRequests.delete(requestId);
                     reject(new Error(error));
                 } else if (done) {
                     // For tool-call responses, fullResponse holds the envelope JSON;
                     // estimating completion from it is still a reasonable upper bound
                     // when the provider didn't report usage.
                     const usage = this._resolveUsage(reportedUsage, messages, systemPrompt, fullResponse);
+                    const sentRequest = this._sentRequests.get(requestId) || null;
+                    this._sentRequests.delete(requestId);
 
                     // Try to parse native tool calls from the response
                     let toolCalls = null;
@@ -450,14 +476,14 @@ class LLMService {
                         const parsed = JSON.parse(fullResponse);
                         if (parsed && parsed.tool_calls) {
                             toolCalls = parsed.tool_calls;
-                            resolve({ content: parsed.content || '', toolCalls, usage });
+                            resolve({ content: parsed.content || '', toolCalls, usage, sentRequest });
                             return;
                         }
                     } catch (e) {
                         // Not a tool call response, return as regular text
                     }
 
-                    resolve({ content: fullResponse, toolCalls: null, usage });
+                    resolve({ content: fullResponse, toolCalls: null, usage, sentRequest });
                 } else {
                     // Detect the Rust-emitted tool-call envelope sentinel. When present,
                     // the delta payload after the sentinel IS the complete envelope JSON,

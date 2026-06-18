@@ -659,6 +659,9 @@ export class AgentController {
                         vision_supported: imageDiag.vision_supported,
                         images_attached_to_llm: imageDiag.attached_this_step,
                         images: imageDiag.images,
+                        // The EXACT assembled body sent to the provider (cache_control,
+                        // system split, trailing volatile msg, messages in send order).
+                        sent_request: genResult.sentRequest || null,
                         system_prompt: systemPrompt,
                         history: history,
                         tools: reqTools,
@@ -1450,10 +1453,10 @@ ${String(finalResponse || '').slice(0, 2000)}`;
                             tool_calls: toolCallsFormatted
                         });
 
-                        return { content, usage: result.usage };
+                        return { content, usage: result.usage, sentRequest: result.sentRequest };
                     }
-                    
-                    return { content: result.content || '', usage: result.usage };
+
+                    return { content: result.content || '', usage: result.usage, sentRequest: result.sentRequest };
                 } catch (e) {
                     // If it's a JSON parsing error, and we have retries left, let the model try to correct its JSON
                     if (e instanceof SyntaxError && retryCount < maxNativeRetries) {
