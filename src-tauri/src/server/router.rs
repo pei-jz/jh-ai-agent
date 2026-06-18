@@ -309,7 +309,18 @@ async fn create_task(
 
 async fn list_tasks(State(state): State<AppState>) -> Json<Vec<TaskInfo>> {
     let tasks = state.tasks.lock().unwrap();
-    let list: Vec<TaskInfo> = tasks.values().cloned().collect();
+    // The list view needs METADATA only (id / status / prompt / tokens /
+    // result_summary). Strip each task's `logs` here: with logs, /tasks shipped
+    // EVERY step's full request (system + history + tools + sent_request) for
+    // EVERY task on each call — the dominant cause of "Monitor / spotlight feels
+    // heavy" (both call listTasks). The detail view loads logs on demand via
+    // GET /tasks/:id. (`logs` has skip_serializing_if = Vec::is_empty, so an empty
+    // vec is simply omitted from the JSON.)
+    let list: Vec<TaskInfo> = tasks.values().map(|t| {
+        let mut t = t.clone();
+        t.logs = Vec::new();
+        t
+    }).collect();
     Json(list)
 }
 

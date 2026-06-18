@@ -520,7 +520,7 @@ async function renderSearchResults(query) {
     const q = query.trim().toLowerCase();
     const filtered = tasks
         .filter(t => !q || (t.prompt || '').toLowerCase().includes(q))
-        .sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))
+        .sort((a, b) => new Date(b.started_at || 0) - new Date(a.started_at || 0))
         .slice(0, 8);
 
     _searchItems = filtered;
@@ -546,7 +546,7 @@ async function renderSearchResults(query) {
                           : t.status === 'running'   ? 'running'
                           : t.status === 'failed'    ? 'failed'
                           : 'pending';
-        const date = t.created_at ? new Date(t.created_at).toLocaleString() : '';
+        const date = t.started_at ? new Date(t.started_at).toLocaleString() : '';
         const prompt = (t.prompt || '(no prompt)').replace(/</g, '&lt;');
         return `
             <div class="search-result-item" data-index="${i}" data-task-id="${t.id}">
