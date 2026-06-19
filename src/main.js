@@ -13,7 +13,12 @@ import { taskBridge } from './modules/bridge/TaskBridge.js';
 import { scheduleManager } from './modules/ai/ScheduleManager.js';
 import { mcpManager } from './modules/ai/McpManager.js';
 import llmService from './modules/ai/LLMService.js';
+import { ToolExecutor } from './modules/ai/ToolExecutor.js';
+import { promptTemplateManager } from './modules/ai/PromptTemplateManager.js';
+import { skillManager } from './modules/ai/SkillManager.js';
 import { renderMarkdown, ensureResultViewStyles } from './dashboard/utils/resultView.js';
+import { formatMessageContent, escapeHtml } from './dashboard/views/chat/chatMarkdown.js';
+import { extractToolCall } from './dashboard/views/chat/chatRenderer.js';
 import { STORAGE_KEY as CHAT_SESSIONS_KEY, parseSessions, pruneSessions } from './dashboard/views/chat/chatSessions.js';
 
 // API Client Helper
@@ -257,60 +262,6 @@ function injectSearchOverlayStyles() {
         .search-expand-btn:hover { background: hsla(185, 100%, 55%, 0.22); }
         .search-expand-btn svg { width: 14px; height: 14px; flex-shrink: 0; }
 
-        #search-results {
-            max-height: 320px;
-            overflow-y: auto;
-        }
-        #search-results:empty::after {
-            content: 'No recent tasks';
-            display: block;
-            padding: 24px;
-            text-align: center;
-            color: hsl(220, 12%, 40%);
-            font-size: 13px;
-        }
-
-        .search-result-item {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            padding: 10px 18px;
-            cursor: pointer;
-            transition: background 0.1s;
-            border-bottom: 1px solid hsla(220, 20%, 25%, 0.4);
-        }
-        .search-result-item:last-child { border-bottom: none; }
-        .search-result-item:hover, .search-result-item.focused {
-            background: hsla(220, 18%, 20%, 0.6);
-        }
-        .search-result-status {
-            width: 8px; height: 8px;
-            border-radius: 50%;
-            flex-shrink: 0;
-        }
-        .search-result-status.completed { background: hsl(145, 70%, 50%); }
-        .search-result-status.running   { background: hsl(185, 100%, 55%); animation: pulse 1.5s infinite; }
-        .search-result-status.failed    { background: hsl(0, 75%, 55%); }
-        .search-result-status.pending   { background: hsl(40, 90%, 55%); }
-        @keyframes pulse { 0%,100%{ opacity:1; } 50%{ opacity:0.4; } }
-
-        .search-result-text { flex: 1; min-width: 0; }
-        .search-result-prompt {
-            font-size: 13px;
-            color: hsl(220, 20%, 85%);
-            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-        }
-        .search-result-meta {
-            font-size: 11px;
-            color: hsl(220, 12%, 45%);
-            margin-top: 2px;
-        }
-        .search-result-arrow {
-            font-size: 14px;
-            color: hsl(220, 12%, 40%);
-            flex-shrink: 0;
-        }
-
         .search-footer {
             padding: 8px 18px;
             border-top: 1px solid hsla(220, 20%, 25%, 0.5);
@@ -329,22 +280,6 @@ function injectSearchOverlayStyles() {
             font-size: 10px;
             font-family: monospace;
         }
-        .search-ask-ai-row {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            padding: 10px 18px;
-            cursor: pointer;
-            border-top: 1px solid hsla(220, 20%, 25%, 0.4);
-            color: hsl(185, 100%, 65%);
-            font-size: 13px;
-            transition: background 0.1s;
-        }
-        .search-ask-ai-row:hover, .search-ask-ai-row.focused {
-            background: hsla(185, 100%, 55%, 0.1);
-        }
-        .search-ask-ai-icon { font-size: 15px; flex-shrink: 0; }
-        .search-ask-ai-label { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
         /* ── Inline AI answer (Simple-mode direct message) ── */
         #search-ai-answer {
@@ -395,7 +330,6 @@ function injectSearchOverlayStyles() {
             flex-direction: column;
         }
         /* Middle area grows; footer sticks to the bottom. */
-        .spotlight-mode #search-results { flex: 0 1 auto; }
         .spotlight-mode #search-ai-answer { flex: 1 1 auto; max-height: none; }
         .spotlight-mode .search-footer { margin-top: auto; }
         /* Drag handles (no native titlebar): grab the top bar or footer to move. */
@@ -403,6 +337,63 @@ function injectSearchOverlayStyles() {
         .spotlight-mode .search-footer { cursor: move; }
         .spotlight-mode #search-input,
         .spotlight-mode .search-expand-btn { cursor: auto; }
+
+        /* ── Spotlight Slash Popup & Skills ───────────────── */
+        .slash-popup {
+            position: absolute;
+            top: 100%;
+            left: 18px;
+            right: 18px;
+            background: hsl(220, 20%, 16%);
+            border: 1px solid hsla(220, 20%, 35%, 0.5);
+            border-radius: 8px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+            overflow: hidden;
+            z-index: 200;
+            max-height: 200px;
+            display: flex;
+            flex-direction: column;
+            display: none;
+            margin-top: 4px;
+        }
+        .slash-popup-list { overflow-y: auto; flex: 1; }
+        .slash-popup-item {
+            display: flex; align-items: center; gap: 10px;
+            padding: 8px 12px; cursor: pointer; font-size: 13px;
+            color: hsl(220, 20%, 80%);
+        }
+        .slash-popup-item.selected, .slash-popup-item:hover { background: hsla(220, 20%, 30%, 0.5); }
+        .slash-popup-key { font-family: monospace; color: hsl(185, 100%, 55%); min-width: 60px; font-weight: 600; }
+        .slash-popup-label { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .slash-popup-type { font-size: 10px; color: hsl(220, 20%, 60%); background: hsla(220, 20%, 25%, 0.5); padding: 2px 6px; border-radius: 4px; }
+        
+        .chat-input-skills {
+            display: flex; flex-wrap: wrap; gap: 6px; padding: 12px 18px 0 18px;
+        }
+        .skill-chip {
+            display: inline-flex; align-items: center; gap: 5px;
+            background: hsla(265, 90%, 65%, 0.12);
+            border: 1px solid hsla(265, 90%, 65%, 0.45);
+            color: hsl(220, 20%, 90%);
+            border-radius: 999px; padding: 3px 8px; font-size: 11.5px;
+        }
+        .skill-chip-remove { background: none; border: none; color: hsl(220, 20%, 60%); cursor: pointer; padding: 0 0 0 2px; }
+        .skill-chip-remove:hover { color: #ff4444; }
+
+        .search-mcp-row {
+            padding: 8px 18px;
+            border-top: 1px solid hsla(220, 20%, 25%, 0.5);
+            font-size: 11.5px;
+            color: hsl(220, 20%, 70%);
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+            background: hsl(220, 20%, 14%);
+        }
+        .search-mcp-row label {
+            display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none;
+        }
     `;
     document.head.appendChild(style);
 }
@@ -410,22 +401,29 @@ function injectSearchOverlayStyles() {
 function buildSearchOverlayHTML() {
     return `
         <div class="search-backdrop" id="search-backdrop"></div>
-        <div class="search-container" role="dialog" aria-label="Quick Search">
-            <div class="search-input-row">
-                <span class="search-input-icon">🔍</span>
-                <textarea id="search-input" rows="1" placeholder="Search / Ask AI…  (Enter to send, Shift+Enter for newline)" autocomplete="off" spellcheck="false"></textarea>
+        <div class="search-container" role="dialog" aria-label="Ask AI">
+            <div id="search-input-skills" class="chat-input-skills" style="display: none;"></div>
+            <div class="search-input-row" style="position: relative;">
+                <span class="search-input-icon">✨</span>
+                <textarea id="search-input" rows="1" placeholder="Ask AI…  (Enter to send, / for templates & skills)" autocomplete="off" spellcheck="false"></textarea>
                 <button class="search-expand-btn" id="search-expand-btn" title="Open full app (Ctrl+Enter)">
                     <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
                         <path d="M6 2H2v4M10 2h4v4M6 14H2v-4M10 14h4v-4"/>
                     </svg>
                     Open App
                 </button>
+                <div id="spotlight-slash-popup" class="slash-popup">
+                    <div class="slash-popup-list" id="spotlight-slash-list"></div>
+                </div>
             </div>
-            <div id="search-results"></div>
-            <div id="search-ai-answer" style="display:none"></div>
+            <div id="search-ai-answer" style="display:none; padding: 18px; color: #e6edf3; font-size: 13.5px; line-height: 1.6; max-height: 400px; overflow-y: auto;"></div>
+            
+            <div class="search-mcp-row" id="spotlight-mcp-list" style="display:none">
+                <!-- Checkboxes populated dynamically -->
+            </div>
+
             <div class="search-footer">
-                <span><kbd>↑</kbd><kbd>↓</kbd> Navigate</span>
-                <span><kbd>↵</kbd> Send / Open</span>
+                <span><kbd>↵</kbd> Send</span>
                 <span><kbd>Shift+↵</kbd> Newline</span>
                 <span><kbd>Ctrl+↵</kbd> Full app</span>
                 <span style="margin-left:auto"><kbd>Esc</kbd> Close</span>
@@ -435,11 +433,11 @@ function buildSearchOverlayHTML() {
 }
 
 let _searchUnlisten = null;
-let _searchFocusIndex = -1;
-let _searchItems = [];
-// Task list fetched once per overlay-open; keystrokes filter locally instead of
-// re-hitting the REST API on every input event.
-let _searchTasksCache = null;
+
+let _spotlightActiveSkills = [];
+let _spotlightSlashItems = [];
+let _spotlightSlashIndex = 0;
+let _spotlightSlashQuery = '';
 
 function initSearchOverlay() {
     injectSearchOverlayStyles();
@@ -458,31 +456,107 @@ function initSearchOverlay() {
 
     // Input events
     const input = el.querySelector('#search-input');
+    let _lastValLen = 0;
     input.addEventListener('input', () => {
-        autoGrowSearchInput(input);
-        renderSearchResults(input.value);
+        // Only trigger auto-grow if length changed significantly or includes newline
+        const val = input.value;
+        if (Math.abs(val.length - _lastValLen) > 5 || val.includes('\n') || val.length < _lastValLen) {
+            autoGrowSearchInput(input);
+        }
+        _lastValLen = val.length;
+
+        // Slash command filtering
+        if (val.startsWith('/')) {
+            const query = val.slice(1).toLowerCase();
+            const templates = promptTemplateManager.search(query).map(t => ({
+                type: 'template', key: t.key, label: t.label, icon: t.icon, prompt: t.prompt
+            }));
+            const skills = skillManager.search(query).map(s => ({
+                type: 'skill', key: s.name, label: s.title || s.name, icon: '⚡'
+            }));
+            _spotlightSlashItems = [...templates, ...skills];
+            _spotlightSlashIndex = 0;
+            _spotlightSlashQuery = query;
+            if (_spotlightSlashItems.length > 0) {
+                renderSlashPopup();
+            } else {
+                hideSlashPopup();
+            }
+        } else {
+            hideSlashPopup();
+        }
     });
     input.addEventListener('keydown', onSearchKeydown);
 }
 
-function showSearch() {
+async function showSearch() {
     const overlay = document.getElementById('search-overlay');
     if (!overlay) return;
-    _searchFocusIndex = -1;
-    _searchTasksCache = null;   // refresh the task list once per open
     overlay.classList.add('visible');
     clearAiAnswer();
+    
+    // Reset state
+    _spotlightActiveSkills = [];
+    _spotlightSlashItems = [];
+    _spotlightSlashIndex = 0;
+    renderSkillChips();
+    hideSlashPopup();
+
+    // Ensure templates and skills are loaded
+    try {
+        const config = await invoke('get_ai_config');
+        if (config) promptTemplateManager.loadFromConfig(config);
+        await skillManager.refresh();
+    } catch (e) {
+        console.error('Failed to load Spotlight config/skills:', e);
+    }
+
+    // Render MCP checkboxes
+    renderMcpCheckboxes();
+
     const input = document.getElementById('search-input');
     input.value = '';
     input.style.height = 'auto';   // reset multiline growth
     input.focus();
-    renderSearchResults('');
+}
+
+function hideSlashPopup() {
+    const popup = document.getElementById('spotlight-slash-popup');
+    if (popup) popup.style.display = 'none';
+    _spotlightSlashItems = [];
+    _spotlightSlashIndex = 0;
+}
+
+async function renderMcpCheckboxes() {
+    const mcpList = document.getElementById('spotlight-mcp-list');
+    if (!mcpList) return;
+    
+    // Only show if there are running MCP clients
+    const clients = Array.from(mcpManager.clients.entries());
+    if (clients.length === 0) {
+        mcpList.style.display = 'none';
+        return;
+    }
+    
+    mcpList.style.display = 'flex';
+    mcpList.innerHTML = clients.map(([name, client]) => {
+        const toolCount = client.tools?.length || 0;
+        return `
+            <label>
+                <input type="checkbox" class="spotlight-mcp-checkbox" data-name="${escapeHtml(name)}" checked>
+                ${escapeHtml(name)}
+                <span style="font-size: 9px; background: hsla(185,100%,55%,0.15); color: hsl(185,100%,65%); border-radius: 4px; padding: 1px 4px;">${toolCount}t</span>
+            </label>
+        `;
+    }).join('');
+
+    // Allow toggling local active state (does not stop server, just skips sending to ToolExecutor)
+    // Actually, in ChatView, unchecking STOPS the server. Let's just track checked state locally for askAI filtering.
 }
 
 function hideSearch() {
     const overlay = document.getElementById('search-overlay');
     overlay?.classList.remove('visible');
-    _searchFocusIndex = -1;
     clearAiAnswer();
     // In the dedicated spotlight window, "closing" means hiding the window itself
     // (the overlay IS the whole window). In-app, just dismiss the overlay.
@@ -501,205 +575,320 @@ async function onExpandApp() {
     hideSearch();
 }
 
-async function renderSearchResults(query) {
-    const container = document.getElementById('search-results');
-    if (!container) return;
-
-    // Typing a new query dismisses any shown AI answer and returns to the list.
-    clearAiAnswer();
-    container.style.display = '';
-
-    if (!_searchTasksCache) {
-        try {
-            const list = await window.apiClient?.listTasks();
-            _searchTasksCache = (list?.tasks || list || []);
-        } catch (_) { _searchTasksCache = []; /* API not ready */ }
-    }
-    const tasks = _searchTasksCache;
-
-    const q = query.trim().toLowerCase();
-    const filtered = tasks
-        .filter(t => !q || (t.prompt || '').toLowerCase().includes(q))
-        .sort((a, b) => new Date(b.started_at || 0) - new Date(a.started_at || 0))
-        .slice(0, 8);
-
-    _searchItems = filtered;
-    _searchFocusIndex = -1;
-
-    const askAiHtml = q ? `
-        <div class="search-ask-ai-row" id="search-ask-ai-row">
-            <span class="search-ask-ai-icon">✨</span>
-            <span class="search-ask-ai-label">Ask AI: ${q.replace(/</g, '&lt;')}</span>
-            <span style="font-size:11px;opacity:0.6">Shift+↵</span>
-        </div>` : '';
-
-    if (!filtered.length) {
-        container.innerHTML = askAiHtml;
-        if (q) {
-            container.querySelector('#search-ask-ai-row')?.addEventListener('click', () => askAI(q));
-        }
-        return;
-    }
-
-    container.innerHTML = filtered.map((t, i) => {
-        const statusClass = t.status === 'completed' ? 'completed'
-                          : t.status === 'running'   ? 'running'
-                          : t.status === 'failed'    ? 'failed'
-                          : 'pending';
-        const date = t.started_at ? new Date(t.started_at).toLocaleString() : '';
-        const prompt = (t.prompt || '(no prompt)').replace(/</g, '&lt;');
-        return `
-            <div class="search-result-item" data-index="${i}" data-task-id="${t.id}">
-                <span class="search-result-status ${statusClass}"></span>
-                <div class="search-result-text">
-                    <div class="search-result-prompt">${prompt}</div>
-                    <div class="search-result-meta">${statusClass} · ${date}</div>
-                </div>
-                <span class="search-result-arrow">→</span>
-            </div>
-        `;
-    }).join('') + askAiHtml;
-
-    container.querySelectorAll('.search-result-item').forEach(item => {
-        item.addEventListener('click', () => openSearchResult(item.getAttribute('data-task-id')));
-    });
-    if (q) {
-        container.querySelector('#search-ask-ai-row')?.addEventListener('click', () => askAI(q));
-    }
-}
-
-function openSearchResult(taskId) {
-    if (!taskId) { hideSearch(); return; }
-    const hash = `#monitor?task=${taskId}`;
-    if (document.body.classList.contains('spotlight-mode')) {
-        // The spotlight window has no router/monitor — ask the MAIN window to
-        // navigate, then bring it forward (open_main_window also hides spotlight).
-        clearAiAnswer();
-        try { emit('spotlight-navigate', { hash }); } catch (_) {}
-        invoke('open_main_window').catch(() => {});
-        return;
-    }
-    hideSearch();
-    window.location.hash = hash;
-}
-
 /** Auto-grow the multiline search textarea up to its CSS max-height. */
 function autoGrowSearchInput(ta) {
     if (!ta) return;
+    
+    // Store original height to avoid unnecessary DOM updates if it hasn't changed
+    const oldHeight = ta.style.height;
+    
     ta.style.height = 'auto';
-    ta.style.height = Math.min(ta.scrollHeight, 160) + 'px';
+    const newHeight = Math.min(ta.scrollHeight, 160) + 'px';
+    
+    // Only apply the new height if it actually changed, to minimize style recalculations
+    ta.style.height = newHeight;
+    
+    // If it didn't need to change, restoring it immediately prevents a full reflow in some browsers
+    if (oldHeight && oldHeight === newHeight) {
+        ta.style.height = oldHeight;
+    }
+}
+
+function renderSkillChips() {
+    const container = document.getElementById('search-input-skills');
+    if (!container) return;
+
+    if (_spotlightActiveSkills.length === 0) {
+        container.style.display = 'none';
+        container.innerHTML = '';
+        return;
+    }
+
+    container.style.display = 'flex';
+    container.innerHTML = _spotlightActiveSkills.map(s => `
+        <span class="skill-chip" data-name="${escapeHtml(s.name)}" title="Skill: ${escapeHtml(s.name)}">
+            <span>⚡</span>
+            <span>${escapeHtml(s.title)}</span>
+            <button class="skill-chip-remove" title="Remove skill">✕</button>
+        </span>
+    `).join('');
+
+    container.querySelectorAll('.skill-chip-remove').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const name = btn.closest('.skill-chip').getAttribute('data-name');
+            _spotlightActiveSkills = _spotlightActiveSkills.filter(s => s.name !== name);
+            renderSkillChips();
+        });
+    });
+}
+
+function renderSlashPopup() {
+    const popup = document.getElementById('spotlight-slash-popup');
+    const list = document.getElementById('spotlight-slash-list');
+    if (!popup || !list) return;
+
+    if (_spotlightSlashItems.length === 0) {
+        popup.style.display = 'none';
+        return;
+    }
+
+    popup.style.display = 'flex';
+    list.innerHTML = _spotlightSlashItems.map((item, i) => `
+        <div class="slash-popup-item ${i === _spotlightSlashIndex ? 'selected' : ''}" data-index="${i}">
+            <span class="slash-popup-icon">${item.icon || '⚡'}</span>
+            <span class="slash-popup-key">/${escapeHtml(item.key)}</span>
+            <span class="slash-popup-label">${escapeHtml(item.label || '')}</span>
+            <span class="slash-popup-type">${item.type}</span>
+        </div>
+    `).join('');
+
+    list.querySelectorAll('.slash-popup-item').forEach(el => {
+        el.addEventListener('click', () => {
+            const idx = parseInt(el.getAttribute('data-index'), 10);
+            _selectSlashItem(_spotlightSlashItems[idx]);
+        });
+    });
+
+    const selected = list.querySelector('.selected');
+    if (selected) selected.scrollIntoView({ block: 'nearest' });
+}
+
+function _selectSlashItem(item) {
+    const textarea = document.getElementById('search-input');
+    if (!textarea || !item) return;
+
+    hideSlashPopup();
+
+    if (item.type === 'template') {
+        textarea.value = item.prompt;
+        autoGrowSearchInput(textarea);
+        textarea.focus();
+    } else if (item.type === 'skill') {
+        const currentValue = textarea.value;
+        const afterSlash = currentValue.slice(1);
+        const spaceIdx = afterSlash.indexOf(' ');
+        const remainder = spaceIdx >= 0 ? afterSlash.slice(spaceIdx + 1) : '';
+
+        if (!_spotlightActiveSkills.some(s => s.name === item.key)) {
+            _spotlightActiveSkills.push({ name: item.key, title: item.label || item.key });
+        }
+        renderSkillChips();
+
+        textarea.value = remainder;
+        autoGrowSearchInput(textarea);
+        textarea.focus();
+    }
 }
 
 function onSearchKeydown(e) {
     const ta = document.getElementById('search-input');
-    const items = document.querySelectorAll('.search-result-item');
-    // Once the query spans multiple lines, arrows edit the text (cursor movement)
-    // instead of navigating the task list.
-    const isMultiline = !!ta && ta.value.includes('\n');
+
+    const popup = document.getElementById('spotlight-slash-popup');
+    if (popup && popup.style.display === 'flex') {
+        if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            _spotlightSlashIndex = Math.min(_spotlightSlashIndex + 1, _spotlightSlashItems.length - 1);
+            renderSlashPopup();
+            return;
+        }
+        if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            _spotlightSlashIndex = Math.max(_spotlightSlashIndex - 1, 0);
+            renderSlashPopup();
+            return;
+        }
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            const item = _spotlightSlashItems[_spotlightSlashIndex];
+            if (item) _selectSlashItem(item);
+            return;
+        }
+        if (e.key === 'Escape') {
+            e.preventDefault();
+            hideSlashPopup();
+            return;
+        }
+    }
 
     if (e.key === 'Escape') {
         e.preventDefault();
         hideSearch();
         return;
     }
-    if (e.key === 'ArrowDown' && !isMultiline) {
-        e.preventDefault();
-        _searchFocusIndex = Math.min(_searchFocusIndex + 1, items.length - 1);
-        updateSearchFocus(items);
-        return;
-    }
-    if (e.key === 'ArrowUp' && !isMultiline) {
-        e.preventDefault();
-        _searchFocusIndex = Math.max(_searchFocusIndex - 1, 0);
-        updateSearchFocus(items);
-        return;
-    }
     if (e.key === 'Enter') {
-        // Shift+Enter inserts a newline (default textarea behavior).
         if (e.shiftKey) return;
         e.preventDefault();
         if (e.ctrlKey) {
-            // Ctrl+Enter → open the full app.
             onExpandApp();
             return;
         }
         const q = ta?.value.trim();
-        if (_searchFocusIndex >= 0 && _searchItems[_searchFocusIndex]) {
-            openSearchResult(_searchItems[_searchFocusIndex].id);
-        } else if (q) {
-            askAI(q);
+        if (q || _spotlightActiveSkills.length > 0) {
+            askAI(q || '');
         }
     }
 }
 
 // In-flight abort handle for the inline Simple-mode generation.
 let _aiAbort = null;
+const _toolExecutor = new ToolExecutor();
 
-/**
- * Send the query as a Simple-mode (single LLM call, no tools/agent loop) message
- * and render the streamed answer INLINE inside the Ctrl+Shift+Space overlay —
- * the modal stays open and the result appears directly below the input box.
- */
 async function askAI(query) {
-    if (!query) return;
+    if (!query && _spotlightActiveSkills.length === 0) return;
     const answerEl = document.getElementById('search-ai-answer');
     if (!answerEl) {
-        // Fallback (overlay not initialized): old behavior — open Chat and auto-send.
         try { localStorage.setItem('jh_pending_chat_question', query); } catch (_) {}
         hideSearch();
         window.location.hash = '#chat';
         return;
     }
 
-    // Abort any previous in-flight generation before starting a new one.
     if (_aiAbort) { try { _aiAbort.abort(); } catch (_) {} }
     _aiAbort = new AbortController();
     const myAbort = _aiAbort;
 
     ensureResultViewStyles();
-    // Give the answer full focus — hide the task list while it's shown.
-    const resultsEl = document.getElementById('search-results');
-    if (resultsEl) resultsEl.style.display = 'none';
     answerEl.style.display = 'block';
+
+    const skillRefs = [..._spotlightActiveSkills];
+    _spotlightActiveSkills = [];
+    renderSkillChips();
+
+    let skillPreamble = '';
+    if (skillRefs.length > 0) {
+        const bodies = [];
+        for (const s of skillRefs) {
+            try {
+                const body = await skillManager.readContent(s.name);
+                bodies.push(`# Skill: ${s.title} (/${s.name})\n${body}`);
+            } catch (e) { console.error(e); }
+        }
+        if (bodies.length > 0) {
+            skillPreamble = bodies.join('\n\n') + '\n\n---\n\n';
+        }
+    }
+    const processedText = skillPreamble + query;
+
     answerEl.innerHTML =
-        `<div class="search-ai-q"><span>🧑</span><span>${query.replace(/</g, '&lt;')}</span></div>` +
+        `<div class="search-ai-q"><span>🧑</span><span>${escapeHtml(query || '(Skill Only)')}</span></div>` +
         `<div class="search-ai-body"><span class="search-ai-thinking">✨ Thinking…</span></div>`;
     const bodyEl = answerEl.querySelector('.search-ai-body');
     answerEl.scrollTop = answerEl.scrollHeight;
 
-    let full = '';
-    let streamNode = null;
+    const apiMessages = [{ role: 'user', content: processedText }];
+
+    await _toolExecutor.startSession('.');
+    _toolExecutor.setToolAllowlist(['web_search', 'fetch_url']);
+    _toolExecutor._mcpBypassesAllowlist = true;
+    _toolExecutor.setMcpRelevanceQuery(processedText);
+    _toolExecutor.setMcpPruneOptions({ minScore: 0.12, top: 5 });
+
+    let outputLanguage = 'Japanese';
+    try { outputLanguage = (await invoke('get_ai_config'))?.output_language || 'Japanese'; } catch (_) {}
+
+    const toolDefs = _toolExecutor.getToolsForNativeAPI().map(t => {
+        return `<tool name="${t.function.name}">
+<description>${t.function.description}</description>
+<parameters>${JSON.stringify(t.function.parameters)}</parameters>
+</tool>`;
+    }).join('\n');
+
+    let systemPrompt = "You are a helpful AI assistant. Answer concisely and in the user's language.";
+    systemPrompt += `
+
+<available_tools>
+${toolDefs}
+</available_tools>
+
+<instructions>
+If you need to perform actions, query/modify files, run commands, or use any other tools, you MUST reply with a JSON object wrapped inside a markdown code block (\`\`\`json).
+The JSON object must contain a "thought" string and a "tool_calls" array.
+
+Example:
+\`\`\`json
+{
+  "thought": "Describe what you observed, what you plan to do, and why you are calling the tool.",
+  "tool_calls": [
+    {
+      "name": "list_files",
+      "args": { "path": "." }
+    }
+  ]
+}
+\`\`\`
+
+If no tool execution is needed, or if you have finished all tasks, you can reply normally in plain text.
+Always write your thoughts and tool calls in the JSON structure if you use tools.
+When you finish a task, call the \`finish_task\` tool.
+Your final responses and messages to the user MUST be in ${outputLanguage}.
+</instructions>
+`;
+
     try {
-        await llmService.chat(
-            [{ role: 'user', content: query }],
-            "You are a helpful AI assistant. Answer concisely and in the user's language.",
-            (chunk) => {
-                if (myAbort.signal.aborted) return;
-                full += chunk;
-                if (!streamNode) {
-                    bodyEl.innerHTML = '<div class="search-ai-stream"></div>';
-                    streamNode = document.createTextNode('');
-                    bodyEl.querySelector('.search-ai-stream').appendChild(streamNode);
-                    // Pin to the top so the answer is read from the start as it
-                    // streams — no jarring auto-scroll-to-bottom each chunk.
-                    answerEl.scrollTop = 0;
+        let loopCount = 0;
+        const maxLoops = 10;
+        let keepRunning = true;
+        let fullAnswer = '';
+
+        while (keepRunning && loopCount < maxLoops) {
+            if (myAbort.signal.aborted) break;
+
+            let aiResponse = '';
+            let streamRafPending = false;
+            
+            const renderStreamed = () => {
+                streamRafPending = false;
+                if (!bodyEl) return;
+                const trimmed = aiResponse.trimStart();
+                const looksLikeToolCall = trimmed.startsWith('\`\`\`json') || trimmed.startsWith('{"thought"') || trimmed.startsWith('{ "thought"');
+                if (looksLikeToolCall) {
+                    bodyEl.innerHTML = `<span style="font-size:13px;color:var(--text-secondary);">🔍 Using tools to research…</span>`;
+                } else {
+                    bodyEl.innerHTML = `<div class="rv-summary">${formatMessageContent(aiResponse)}</div>`;
                 }
-                // Append ONLY the new delta to the existing text node — O(chunk),
-                // not O(n) per chunk (the old `textContent = full` was O(n²) total
-                // and the per-chunk scrollHeight read forced a reflow every time).
-                streamNode.appendData(chunk);
-            },
-            myAbort.signal,
-            []
-        );
+                answerEl.scrollTop = answerEl.scrollHeight;
+            };
+
+            await llmService.chat(
+                apiMessages,
+                systemPrompt,
+                (chunk) => {
+                    if (myAbort.signal.aborted) return;
+                    aiResponse += chunk;
+                    if (!streamRafPending) {
+                        streamRafPending = true;
+                        requestAnimationFrame(renderStreamed);
+                    }
+                },
+                myAbort.signal,
+                []
+            );
+            
+            if (myAbort.signal.aborted) break;
+            renderStreamed(); // Final flush
+
+            fullAnswer += aiResponse;
+
+            const toolCalls = extractToolCall(aiResponse);
+            if (toolCalls && toolCalls.length > 0) {
+                apiMessages.push({ role: 'assistant', content: aiResponse });
+                const results = await _toolExecutor.executeTools(toolCalls);
+                for (const res of results) {
+                    apiMessages.push({
+                        role: 'user',
+                        content: `Tool result for ${res.toolName}:\n${res.result}`
+                    });
+                }
+                loopCount++;
+            } else {
+                keepRunning = false;
+            }
+        }
+        
         if (myAbort.signal.aborted) return;
-        // Render the final answer as markdown.
-        bodyEl.innerHTML = `<div class="rv-summary">${renderMarkdown(full)}</div>`;
-        answerEl.scrollTop = 0;
-        // Persist the Q&A to the chat-session store so it shows up in the
-        // Chat → History list when the user switches back to the app.
-        if (full.trim()) {
-            saveQuickSearchToHistory(query, full).catch(e =>
+
+        if (fullAnswer.trim()) {
+            saveQuickSearchToHistory(processedText, fullAnswer).catch(e =>
                 console.warn('Quick-search history save failed:', e));
         }
     } catch (e) {
@@ -766,11 +955,6 @@ function clearAiAnswer() {
     if (_aiAbort) { try { _aiAbort.abort(); } catch (_) {} _aiAbort = null; }
     const answerEl = document.getElementById('search-ai-answer');
     if (answerEl) { answerEl.style.display = 'none'; answerEl.innerHTML = ''; }
-}
-
-function updateSearchFocus(items) {
-    items.forEach((el, i) => el.classList.toggle('focused', i === _searchFocusIndex));
-    items[_searchFocusIndex]?.scrollIntoView({ block: 'nearest' });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
