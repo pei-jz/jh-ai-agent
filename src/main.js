@@ -17,7 +17,7 @@ import { ToolExecutor } from './modules/ai/ToolExecutor.js';
 import { promptTemplateManager } from './modules/ai/PromptTemplateManager.js';
 import { skillManager } from './modules/ai/SkillManager.js';
 import { renderMarkdown, ensureResultViewStyles } from './dashboard/utils/resultView.js';
-import { formatMessageContent, escapeHtml } from './dashboard/views/chat/chatMarkdown.js';
+import { formatMessageContent, escapeHtml, ensureChatMarkdownStyles } from './dashboard/views/chat/chatMarkdown.js';
 import { extractToolCall } from './dashboard/views/chat/chatRenderer.js';
 import { STORAGE_KEY as CHAT_SESSIONS_KEY, parseSessions, pruneSessions } from './dashboard/views/chat/chatSessions.js';
 
@@ -330,7 +330,7 @@ function injectSearchOverlayStyles() {
             flex-direction: column;
         }
         /* Middle area grows; footer sticks to the bottom. */
-        .spotlight-mode #search-ai-answer { flex: 1 1 auto; max-height: none; }
+        .spotlight-mode #search-ai-answer { flex: 1 1 auto; max-height: none !important; }
         .spotlight-mode .search-footer { margin-top: auto; }
         /* Drag handles (no native titlebar): grab the top bar or footer to move. */
         .spotlight-mode .search-input-row,
@@ -453,6 +453,21 @@ function initSearchOverlay() {
     // Expand button → open the full app. From the spotlight window this brings
     // the main window forward and hides the spotlight; in-app it just closes.
     el.querySelector('#search-expand-btn').addEventListener('click', onExpandApp);
+
+    // Global Escape key handler
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+            const overlay = document.getElementById('search-overlay');
+            if (overlay && overlay.classList.contains('visible')) {
+                const popup = document.getElementById('spotlight-slash-popup');
+                if (popup && popup.style.display === 'flex') {
+                    hideSlashPopup();
+                } else {
+                    hideSearch();
+                }
+            }
+        }
+    });
 
     // Input events
     const input = el.querySelector('#search-input');
@@ -703,18 +718,8 @@ function onSearchKeydown(e) {
             if (item) _selectSlashItem(item);
             return;
         }
-        if (e.key === 'Escape') {
-            e.preventDefault();
-            hideSlashPopup();
-            return;
-        }
     }
 
-    if (e.key === 'Escape') {
-        e.preventDefault();
-        hideSearch();
-        return;
-    }
     if (e.key === 'Enter') {
         if (e.shiftKey) return;
         e.preventDefault();
@@ -748,6 +753,7 @@ async function askAI(query) {
     const myAbort = _aiAbort;
 
     ensureResultViewStyles();
+    ensureChatMarkdownStyles();
     answerEl.style.display = 'block';
 
     const skillRefs = [..._spotlightActiveSkills];
@@ -839,14 +845,14 @@ Your final responses and messages to the user MUST be in ${outputLanguage}.
             const renderStreamed = () => {
                 streamRafPending = false;
                 if (!bodyEl) return;
+
                 const trimmed = aiResponse.trimStart();
                 const looksLikeToolCall = trimmed.startsWith('\`\`\`json') || trimmed.startsWith('{"thought"') || trimmed.startsWith('{ "thought"');
                 if (looksLikeToolCall) {
-                    bodyEl.innerHTML = `<span style="font-size:13px;color:var(--text-secondary);">🔍 Using tools to research…</span>`;
+                    bodyEl.innerHTML = `<span style="font-size:13px;color:var(--text-secondary);">🤔 Thinking or using tools…</span>`;
                 } else {
-                    bodyEl.innerHTML = `<div class="rv-summary">${formatMessageContent(aiResponse)}</div>`;
+                    bodyEl.innerHTML = `<div class="rv-summary chat-md">${formatMessageContent(aiResponse)}</div>`;
                 }
-                answerEl.scrollTop = answerEl.scrollHeight;
             };
 
             await llmService.chat(
@@ -869,16 +875,23 @@ Your final responses and messages to the user MUST be in ${outputLanguage}.
 
             fullAnswer += aiResponse;
 
-            const toolCalls = extractToolCall(aiResponse);
-            if (toolCalls && toolCalls.length > 0) {
+            const toolCallObj = extractToolCall(aiResponse);
+            if (toolCallObj && toolCallObj.tool_calls && toolCallObj.tool_calls.length > 0) {
                 apiMessages.push({ role: 'assistant', content: aiResponse });
-                const results = await _toolExecutor.executeTools(toolCalls);
+                const results = await _toolExecutor.executeTools(toolCallObj.tool_calls);
                 for (const res of results) {
                     apiMessages.push({
                         role: 'user',
                         content: `Tool result for ${res.toolName}:\n${res.result}`
                     });
                 }
+                loopCount++;
+            } else if (toolCallObj && (!toolCallObj.tool_calls || toolCallObj.tool_calls.length === 0)) {
+                apiMessages.push({ role: 'assistant', content: aiResponse });
+                apiMessages.push({
+                    role: 'user',
+                    content: `You outputted a thought/planning JSON but no tool calls and no final answer. Please provide your final response to the user in plain text now.`
+                });
                 loopCount++;
             } else {
                 keepRunning = false;

@@ -1746,7 +1746,6 @@ Your final responses and messages to the user MUST be in ${outputLanguage}.
                 const renderStreamed = () => {
                     streamRafPending = false;
                     if (!aiContentEl) return;
-                    const wasAtBottom = chatBody.scrollHeight - chatBody.scrollTop - chatBody.clientHeight <= 50;
                     // When the model is emitting a tool-call JSON block, don't render
                     // the raw JSON forming in the chat — show a compact "researching"
                     // placeholder instead. The compact tool indicator replaces this
@@ -1755,11 +1754,8 @@ Your final responses and messages to the user MUST be in ${outputLanguage}.
                     const trimmed = aiResponse.trimStart();
                     const looksLikeToolCall = trimmed.startsWith('```json') || trimmed.startsWith('{"thought"') || trimmed.startsWith('{ "thought"');
                     aiContentEl.innerHTML = looksLikeToolCall
-                        ? `<span style="font-size:12.5px;color:var(--text-secondary);">🔍 Using tools to research…</span>`
+                        ? `<span style="font-size:12.5px;color:var(--text-secondary);">🤔 Thinking or using tools…</span>`
                         : formatMessageContent(aiResponse);
-                    if (wasAtBottom) {
-                        chatBody.scrollTop = chatBody.scrollHeight;
-                    }
                 };
 
                 try {
@@ -1865,6 +1861,26 @@ Your final responses and messages to the user MUST be in ${outputLanguage}.
                           if (toolCall.tool_calls.some(c => c.name === 'finish_task')) {
                               keepRunning = false;
                           }
+                      } else if (toolCall && (!toolCall.tool_calls || toolCall.tool_calls.length === 0)) {
+                          // The LLM outputted JSON, but NO tool calls. It's just planning/thinking.
+                          // We must prompt it to continue and output the actual answer.
+                          loopCount++;
+
+                          // Drop the streamed bubble
+                          if (aiBubbleRow) { aiBubbleRow.remove(); aiBubbleRow = null; aiContentEl = null; }
+
+                          this.messages.push({
+                              role: 'assistant',
+                              content: res.content,
+                              isToolCall: true,
+                              toolCalls: []
+                          });
+                          this.messages.push({
+                              role: 'user',
+                              content: `You outputted a thought/planning JSON but no tool calls and no final answer. Please provide your final response to the user in plain text now.`
+                          });
+                          this.saveHistory();
+                          this._appendLastMessage(); // Render the empty tool call as "Thinking..."
                       } else {
                           // Plain text response, end loop
                           this.messages.push({ role: 'assistant', content: res.content });

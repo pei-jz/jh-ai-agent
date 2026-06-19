@@ -481,6 +481,7 @@ export class MonitorView {
                 .mfilter-btn:hover { background: var(--bg-hover); color: var(--text-secondary); }
                 .mfilter-btn.active { background: var(--bg-tertiary); color: var(--accent); }
 
+
                 /* ── Console / Log Area ────────────────────────── */
                 .mconsole {
                     flex: 1;
@@ -970,9 +971,6 @@ export class MonitorView {
             </div>
             <div class="mfilter-bar">
                 <button class="mfilter-btn active" data-filter="all">All Logs</button>
-                <button class="mfilter-btn" data-filter="thought">🧠 Thoughts</button>
-                <button class="mfilter-btn" data-filter="tool">🛠 Tools</button>
-                <button class="mfilter-btn" data-filter="telemetry">🔌 API</button>
                 <button class="mfilter-btn" data-filter="result">📋 Result</button>
             </div>
             <div class="mconsole" id="console-logs" data-current-filter="all">
@@ -1782,10 +1780,7 @@ export class MonitorView {
                                 }
                             }
 
-                            // Apply current filter
-                            const filter = consoleEl.getAttribute('data-current-filter') || 'all';
-                            const last = activeBody.lastElementChild;
-                            if (last) this.applyElementFilter(last, filter);
+                            // CSS [data-current-filter] automatically hides elements that don't match.
                         }
                     }
                 }
@@ -1942,22 +1937,7 @@ export class MonitorView {
         if (rp) { rp.style.display = 'block'; this._renderResultPanel(); }
     }
 
-    // ─── Filter ─────────────────────────────────────────────────────────────
 
-    applyFilter(consoleEl, filter) {
-        const items = consoleEl.querySelectorAll('.mlog, .mlog-telemetry, .mconfirm-box');
-        items.forEach(item => this.applyElementFilter(item, filter));
-    }
-
-    applyElementFilter(item, filter) {
-        if (filter === 'all') { item.style.display = ''; return; }
-        const cls = item.classList;
-        const show =
-            (filter === 'thought'   && cls.contains('log-thought')) ||
-            (filter === 'tool'      && (cls.contains('log-tool') || cls.contains('log-file'))) ||
-            (filter === 'telemetry' && cls.contains('telemetry-log'));
-        item.style.display = show ? '' : 'none';
-    }
 
     /**
      * Update the currently-running step's header summary so the user always sees
@@ -2685,38 +2665,24 @@ export class MonitorView {
             });
         }
 
-        // Filter buttons
+        // Filter buttons (All Logs ↔ Result)
         const filterBtns = document.querySelectorAll('.mfilter-btn');
         const resultPanel = document.getElementById('result-panel');
         filterBtns.forEach(btn => {
             btn.addEventListener('click', () => {
-                // User manually chose a tab → stop auto-jumping to Result on completion.
                 this._userPickedTab = true;
                 filterBtns.forEach(b => b.classList.remove('active'));
                 btn.classList.add('active');
                 const filter = btn.getAttribute('data-filter');
                 if (filter === 'result') {
-                    // Show the result panel, hide the log console.
                     if (consoleEl) consoleEl.style.display = 'none';
-                    if (resultPanel) {
-                        resultPanel.style.display = 'block';
-                        this._renderResultPanel();
-                    }
+                    if (resultPanel) { resultPanel.style.display = 'block'; this._renderResultPanel(); }
                 } else {
                     if (resultPanel) resultPanel.style.display = 'none';
-                    if (consoleEl) {
-                        consoleEl.style.display = '';
-                        consoleEl.setAttribute('data-current-filter', filter);
-                        this.applyFilter(consoleEl, filter);
-                    }
+                    if (consoleEl) consoleEl.style.display = '';
                 }
             });
         });
-
-        if (consoleEl) {
-            consoleEl.setAttribute('data-current-filter', 'all');
-            this.applyFilter(consoleEl, 'all');
-        }
 
         // Steering
         const steerBtn   = document.getElementById('btn-send-steering');

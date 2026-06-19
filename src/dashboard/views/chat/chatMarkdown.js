@@ -4,6 +4,90 @@
 // lists, emphasis), and table rendering. No DOM access — pure functions, so
 // they're unit-tested directly (see chatMarkdown.test.js).
 
+export function ensureChatMarkdownStyles() {
+    if (document.getElementById('chat-markdown-styles')) return;
+    const style = document.createElement('style');
+    style.id = 'chat-markdown-styles';
+    style.textContent = `
+        /* Markdown Typography */
+        .chat-md p { margin-bottom: 8px; }
+        .chat-md p:last-child { margin-bottom: 0; }
+        .chat-md h1, .chat-md h2, .chat-md h3, .chat-md h4, .chat-md h5, .chat-md h6 {
+            margin: 12px 0 6px 0; color: var(--accent);
+        }
+        .chat-md h1:first-child, .chat-md h2:first-child, .chat-md h3:first-child { margin-top: 0; }
+        .chat-md ul, .chat-md ol { margin: 8px 0; padding-left: 20px; }
+        .chat-md li { margin-bottom: 4px; }
+        .chat-md blockquote {
+            border-left: 3px solid var(--accent);
+            background: var(--bg-tertiary);
+            padding: 6px 12px; margin: 8px 0;
+            color: var(--text-secondary);
+            border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+        }
+        
+        /* Tables */
+        .chat-md table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 13px; }
+        .chat-md th, .chat-md td { border: 1px solid var(--border); padding: 8px 10px; text-align: left; }
+        .chat-md th { background: var(--bg-tertiary); font-weight: 600; color: var(--accent); }
+        .chat-md tr:nth-child(even) { background: hsla(220, 18%, 15%, 0.3); }
+
+        /* Code Blocks */
+        .chat-md .inline-code {
+            font-family: var(--font-mono); font-size: 12px;
+            background: var(--bg-tertiary); padding: 2px 5px;
+            border-radius: 4px; color: var(--accent);
+        }
+        .chat-md .code-block-wrapper {
+            margin: 10px 0; border-radius: 6px; overflow: hidden; border: 1px solid var(--border);
+        }
+        .chat-md .code-block-header {
+            background: var(--bg-input); padding: 6px 12px;
+            display: flex; justify-content: space-between; align-items: center;
+            border-bottom: 1px solid var(--border);
+        }
+        .chat-md .code-block-lang {
+            font-size: 11px; font-family: var(--font-mono);
+            color: var(--text-secondary); text-transform: uppercase;
+        }
+        .chat-md .btn-copy-code {
+            background: transparent; border: none; color: var(--accent);
+            font-size: 11px; cursor: pointer; font-weight: 500;
+        }
+        .chat-md .btn-copy-code:hover { color: var(--accent-hover); }
+        .chat-md .code-block-wrapper pre {
+            margin: 0; padding: 12px; background: var(--bg-primary); overflow-x: auto;
+        }
+        .chat-md .code-block-wrapper code {
+            font-family: var(--font-mono); font-size: 12.5px; color: #e6edf3; line-height: 1.5;
+        }
+
+        /* Thought Process */
+        .chat-md .thought-process-block {
+            margin: 8px 0; border-radius: 6px; border: 1px solid var(--border);
+            background: hsla(220, 20%, 14%, 0.5); overflow: hidden;
+        }
+        .chat-md .thought-process-block > summary {
+            cursor: pointer; padding: 8px 12px; font-size: 12px; font-weight: 500;
+            color: var(--text-secondary); background: hsla(220, 20%, 18%, 0.5);
+            user-select: none;
+        }
+        .chat-md .thought-process-content {
+            padding: 12px; font-size: 12.5px; color: var(--text-secondary);
+            border-top: 1px solid var(--border);
+        }
+        .chat-md .thought-process-streaming {
+            animation: pulse-border 2s infinite;
+        }
+        @keyframes pulse-border {
+            0% { border-color: var(--border); }
+            50% { border-color: var(--accent); }
+            100% { border-color: var(--border); }
+        }
+    `;
+    document.head.appendChild(style);
+}
+
 export function escapeHtml(str) {
     if (!str) return '';
     return str.replace(/&/g, "&amp;")

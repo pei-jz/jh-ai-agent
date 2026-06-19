@@ -542,7 +542,7 @@ pub fn run() {
                 .transparent(true)
                 .always_on_top(true)
                 .skip_taskbar(true)
-                .resizable(false)
+                .resizable(true)
                 // Prevent the drag-region's double-click from maximizing the
                 // spotlight to fullscreen.
                 .maximizable(false)
@@ -550,14 +550,11 @@ pub fn run() {
                 .center()
                 .build()
             {
-                Ok(spotlight) => {
-                    // Auto-hide on focus loss (click elsewhere) — Spotlight behavior.
-                    let sh = spotlight.clone();
-                    spotlight.on_window_event(move |event| {
-                        if let tauri::WindowEvent::Focused(false) = event {
-                            let _ = sh.hide();
-                        }
-                    });
+                Ok(_) => {
+                    // We intentionally DO NOT auto-hide on focus loss anymore.
+                    // This allows the user to resize the frameless window (which steals focus),
+                    // and more importantly, allows them to click their editor to copy-paste
+                    // code without the AI answer disappearing.
                 }
                 Err(e) => eprintln!("Failed to create spotlight window: {}", e),
             }

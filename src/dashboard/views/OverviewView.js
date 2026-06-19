@@ -70,9 +70,9 @@ export class OverviewView {
                 .dstat-val { font-size:26px; font-weight:700; color:var(--text-primary); font-variant-numeric:tabular-nums; line-height:1.1; }
                 .dstat-sub { font-size:11px; color:var(--text-secondary); }
                 .dash-main { display:flex; flex-direction:column; gap:14px; flex:1; min-height:0; }
-                .dash-lists { display:flex; gap:14px; flex:1.25 1 0; min-height:0; }
+                .dash-lists { display:flex; gap:14px; flex:0.8 1 0; min-height:0; }
                 .dash-lists > .dash-panel { flex:1; min-width:0; }
-                .dash-analytics { flex:1 1 0; min-height:0; overflow-y:auto;
+                .dash-analytics { flex:1.2 1 0; min-height:0; overflow-y:auto;
                     background:var(--bg-secondary); border:1px solid var(--border); border-radius:var(--radius-lg); padding:12px 14px; }
                 .dash-panel { background:var(--bg-secondary); border:1px solid var(--border); border-radius:var(--radius-lg);
                     display:flex; flex-direction:column; min-height:0; overflow:hidden; }
