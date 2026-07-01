@@ -78,11 +78,11 @@ class ApiClient {
     }
     getStats() { return this.request('/stats'); }
     getTaskLogs(id) { return this.request(`/tasks/${id}/logs`); }
-    continueTask(id, message) {
-        // Re-run a completed task with a new message under the SAME task id.
+    continueTask(id, payload) {
+        // Re-run a completed task with a new message/payload under the SAME task id.
         return this.request(`/tasks/${id}/continue`, {
             method: 'POST',
-            body: JSON.stringify({ message })
+            body: JSON.stringify(typeof payload === 'string' ? { message: payload } : payload)
         });
     }
 }
@@ -530,9 +530,20 @@ async function showSearch() {
     renderMcpCheckboxes();
 
     const input = document.getElementById('search-input');
-    input.value = '';
     input.style.height = 'auto';   // reset multiline growth
-    input.focus();
+    // Restore the previous Q&A so reopening doesn't lose the last answer. The text
+    // is pre-selected, so typing immediately starts a fresh query (the input event
+    // → clearAiAnswer/renderSearchResults clears the restored answer).
+    if (_lastSpotlightAnswerHtml) {
+        input.value = _lastSpotlightQuery || '';
+        const answerEl = document.getElementById('search-ai-answer');
+        if (answerEl) { answerEl.innerHTML = _lastSpotlightAnswerHtml; answerEl.style.display = 'block'; }
+        input.focus();
+        try { input.select(); } catch (_) {}
+    } else {
+        input.value = '';
+        input.focus();
+    }
 }
 
 function hideSlashPopup() {
@@ -736,6 +747,11 @@ function onSearchKeydown(e) {
 
 // In-flight abort handle for the inline Simple-mode generation.
 let _aiAbort = null;
+// Last spotlight Q&A, kept so closing/reopening (Ctrl+Shift+Space) restores the
+// previous answer instead of forcing the user to re-ask. Cleared only when a NEW
+// query is typed/submitted.
+let _lastSpotlightQuery = '';
+let _lastSpotlightAnswerHtml = '';
 const _toolExecutor = new ToolExecutor();
 
 async function askAI(query) {
@@ -878,7 +894,13 @@ Your final responses and messages to the user MUST be in ${outputLanguage}.
             const toolCallObj = extractToolCall(aiResponse);
             if (toolCallObj && toolCallObj.tool_calls && toolCallObj.tool_calls.length > 0) {
                 apiMessages.push({ role: 'assistant', content: aiResponse });
-                const results = await _toolExecutor.executeTools(toolCallObj.tool_calls);
+                
+                const results = [];
+                for (const call of toolCallObj.tool_calls) {
+                    const resValue = await _toolExecutor.executeTool(call);
+                    results.push({ toolName: call.name, result: typeof resValue === 'string' ? resValue : JSON.stringify(resValue) });
+                }
+                
                 for (const res of results) {
                     apiMessages.push({
                         role: 'user',
@@ -901,6 +923,9 @@ Your final responses and messages to the user MUST be in ${outputLanguage}.
         if (myAbort.signal.aborted) return;
 
         if (fullAnswer.trim()) {
+            // Remember the rendered Q&A so reopening the spotlight restores it.
+            _lastSpotlightQuery = query || '';
+            _lastSpotlightAnswerHtml = answerEl.innerHTML;
             saveQuickSearchToHistory(processedText, fullAnswer).catch(e =>
                 console.warn('Quick-search history save failed:', e));
         }

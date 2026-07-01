@@ -376,12 +376,34 @@ export class AgentController {
 
             // Apply steering
             if (this.steeringQueue && this.steeringQueue.length > 0) {
-                const messages = this.steeringQueue.splice(0, this.steeringQueue.length);
-                const steeringText = messages.join('\n\n');
-                history.push({
+                const steers = this.steeringQueue.splice(0, this.steeringQueue.length);
+                const steeringText = steers.map(s => typeof s === 'string' ? s : s.message).join('\n\n');
+                
+                const steeringMsg = {
                     role: 'user',
                     content: `[Steering Instruction / Course Correction]\nReceived the following instruction from the user during execution. Please reflect it in your plan and approach immediately:\n${steeringText}`
-                });
+                };
+
+                // Append any images from the steering payloads
+                const allImages = [];
+                for (const s of steers) {
+                    if (s && typeof s === 'object' && s.images && Array.isArray(s.images)) {
+                        allImages.push(...s.images);
+                    }
+                }
+                
+                if (allImages.length > 0) {
+                    steeringMsg.content = [
+                        { type: "text", text: steeringMsg.content },
+                        ...allImages.map(img => ({
+                            type: "image_url",
+                            image_url: { url: img }
+                        }))
+                    ];
+                }
+
+                history.push(steeringMsg);
+                
                 // Emit a dedicated event so the UI can show a visible acknowledgment.
                 const preview = steeringText.split('\n')[0].substring(0, 80);
                 onAgentStatus?.({ event: 'steering_received', message: `📌 Steering received: "${preview}"` });

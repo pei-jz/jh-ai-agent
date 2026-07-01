@@ -873,16 +873,55 @@ export class MonitorView {
                 .mconfirm-actions { display: flex; gap: 8px; margin-top: 8px; }
 
                 /* Steering input */
-                .msteering {
+                .msteering-wrapper {
                     display: flex;
-                    gap: 8px;
-                    padding: 8px 10px;
+                    flex-direction: column;
                     background: var(--bg-secondary);
                     border-top: 1px solid var(--border-light);
                     flex-shrink: 0;
+                    padding: 8px 10px;
+                    position: relative;
+                }
+                .msteering-top {
+                    display: flex;
+                    flex-direction: column;
+                    gap: 8px;
+                }
+                .msteering-previews {
+                    display: flex;
+                    flex-wrap: wrap;
+                    gap: 8px;
+                    margin-bottom: 6px;
+                }
+                .msteering-skills {
+                    display: flex;
+                    flex-wrap: wrap;
+                    gap: 6px;
+                    margin-bottom: 6px;
+                }
+                .msteering-input-row {
+                    display: flex;
+                    gap: 8px;
                     align-items: flex-end;
                 }
-                .msteering textarea {
+                .steer-btn-icon {
+                    background: transparent;
+                    border: none;
+                    color: var(--text-secondary);
+                    font-size: 16px;
+                    cursor: pointer;
+                    width: 32px;
+                    height: 32px;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    border-radius: var(--radius-sm);
+                    transition: background 0.15s, color 0.15s;
+                    flex-shrink: 0;
+                }
+                .steer-btn-icon:hover { color: var(--text-primary); background: hsla(220, 20%, 30%, 0.5); }
+                .steer-btn-icon:disabled { opacity: 0.5; cursor: not-allowed; }
+                .msteering-wrapper textarea {
                     flex: 1;
                     background: var(--bg-input);
                     border: 1px solid var(--border);
@@ -897,9 +936,9 @@ export class MonitorView {
                     outline: none;
                     transition: border-color 0.15s;
                 }
-                .msteering textarea:focus { border-color: var(--accent); }
-                .msteering textarea::placeholder { color: var(--text-tertiary); }
-                .msteering .btn-sm {
+                .msteering-wrapper textarea:focus { border-color: var(--accent); }
+                .msteering-wrapper textarea::placeholder { color: var(--text-tertiary); }
+                .msteering-wrapper .btn-sm {
                     height: 36px;
                     padding: 0 16px;
                     font-size: 12px;
@@ -979,9 +1018,20 @@ export class MonitorView {
             <div class="mconsole mresult" id="result-panel" style="display:none">
                 ${this._renderResultsHtml()}
             </div>
-            <div class="msteering">
-                <textarea id="input-steering" placeholder="Steer the agent... (Ctrl+Enter to send)" disabled rows="1"></textarea>
-                <button class="btn btn-primary btn-sm" id="btn-send-steering" disabled>Send</button>
+            <div class="msteering-wrapper">
+                <div class="msteering-top">
+                    <div id="steer-input-skills" class="msteering-skills chat-input-skills" style="display: none;"></div>
+                    <div id="steer-input-previews" class="msteering-previews" style="display: none;"></div>
+                </div>
+                <div class="msteering-input-row">
+                    <button type="button" class="steer-btn-icon steer-attach-btn" id="steer-btn-attach" title="Attach file or image" disabled>📎</button>
+                    <input type="file" id="steer-file-input" multiple style="display: none;">
+                    <textarea id="input-steering" placeholder="Steer the agent... (Ctrl+Enter to send, / for skills)" disabled rows="1"></textarea>
+                    <button class="btn btn-primary btn-sm" id="btn-send-steering" disabled>Send</button>
+                </div>
+                <div id="steer-slash-popup" class="slash-popup" style="bottom: 100%; top: auto; max-height: 200px; z-index: 1000; margin-bottom: 4px; left: 10px; right: 10px;">
+                    <div class="slash-popup-list" id="steer-slash-list"></div>
+                </div>
             </div>
         `;
     }
@@ -1557,8 +1607,12 @@ export class MonitorView {
         const disableSteering = () => {
             const si = document.getElementById('input-steering');
             const sb = document.getElementById('btn-send-steering');
+            const sba = document.getElementById('steer-btn-attach');
+            const sbs = document.getElementById('steer-btn-skills');
             if (si) si.disabled = true;
             if (sb) sb.disabled = true;
+            if (sba) sba.disabled = true;
+            if (sbs) sbs.disabled = true;
         };
 
         this.socket.onopen = () => {
@@ -1566,8 +1620,12 @@ export class MonitorView {
             if (consoleEl) consoleEl.innerHTML = '';
             const si = document.getElementById('input-steering');
             const sb = document.getElementById('btn-send-steering');
+            const sba = document.getElementById('steer-btn-attach');
+            const sbs = document.getElementById('steer-btn-skills');
             if (si) si.disabled = false;
             if (sb) sb.disabled = false;
+            if (sba) sba.disabled = false;
+            if (sbs) sbs.disabled = false;
         };
 
         this.socket.onmessage = (ev) => {
@@ -1857,8 +1915,12 @@ export class MonitorView {
                         this._taskFinished = true;
                         const si = document.getElementById('input-steering');
                         const sb = document.getElementById('btn-send-steering');
-                        if (si) { si.disabled = false; si.placeholder = '✓ Done. Add a message to continue the task (Ctrl+Enter)'; }
+                        const sba = document.getElementById('steer-btn-attach');
+                        const sbs = document.getElementById('steer-btn-skills');
+                        if (si) { si.disabled = false; si.placeholder = '✓ Done. Add a message to continue the task (Ctrl+Enter, / for skills)'; }
                         if (sb) sb.disabled = false;
+                        if (sba) sba.disabled = false;
+                        if (sbs) sbs.disabled = false;
                     } else {
                         disableSteering();
                     }
@@ -1887,8 +1949,6 @@ export class MonitorView {
                 this._renderResultPanel();
                 if (consoleEl) {
                     consoleEl.innerHTML = this.renderAllLogs();
-                    const filter = consoleEl.getAttribute('data-current-filter') || 'all';
-                    this.applyFilter(consoleEl, filter);
                 }
                 // Completed task with a result → open on the Result tab by default.
                 if (this.resultSummaries.length > 0) {
@@ -1898,8 +1958,12 @@ export class MonitorView {
                 this._taskFinished = true;
                 const si = document.getElementById('input-steering');
                 const sb = document.getElementById('btn-send-steering');
-                if (si) { si.disabled = false; si.placeholder = '✓ Done. Add a message to continue the task (Ctrl+Enter)'; }
+                const sba = document.getElementById('steer-btn-attach');
+                const sbs = document.getElementById('steer-btn-skills');
+                if (si) { si.disabled = false; si.placeholder = '✓ Done. Add a message to continue the task (Ctrl+Enter, / for skills)'; }
                 if (sb) sb.disabled = false;
+                if (sba) sba.disabled = false;
+                if (sbs) sbs.disabled = false;
             }
         } catch (e) {
             console.error('Failed to load task logs:', e);
@@ -2687,40 +2751,160 @@ export class MonitorView {
         // Steering
         const steerBtn   = document.getElementById('btn-send-steering');
         const steerInput = document.getElementById('input-steering');
+        const steerAttachBtn = document.getElementById('steer-btn-attach');
+        const steerFileInput = document.getElementById('steer-file-input');
+        const steerPreviews = document.getElementById('steer-input-previews');
+        
         if (steerBtn && steerInput) {
+            let slash = null;
+            let attachments = [];
+            
+            try {
+                slash = new SlashCommands(steerInput, document.getElementById('steer-slash-popup'), document.getElementById('steer-input-skills'));
+            } catch (err) {
+                console.error("Failed to init SlashCommands:", err);
+            }
+
+            const renderPreviews = () => {
+                if (!steerPreviews) return;
+                if (attachments.length === 0) { steerPreviews.style.display = 'none'; steerPreviews.innerHTML = ''; return; }
+                steerPreviews.style.display = 'flex';
+                steerPreviews.innerHTML = attachments.map(a => a.type === 'image'
+                    ? `<div class="nt-prev" data-id="${a.id}" style="position:relative;border:1px solid var(--border);border-radius:6px;padding:4px;background:var(--bg-tertiary);">
+                           <img src="${a.dataUrl}" style="width:40px;height:40px;object-fit:cover;border-radius:4px;display:block;cursor:zoom-in;">
+                           <button class="nt-prev-x" title="Remove" style="position:absolute;top:-6px;right:-6px;background:var(--error);border:none;color:#fff;width:16px;height:16px;border-radius:50%;font-size:9px;cursor:pointer;">✕</button>
+                       </div>`
+                    : `<div class="nt-prev" data-id="${a.id}" style="position:relative;display:flex;align-items:center;gap:6px;border:1px solid var(--border);border-radius:6px;padding:4px 20px 4px 8px;background:var(--bg-tertiary);font-size:11px;color:var(--text-secondary);max-width:180px;">
+                           <span>📄</span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(a.name)}</span>
+                           <button class="nt-prev-x" title="Remove" style="position:absolute;top:2px;right:2px;background:none;border:none;color:var(--error);cursor:pointer;font-size:10px;">✕</button>
+                       </div>`).join('');
+                steerPreviews.querySelectorAll('.nt-prev-x').forEach(btn => btn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const id = btn.closest('.nt-prev').getAttribute('data-id');
+                    const i = attachments.findIndex(a => a.id === id);
+                    if (i >= 0) { attachments.splice(i, 1); renderPreviews(); }
+                }));
+                steerPreviews.querySelectorAll('.nt-prev img').forEach(img => {
+                    img.addEventListener('click', () => this._openImageZoom(img.src));
+                });
+            };
+
+            const handleFile = (file) => {
+                if (!file) return;
+                if (file.size > 10 * 1024 * 1024) { alert('File is too large (max 10MB).'); return; }
+                const isImage = file.type.startsWith('image/');
+                const isExcel = /\.(xlsx|xls|ods)$/i.test(file.name);
+                const reader = new FileReader();
+                reader.onload = async (e) => {
+                    let dataUrl = null, content = null;
+                    if (isImage) {
+                        dataUrl = e.target.result;
+                    } else if (isExcel) {
+                        try {
+                            const bytes = new Uint8Array(e.target.result);
+                            content = await invoke('parse_excel_to_html', { bytes: Array.from(bytes), ext: file.name.split('.').pop() || '' });
+                        } catch (err) { alert(`Failed to parse Excel: ${err.message || err}`); return; }
+                    } else {
+                        content = reader.result;
+                    }
+                    attachments.push({ id: Math.random().toString(36).slice(2, 8), name: file.name, type: isImage ? 'image' : 'file', dataUrl, content });
+                    renderPreviews();
+                };
+                if (isImage) reader.readAsDataURL(file);
+                else if (isExcel) reader.readAsArrayBuffer(file);
+                else reader.readAsText(file);
+            };
+
+            if (steerAttachBtn && steerFileInput) {
+                steerAttachBtn.addEventListener('click', () => steerFileInput.click());
+                steerFileInput.addEventListener('change', (e) => {
+                    for (const f of e.target.files) handleFile(f);
+                    steerFileInput.value = '';
+                });
+            }
+
+            steerInput.addEventListener('paste', (e) => {
+                for (const it of (e.clipboardData?.items || [])) {
+                    if (it.type.indexOf('image') !== -1) handleFile(it.getAsFile());
+                }
+            });
+
+            // Native Tauri Drag and Drop handling
+            let dragUnlisten;
+            const setDragHL = (on) => { 
+                const box = steerInput.closest('.msteering-wrapper');
+                if (box) { box.style.outline = on ? '2px dashed var(--accent)' : ''; box.style.outlineOffset = on ? '-4px' : ''; }
+            };
+            const readDroppedPath = async (path) => {
+                try {
+                    const fd = await invoke('read_file_bytes', { path });
+                    const bytes = new Uint8Array(fd.bytes);
+                    const ext = (fd.ext || '').toLowerCase();
+                    const mimeMap = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp', svg: 'image/svg+xml' };
+                    const mime = mimeMap[ext] || 'application/octet-stream';
+                    handleFile(new File([new Blob([bytes], { type: mime })], fd.name, { type: mime }));
+                } catch (e) { console.error('Dropped file read failed:', e); }
+            };
+            import('@tauri-apps/api/window').then(({ getCurrentWebviewWindow }) => {
+                getCurrentWebviewWindow().onDragDropEvent((event) => {
+                    if (!document.getElementById('input-steering')) return;
+                    const t = event.payload.type;
+                    if (t === 'enter' || t === 'over') setDragHL(true);
+                    else if (t === 'drop') { setDragHL(false); for (const p of (event.payload.paths || [])) readDroppedPath(p); }
+                    else setDragHL(false);
+                }).then(un => { dragUnlisten = un; }).catch(() => {});
+            });
+
             const sendSteer = async () => {
-                const msg = steerInput.value.trim();
-                if (!msg) return;
-                // If the task already finished, this CONTINUES it (re-runs the agent
-                // under the same id). Otherwise it steers the live run.
+                const rawText = steerInput.value.trim();
+                if ((!slash || !slash.hasContent(rawText)) && attachments.length === 0) return;
+                
+                let prompt = await (slash ? slash.buildPrompt(rawText) : rawText);
+                const fileAtts = attachments.filter(a => a.type === 'file');
+                if (fileAtts.length > 0) {
+                    prompt += '\n\n' + fileAtts.map(f => `[Attached File: ${f.name}]\n\`\`\`\n${f.content}\n\`\`\`\n`).join('\n');
+                }
+                const images = attachments.filter(a => a.type === 'image').map(a => a.dataUrl);
+
                 if (this._taskFinished) {
                     steerInput.value = '';
+                    attachments = []; renderPreviews();
+                    if (slash) { slash.activeSkills = []; slash._renderChips(); }
+                    
                     steerInput.disabled = true; steerBtn.disabled = true;
+                    if (steerAttachBtn) steerAttachBtn.disabled = true;
+
                     if (consoleEl) {
                         consoleEl.style.display = '';
                         consoleEl.insertAdjacentHTML('beforeend',
-                            `<div class="mlog mlog-status"><span class="mlog-icon">↪</span><span class="mlog-body" style="color:var(--accent)"><strong>Continue:</strong> ${escapeHtml(msg)}</span></div>`);
+                            `<div class="mlog mlog-status"><span class="mlog-icon">↪</span><span class="mlog-body" style="color:var(--accent)"><strong>Continue:</strong> ${escapeHtml(prompt)}</span></div>`);
                     }
                     try {
-                        await window.apiClient.continueTask(this.selectedTaskId, msg);
+                        const payload = { message: prompt };
+                        if (images.length > 0) payload.images = images;
+                        await window.apiClient.continueTask(this.selectedTaskId, payload);
                         this._taskFinished = false;
-                        // Reconnect to stream the continued run (logs/results replay + accumulate).
                         this.connectWebSocket(this.selectedTaskId);
                     } catch (e) {
                         console.error('continueTask failed:', e);
                         steerInput.disabled = false; steerBtn.disabled = false;
+                        if (steerAttachBtn) steerAttachBtn.disabled = false;
                         alert(`Failed to continue: ${e.message || e}`);
                     }
                     return;
                 }
                 if (this.socket?.readyState === WebSocket.OPEN) {
-                    this.socket.send(JSON.stringify({ event: 'steering', data: { message: msg } }));
+                    const payload = { message: prompt };
+                    if (images.length > 0) payload.images = images;
+                    this.socket.send(JSON.stringify({ event: 'steering', data: payload }));
                     if (consoleEl) {
                         consoleEl.insertAdjacentHTML('beforeend',
-                            `<div class="mlog mlog-status"><span class="mlog-icon">👉</span><span class="mlog-body" style="color:var(--accent)"><strong>Steered:</strong> ${escapeHtml(msg)}</span></div>`);
+                            `<div class="mlog mlog-status"><span class="mlog-icon">👉</span><span class="mlog-body" style="color:var(--accent)"><strong>Steered:</strong> ${escapeHtml(prompt)}</span></div>`);
                         consoleEl.scrollTop = consoleEl.scrollHeight;
                     }
                     steerInput.value = '';
+                    attachments = []; renderPreviews();
+                    if (slash) { slash.activeSkills = []; slash._renderChips(); }
                 }
             };
             steerBtn.addEventListener('click', sendSteer);

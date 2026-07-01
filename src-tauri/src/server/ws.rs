@@ -146,11 +146,15 @@ async fn handle_socket(socket: WebSocket, task_id: String, state: AppState) {
                         }
                     }
                     "steering" => {
-                        if let Some(msg) = client_event["data"]["message"].as_str() {
-                            let _ = app_handle.emit("steering-task", serde_json::json!({
-                                "taskId": task_id_clone,
-                                "message": msg
-                            }));
+                        if let Some(data) = client_event.get("data") {
+                            if let Some(msg) = data.get("message").and_then(|m| m.as_str()) {
+                                let images = data.get("images").map(|i| i.clone());
+                                let _ = app_handle.emit("steering-task", serde_json::json!({
+                                    "taskId": task_id_clone,
+                                    "message": msg,
+                                    "images": images
+                                }));
+                            }
                         }
                     }
                     _ => {}

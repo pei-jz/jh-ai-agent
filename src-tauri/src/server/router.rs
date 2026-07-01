@@ -148,6 +148,8 @@ pub struct CreateTaskResponse {
 #[derive(Debug, Deserialize)]
 pub struct SteeringRequest {
     pub message: String,
+    #[serde(default)]
+    pub images: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -448,7 +450,8 @@ async fn send_steering(
     // Notify Frontend Webview of steering message
     let _ = state.app_handle.emit("steering-task", serde_json::json!({
         "taskId": id,
-        "message": payload.message
+        "message": payload.message,
+        "images": payload.images
     }));
     Ok(Json(serde_json::json!({ "status": "steered" })))
 }
@@ -499,7 +502,7 @@ async fn continue_task(
         workspace_path: workspace,
         context: None,
         behavior: None,
-        images: None,
+        images: payload.images,
         chat_context: Some(chat_context),
         caller,
     };

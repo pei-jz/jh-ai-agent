@@ -76,6 +76,16 @@ class TaskBridge {
             console.log("TaskBridge: Received abort-task event for:", taskId);
             this.abortAgentTask(taskId);
         });
+
+        // 4. Listen for mid-flight steering
+        await listen('steering-task', (event) => {
+            const { taskId, message, images } = event.payload;
+            console.log("TaskBridge: Received steering-task event for:", taskId);
+            const agent = this.activeAgents.get(taskId);
+            if (agent && agent.controller) {
+                agent.controller.addSteeringMessage({ message, images: images || [] });
+            }
+        });
     }
 
     /**

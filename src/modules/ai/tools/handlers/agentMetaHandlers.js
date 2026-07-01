@@ -69,7 +69,9 @@ export async function handlePresentResult(ctx, args, onAgentStatus) {
 /** create_artifact / update_artifact — write a markdown artifact to the session dir. */
 export async function handleArtifact(ctx, args, name, onAgentStatus) {
     const actionName = name === 'create_artifact' ? 'Creating' : 'Updating';
-    const artifactName = args.name.endsWith('.md') ? args.name : `${args.name}.md`;
+    const safeName = typeof args?.name === 'string' && args.name.trim() ? args.name.trim() : 'artifact';
+    const artifactName = safeName.endsWith('.md') ? safeName : `${safeName}.md`;
+    const content = typeof args?.content === 'string' ? args.content : '';
     onAgentStatus?.(`${actionName} artifact: ${artifactName}...`);
 
     const artifactDir = ctx.getSessionArtifactDir();
@@ -83,13 +85,13 @@ export async function handleArtifact(ctx, args, name, onAgentStatus) {
     }
 
     await invoke('create_dir', { path: artifactDir });
-    await invoke('write_file', { path: artifactPath, content: args.content });
+    await invoke('write_file', { path: artifactPath, content });
 
     // Track the artifact (e.g. task_plan.md) as a session-modified file so it
     // shows up in the post-run Result file list (clickable → OS default app).
-    ctx._recordModification?.(artifactPath, original, args.content);
+    ctx._recordModification?.(artifactPath, original, content);
 
-    ctx.onToolEvent?.('artifact_modified', { name: artifactName, path: artifactPath, content: args.content });
+    ctx.onToolEvent?.('artifact_modified', { name: artifactName, path: artifactPath, content });
     return `Success: Artifact ${artifactName} ${name === 'create_artifact' ? 'created' : 'updated'}.`;
 }
 
