@@ -1,7 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { projectContext } from './ProjectContext.js';
 import { conversationMemory } from './ConversationMemory.js';
-import { workflowManager } from './WorkflowManager.js';
 import { tokenEstimator } from './TokenEstimator.js';
 import llmService from './LLMService.js';
 
@@ -35,12 +34,11 @@ class ContextBuilder {
 When invoking tools, reply with EXACTLY ONE JSON object wrapped in a \`\`\`json fenced code block.
 NO commentary before or after the fence. NO multiple JSON blocks. NO trailing prose.
 
-The "thought" field MUST follow this 3-part structure (one sentence each):
-  "OBSERVE: <what you see> | PLAN: <what you'll do and why> | CALL: <tool name>"
+Put a brief line of reasoning in the "thought" field, then the tool call(s):
 
 \`\`\`json
 {
-  "thought": "OBSERVE: The export is missing from utils.js. | PLAN: Add it with multi_replace to keep the edit minimal. | CALL: multi_replace_file_content",
+  "thought": "Add the missing export with multi_replace to keep the edit minimal.",
   "tool_calls": [
     { "name": "tool_name", "args": { "arg_name": "value" } }
   ]
@@ -192,8 +190,6 @@ JSON FORMATTING RULES (critical — most failures come from these):
             memoryContext = conversationMemory.getPromptContext(currentQuery);
         } catch (e) { }
 
-        const workflowContext = workflowManager.getPromptContext();
-
         // Artifacts (DISK IO — must run every iteration since files change)
         let artifactContext = '';
         let taskPlanContent = '';
@@ -301,20 +297,9 @@ IMPORTANT: Final responses to the USER must be in ${outputLanguage}. Internal re
             if (isNative) {
                 instructionsPrompt = `
 <protocol>
-Use the provided native tool-calling mechanism (function calls) to invoke tools.
-Before EVERY function call, output a short reasoning preamble as plain text:
-
-OBSERVE: [One sentence: what the previous result showed, or the current state]
-PLAN: [One sentence: what you will do next and why]
-
-Then immediately invoke the function via the tool-calling API.
-Do NOT write "CALL: <tool_name>" — that is NOT a function call.
-The actual invocation must go through the function-call mechanism, not as text.
-
-Example:
-OBSERVE: The export statement is missing from utils.js after the helper definition.
-PLAN: Insert it using multi_replace_file_content (content-based) so the rest of the file is untouched.
-[function call: multi_replace_file_content(...)]
+Invoke tools through the native function-calling mechanism. Reason as much as you
+need before acting, but keep any out-loud reasoning brief. Do NOT write the call as
+text (e.g. "CALL: read_file") — always use the actual function-call API.
 </protocol>
 `;
             } else {
@@ -338,6 +323,8 @@ ${instructionsPrompt}
 A task ends in exactly one of two ways — a text-only reply is never treated as completion:
 - \`finish_task\` — when the user's request is fully addressed (deliver the result via \`present_result\` first when a result kind is expected).
 - \`ask_user\` — when you genuinely CANNOT proceed without input only the user can give (ambiguous requirement, a missing decision, or attached content the current model can't read). This pauses the run and waits for their reply. Do NOT use it to report progress; prefer a reasonable assumption when you can.
+
+For a LARGE or AMBIGUOUS request, you MAY briefly state your intended approach and call \`ask_user\` to confirm the direction before doing extensive work — optional, and best used when a wrong assumption would be costly to undo. Otherwise proceed with a reasonable approach.
 </task_completion>
 
 <critical_rules>
@@ -364,6 +351,10 @@ A task ends ONLY by calling \`finish_task\` (goal achieved) or \`ask_user\` (blo
 input only the user can give). Text-only replies (no tool call) will cause the system to
 ask you to continue — they are never treated as completion. If you find yourself wanting
 to "wait for the user" or "confirm with the user", call \`ask_user\` — never just emit text.
+
+For a LARGE or AMBIGUOUS request, you MAY briefly propose your intended approach and call
+\`ask_user\` to confirm the direction before doing extensive work — optional, best used when a
+wrong assumption would be costly to undo. Otherwise proceed with a sensible approach.
 
 Call \`finish_task\` when ALL of these are true:
   ✓ The user's stated goal is fully achieved.
@@ -400,16 +391,13 @@ Call \`finish_task\` when ALL of these are true:
    - On a read_file "not found", use the error's "Did you mean?" suggestions (often an
      extension typo: \`.ts\` vs \`.tsx\`) rather than guessing again.
 
-4. **Anti-Loop / Anti-Re-Read**:
-   - Do NOT read the same file more than twice unless it changed. \`task_plan.md\` is auto-embedded
-     in the <task_plan> section below — never \`read_file\` it. If recent actions feel like repeats,
-     STOP and change approach.
+4. **Don't spin**: avoid re-reading an unchanged file or repeating an action that
+   didn't make progress — change approach instead. \`task_plan.md\` is auto-embedded
+   in the <task_plan> section below, so read it there, not via \`read_file\`.
 
-5. **Use task_progress for Multi-Step Tasks (MANDATORY)**:
-   - For ANY task of 3+ distinct actions, your FIRST tool call MUST be
-     \`task_progress(action="set", items=[...])\`; update with \`action="update"\` as you go (don't
-     rely on conversation history — it gets compacted). To check status use \`task_progress\`
-     (action="get"), NOT \`read_file\` on task_plan.md. Skip only for single-action tasks.
+5. **Track multi-step work (recommended)**: for a task with several distinct steps,
+   \`task_progress\` helps you keep state across history compaction — register the
+   subtasks and update them as you go. Optional, but useful on longer tasks.
 
 6. **Stuck? Ask, Don't Spin**:
    - If 3 different approaches all failed for the same subproblem, STOP and call \`ask_user\`
@@ -506,10 +494,6 @@ ${planBody}
 ]]>
 </task_plan>
 `;
-        }
-
-        if (workflowContext) {
-            volatilePart += `\n${workflowContext}\n`;
         }
 
         if (artifactContext) {

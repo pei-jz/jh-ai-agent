@@ -1,7 +1,6 @@
 import llmService from '../../modules/ai/LLMService.js';
 import { ToolExecutor } from '../../modules/ai/ToolExecutor.js';
 import { mcpManager } from '../../modules/ai/McpManager.js';
-import { workflowManager } from '../../modules/ai/WorkflowManager.js';
 import { promptTemplateManager } from '../../modules/ai/PromptTemplateManager.js';
 import { skillManager } from '../../modules/ai/SkillManager.js';
 import { invoke } from '@tauri-apps/api/core';
@@ -39,7 +38,6 @@ export class ChatView {
         this.activeSkills = [];   // [{ name, title }]
         
         // Settings states
-        this.selectedWorkflow = 'none'; // 'none', 'research', 'planning', 'execution', 'debugging', 'verification'
         this.workspacePath = '';
         this.toolsEnabled = false;
         this.allMcpServers = {};
@@ -1015,7 +1013,6 @@ export class ChatView {
         const sendBtn = document.getElementById('btn-send-message');
         const clearBtn = document.getElementById('btn-clear-chat');
         const modelSelect = document.getElementById('chat-model-select');
-        const workflowSelect = document.getElementById('chat-workflow-select');
         const promptToggle = document.getElementById('prompt-toggle-btn');
         const promptPanel = document.getElementById('prompt-panel');
         const systemInput = document.getElementById('chat-system-input');
@@ -1169,16 +1166,6 @@ export class ChatView {
             modelSelect.addEventListener('change', (e) => {
                 this.selectedModel = e.target.value;
                 llmService.setCurrentModel(this.selectedModel);
-            });
-        }
-
-        // Workflow Select change listener
-        if (workflowSelect) {
-            workflowSelect.addEventListener('change', (e) => {
-                this.selectedWorkflow = e.target.value;
-                if (this.selectedWorkflow !== 'none') {
-                    workflowManager.setPhase(this.selectedWorkflow);
-                }
             });
         }
 
@@ -1690,10 +1677,6 @@ export class ChatView {
 
                 // Build dynamic system prompt
                 let dynamicSystemPrompt = this.systemPrompt;
-                if (this.selectedWorkflow !== 'none') {
-                    workflowManager.setPhase(this.selectedWorkflow);
-                    dynamicSystemPrompt += `\n\n${workflowManager.getPromptContext()}`;
-                }
 
                 {
                     const toolDefs = toolExecutor.getToolsForNativeAPI().map(t => {

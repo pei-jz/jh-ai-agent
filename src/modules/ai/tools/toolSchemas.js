@@ -206,11 +206,11 @@ export const TOOL_DEFINITIONS = [
     {
         name: 'finish_task',
         isSafe: true,
-        description: "Declare that all changes, tests, and verification have successfully completed, achieving the user's goal.",
+        description: "End the task when the user's goal is fully achieved (and, for code changes, verified). IMPORTANT: if the user asked for a TEXT deliverable — a report, analysis, answer, proposal, or plan — that deliverable must already be delivered, either via `present_result` or as the full content of `summary` below. Do NOT call finish_task merely to ANNOUNCE completion (e.g. \"I completed the analysis\") without the actual content — an empty finish leaves the user with nothing.",
         parameters: {
             type: 'object',
             properties: {
-                summary: { type: 'string', description: 'A concise final summary of what was accomplished' }
+                summary: { type: 'string', description: 'The outcome. For a TEXT deliverable that you did not send via present_result and that involved no file changes, put the COMPLETE report/answer/proposal here (not a one-line "done" claim). For code tasks, a concise summary of what changed and how it was verified.' }
             },
             required: ['summary'],
             additionalProperties: false

@@ -1,5 +1,4 @@
 import llmService from './LLMService.js';
-import { workflowManager, WorkflowPhases } from './WorkflowManager.js';
 import { ToolExecutor } from './ToolExecutor.js';
 import { contextBuilder, ContextBuilder } from './ContextBuilder.js';
 import { conversationMemory } from './ConversationMemory.js';
@@ -60,8 +59,6 @@ export class AgentController {
             });
         } catch (_) { /* non-critical */ }
 
-        workflowManager.setPhase(WorkflowPhases.RESEARCH);
-        
         // Phase 2: Goal-pinning — original user goal is always the first message
         let history = [];
         if (chatContext.length > 0) {
@@ -96,6 +93,8 @@ export class AgentController {
         // SUBSTANTIVE answer (markdown/table/etc.), distinct from the finish_task
         // wrap-up thought. Preferred as the Result's headline content.
         this._lastResultEnvelope = null;
+        // One-time soft nudge if finish_task is called with no deliverable (reset per run).
+        this._deliverableNudged = false;
 
         // ── Expand Intent/Recipe (behavior.intent) into behavior fields ──
         // A named AI action declared by the calling app. Inline-object form
@@ -698,23 +697,17 @@ export class AgentController {
             const toolCall = this._extractToolCall(response);
 
             if (toolCall && toolCall.thought) {
-                const thoughtText = typeof toolCall.thought === 'string' 
-                    ? toolCall.thought 
+                const thoughtText = typeof toolCall.thought === 'string'
+                    ? toolCall.thought
                     : (toolCall.thought.current_task || JSON.stringify(toolCall.thought));
 
-                // Phase 4: Dynamic phase detection based on thought content
-                if (thoughtText.toLowerCase().includes('エラー') || thoughtText.toLowerCase().includes('error')) {
-                    workflowManager.setPhase(WorkflowPhases.DEBUGGING);
-                }
-                
                 // Emit a status update with abbreviated label, then the full thought once.
                 // (Using 'status' for the label avoids creating a duplicate step in ChatView.)
-                const phaseName = workflowManager.getStageInfo().name;
                 const taskName = typeof toolCall.thought === 'string'
                     ? (toolCall.thought.substring(0, 60) + (toolCall.thought.length > 60 ? '...' : ''))
                     : (toolCall.thought.current_task || 'Thinking...');
 
-                onAgentStatus?.({ event: 'status', status: 'running', message: `[${phaseName}] ${taskName} (step ${iteration})` });
+                onAgentStatus?.({ event: 'status', status: 'running', message: `${taskName} (step ${iteration})` });
                 onAgentStatus?.({ event: 'thought', text: thoughtText });
             }
 
@@ -895,7 +888,6 @@ export class AgentController {
 
                 if (hasErrors) {
                     consecutiveErrorCount++;
-                    workflowManager.setPhase(WorkflowPhases.DEBUGGING);
                 } else {
                     consecutiveErrorCount = 0;
                 }
@@ -905,27 +897,11 @@ export class AgentController {
 
                 if (consecutiveErrorCount >= 3) {
                     recoveryHint += `\n[Critical Warning] Encountered ${consecutiveErrorCount} consecutive errors. Re-evaluate your approach or report status to the user.`;
-                    workflowManager.setPhase(WorkflowPhases.PLANNING);
                 }
 
-                // ── Post-edit verify_syntax reminder ─────────────────────────
-                // If the agent just edited a .js/.ts/.json file, gently remind it
-                // to run verify_syntax. This is the system-prompt rule made operative
-                // at the most relevant moment (immediately after the edit returns).
-                const editedFileExts = toolCall.tool_calls
-                    .filter(tc => tc.name === 'write_file' || tc.name === 'multi_replace_file_content')
-                    .map(tc => {
-                        const p = String(tc.args?.path || '').toLowerCase();
-                        const m = p.match(/\.([a-z0-9]+)$/);
-                        return m ? m[1] : '';
-                    })
-                    .filter(Boolean);
-                const verifiableEdit = editedFileExts.some(ext =>
-                    ['js', 'jsx', 'ts', 'tsx', 'json', 'mjs', 'cjs'].includes(ext)
-                );
-                if (verifiableEdit && !hasErrors) {
-                    recoveryHint += `\n[Verify Reminder] You just edited a .js/.ts/.json file. Call verify_syntax on it next to confirm the edit didn't introduce syntax errors. Do NOT call finish_task before verifying.`;
-                }
+                // (Post-edit verify reminder removed — the system prompt's
+                // "verify after edit" rule covers it; a per-step injected reminder
+                // was redundant noise. Errors still surface via recoveryHint below.)
 
                 // ── No-progress detector ──────────────────────────────────────
                 // Record whether THIS iteration produced any "real" progress
@@ -1015,6 +991,32 @@ export class AgentController {
                     richThought = stripReActPreamble(this._cleanFinalResponse(richThought || '')).trim();
                     const ftCall = toolCall.tool_calls.find(c => c.name === 'finish_task');
                     const ftSummaryArg = String(ftCall?.args?.summary || '').trim();
+
+                    // ── Deliverable nudge (SOFT, one-time) ─────────────────────
+                    // A common weak-model failure is finishing to ANNOUNCE completion
+                    // ("I completed the analysis") without ever producing the thing
+                    // the user asked for. If the run delivered no present_result,
+                    // changed no files, and the finish summary/thought are both short
+                    // (a meta-claim, not real content), nudge ONCE to deliver — then
+                    // let the model decide. We never hard-block: if it ignores the
+                    // nudge, the next finish_task goes straight through. This keeps the
+                    // "trust the model" default while catching the empty-finish case.
+                    const deliverableLen = Math.max(ftSummaryArg.length, richThought.length);
+                    const hasDeliverable = !!this._lastResultEnvelope
+                        || (this.toolExecutor.getModifiedFiles()?.length > 0)
+                        || deliverableLen >= 400;
+                    if (!hasDeliverable && !this._deliverableNudged) {
+                        this._deliverableNudged = true;
+                        this.toolExecutor.resetTaskCompleted?.();
+                        onAgentStatus?.({ event: 'status', status: 'running', message: '📝 成果物が未提示 — 本文の出力を促しています' });
+                        history.push({ role: 'assistant', content: response });
+                        history.push({
+                            role: 'user',
+                            content: '[Deliverable Missing] You called finish_task but produced no deliverable: no present_result, no file changes, and only a brief "what I did" note. If the user asked for actual content (a report / analysis / answer / proposal), output the FULL content NOW — call present_result (kind:"markdown") with the complete text, or put the complete text in finish_task\'s summary. If the task genuinely needed no textual deliverable, just call finish_task again and it will complete.'
+                        });
+                        continue;
+                    }
+
                     // Longest substantive candidate wins (reports are long; the
                     // OBSERVE/PLAN/CALL thought is short meta-text).
                     finalResponse = [ftSummaryArg, richThought]
@@ -1031,7 +1033,7 @@ export class AgentController {
                 history.push({ role: 'assistant', content: response });
                 history.push({
                     role: 'user',
-                    content: `Tool Execution Results:\n${JSON.stringify(results, null, 2)}${recoveryHint}\n\nBefore your next action, explicitly reflect on the results above:\nOBSERVE: What do these results tell you? (What was found, confirmed, or is still missing?)\nPLAN: What will you do next based on what you just observed, and why?\nThen make your next tool call — or call finish_task if the user's goal is fully achieved.`
+                    content: `Tool Execution Results:\n${JSON.stringify(results, null, 2)}${recoveryHint}\n\nConsider what these results tell you, then make your next tool call — or call finish_task if the user's goal is fully achieved.`
                 });
             } else {
                 const looksLikeToolAttempt = response.includes('tool_calls') || (response.includes('"name"') && response.includes('"args"'));
@@ -1416,9 +1418,9 @@ ${String(finalResponse || '').slice(0, 2000)}`;
             const maxNativeRetries = 2;
             let currentHistory = [...history];
 
-            // systemPrompt already contains the native-mode OBSERVE/PLAN protocol
-            // (built by ContextBuilder).  Do NOT append more instructions here —
-            // that would duplicate the protocol and confuse the model.
+            // systemPrompt already contains the native-mode protocol (built by
+            // ContextBuilder). Do NOT append more instructions here — that would
+            // duplicate the protocol and confuse the model.
 
             while (retryCount <= maxNativeRetries) {
                 try {

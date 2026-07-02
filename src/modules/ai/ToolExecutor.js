@@ -1,6 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
 import { mcpManager } from './McpManager.js';
-import { workflowManager } from './WorkflowManager.js';
 import { toStrictSchema } from './strictSchema.js';
 import { levenshtein, pickClosestFile } from './tools/FuzzyPath.js';
 import {
@@ -528,6 +527,12 @@ export class ToolExecutor {
         return !!this._taskCompleted;
     }
 
+    /** Clear the completion flag — used by the deliverable nudge to let the loop
+     *  continue when finish_task was called without producing a deliverable. */
+    resetTaskCompleted() {
+        this._taskCompleted = false;
+    }
+
     /** True when ask_user paused the run waiting for the user's reply. */
     isAwaitingUser() {
         return !!this._awaitingUser;
@@ -844,7 +849,6 @@ export class ToolExecutor {
     async executeTool(call, onAgentStatus, onConfirm) {
         const { name } = call;
         const args = call.args || {};
-        workflowManager.autoAdvance(name);
 
         // Enforce per-session tool allowlist (configured via setToolAllowlist).
         // Always permit finish_task so a restricted agent can still terminate.

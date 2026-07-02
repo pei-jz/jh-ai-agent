@@ -5,7 +5,6 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 // permission classification), none of which calls invoke().
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 vi.mock('../McpManager.js', () => ({ mcpManager: { getAllTools: () => [] } }));
-vi.mock('../WorkflowManager.js', () => ({ workflowManager: { autoAdvance: () => {} } }));
 
 const { ToolExecutor } = await import('../ToolExecutor.js');
 let toolExecutor;
