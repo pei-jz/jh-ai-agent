@@ -20,6 +20,7 @@ import { renderMarkdown, ensureResultViewStyles } from './dashboard/utils/result
 import { formatMessageContent, escapeHtml, ensureChatMarkdownStyles } from './dashboard/views/chat/chatMarkdown.js';
 import { extractToolCall } from './dashboard/views/chat/chatRenderer.js';
 import { STORAGE_KEY as CHAT_SESSIONS_KEY, parseSessions, pruneSessions } from './dashboard/views/chat/chatSessions.js';
+import { icon } from './dashboard/utils/icons.js';
 
 // API Client Helper
 class ApiClient {
@@ -90,10 +91,42 @@ class ApiClient {
 // Router State
 let currentView = null;
 
+// ── Theme (light default / dark) ────────────────────────────────────────────
+// Persisted in localStorage `jhai_theme`; applied by setting data-theme on
+// <html>. Applied at MODULE LOAD (below) so the first paint is already themed.
+function applyTheme(theme) {
+    if (theme === 'light') document.documentElement.dataset.theme = 'light';
+    else delete document.documentElement.dataset.theme;
+    const btn = document.getElementById('titlebar-theme');
+    if (btn) {
+        // Icon shows the mode you'd switch TO (moon = go dark, sun = go light).
+        btn.innerHTML = theme === 'light' ? icon('moon', 14) : icon('sun', 14);
+        btn.title = theme === 'light' ? 'ダークモードへ / Switch to dark' : 'ライトモードへ / Switch to light';
+    }
+}
+function currentTheme() {
+    try { return localStorage.getItem('jhai_theme') === 'dark' ? 'dark' : 'light'; } catch (_) { return 'light'; }
+}
+// Apply immediately (before DOMContentLoaded) to avoid a dark flash in light mode.
+applyTheme(currentTheme());
+// Cross-window sync: the spotlight window shares this localStorage, so a theme
+// toggle in the main window re-themes it live via the storage event.
+window.addEventListener('storage', (e) => {
+    if (e.key === 'jhai_theme') applyTheme(currentTheme());
+});
+
 // Initialize Titlebar Window Event Listeners (decorations: false)
 function initTitlebar() {
     const appWindow = getCurrentWindow();
-    
+
+    // Theme toggle (icon shows the mode you'd switch TO)
+    applyTheme(currentTheme());   // sync the button icon now that the DOM exists
+    document.getElementById('titlebar-theme')?.addEventListener('click', () => {
+        const next = currentTheme() === 'light' ? 'dark' : 'light';
+        try { localStorage.setItem('jhai_theme', next); } catch (_) {}
+        applyTheme(next);
+    });
+
     document.getElementById('titlebar-minimize')?.addEventListener('click', () => {
         appWindow.minimize();
     });
@@ -181,6 +214,8 @@ function injectSearchOverlayStyles() {
     const style = document.createElement('style');
     style.textContent = `
         /* ── Search Overlay ────────────────────────────────── */
+        /* Colors come from the dashboard theme variables so the overlay follows
+           light/dark mode (accent tints via color-mix on --accent). */
         #search-overlay {
             display: none;
             position: fixed;
@@ -195,7 +230,7 @@ function injectSearchOverlayStyles() {
         .search-backdrop {
             position: absolute;
             inset: 0;
-            background: rgba(0, 0, 0, 0.55);
+            background: rgba(0, 0, 0, 0.45);
             backdrop-filter: blur(4px);
             -webkit-backdrop-filter: blur(4px);
         }
@@ -204,10 +239,10 @@ function injectSearchOverlayStyles() {
             position: relative;
             z-index: 1;
             width: min(620px, calc(100vw - 80px));
-            background: hsl(220, 20%, 12%);
-            border: 1px solid hsla(220, 20%, 35%, 0.5);
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
             border-radius: 14px;
-            box-shadow: 0 24px 64px rgba(0,0,0,0.7), 0 0 0 1px rgba(255,255,255,0.04);
+            box-shadow: 0 24px 64px rgba(0,0,0,0.35), 0 0 0 1px rgba(0,0,0,0.04);
             overflow: hidden;
             animation: searchSlideIn 0.15s ease;
         }
@@ -221,7 +256,7 @@ function injectSearchOverlayStyles() {
             align-items: center;
             gap: 12px;
             padding: 16px 18px;
-            border-bottom: 1px solid hsla(220, 20%, 30%, 0.5);
+            border-bottom: 1px solid var(--border);
         }
         .search-input-icon { font-size: 16px; opacity: 0.6; flex-shrink: 0; align-self: flex-start; margin-top: 2px; }
         #search-input {
@@ -229,10 +264,10 @@ function injectSearchOverlayStyles() {
             background: none;
             border: none;
             outline: none;
-            color: hsl(220, 20%, 90%);
+            color: var(--text-primary);
             font-size: 16px;
             font-family: inherit;
-            caret-color: hsl(185, 100%, 55%);
+            caret-color: var(--accent);
             /* Multiline support: a textarea that auto-grows up to a cap. */
             resize: none;
             line-height: 1.5;
@@ -241,7 +276,7 @@ function injectSearchOverlayStyles() {
             padding: 0;
             display: block;
         }
-        #search-input::placeholder { color: hsl(220, 12%, 40%); }
+        #search-input::placeholder { color: var(--text-tertiary); }
         .search-input-row { align-items: flex-start; }
 
         .search-expand-btn {
@@ -249,24 +284,24 @@ function injectSearchOverlayStyles() {
             align-items: center;
             gap: 6px;
             padding: 5px 11px;
-            background: hsla(185, 100%, 55%, 0.12);
-            border: 1px solid hsla(185, 100%, 55%, 0.35);
+            background: color-mix(in srgb, var(--accent) 12%, transparent);
+            border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
             border-radius: 8px;
-            color: hsl(185, 100%, 65%);
+            color: var(--accent);
             font-size: 12px;
             font-family: inherit;
             cursor: pointer;
             white-space: nowrap;
             transition: background 0.15s;
         }
-        .search-expand-btn:hover { background: hsla(185, 100%, 55%, 0.22); }
+        .search-expand-btn:hover { background: color-mix(in srgb, var(--accent) 22%, transparent); }
         .search-expand-btn svg { width: 14px; height: 14px; flex-shrink: 0; }
 
         .search-footer {
             padding: 8px 18px;
-            border-top: 1px solid hsla(220, 20%, 25%, 0.5);
+            border-top: 1px solid var(--border-light);
             font-size: 11px;
-            color: hsl(220, 12%, 40%);
+            color: var(--text-tertiary);
             display: flex;
             align-items: center;
             gap: 14px;
@@ -274,8 +309,8 @@ function injectSearchOverlayStyles() {
         .search-footer kbd {
             display: inline-block;
             padding: 1px 5px;
-            background: hsla(220, 18%, 20%, 0.8);
-            border: 1px solid hsla(220, 20%, 35%, 0.5);
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
             border-radius: 4px;
             font-size: 10px;
             font-family: monospace;
@@ -286,23 +321,31 @@ function injectSearchOverlayStyles() {
             max-height: 420px;
             overflow-y: auto;
             padding: 14px 18px;
-            border-top: 1px solid hsla(220, 20%, 25%, 0.5);
+            border-top: 1px solid var(--border-light);
             font-size: 13px;
-            color: hsl(220, 20%, 88%);
+            color: var(--text-primary);
             line-height: 1.6;
         }
         .search-ai-q {
             font-size: 12px;
-            color: hsl(185, 100%, 65%);
+            color: var(--accent);
             margin-bottom: 8px;
             font-weight: 600;
             display: flex;
             gap: 6px;
             align-items: flex-start;
         }
-        .search-ai-thinking { color: hsl(220, 12%, 55%); }
+        .search-ai-thinking { color: var(--text-tertiary); }
         .search-ai-stream { white-space: pre-wrap; word-break: break-word; }
         #search-ai-answer .rv-summary { font-size: 13px; }
+        .search-ai-toolnote {
+            font-size: 12px;
+            color: var(--text-tertiary);
+            margin: 6px 0;
+            display: flex;
+            gap: 6px;
+            align-items: center;
+        }
 
         /* ── Spotlight window: the modal FILLS the window (no white margins) ── */
         html.spotlight-mode, .spotlight-mode, .spotlight-mode body {
@@ -344,10 +387,10 @@ function injectSearchOverlayStyles() {
             top: 100%;
             left: 18px;
             right: 18px;
-            background: hsl(220, 20%, 16%);
-            border: 1px solid hsla(220, 20%, 35%, 0.5);
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
             border-radius: 8px;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+            box-shadow: 0 4px 20px rgba(0,0,0,0.25);
             overflow: hidden;
             z-index: 200;
             max-height: 200px;
@@ -360,36 +403,36 @@ function injectSearchOverlayStyles() {
         .slash-popup-item {
             display: flex; align-items: center; gap: 10px;
             padding: 8px 12px; cursor: pointer; font-size: 13px;
-            color: hsl(220, 20%, 80%);
+            color: var(--text-secondary);
         }
-        .slash-popup-item.selected, .slash-popup-item:hover { background: hsla(220, 20%, 30%, 0.5); }
-        .slash-popup-key { font-family: monospace; color: hsl(185, 100%, 55%); min-width: 60px; font-weight: 600; }
+        .slash-popup-item.selected, .slash-popup-item:hover { background: var(--bg-tertiary); }
+        .slash-popup-key { font-family: monospace; color: var(--accent); min-width: 60px; font-weight: 600; }
         .slash-popup-label { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .slash-popup-type { font-size: 10px; color: hsl(220, 20%, 60%); background: hsla(220, 20%, 25%, 0.5); padding: 2px 6px; border-radius: 4px; }
-        
+        .slash-popup-type { font-size: 10px; color: var(--text-tertiary); background: var(--bg-tertiary); padding: 2px 6px; border-radius: 4px; }
+
         .chat-input-skills {
             display: flex; flex-wrap: wrap; gap: 6px; padding: 12px 18px 0 18px;
         }
         .skill-chip {
             display: inline-flex; align-items: center; gap: 5px;
-            background: hsla(265, 90%, 65%, 0.12);
-            border: 1px solid hsla(265, 90%, 65%, 0.45);
-            color: hsl(220, 20%, 90%);
+            background: color-mix(in srgb, var(--accent) 12%, transparent);
+            border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+            color: var(--text-primary);
             border-radius: 999px; padding: 3px 8px; font-size: 11.5px;
         }
-        .skill-chip-remove { background: none; border: none; color: hsl(220, 20%, 60%); cursor: pointer; padding: 0 0 0 2px; }
-        .skill-chip-remove:hover { color: #ff4444; }
+        .skill-chip-remove { background: none; border: none; color: var(--text-tertiary); cursor: pointer; padding: 0 0 0 2px; }
+        .skill-chip-remove:hover { color: var(--error); }
 
         .search-mcp-row {
             padding: 8px 18px;
-            border-top: 1px solid hsla(220, 20%, 25%, 0.5);
+            border-top: 1px solid var(--border-light);
             font-size: 11.5px;
-            color: hsl(220, 20%, 70%);
+            color: var(--text-secondary);
             display: flex;
             align-items: center;
             gap: 12px;
             flex-wrap: wrap;
-            background: hsl(220, 20%, 14%);
+            background: var(--bg-tertiary);
         }
         .search-mcp-row label {
             display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none;
@@ -416,7 +459,7 @@ function buildSearchOverlayHTML() {
                     <div class="slash-popup-list" id="spotlight-slash-list"></div>
                 </div>
             </div>
-            <div id="search-ai-answer" style="display:none; padding: 18px; color: #e6edf3; font-size: 13.5px; line-height: 1.6; max-height: 400px; overflow-y: auto;"></div>
+            <div id="search-ai-answer" style="display:none; padding: 18px; font-size: 13.5px; line-height: 1.6; max-height: 400px; overflow-y: auto;"></div>
             
             <div class="search-mcp-row" id="spotlight-mcp-list" style="display:none">
                 <!-- Checkboxes populated dynamically -->
@@ -571,7 +614,7 @@ async function renderMcpCheckboxes() {
             <label>
                 <input type="checkbox" class="spotlight-mcp-checkbox" data-name="${escapeHtml(name)}" checked>
                 ${escapeHtml(name)}
-                <span style="font-size: 9px; background: hsla(185,100%,55%,0.15); color: hsl(185,100%,65%); border-radius: 4px; padding: 1px 4px;">${toolCount}t</span>
+                <span style="font-size: 9px; background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); border-radius: 4px; padding: 1px 4px;">${toolCount}t</span>
             </label>
         `;
     }).join('');
@@ -791,10 +834,19 @@ async function askAI(query) {
     }
     const processedText = skillPreamble + query;
 
+    // Two-part body: `.search-ai-segs` holds FINISHED segments (previous loop
+    // turns / tool notes) and is never rewritten again; `.search-ai-cur` is the
+    // only node updated while streaming. Rewriting the whole body every chunk
+    // (the old behavior) redrew all earlier content each frame → the visible
+    // "the answer keeps refreshing" flicker.
     answerEl.innerHTML =
         `<div class="search-ai-q"><span>🧑</span><span>${escapeHtml(query || '(Skill Only)')}</span></div>` +
-        `<div class="search-ai-body"><span class="search-ai-thinking">✨ Thinking…</span></div>`;
-    const bodyEl = answerEl.querySelector('.search-ai-body');
+        `<div class="search-ai-body">` +
+            `<div class="search-ai-segs"></div>` +
+            `<div class="search-ai-cur"><span class="search-ai-thinking">✨ Thinking…</span></div>` +
+        `</div>`;
+    const segsEl = answerEl.querySelector('.search-ai-segs');
+    const curEl = answerEl.querySelector('.search-ai-cur');
     answerEl.scrollTop = answerEl.scrollHeight;
 
     const apiMessages = [{ role: 'user', content: processedText }];
@@ -857,18 +909,27 @@ Your final responses and messages to the user MUST be in ${outputLanguage}.
 
             let aiResponse = '';
             let streamRafPending = false;
-            
+
             const renderStreamed = () => {
                 streamRafPending = false;
-                if (!bodyEl) return;
+                if (!curEl) return;
+
+                // Follow the stream only if the user hasn't scrolled up to read.
+                const nearBottom = answerEl.scrollHeight - answerEl.scrollTop - answerEl.clientHeight < 80;
 
                 const trimmed = aiResponse.trimStart();
                 const looksLikeToolCall = trimmed.startsWith('\`\`\`json') || trimmed.startsWith('{"thought"') || trimmed.startsWith('{ "thought"');
                 if (looksLikeToolCall) {
-                    bodyEl.innerHTML = `<span style="font-size:13px;color:var(--text-secondary);">🤔 Thinking or using tools…</span>`;
+                    // Update only if not already showing — avoids a per-chunk rewrite.
+                    if (!curEl.dataset.toolNote) {
+                        curEl.dataset.toolNote = '1';
+                        curEl.innerHTML = `<span style="font-size:13px;color:var(--text-secondary);">🤔 Thinking or using tools…</span>`;
+                    }
                 } else {
-                    bodyEl.innerHTML = `<div class="rv-summary chat-md">${formatMessageContent(aiResponse)}</div>`;
+                    delete curEl.dataset.toolNote;
+                    curEl.innerHTML = `<div class="rv-summary chat-md">${formatMessageContent(aiResponse)}</div>`;
                 }
+                if (nearBottom) answerEl.scrollTop = answerEl.scrollHeight;
             };
 
             await llmService.chat(
@@ -892,15 +953,27 @@ Your final responses and messages to the user MUST be in ${outputLanguage}.
             fullAnswer += aiResponse;
 
             const toolCallObj = extractToolCall(aiResponse);
+            // Freeze this turn's visual into the segments area (never rewritten
+            // again) and reset the streaming node for the next turn — this keeps
+            // earlier turns stable on screen instead of re-rendering everything.
+            const freezeTurn = (noteHtml) => {
+                if (segsEl && noteHtml) segsEl.insertAdjacentHTML('beforeend', noteHtml);
+                if (curEl) {
+                    delete curEl.dataset.toolNote;
+                    curEl.innerHTML = `<span class="search-ai-thinking">✨ Thinking…</span>`;
+                }
+            };
             if (toolCallObj && toolCallObj.tool_calls && toolCallObj.tool_calls.length > 0) {
                 apiMessages.push({ role: 'assistant', content: aiResponse });
-                
+                const names = toolCallObj.tool_calls.map(c => c.name).filter(Boolean).join(', ');
+                freezeTurn(`<div class="search-ai-toolnote">⚙ ${escapeHtml(names)}</div>`);
+
                 const results = [];
                 for (const call of toolCallObj.tool_calls) {
                     const resValue = await _toolExecutor.executeTool(call);
                     results.push({ toolName: call.name, result: typeof resValue === 'string' ? resValue : JSON.stringify(resValue) });
                 }
-                
+
                 for (const res of results) {
                     apiMessages.push({
                         role: 'user',
@@ -914,6 +987,7 @@ Your final responses and messages to the user MUST be in ${outputLanguage}.
                     role: 'user',
                     content: `You outputted a thought/planning JSON but no tool calls and no final answer. Please provide your final response to the user in plain text now.`
                 });
+                freezeTurn('');
                 loopCount++;
             } else {
                 keepRunning = false;
@@ -931,8 +1005,8 @@ Your final responses and messages to the user MUST be in ${outputLanguage}.
         }
     } catch (e) {
         if (myAbort.signal.aborted) return;
-        bodyEl.innerHTML =
-            `<span style="color:hsl(0,75%,65%)">Error: ${(e?.message || String(e)).replace(/</g, '&lt;')}</span>`;
+        if (curEl) curEl.innerHTML =
+            `<span style="color:var(--error)">Error: ${(e?.message || String(e)).replace(/</g, '&lt;')}</span>`;
     }
 }
 
@@ -1000,6 +1074,9 @@ function clearAiAnswer() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 let _approvalNotifyUnlisten = null;
+// Task ids currently paused on ask_user — so their follow-up `complete` isn't
+// mis-announced as "Task completed".
+const _waitingTasks = new Set();
 
 async function initApprovalNotifications() {
     // Request Web Notification permission once at startup
@@ -1013,55 +1090,73 @@ async function initApprovalNotifications() {
 
         if (evtType === 'confirm_request') {
             _sendApprovalNotification(taskId, data);
+        } else if (evtType === 'status' && data?.status === 'waiting') {
+            // ask_user pause — notify "answer needed", and remember it so the
+            // immediately-following `complete` isn't announced as "Task completed".
+            _waitingTasks.add(taskId);
+            _osNotify('❓ 回答が必要 / Answer needed',
+                String(data.message || '').replace(/^❓\s*/, '').slice(0, 120) || 'The agent is asking for your input.');
         } else if (evtType === 'complete') {
+            if (_waitingTasks.has(taskId)) { _waitingTasks.delete(taskId); return; }
             _sendTaskDoneNotification(taskId, data, false);
         } else if (evtType === 'error') {
+            // Only TERMINAL errors end the run. AgentController emits 'error'
+            // mid-run for recoverable failures (it retries and continues) —
+            // notifying "task failed" for those is just noise.
+            if (!data?.terminal) return;
+            _waitingTasks.delete(taskId);
             _sendTaskDoneNotification(taskId, data, true);
         }
     });
 }
 
+// Single OS-notification path for the whole app (fires globally via the
+// task-event-bridge listener, regardless of which view is open). Uses the
+// tauri-plugin-notification (reliable in the webview) rather than the Web
+// Notification API. Only fires when the app is NOT focused — if you're already
+// looking at it you don't need one. This is the ONLY notifier; MonitorView no
+// longer notifies, so there are never duplicates.
+async function _osNotify(title, body) {
+    try {
+        if (document.hasFocus && document.hasFocus()) return;
+        const t = String(title || 'J.H AI Agent');
+        const b = String(body || '');
+        // Preferred: our own Rust command (notify-rust with a registered
+        // AppUserModelID) so the toast is attributed to "J.H AI Agent" — the
+        // plugin path shows "Windows PowerShell" when running unpackaged.
+        try {
+            await invoke('os_notify', { title: t, body: b });
+            return;
+        } catch (_) { /* old binary without os_notify — fall through */ }
+        let granted = await invoke('plugin:notification|is_permission_granted');
+        if (!granted) {
+            const perm = await invoke('plugin:notification|request_permission');
+            granted = perm === 'granted';
+        }
+        if (!granted) return;
+        await invoke('plugin:notification|notify', { options: { title: t, body: b } });
+    } catch (_) { /* best-effort */ }
+}
+
 function _sendApprovalNotification(taskId, data) {
-    if (!('Notification' in window) || Notification.permission !== 'granted') return;
-
     const isCommand = data?.type === 'command_confirm';
-    const title = isCommand ? '🛡 Approval required' : '📋 Plan approval required';
+    const title = isCommand ? '🛡 承認が必要 / Approval required' : '📋 Plan approval required';
     const body = isCommand
-        ? `Requesting permission to run a command:\n${(data.command || '').slice(0, 120)}`
-        : `Requesting plan approval:\n${(data.title || data.message || '').slice(0, 120)}`;
-
-    const n = new Notification(title, { body, tag: `approval-${data.confirmId}`, requireInteraction: true });
-
-    // Clicking the notification focuses the app window and navigates to the task
-    n.onclick = () => {
-        window.focus();
-        if (taskId) window.location.hash = `#monitor?id=${taskId}`;
-        n.close();
-    };
+        ? `${(data.command || '').slice(0, 120)}`
+        : `${(data.title || data.message || '').slice(0, 120)}`;
+    _osNotify(title, body);
 }
 
 async function _sendTaskDoneNotification(taskId, data, isError) {
-    if (!('Notification' in window) || Notification.permission !== 'granted') return;
-
-    const title = isError ? '❌ Task failed' : '✅ Task completed';
+    const title = isError ? '❌ タスク失敗 / Task failed' : '✅ タスク完了 / Task completed';
     let body = isError
         ? (data?.error || 'An error occurred').slice(0, 120)
         : 'The task completed successfully';
-
-    // Fetch task prompt for a meaningful notification body
     try {
         const task = await window.apiClient?.getTask(taskId);
-        if (task?.prompt) {
-            body = (isError ? '[Failed] ' : '') + task.prompt.slice(0, 120);
-        }
+        if (task?.prompt) body = (isError ? '[Failed] ' : '') + task.prompt.slice(0, 120);
     } catch (_) {}
-
-    const n = new Notification(title, { body, tag: `task-done-${taskId}` });
-    n.onclick = () => {
-        window.focus();
-        if (taskId) window.location.hash = `#monitor?id=${taskId}`;
-        n.close();
-    };
+    _osNotify(title, body);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

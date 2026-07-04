@@ -219,14 +219,16 @@ export const TOOL_DEFINITIONS = [
     {
         name: 'ask_user',
         isSafe: true,
-        description: "Pause the task and ask the user a clarifying question, then STOP and wait for their reply. Use this ONLY when you genuinely cannot proceed without input the user must supply — e.g. an ambiguous requirement, a missing decision, or attached content you cannot read (an image the current model can't see). This ENDS the current run cleanly: the question is shown to the user and the agent stops. Do NOT use it to report progress or to confirm work that is already done (use finish_task for completion). Prefer making a reasonable assumption and proceeding when you can; reserve ask_user for true blockers.",
+        description: "Pause the task and ask the user a clarifying question, then STOP and wait for their reply. Use this ONLY when you genuinely cannot proceed without input the user must supply — e.g. an ambiguous requirement, a missing decision, or attached content you cannot read (an image the current model can't see). This ENDS the current run cleanly: the question is shown to the user and the agent stops. Do NOT use it to report progress or to confirm work that is already done (use finish_task for completion). Prefer making a reasonable assumption and proceeding when you can; reserve ask_user for true blockers. When the answer is a choice, PROVIDE `options` so the user gets clickable buttons instead of having to type — e.g. options ['はい','いいえ'] for a yes/no, or a list of concrete choices. Set `multi_select` true when several options may be picked together.",
         parameters: {
             type: 'object',
             properties: {
                 question: { type: 'string', description: 'The clarifying question to ask the user, in the user\'s language. Be specific about what you need and why you cannot proceed without it.' },
-                context: { type: ['string', 'null'], description: 'Optional brief summary of what you have already done / found, so the user has context when answering. null to omit.' }
+                context: { type: ['string', 'null'], description: 'Optional brief summary of what you have already done / found, so the user has context when answering. null to omit.' },
+                options: { type: ['array', 'null'], items: { type: 'string' }, description: 'Optional list of concrete answer choices (in the user\'s language). When provided, the user gets clickable buttons/checkboxes instead of a free-text box. Use for yes/no (["はい","いいえ"]) or any multiple-choice. null for a free-text answer.' },
+                multi_select: { type: ['boolean', 'null'], description: 'When true (and `options` given), the user may select MULTIPLE options (checkboxes + submit). false/null = single choice.' }
             },
-            required: ['question', 'context'],
+            required: ['question', 'context', 'options', 'multi_select'],
             additionalProperties: false
         }
     },

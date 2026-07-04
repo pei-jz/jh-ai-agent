@@ -59,12 +59,23 @@ export class AgentController {
             });
         } catch (_) { /* non-critical */ }
 
-        // Phase 2: Goal-pinning — original user goal is always the first message
+        // Phase 2: Goal-pinning — the CURRENT goal is always an explicitly
+        // labeled user message. On a CONTINUED task the chatContext carries the
+        // previous request/answer exchanges: label those requests as COMPLETED
+        // so the model never mistakes an old (already delivered) request for the
+        // active goal — the new message is the goal now.
         let history = [];
         if (chatContext.length > 0) {
-            history.push(...chatContext);
+            history.push(...chatContext.map(m =>
+                (m.role === 'user' && typeof m.content === 'string'
+                    && !/^\[(Original Goal|Current Goal|Completed request)/.test(m.content))
+                    ? { ...m, content: `[Completed request — already delivered, do NOT redo] ${m.content}` }
+                    : m
+            ));
+            history.push({ role: 'user', content: `[Current Goal — NEW request; the completed requests above are context only] ${prompt}` });
+        } else {
+            history.push({ role: 'user', content: `[Original Goal] ${prompt}` });
         }
-        history.push({ role: 'user', content: `[Original Goal] ${prompt}` });
         
         // ── Agent Loop State Machine ──────────────────────────────────
         //
@@ -478,12 +489,22 @@ export class AgentController {
                         const totalEst = sysTokens + histTokens;
                         const hardLimit = Math.floor(modelLimit * 0.90);
                         if (totalEst > hardLimit && compactedHistory.length > 4) {
-                            // Keep first message (original goal) + last 3 messages
+                            // Keep the CURRENT goal message + last 3 messages. On a
+                            // continued task the goal is NOT history[0] (that's the
+                            // old, already-completed request) — find the newest
+                            // [Original Goal]/[Current Goal] user message instead.
+                            let goalMsg = compactedHistory[0];
+                            for (let gi = compactedHistory.length - 1; gi >= 0; gi--) {
+                                const m = compactedHistory[gi];
+                                if (m.role === 'user' && typeof m.content === 'string'
+                                    && /^\[(Original Goal|Current Goal)/.test(m.content)) { goalMsg = m; break; }
+                            }
+                            const tail = compactedHistory.slice(-3).filter(m => m !== goalMsg);
                             const trimmed = [
-                                compactedHistory[0],
-                                { role: 'user', content: '[System: Middle history trimmed to stay within context budget. The original goal above remains your primary objective.]' },
-                                { role: 'assistant', content: 'Understood — context trimmed, continuing from original goal.' },
-                                ...compactedHistory.slice(-3)
+                                goalMsg,
+                                { role: 'user', content: '[System: Middle history trimmed to stay within context budget. The goal above remains your primary objective.]' },
+                                { role: 'assistant', content: 'Understood — context trimmed, continuing toward the current goal.' },
+                                ...tail
                             ];
                             compactedHistory = trimmed;
                             onAgentStatus?.({ event: 'status', status: 'running', message: `⚠️ Context near limit (${Math.round(totalEst / 1000)}k/${Math.round(modelLimit / 1000)}k tokens) — trimmed history to prevent API error.` });
@@ -604,7 +625,14 @@ export class AgentController {
                 completion_tokens: genResult.usage?.completion_tokens || 0,
                 total_tokens: genResult.usage?.total_tokens || 0,
                 cache_read_input_tokens: genResult.usage?.cache_read_input_tokens || 0,
-                cache_creation_input_tokens: genResult.usage?.cache_creation_input_tokens || 0
+                cache_creation_input_tokens: genResult.usage?.cache_creation_input_tokens || 0,
+                // Context-occupancy snapshot for the Monitor's context gauge:
+                // what THIS call actually sent as input (prompt + cached reads +
+                // cache writes) vs the model's effective context window.
+                context_used: (genResult.usage?.prompt_tokens || 0)
+                    + (genResult.usage?.cache_read_input_tokens || 0)
+                    + (genResult.usage?.cache_creation_input_tokens || 0),
+                context_limit: (() => { try { return llmService.getEffectiveModelLimit?.() || 0; } catch (_) { return 0; } })()
             });
 
             if (onLog) {
@@ -960,7 +988,22 @@ export class AgentController {
                     }
                     richThought = this._cleanFinalResponse(richThought || '').trim();
                     finalResponse = (richThought.length >= 40) ? richThought : (question || richThought || response);
-                    onAgentStatus?.({ event: 'status', status: 'waiting', message: '❓ ユーザーの回答待ち（確認のため一時停止）' });
+                    // Surface the ACTUAL question in the status event so the UI can show
+                    // a clear "answer this" prompt (not a generic "paused" line). The
+                    // reply is sent as the next turn to resume the run.
+                    const askMsg = (question && question.trim())
+                        ? `❓ ${question.trim()}`
+                        : '❓ ユーザーの回答待ち（確認のため一時停止）';
+                    // Pass any multiple-choice options through so the UI can render
+                    // clickable buttons / checkboxes instead of a free-text box.
+                    const askOptions = this.toolExecutor.getUserQuestionOptions
+                        ? this.toolExecutor.getUserQuestionOptions() : [];
+                    const askMulti = this.toolExecutor.getUserQuestionMulti
+                        ? this.toolExecutor.getUserQuestionMulti() : false;
+                    onAgentStatus?.({
+                        event: 'status', status: 'waiting', message: askMsg,
+                        options: askOptions, multiSelect: askMulti
+                    });
                     break;
                 }
 

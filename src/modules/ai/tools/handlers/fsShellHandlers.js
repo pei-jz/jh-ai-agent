@@ -7,6 +7,7 @@
 // switch bodies — only `this` → `ctx`. I/O glue (excluded from coverage gate).
 
 import { invoke } from '@tauri-apps/api/core';
+import { classifyCommand } from '../commandPolicy.js';
 
 /** delete_file — single-file delete, confirmation required outside workspace. */
 export async function handleDeleteFile(ctx, args, onConfirm, onAgentStatus, resolvedPath) {
@@ -74,18 +75,31 @@ export async function handleMoveFile(ctx, args, onConfirm, onAgentStatus) {
 
 /** run_command — always-gated shell execution with live streaming + timeout. */
 export async function handleRunCommand(ctx, args, onConfirm, onAgentStatus) {
-    // Arbitrary shell execution is ALWAYS gated. Fail-closed: if
-    // no approval channel is wired (e.g. a headless caller), the
-    // command is denied rather than executed unconditionally.
-    const approvedCmd = await ctx._confirmUnsafe(false, onConfirm, {
-        type: 'command_confirm',
-        command: args.command,
-        message: `AI wants to run this terminal command:\n${args.command}`
-    });
-    if (!approvedCmd) {
-        return onConfirm
-            ? "Error: User Denied command execution."
-            : "Error: Command execution denied — no approval channel is available to authorize shell commands.";
+    // Arbitrary shell execution is ALWAYS gated — EXCEPT for commands the user
+    // explicitly added to the "always allow" whitelist via the approval dialog.
+    // Fail-closed: if no approval channel is wired (e.g. a headless caller) and
+    // the command isn't whitelisted, deny rather than execute unconditionally.
+    if (!ctx._isCommandApproved?.(args.command)) {
+        if (!onConfirm) {
+            return "Error: Command execution denied — no approval channel is available to authorize shell commands.";
+        }
+        // Reaching here means the command is NOT auto-approvable → it's either
+        // 'normal' (offer "Always allow" / auto-approve) or 'dangerous' (confirm
+        // only; never whitelistable). The risk level drives the approval UI.
+        const risk = classifyCommand(args.command);
+        const resp = await onConfirm({
+            type: 'command_confirm',
+            command: args.command,
+            message: `AI wants to run this terminal command:\n${args.command}`,
+            risk,                              // 'normal' | 'dangerous'
+            allowAlways: risk !== 'dangerous', // dangerous can't be "always allowed"
+        });
+        if (!resp) return "Error: User Denied command execution.";
+        // "Always allow" → resolves with { always:true }; store a generalized
+        // pattern (dangerous commands are refused inside _rememberApprovedCommand).
+        if (typeof resp === 'object' && resp.always) {
+            ctx._rememberApprovedCommand?.(args.command);
+        }
     }
     // Resolve the working directory. A caller-supplied cwd (relative → resolved
     // against the workspace; absolute → used as-is) lets commands run in a

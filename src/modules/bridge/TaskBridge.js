@@ -52,18 +52,25 @@ class TaskBridge {
 
         // 2. Listen for confirmation responses (approved or denied) from Client or Dashboard
         await listen('confirm-response', (event) => {
-            const { confirmId, approved, modifiedContent } = event.payload;
-            console.log("TaskBridge: Received confirm-response event:", confirmId, approved);
+            const { confirmId, approved, modifiedContent, always } = event.payload;
+            console.log("TaskBridge: Received confirm-response event:", confirmId, approved, always ? '(always)' : '');
 
             const promise = this.pendingConfirmations.get(confirmId);
             if (promise) {
                 this.pendingConfirmations.delete(confirmId);
                 if (approved) {
-                    // Use != null (loose) so both null and undefined fall back to true.
-                    // MonitorView sends modifiedContent: null for plan/command approvals
-                    // (only diff_review carries actual string content), so a null here
-                    // must NOT be treated as falsy rejection.
-                    promise.resolve(modifiedContent != null ? modifiedContent : true);
+                    // "Always allow" → resolve with an object carrying the flag so the
+                    // run_command handler can persist the command to the whitelist.
+                    // (Still truthy, so _confirmUnsafe-based callers treat it as approved.)
+                    if (always) {
+                        promise.resolve({ always: true });
+                    } else {
+                        // Use != null (loose) so both null and undefined fall back to true.
+                        // MonitorView sends modifiedContent: null for plan/command approvals
+                        // (only diff_review carries actual string content), so a null here
+                        // must NOT be treated as falsy rejection.
+                        promise.resolve(modifiedContent != null ? modifiedContent : true);
+                    }
                 } else {
                     promise.resolve(false);
                 }
@@ -169,7 +176,8 @@ class TaskBridge {
         } catch (err) {
             console.error('TaskBridge: single_shot error:', err);
             this.emitTaskEvent(taskId, 'error', {
-                error: err.message || String(err)
+                error: err.message || String(err),
+                terminal: true
             });
         } finally {
             this.activeSingleShots.delete(taskId);
@@ -247,8 +255,13 @@ class TaskBridge {
 
         } catch (err) {
             console.error("TaskBridge: Agent run error:", err);
+            // terminal:true = the RUN IS OVER. AgentController also emits 'error'
+            // events mid-run for RECOVERABLE failures (generation retry etc.) —
+            // those lack this flag, and the UI/notifications must not treat them
+            // as "task failed" (the run continues).
             this.emitTaskEvent(taskId, 'error', {
-                error: err.message || String(err)
+                error: err.message || String(err),
+                terminal: true
             });
         } finally {
             this.activeAgents.delete(taskId);

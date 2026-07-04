@@ -60,7 +60,7 @@ export class OverviewView {
         return `
             <style>
                 .dash { display:flex; flex-direction:column; gap:14px;
-                    height: calc(100vh - var(--titlebar-height) - 64px); }
+                    height: calc(100vh - var(--titlebar-height) - 34px); }
                 .dash-head { display:flex; justify-content:space-between; align-items:center; flex-shrink:0; }
                 .dash-stats { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; flex-shrink:0; }
                 .dstat { background:var(--bg-secondary); border:1px solid var(--border); border-radius:var(--radius-lg);

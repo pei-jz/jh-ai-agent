@@ -8,6 +8,7 @@ import {
 } from './tools/FileEdit.js';
 import { TOOL_DEFINITIONS } from './tools/toolSchemas.js';
 import { selectMcpTools } from './tools/ToolRelevance.js';
+import { classifyCommand, suggestApprovalPattern, isApprovedByPatterns } from './tools/commandPolicy.js';
 import {
     handleListFiles, handleReadFile, handleGrepSearch, handleGlob, handleFetchUrl, handleWebSearch
 } from './tools/handlers/readOnlyHandlers.js';
@@ -62,6 +63,8 @@ export class ToolExecutor {
         this._taskCompleted = false;
         this._awaitingUser = false;
         this._userQuestion = '';
+        this._userQuestionOptions = [];
+        this._userQuestionMulti = false;
         this.toolDefinitions = TOOL_DEFINITIONS;
         this.sessionModifiedFiles = new Map();
         this._sessionActive = false;
@@ -188,6 +191,8 @@ export class ToolExecutor {
         this._taskCompleted = false;
         this._awaitingUser = false;    // reset ask_user pause flag per session
         this._userQuestion = '';
+        this._userQuestionOptions = [];
+        this._userQuestionMulti = false;
         this._toolAllowlist = null;    // reset; caller may re-set after startSession
         this._mcpBypassesAllowlist = false;
         this._mcpServerFilter = null; // reset MCP server filter
@@ -213,6 +218,19 @@ export class ToolExecutor {
                 .filter(p => typeof p === 'string' && p.trim())
                 .map(p => p.replace(/\\/g, '/').replace(/\/+$/, ''));
         } catch (e) { /* config unavailable — only workspace is allowed */ }
+
+        // ── Approved-command PATTERNS ("don't ask again") ──────────────
+        // Patterns the user added via the approval dialog's "Always allow" — now
+        // prefix/glob (e.g. `git status *`) so variants don't re-prompt. Persisted
+        // in localStorage (per machine). DANGEROUS commands are never matched here
+        // (classifyCommand gates them first), so a broad pattern can't authorize
+        // a destructive variant.
+        this._approvedCommands = new Set();
+        try {
+            const raw = localStorage.getItem('jhai_approved_commands');
+            const arr = raw ? JSON.parse(raw) : null;
+            if (Array.isArray(arr)) this._approvedCommands = new Set(arr.filter(s => typeof s === 'string'));
+        } catch (_) { /* no/invalid whitelist — start empty */ }
 
         // ── Register write/exec roots with the Rust path guard ─────────
         // Defense-in-depth: the backend refuses to write/delete/exec outside
@@ -543,6 +561,16 @@ export class ToolExecutor {
         return this._userQuestion || '';
     }
 
+    /** Multiple-choice options ask_user offered (empty ⇒ free-text answer). */
+    getUserQuestionOptions() {
+        return Array.isArray(this._userQuestionOptions) ? this._userQuestionOptions : [];
+    }
+
+    /** True when ask_user's options allow selecting multiple. */
+    getUserQuestionMulti() {
+        return !!this._userQuestionMulti;
+    }
+
     getCurrentSessionId() {
         return this._currentSessionId;
     }
@@ -713,6 +741,50 @@ export class ToolExecutor {
     }
 
     /**
+     * Decide whether `cmd` can run WITHOUT a prompt. Risk-tiered:
+     *   dangerous → never (always prompt), even if whitelisted / auto-approve on.
+     *   safe      → yes (read-only).
+     *   normal    → yes iff it matches an approved pattern OR the workspace has
+     *               auto-approve enabled.
+     */
+    _isCommandApproved(cmd) {
+        if (!cmd) return false;
+        const cls = classifyCommand(cmd);
+        if (cls === 'dangerous') return false;      // hard safety boundary
+        if (cls === 'safe') return true;            // read-only → auto-run
+        if (isApprovedByPatterns(cmd, this._approvedCommands)) return true;
+        if (this._isAutoApproveWorkspace()) return true;
+        return false;
+    }
+
+    /** Add an approval PATTERN for `cmd` (generalized) and persist it. Refuses
+     *  dangerous commands — those must always be confirmed. */
+    _rememberApprovedCommand(cmd) {
+        if (!cmd || classifyCommand(cmd) === 'dangerous') return;
+        const pat = suggestApprovalPattern(cmd);
+        if (!pat) return;
+        if (!this._approvedCommands) this._approvedCommands = new Set();
+        this._approvedCommands.add(pat);
+        try {
+            localStorage.setItem('jhai_approved_commands', JSON.stringify([...this._approvedCommands]));
+        } catch (_) { /* persistence best-effort */ }
+    }
+
+    /** True if the current workspace is on the "auto-approve commands" list.
+     *  Read live from localStorage so a toggle in the approval UI takes effect
+     *  for the very next command without restarting the session. */
+    _isAutoApproveWorkspace() {
+        const ws = (this.workspacePath || '').replace(/\\/g, '/').replace(/\/+$/, '');
+        if (!ws || ws === '.') return false;
+        try {
+            const raw = localStorage.getItem('jhai_autoapprove_workspaces');
+            const arr = raw ? JSON.parse(raw) : null;
+            if (!Array.isArray(arr)) return false;
+            return arr.some(p => String(p).replace(/\\/g, '/').replace(/\/+$/, '') === ws);
+        } catch (_) { return false; }
+    }
+
+    /**
      * Register a path the user has just approved so the Rust path guard will
      * permit the imminent write/delete/move to it. Best-effort — a registration
      * failure is logged but does not block the (already user-approved) action.
@@ -772,10 +844,32 @@ export class ToolExecutor {
         // the top-5 most relevant to the task prompt are sent; the rest are
         // omitted. With no query (Simple chat, external app callers) ALL
         // eligible tools load — the previous behavior.
+        //
+        // Server-name override: if the user EXPLICITLY names an MCP server (e.g.
+        // "use the Backlog MCP to search the wiki"), include ALL of that server's
+        // tools regardless of relevance score. Long/verbose prompts otherwise
+        // dilute the score (hits / queryUnits) below the threshold, so an
+        // explicitly-requested server would be pruned and the model concludes
+        // "no MCP available" — the exact reported bug.
+        const eligibleMcp = this._eligibleMcpTools();
+        const q = (this._mcpRelevanceQuery || '').toLowerCase();
+        const alwaysInclude = new Set(this._mcpPruneOpts.alwaysInclude || []);
+        if (q) {
+            for (const t of eligibleMcp) {
+                const sn = String(t._serverName || '').toLowerCase();
+                if (!sn) continue;
+                // Match the whole server name, or any word-part of it (≥3 chars),
+                // so "backlog" in the prompt matches a "backlog-mcp" server.
+                const parts = sn.split(/[-_ .]+/).filter(p => p.length >= 3);
+                if (q.includes(sn) || parts.some(p => q.includes(p))) {
+                    alwaysInclude.add(t.name);
+                }
+            }
+        }
         const { loaded: mcpTools } = selectMcpTools(
-            this._eligibleMcpTools(),
+            eligibleMcp,
             this._mcpRelevanceQuery,
-            this._mcpPruneOpts
+            { ...this._mcpPruneOpts, alwaysInclude }
         );
         mcpTools.forEach(t => {
             const rawSchema = t.inputSchema || { type: 'object', properties: {} };

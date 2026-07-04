@@ -205,7 +205,7 @@ export class ChatView {
                 .chat-view-layout {
                     display: flex;
                     flex-direction: column;
-                    height: calc(100vh - var(--titlebar-height) - 64px);
+                    height: calc(100vh - var(--titlebar-height) - 34px);
                     position: relative;
                 }
                 
@@ -400,7 +400,9 @@ export class ChatView {
                 .code-block-wrapper code {
                     font-family: var(--font-mono);
                     font-size: 12.5px;
-                    color: #e6edf3;
+                    /* Token-based so it stays readable in BOTH themes (was #e6edf3,
+                       which vanished on the light theme's near-white bg-primary). */
+                    color: var(--text-primary);
                     line-height: 1.5;
                 }
 
@@ -447,6 +449,10 @@ export class ChatView {
                     border-radius: var(--radius-lg);
                     padding: 8px 12px;
                     flex-shrink: 0;
+                    /* Anchor the slash popup (position:absolute; bottom:100%) so it
+                       floats ABOVE the input, not below. Enforced in CSS (not only
+                       the inline style) so nothing can knock it back to static. */
+                    position: relative;
                 }
 
                 .chat-input-area-wrapper:focus-within {
@@ -728,6 +734,11 @@ export class ChatView {
                 /* ── Slash command popup ── */
                 .slash-popup {
                     position: absolute;
+                    /* Reset the GLOBAL .slash-popup rule in main.js (top:100% → below).
+                       Without this, top AND bottom are both set and the popup stretches
+                       into an impossible region → collapses to a 2px sliver BELOW the
+                       input (hidden). We want it floating ABOVE the input. */
+                    top: auto;
                     bottom: calc(100% + 6px);
                     left: 0;
                     right: 0;
@@ -954,16 +965,16 @@ export class ChatView {
                             <select id="chat-model-select" class="select chat-models-select">
                                 ${modelOptions}
                             </select>
-                            <button id="btn-new-chat" class="btn btn-primary btn-sm">📝 New Chat</button>
-                            <button id="btn-chat-history" class="btn btn-secondary btn-sm">🕒 History</button>
-                            <button id="btn-clear-chat" class="btn btn-secondary btn-sm">🗑️ Clear Chat</button>
+                            <button id="btn-new-chat" class="btn btn-primary btn-sm">${icon('doc-plus', 14)} New Chat</button>
+                            <button id="btn-chat-history" class="btn btn-secondary btn-sm">${icon('history', 14)} History</button>
+                            <button id="btn-clear-chat" class="btn btn-secondary btn-sm">${icon('trash', 14)} Clear Chat</button>
                         </div>
                     </div>
 
                     <!-- System Prompt & Chat Settings Collapsible -->
                     <div class="chat-system-prompt-container">
                         <div class="chat-system-prompt-toggle" id="prompt-toggle-btn">
-                            <span>⚙️</span> Chat Settings
+                            <span>${icon('gear', 14)}</span> Chat Settings
                         </div>
                         <div class="chat-system-prompt-panel" id="prompt-panel" style="display: ${this.settingsExpanded ? 'block' : 'none'};">
                             <div class="provider-card-fields" style="display: flex; flex-direction: column; gap: 12px;">
@@ -1927,20 +1938,21 @@ Your final responses and messages to the user MUST be in ${outputLanguage}.
         const query = value.slice(1); // text after the leading "/"
         this._slashQuery = query;
 
-        const templates = promptTemplateManager.search(query).map(t => ({
-            type: 'template',
-            key: t.key,
-            label: t.label,
-            icon: t.icon || '📝',
-            prompt: t.prompt,
-        }));
-
-        const skills = skillManager.search(query).map(s => ({
-            type: 'skill',
-            key: s.name,
-            label: s.title,
-            icon: '⚡',
-        }));
+        // Robust: a throw here (e.g. a manager not yet loaded) used to silently
+        // leave the popup hidden — the "/ shows nothing" symptom. Guard each source
+        // independently and always render (even an empty list shows the header).
+        let templates = [];
+        let skills = [];
+        try {
+            templates = (promptTemplateManager.search(query) || []).map(t => ({
+                type: 'template', key: t.key, label: t.label, icon: t.icon || '📝', prompt: t.prompt,
+            }));
+        } catch (e) { console.error('slash: template search failed', e); }
+        try {
+            skills = (skillManager.search(query) || []).map(s => ({
+                type: 'skill', key: s.name, label: s.title, icon: '⚡',
+            }));
+        } catch (e) { console.error('slash: skill search failed', e); }
 
         this._slashItems = [...templates, ...skills];
         this._slashIndex = 0;

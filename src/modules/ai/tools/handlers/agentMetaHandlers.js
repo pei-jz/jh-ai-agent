@@ -99,19 +99,22 @@ export async function handleArtifact(ctx, args, name, onAgentStatus) {
 export async function handleFinishTask(ctx, args, onAgentStatus) {
     // ── Pre-finish syntax gate (real-parser based) ────────
     // Sanity-check every modified file before accepting completion.
-    //   .json          → JSON.parse  (in-process, fast, reliable)
-    //   .js/.jsx/...   → node --check (real V8 parser)
-    //   .ts/.tsx       → skipped (TS needs project tsc; we surface a soft reminder
-    //                    in the success message instead of blocking).
+    //   .json            → JSON.parse  (in-process, fast, reliable)
+    //   .js/.mjs/.cjs     → node --check (real V8 parser — PLAIN JS only)
+    //   .jsx/.ts/.tsx     → SKIPPED. `node --check` does NOT understand JSX or
+    //                      TypeScript syntax, so it reports false "SyntaxError"s on
+    //                      valid .jsx/.tsx files and used to BLOCK a legitimate
+    //                      finish_task (the reported bug). Those need project
+    //                      tooling (tsc / a JSX parser); we don't hard-block on them.
     // Files we can't parse (no Node, unreadable) are skipped silently — the
     // gate's purpose is to catch broken edits, not to block on environment gaps.
     const jsonFiles = [];
     const jsFiles = [];
-    const tsFiles = [];
+    const skippedFiles = [];   // .jsx/.ts/.tsx — node --check can't parse these
     for (const [p] of ctx.sessionModifiedFiles) {
         if (/\.json$/i.test(p)) jsonFiles.push(p);
-        else if (/\.(js|jsx|mjs|cjs)$/i.test(p)) jsFiles.push(p);
-        else if (/\.(ts|tsx)$/i.test(p)) tsFiles.push(p);
+        else if (/\.(js|mjs|cjs)$/i.test(p)) jsFiles.push(p);
+        else if (/\.(jsx|ts|tsx)$/i.test(p)) skippedFiles.push(p);
     }
 
     const failures = [];
@@ -169,12 +172,13 @@ export async function handleFinishTask(ctx, args, onAgentStatus) {
     // the real summary. Keeping this event distinct avoids that collision.
     ctx.onToolEvent?.('finish_task', { summary: args.summary });
 
-    // Soft reminder about TS files (not a block — just guidance).
+    // Soft reminder about JSX/TS files (not a block — just guidance). These were
+    // NOT syntax-checked because node --check can't parse JSX/TS.
     let tsNote = '';
-    if (tsFiles.length > 0) {
-        tsNote = `\n\n[Reminder] ${tsFiles.length} TypeScript file(s) were modified. ` +
-            `If you haven't already, run the project's type checker ` +
-            `(e.g. "npx tsc --noEmit") to catch type errors.`;
+    if (skippedFiles.length > 0) {
+        tsNote = `\n\n[Reminder] ${skippedFiles.length} JSX/TypeScript file(s) were modified ` +
+            `(not syntax-checkable with node --check). If you haven't already, run the ` +
+            `project's own check (e.g. "npx tsc --noEmit" or "npx vite build") to catch errors.`;
     }
     if (nodeMissing && jsFiles.length > 0) {
         tsNote += `\n[Note] 'node' was not on PATH, so JS files were not syntax-checked.`;
@@ -198,11 +202,18 @@ export async function handleAskUser(ctx, args, onAgentStatus) {
         return 'Error: ask_user requires a non-empty "question". State exactly what you need from the user and why you cannot proceed.';
     }
     const context = (args && typeof args.context === 'string') ? args.context.trim() : '';
+    // Optional multiple-choice: sanitize to a list of non-empty strings.
+    const options = Array.isArray(args?.options)
+        ? args.options.map(o => String(o || '').trim()).filter(Boolean)
+        : [];
+    const multiSelect = !!args?.multi_select && options.length > 0;
     onAgentStatus?.(`Asking the user: ${question.slice(0, 80)}`);
     ctx._awaitingUser = true;
     ctx._userQuestion = context ? `${question}\n\n${context}` : question;
-    ctx.onToolEvent?.('ask_user', { question, context });
-    return `Acknowledged: question surfaced to the user. The run will now pause and wait for their reply. Do not call any further tools.`;
+    ctx._userQuestionOptions = options;      // consumed by AgentController → UI
+    ctx._userQuestionMulti = multiSelect;
+    ctx.onToolEvent?.('ask_user', { question, context, options, multiSelect });
+    return `Acknowledged: question surfaced to the user${options.length ? ` with ${options.length} option(s)` : ''}. The run will now pause and wait for their reply. Do not call any further tools.`;
 }
 
 /** verify_syntax — JSON via JSON.parse, JS via `node --check`, TS skipped. */
@@ -222,8 +233,11 @@ export async function handleVerifySyntax(ctx, args, onAgentStatus, resolvedPath)
 
     const lower = resolvedPath.toLowerCase();
     const isJson = lower.endsWith('.json');
-    const isJs = /\.(js|jsx|mjs|cjs)$/.test(lower);
-    const isTs = /\.(ts|tsx)$/.test(lower);
+    // PLAIN JS only. `node --check` does NOT understand JSX or TypeScript, so it
+    // reports FALSE "SyntaxError"s on valid .jsx/.tsx (the reported bug). Those go
+    // through the skip path below with guidance to use the project's own tooling.
+    const isJs = /\.(js|mjs|cjs)$/.test(lower);
+    const isJsxOrTs = /\.(jsx|ts|tsx)$/.test(lower);
 
     if (isJson) {
         let src;
@@ -286,15 +300,16 @@ export async function handleVerifySyntax(ctx, args, onAgentStatus, resolvedPath)
         }
     }
 
-    if (isTs) {
-        return `Skipped: verify_syntax does not directly check TypeScript. ` +
-            `Catastrophic structural breakage (unbalanced braces/brackets) is already ` +
-            `flagged automatically by multi_replace_file_content's auto read-back. ` +
-            `For full type-checking, call: run_command("npx tsc --noEmit ${resolvedPath}") ` +
-            `or run the project's type-check script.`;
+    if (isJsxOrTs) {
+        return `Skipped (not a false error): verify_syntax does NOT check JSX/TypeScript — ` +
+            `\`node --check\` cannot parse JSX or TS syntax and would report false errors. ` +
+            `This does NOT mean the file is broken. Structural breakage (unbalanced ` +
+            `braces/brackets) is already flagged by the edit tools' auto read-back. ` +
+            `For a real check, run the PROJECT's own build/type-check via run_command ` +
+            `(e.g. "npx vite build", "npx tsc --noEmit", or "npx eslint ${resolvedPath}").`;
     }
 
-    return `Skipped: verify_syntax only checks .json / .js / .jsx / .mjs / .cjs. ` +
+    return `Skipped: verify_syntax only checks .json / .js / .mjs / .cjs. ` +
         `Got: ${resolvedPath}. For other languages, invoke the appropriate checker via run_command ` +
         `(e.g. "python -m py_compile <file>", "cargo check").`;
 }

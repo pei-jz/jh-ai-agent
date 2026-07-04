@@ -5,6 +5,15 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>J.H AI Agent</title>
 
+    <!-- Apply the persisted theme BEFORE the stylesheet paints (light is the
+         default; dashboard.css's bare :root is dark, so set data-theme early
+         to avoid a dark flash on startup). main.js re-applies + syncs later. -->
+    <script>
+      try {
+        if (localStorage.getItem('jhai_theme') !== 'dark') document.documentElement.dataset.theme = 'light';
+      } catch (e) { document.documentElement.dataset.theme = 'light'; }
+    </script>
+
     <!-- Google Fonts: Inter -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -36,6 +45,7 @@
         <span class="titlebar-title" data-tauri-drag-region>J.H AI Agent</span>
       </div>
       <div class="titlebar-controls">
+        <button id="titlebar-theme" class="titlebar-btn" aria-label="Toggle light/dark theme" title="Toggle light/dark theme">☀</button>
         <button id="titlebar-minimize" class="titlebar-btn" aria-label="Minimize">─</button>
         <button id="titlebar-maximize" class="titlebar-btn" aria-label="Maximize">□</button>
         <button id="titlebar-close" class="titlebar-btn titlebar-btn-close" aria-label="Close">✕</button>

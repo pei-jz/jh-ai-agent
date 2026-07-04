@@ -369,9 +369,10 @@ Call \`finish_task\` when ALL of these are true:
    - After \`write_file\` / \`multi_replace_file_content\`, the tool result includes the file's
      new content. Inspect it. If chars are missing or structure is broken, fix immediately —
      NEVER assume the edit succeeded.
-   - For .js / .ts / .jsx / .tsx / .json files, ALSO call \`verify_syntax\` right after the edit.
-   - If you introduced a syntax error, fix it NOW before any other work. Do NOT call
-     \`finish_task\` while any file you edited has syntax errors.
+   - For plain .js / .mjs / .cjs / .json files, call \`verify_syntax\` after the edit.
+     For .jsx / .tsx / .ts, \`verify_syntax\` is NOT reliable (node can't parse JSX/TS) —
+     verify those with the project's own build instead, e.g. run_command("npx vite build").
+   - If you introduced a syntax error, fix it NOW before any other work.
 
 2. **Tool Choice for Edits**:
    - Create a new file → \`write_file\`. Small targeted change → \`multi_replace_file_content\`

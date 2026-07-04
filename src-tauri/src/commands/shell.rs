@@ -196,6 +196,15 @@ fn spawn_line_pump<R: Read + Send + 'static>(
 #[tauri::command]
 pub fn open_path_default<R: Runtime>(app: AppHandle<R>, path: String) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
+    // Normalize separators to the OS-native form. The UI stores paths with
+    // forward slashes (resolvePath normalizes to '/'), but Windows Explorer's
+    // reveal ("/select,") — the fallback for extensions with no default app
+    // like .md — only accepts BACKSLASHES. Without this, clicking a .md link
+    // silently no-ops (open fails on no-association, then reveal fails on the
+    // forward-slash path). See report: "link visible but clicking does nothing".
+    #[cfg(windows)]
+    let path = path.replace('/', "\\");
+
     // Try the OS default application first (double-click behavior).
     match app.opener().open_path(path.clone(), None::<&str>) {
         Ok(()) => Ok(()),
@@ -215,4 +224,44 @@ pub fn open_path_default<R: Runtime>(app: AppHandle<R>, path: String) -> Result<
             }
         }
     }
+}
+
+/// AppUserModelID used for our Windows toast notifications. Must match the id
+/// registered in the registry by `register_notification_identity()` so Windows
+/// shows "J.H AI Agent" (name + icon) as the toast source instead of falling
+/// back to "Windows PowerShell".
+#[cfg(windows)]
+pub const NOTIFY_APP_ID: &str = "com.jh-ai-agent.app";
+
+/// Register our AppUserModelID → DisplayName mapping (HKCU, no elevation).
+/// Without this, an unpackaged exe (target\debug|release — the dev workflow)
+/// has no registered identity, so tauri-plugin-notification's fallback makes
+/// every toast appear as "Windows PowerShell". Idempotent; call once at setup.
+#[cfg(windows)]
+pub fn register_notification_identity() {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let key = format!(r"HKCU\Software\Classes\AppUserModelId\{}", NOTIFY_APP_ID);
+    let _ = Command::new("reg")
+        .args(["add", &key, "/v", "DisplayName", "/t", "REG_SZ", "/d", "J.H AI Agent", "/f"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status();
+}
+
+#[cfg(not(windows))]
+pub fn register_notification_identity() {}
+
+/// OS toast notification with a proper app identity. We bypass the
+/// tauri-plugin-notification path for the toast itself because the plugin only
+/// sets the AppUserModelID when the exe is NOT under target\debug|release —
+/// i.e. in dev/portable use every toast said "Windows PowerShell".
+#[tauri::command]
+pub fn os_notify(title: String, body: String) -> Result<(), String> {
+    let mut n = notify_rust::Notification::new();
+    n.summary(&title).body(&body);
+    #[cfg(windows)]
+    {
+        n.app_id(NOTIFY_APP_ID);
+    }
+    n.show().map(|_| ()).map_err(|e| e.to_string())
 }

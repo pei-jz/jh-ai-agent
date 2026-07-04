@@ -325,12 +325,12 @@ export class ConfigView {
                 <div class="card settings-card" style="height: 100%;">
                     <div class="card-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
                         <div>
-                            <h3>🧠 LLM Connections</h3>
+                            <h3>${icon('llm', 15)} LLM Connections</h3>
                             <p class="subtitle">Manage connection instances and credentials</p>
                         </div>
                         <div style="display: flex; gap: 8px;">
-                            <button class="btn btn-secondary" id="btn-save-config">💾 Save Settings</button>
-                            <button class="btn btn-primary" id="btn-open-add-modal">➕ Add Connection</button>
+                            <button class="btn btn-secondary" id="btn-save-config">${icon('save', 13)} Save Settings</button>
+                            <button class="btn btn-primary" id="btn-open-add-modal">${icon('plus', 13)} Add Connection</button>
                         </div>
                     </div>
                     
@@ -359,14 +359,14 @@ export class ConfigView {
                                         || (instances[0] && instances[0].id);
                                     return instances.map(inst => {
                                         let providerName = '';
-                                        let providerIcon = '🤖';
+                                        let providerIcon = icon('bot', 15);
                                         switch (inst.provider) {
-                                            case 'openai': providerName = 'OpenAI GPT'; providerIcon = '🤖'; break;
-                                            case 'anthropic': providerName = 'Anthropic Claude'; providerIcon = '🧠'; break;
-                                            case 'gemini': providerName = 'Google Gemini'; providerIcon = '✨'; break;
-                                            case 'azure': providerName = 'Azure OpenAI'; providerIcon = '☁️'; break;
-                                            case 'ollama': providerName = 'Ollama (Local)'; providerIcon = '🦙'; break;
-                                            case 'generic': providerName = 'Generic OpenAI'; providerIcon = '🔌'; break;
+                                            case 'openai': providerName = 'OpenAI GPT'; providerIcon = icon('bot', 15); break;
+                                            case 'anthropic': providerName = 'Anthropic Claude'; providerIcon = icon('brain', 15); break;
+                                            case 'gemini': providerName = 'Google Gemini'; providerIcon = icon('sparkle', 15); break;
+                                            case 'azure': providerName = 'Azure OpenAI'; providerIcon = icon('cloud', 15); break;
+                                            case 'ollama': providerName = 'Ollama (Local)'; providerIcon = icon('server', 15); break;
+                                            case 'generic': providerName = 'Generic OpenAI'; providerIcon = icon('plug', 15); break;
                                             default: providerName = inst.provider;
                                         }
                                         const isActive = effectiveActiveId === inst.id;
@@ -386,8 +386,8 @@ export class ConfigView {
                                                 <td style="color: var(--text-secondary); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${inst.base_url || 'Default'}</td>
                                                 <td>
                                                     <div style="display: flex; gap: 8px; justify-content: flex-end; align-items: center;">
-                                                        <button class="btn btn-secondary btn-sm btn-edit-instance" data-id="${inst.id}">✏️ Edit</button>
-                                                        <button class="btn btn-danger btn-sm btn-delete-instance" data-id="${inst.id}">🗑️ Delete</button>
+                                                        <button class="btn btn-secondary btn-sm btn-edit-instance" data-id="${inst.id}">${icon('edit', 12)} Edit</button>
+                                                        <button class="btn btn-danger btn-sm btn-delete-instance" data-id="${inst.id}">${icon('trash', 12)} Delete</button>
                                                     </div>
                                                 </td>
                                             </tr>
@@ -404,10 +404,10 @@ export class ConfigView {
                 <div class="card settings-card" style="height: 100%;">
                     <div class="card-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
                         <div>
-                            <h3>🔌 Model Context Protocol (MCP) Servers</h3>
+                            <h3>${icon('mcp', 15)} Model Context Protocol (MCP) Servers</h3>
                             <p class="subtitle">Configure local or remote MCP servers in JSON format</p>
                         </div>
-                        <button class="btn btn-primary" id="btn-save-config">💾 Save Settings</button>
+                        <button class="btn btn-primary" id="btn-save-config">${icon('save', 13)} Save Settings</button>
                     </div>
                     <div class="input-group">
                         <label class="input-label">Configuration JSON</label>
@@ -421,10 +421,10 @@ export class ConfigView {
                 <div class="card settings-card" style="height: 100%;">
                     <div class="card-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
                         <div>
-                            <h3>⚙️ General Settings</h3>
+                            <h3>${icon('gear', 15)} General Settings</h3>
                             <p class="subtitle">Configure proxy, logging, and other general preferences</p>
                         </div>
-                        <button class="btn btn-primary" id="btn-save-config">💾 Save Settings</button>
+                        <button class="btn btn-primary" id="btn-save-config">${icon('save', 13)} Save Settings</button>
                     </div>
                     <div class="provider-card-fields">
                         <div class="input-group">
@@ -456,7 +456,7 @@ export class ConfigView {
                         <!-- ── Agent Safety Limits ────────────────────────────── -->
                         <div style="margin-top: 8px; padding: 14px 16px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-secondary);">
                             <div style="font-size: 12px; font-weight: 600; color: var(--accent); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 4px;">
-                                🛡 Agent Safety Limits
+                                ${icon('shield', 13)} Agent Safety Limits
                             </div>
                             <p style="font-size: 11.5px; color: var(--text-tertiary); margin: 0 0 14px 0; line-height: 1.5;">
                                 Controls when the agent loop auto-stops or gets nudged.
@@ -606,7 +606,7 @@ export class ConfigView {
                             <label class="input-label">J.H AI Agent Connection Token (API Key)</label>
                             <div style="display: flex; gap: 8px;">
                                 <input type="text" id="cfg-connection-token" class="input" value="${window.apiClient ? window.apiClient.token : ''}" readonly style="flex: 1; font-family: var(--font-mono); background: var(--bg-primary); cursor: default;">
-                                <button class="btn btn-secondary" id="btn-copy-connection-token" style="padding: 0 12px; display: flex; align-items: center; justify-content: center; height: 36px; border: 1px solid var(--border);" type="button">📋 Copy</button>
+                                <button class="btn btn-secondary" id="btn-copy-connection-token" style="padding: 0 12px; display: flex; align-items: center; justify-content: center; height: 36px; border: 1px solid var(--border);" type="button">${icon('clipboard', 13)} Copy</button>
                             </div>
                             <p class="input-hint">Use this token and Port <strong>${window.apiClient ? window.apiClient.port : '14300'}</strong> to connect from external tools like JHEditor.</p>
 
@@ -621,7 +621,7 @@ export class ConfigView {
                                             re-entering credentials.
                                         </p>
                                     </div>
-                                    <button class="btn btn-secondary" id="btn-export-connection" type="button" style="white-space: nowrap;">💾 Export</button>
+                                    <button class="btn btn-secondary" id="btn-export-connection" type="button" style="white-space: nowrap;">${icon('save', 13)} Export</button>
                                 </div>
                                 <div id="export-connection-status" style="margin-top: 8px; font-size: 11.5px;"></div>
                             </div>
@@ -646,7 +646,7 @@ export class ConfigView {
             <div class="modal-overlay" id="llm-modal-overlay">
                 <div class="modal" style="width: 500px; max-width: 90%;">
                     <div class="modal-title" style="margin-bottom: 20px;">
-                        <h3>${this.editingInstance ? '✏️ Edit LLM Connection' : '➕ Add LLM Connection'}</h3>
+                        <h3>${this.editingInstance ? `${icon('edit', 14)} Edit LLM Connection` : `${icon('plus', 14)} Add LLM Connection`}</h3>
                     </div>
                     
                     <div class="provider-card-fields">
@@ -1101,7 +1101,7 @@ export class ConfigView {
                     alert('Failed to save: ' + (e.message || e));
                 } finally {
                     btnSkillSave.disabled = false;
-                    btnSkillSave.innerText = '💾 Save';
+                    btnSkillSave.innerHTML = `${icon('save', 13)} Save`;
                 }
             });
         }
@@ -1467,7 +1467,7 @@ export class ConfigView {
                     }
                 } finally {
                     btnExportConn.disabled = false;
-                    btnExportConn.innerText = '💾 Export';
+                    btnExportConn.innerHTML = `${icon('save', 13)} Export`;
                 }
             });
         }
@@ -1481,7 +1481,7 @@ export class ConfigView {
                     navigator.clipboard.writeText(tokenInput.value);
                     btnCopyToken.innerText = 'Copied!';
                     setTimeout(() => {
-                        btnCopyToken.innerText = '📋 Copy';
+                        btnCopyToken.innerHTML = `${icon('clipboard', 13)} Copy`;
                     }, 2000);
                 }
             });
@@ -1515,7 +1515,7 @@ export class ConfigView {
                     alert("Error saving config: " + e.message);
                 } finally {
                     btnSave.disabled = false;
-                    btnSave.innerText = '💾 Save Settings';
+                    btnSave.innerHTML = `${icon('save', 13)} Save Settings`;
                 }
             });
         }
@@ -1658,8 +1658,8 @@ export class ConfigView {
                 <td style="white-space:nowrap; font-size:11px; color:var(--text-tertiary);">${escapeHtml(f.date || '')}</td>
                 <td style="text-align:center; font-size:11px;">${f.hits || 1}</td>
                 <td style="white-space:nowrap; text-align:right;">
-                    <button class="btn btn-secondary memory-fact-edit" data-idx="${i}" style="padding:2px 8px; font-size:11px;">✏️</button>
-                    <button class="btn btn-secondary memory-fact-del" data-idx="${i}" style="padding:2px 8px; font-size:11px; color:var(--error);">🗑</button>
+                    <button class="btn btn-secondary memory-fact-edit" data-idx="${i}" style="padding:2px 8px; font-size:11px;">${icon('edit', 12)}</button>
+                    <button class="btn btn-secondary memory-fact-del" data-idx="${i}" style="padding:2px 8px; font-size:11px; color:var(--error);">${icon('trash', 12)}</button>
                 </td>
             </tr>
         `).join('');
@@ -1673,7 +1673,7 @@ export class ConfigView {
                     <div style="color:var(--text-secondary); font-size:11.5px; margin-top:2px;">${escapeHtml(e.summary || '')}</div>
                 </td>
                 <td style="white-space:nowrap; text-align:right;">
-                    <button class="btn btn-secondary memory-episode-del" data-idx="${i}" style="padding:2px 8px; font-size:11px; color:var(--error);">🗑</button>
+                    <button class="btn btn-secondary memory-episode-del" data-idx="${i}" style="padding:2px 8px; font-size:11px; color:var(--error);">${icon('trash', 12)}</button>
                 </td>
             </tr>`;
         }).join('');
@@ -1704,7 +1704,7 @@ export class ConfigView {
                             <div style="font-size:12px; font-weight:600; color:var(--accent); text-transform:uppercase; letter-spacing:0.06em;">
                                 📌 Durable Facts (durable facts injected into the system prompt — ${(this.memoryFacts || []).length})
                             </div>
-                            <button class="btn btn-secondary" id="btn-memory-facts-clear" style="font-size:11px; padding:3px 10px; color:var(--error); border-color:var(--error);">🗑 Clear All</button>
+                            <button class="btn btn-secondary" id="btn-memory-facts-clear" style="font-size:11px; padding:3px 10px; color:var(--error); border-color:var(--error);">${icon('trash', 12)} Clear All</button>
                         </div>
                         ${(this.memoryFacts || []).length === 0
                             ? `<div style="color:var(--text-tertiary); font-size:12px;">No facts stored yet.</div>`
@@ -1726,7 +1726,7 @@ export class ConfigView {
                             <div style="font-size:12px; font-weight:600; color:var(--accent); text-transform:uppercase; letter-spacing:0.06em;">
                                 📚 Episodes (summaries of past sessions — latest ${(this.memoryEpisodes || []).length})
                             </div>
-                            <button class="btn btn-secondary" id="btn-memory-episodes-clear" style="font-size:11px; padding:3px 10px; color:var(--error); border-color:var(--error);">🗑 Clear All</button>
+                            <button class="btn btn-secondary" id="btn-memory-episodes-clear" style="font-size:11px; padding:3px 10px; color:var(--error); border-color:var(--error);">${icon('trash', 12)} Clear All</button>
                         </div>
                         ${(this.memoryEpisodes || []).length === 0
                             ? `<div style="color:var(--text-tertiary); font-size:12px;">No session history yet.</div>`
@@ -1768,7 +1768,7 @@ export class ConfigView {
         return `
             <div class="card settings-card" style="height:100%;">
                 <div class="card-header" style="margin-bottom:20px;">
-                    <h3>🔍 RAG Indexing</h3>
+                    <h3>${icon('search', 15)} RAG Indexing</h3>
                     <p class="subtitle">Index your workspace for semantic code search (Auto-RAG)</p>
                 </div>
                 <div class="provider-card-fields">
@@ -1817,7 +1817,7 @@ export class ConfigView {
         const formHtml = this.showTemplateForm ? `
             <div style="background: var(--bg-tertiary); border: 1px solid var(--border-focus); border-radius: var(--radius-md); padding: 16px; margin-bottom: 16px;">
                 <h4 style="margin: 0 0 14px 0; font-size: 13px; color: var(--accent);">
-                    ${ef ? '✏️ Edit template' : '➕ New template'}
+                    ${ef ? `${icon('edit', 14)} Edit template` : `${icon('plus', 14)} New template`}
                 </h4>
                 <div class="provider-card-fields">
                     <div class="grid-2" style="gap: 12px;">
@@ -1847,7 +1847,7 @@ export class ConfigView {
                 </div>
                 <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px;">
                     <button class="btn btn-secondary" id="btn-tpl-cancel">Cancel</button>
-                    <button class="btn btn-primary" id="btn-tpl-save">💾 Save</button>
+                    <button class="btn btn-primary" id="btn-tpl-save">${icon('save', 13)} Save</button>
                 </div>
             </div>
         ` : '';
@@ -1880,8 +1880,8 @@ export class ConfigView {
                                 </td>
                                 <td>
                                     <div style="display:flex;gap:6px;justify-content:flex-end;">
-                                        <button class="btn btn-secondary btn-sm btn-tpl-edit" data-key="${escapeHtml(t.key)}">✏️ Edit</button>
-                                        <button class="btn btn-danger btn-sm btn-tpl-delete" data-key="${escapeHtml(t.key)}">🗑️</button>
+                                        <button class="btn btn-secondary btn-sm btn-tpl-edit" data-key="${escapeHtml(t.key)}">${icon('edit', 12)} Edit</button>
+                                        <button class="btn btn-danger btn-sm btn-tpl-delete" data-key="${escapeHtml(t.key)}">${icon('trash', 12)}</button>
                                     </div>
                                 </td>
                             </tr>
@@ -1898,7 +1898,7 @@ export class ConfigView {
                         <h3>📝 Prompt Templates</h3>
                         <p class="subtitle">Manage reusable prompts you can invoke by typing /command in chat</p>
                     </div>
-                    <button class="btn btn-primary" id="btn-tpl-new">➕ Add new</button>
+                    <button class="btn btn-primary" id="btn-tpl-new">${icon('plus', 13)} Add new</button>
                 </div>
                 <div style="flex:1;overflow-y:auto;">
                     ${formHtml}
@@ -1915,7 +1915,7 @@ export class ConfigView {
         const formHtml = this.showSkillForm ? `
             <div style="background: var(--bg-tertiary); border: 1px solid var(--border-focus); border-radius: var(--radius-md); padding: 16px; margin-bottom: 16px;">
                 <h4 style="margin: 0 0 14px 0; font-size: 13px; color: var(--accent);">
-                    ${es ? `✏️ Edit skill: ${escapeHtml(es.name)}` : '➕ New skill'}
+                    ${es ? `${icon('edit', 14)} Edit skill: ${escapeHtml(es.name)}` : `${icon('plus', 14)} New skill`}
                 </h4>
                 <div class="provider-card-fields">
                     ${!es ? `
@@ -1936,7 +1936,7 @@ export class ConfigView {
                 </div>
                 <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px;">
                     <button class="btn btn-secondary" id="btn-skill-cancel">Cancel</button>
-                    <button class="btn btn-primary" id="btn-skill-save">💾 Save</button>
+                    <button class="btn btn-primary" id="btn-skill-save">${icon('save', 13)} Save</button>
                 </div>
             </div>
         ` : '';
@@ -1963,8 +1963,8 @@ export class ConfigView {
                                 <td style="font-weight:600;">${escapeHtml(s.title)}</td>
                                 <td>
                                     <div style="display:flex;gap:6px;justify-content:flex-end;">
-                                        <button class="btn btn-secondary btn-sm btn-skill-edit" data-name="${escapeHtml(s.name)}">✏️ Edit</button>
-                                        <button class="btn btn-danger btn-sm btn-skill-delete" data-name="${escapeHtml(s.name)}">🗑️</button>
+                                        <button class="btn btn-secondary btn-sm btn-skill-edit" data-name="${escapeHtml(s.name)}">${icon('edit', 12)} Edit</button>
+                                        <button class="btn btn-danger btn-sm btn-skill-delete" data-name="${escapeHtml(s.name)}">${icon('trash', 12)}</button>
                                     </div>
                                 </td>
                             </tr>
@@ -1978,10 +1978,10 @@ export class ConfigView {
             <div class="card settings-card" style="height:100%;display:flex;flex-direction:column;">
                 <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-shrink:0;">
                     <div>
-                        <h3>⚡ Skills</h3>
+                        <h3>${icon('bolt', 15)} Skills</h3>
                         <p class="subtitle">Invocable procedures like Claude Code's /skill. Saved in <code>~/.config/JH AI Agent/skills/</code>.</p>
                     </div>
-                    <button class="btn btn-primary" id="btn-skill-new">➕ Create new</button>
+                    <button class="btn btn-primary" id="btn-skill-new">${icon('plus', 13)} Create new</button>
                 </div>
                 <div style="flex:1;overflow-y:auto;">
                     ${formHtml}
@@ -2036,7 +2036,7 @@ export class ConfigView {
             return `
                 <div class="card settings-card" style="height: 100%;">
                     <div class="card-header" style="margin-bottom: 20px;">
-                        <h3>🔌 API Communication Logs</h3>
+                        <h3>${icon('plug', 15)} API Communication Logs</h3>
                         <p class="subtitle">View and debug detailed API payloads sent to AI providers</p>
                     </div>
                     <div style="padding: 40px; text-align: center; color: var(--text-secondary);">
@@ -2054,7 +2054,7 @@ export class ConfigView {
             return `
                 <div class="card settings-card" style="height: 100%;">
                     <div class="card-header" style="margin-bottom: 20px;">
-                        <h3>🔌 API Communication Logs</h3>
+                        <h3>${icon('plug', 15)} API Communication Logs</h3>
                         <p class="subtitle">View and debug detailed API payloads sent to AI providers</p>
                     </div>
                     <div style="padding: 40px; text-align: center; color: var(--error);">
@@ -2115,10 +2115,10 @@ export class ConfigView {
             <div class="card settings-card" style="height: 100%; display: flex; flex-direction: column;">
                 <div class="card-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-shrink: 0;">
                     <div>
-                        <h3>🔌 API Communication Logs</h3>
+                        <h3>${icon('plug', 15)} API Communication Logs</h3>
                         <p class="subtitle">Chronological record of request payloads and raw AI responses</p>
                     </div>
-                    <button class="btn btn-secondary" id="btn-clear-logs" style="color: var(--error); border-color: var(--error); background: transparent;">🗑️ Clear Logs</button>
+                    <button class="btn btn-secondary" id="btn-clear-logs" style="color: var(--error); border-color: var(--error); background: transparent;">${icon('trash', 12)} Clear Logs</button>
                 </div>
                 
                 <div class="logs-list-container" style="flex: 1; overflow-y: auto; padding-right: 4px;">

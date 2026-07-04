@@ -70,6 +70,60 @@
   --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
 }
 
+/* ── Light theme ───────────────────────────────────────────────
+   Toggled by setting  data-theme="light"  on <html> (persisted in
+   localStorage `jhai_theme`; see main.js). Only the design tokens are
+   overridden — every component styles itself via var(--*), so this
+   cascades app-wide. Code/diff blocks intentionally stay dark. */
+:root[data-theme="light"] {
+  /* Background palette */
+  --bg-primary:   hsl(220, 30%, 97%);
+  --bg-secondary: hsl(0, 0%, 100%);
+  --bg-tertiary:  hsl(220, 25%, 93%);
+  --bg-card:      hsla(0, 0%, 100%, 0.75);
+  --bg-card-solid:hsl(0, 0%, 100%);
+  --bg-input:     hsl(220, 25%, 96%);
+  --bg-hover:     hsla(220, 25%, 85%, 0.5);
+
+  /* Text palette */
+  --text-primary:   hsl(220, 30%, 14%);
+  --text-secondary: hsl(220, 15%, 38%);
+  --text-tertiary:  hsl(220, 10%, 55%);
+  --text-inverse:   hsl(0, 0%, 100%);
+
+  /* Accent — violet. Deliberately NOT blue/teal (didn't sit well on white) and
+     NOT orange (would collide with the warning color, blurring "accent" vs
+     "warning" everywhere statuses matter). Violet keeps the cool-tone brand of
+     the dark theme with strong contrast on white.
+     (Orange alternative if ever wanted: hsl(24, 90%, 48%) / hover 40%.) */
+  --accent:        hsl(262, 72%, 50%);
+  --accent-hover:  hsl(262, 72%, 42%);
+  --accent-dim:    hsl(262, 45%, 65%);
+  --accent-glow:   hsla(262, 72%, 50%, 0.20);
+  --accent-glow-lg:hsla(262, 72%, 50%, 0.08);
+
+  /* Borders */
+  --border:       hsla(220, 25%, 30%, 0.25);
+  --border-light: hsla(220, 25%, 30%, 0.14);
+  --border-focus: hsla(262, 72%, 50%, 0.5);
+
+  /* Status colors (slightly darkened for white backgrounds) */
+  --success:     hsl(145, 65%, 34%);
+  --success-bg:  hsla(145, 65%, 34%, 0.10);
+  --warning:     hsl(35, 95%, 40%);
+  --warning-bg:  hsla(35, 95%, 40%, 0.10);
+  --error:       hsl(0, 72%, 45%);
+  --error-bg:    hsla(0, 72%, 45%, 0.10);
+  --info:        hsl(210, 90%, 42%);
+  --info-bg:     hsla(210, 90%, 42%, 0.10);
+
+  /* Shadows — much softer on light surfaces */
+  --shadow-sm:  0 1px 3px  rgba(30, 40, 60, 0.08);
+  --shadow-md:  0 4px 12px rgba(30, 40, 60, 0.10);
+  --shadow-lg:  0 8px 32px rgba(30, 40, 60, 0.14);
+  --shadow-glow:0 0 20px var(--accent-glow);
+}
+
 
 /* ── Reset & Base ──────────────────────────────────────────── */
 *,
@@ -319,7 +373,10 @@ body {
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 32px;
+  /* Tighter top/left — 32px all around wasted space next to the sidebar and
+     under the titlebar. Views that size themselves with
+     calc(100vh - titlebar - Npx) assume top+bottom = 34px total. */
+  padding: 14px 20px 20px 16px;
   position: relative;
 }
 
@@ -1028,7 +1085,7 @@ tr:hover td {
 .split-pane {
   display: flex;
   gap: 20px;
-  height: calc(100vh - var(--titlebar-height) - 140px);
+  height: calc(100vh - var(--titlebar-height) - 110px);
 }
 .split-left {
   width: 340px;

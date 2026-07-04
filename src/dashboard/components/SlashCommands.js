@@ -149,7 +149,7 @@ export class SlashCommands {
         const s = document.createElement('style');
         s.id = 'slashcmd-styles';
         s.textContent = `
-            .slash-popup { position:absolute; bottom: calc(100% + 6px); left:0; right:0; background:var(--bg-secondary);
+            .slash-popup { position:absolute; top:auto; bottom: calc(100% + 6px); left:0; right:0; background:var(--bg-secondary);
                 border:1px solid var(--border-focus); border-radius:var(--radius-md); box-shadow:0 -4px 20px rgba(0,0,0,0.35);
                 overflow:hidden; z-index:600; max-height:260px; display:flex; flex-direction:column; }
             .slash-popup-header { padding:6px 12px; font-size:11px; font-weight:600; color:var(--text-tertiary);

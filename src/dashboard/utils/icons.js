@@ -32,6 +32,47 @@ const PATHS = {
         <line x1="7" y1="2.5" x2="7" y2="6"/><line x1="13" y1="2.5" x2="13" y2="6"/>`,
     // Folder — workspace grouping
     folder: `<path d="M2.5 6.5a1.5 1.5 0 011.5-1.5h3l2 2h5a1.5 1.5 0 011.5 1.5v6a1.5 1.5 0 01-1.5 1.5H4A1.5 1.5 0 012.5 14V6.5z"/>`,
+    // Sun — switch to light theme
+    sun: `<circle cx="10" cy="10" r="3.5"/>
+        <path d="M10 2.5v2M10 15.5v2M2.5 10h2M15.5 10h2M4.7 4.7l1.4 1.4M13.9 13.9l1.4 1.4M4.7 15.3l1.4-1.4M13.9 6.1l1.4-1.4"/>`,
+    // Moon — switch to dark theme
+    moon: `<path d="M16.5 12.2A7 7 0 018.2 3.6a7 7 0 108.3 8.6z"/>`,
+    // New chat — document with a plus
+    'doc-plus': `<path d="M11.5 2.5H5.5A1.5 1.5 0 004 4v12a1.5 1.5 0 001.5 1.5h9A1.5 1.5 0 0016 16V7z"/>
+        <path d="M11.5 2.5V7H16M10 10v4M8 12h4"/>`,
+    // History — clock with a back arrow
+    history: `<path d="M3.5 10a6.5 6.5 0 103-5.5"/><path d="M3.5 2.5v3.2h3.2"/><path d="M10 6.5V10l2.5 1.8"/>`,
+    // Trash / delete
+    trash: `<path d="M3.5 5.5h13M8 5.5V4a1 1 0 011-1h2a1 1 0 011 1v1.5M5 5.5l.8 10.3A1.5 1.5 0 007.3 17.2h5.4a1.5 1.5 0 001.5-1.4l.8-10.3"/>
+        <path d="M8.2 8.5v6M11.8 8.5v6"/>`,
+    // Plus — create / add
+    plus: `<path d="M10 4v12M4 10h12"/>`,
+    // Plug — generic connection / API
+    plug: `<path d="M7 3v4M13 3v4M5.5 7h9v3a4.5 4.5 0 01-9 0z"/><path d="M10 14.5V17"/>`,
+    // Sparkle — Gemini / "ask AI"
+    sparkle: `<path d="M10 2.5l1.7 5.1 5.1 1.7-5.1 1.7L10 16.1l-1.7-5.1-5.1-1.7 5.1-1.7z"/>
+        <path d="M16 14.5l.7 2 2 .7-2 .7-.7 2-.7-2-2-.7 2-.7z" stroke-width="1"/>`,
+    // Bot — OpenAI GPT / generic robot
+    bot: `<rect x="4" y="7" width="12" height="8.5" rx="2"/><circle cx="7.8" cy="11" r="0.9" fill="currentColor" stroke="none"/>
+        <circle cx="12.2" cy="11" r="0.9" fill="currentColor" stroke="none"/><path d="M10 7V4.2M10 4.2a1.2 1.2 0 10-.01 0z"/>`,
+    // Brain — Anthropic Claude / memory-adjacent
+    brain: `<path d="M8.8 3.2a2.6 2.6 0 00-2.5 2 2.7 2.7 0 00-1.8 4.3 2.7 2.7 0 001.3 4.3 2.6 2.6 0 004.2 1.6V4.6a2.6 2.6 0 00-1.2-1.4z"/>
+        <path d="M11.2 3.2a2.6 2.6 0 012.5 2 2.7 2.7 0 011.8 4.3 2.7 2.7 0 01-1.3 4.3 2.6 2.6 0 01-4.2 1.6V4.6a2.6 2.6 0 011.2-1.4z"/>`,
+    // Shield — safety limits
+    shield: `<path d="M10 2.5l6 2.2v4.6c0 3.6-2.5 6.4-6 8.2-3.5-1.8-6-4.6-6-8.2V4.7z"/><path d="M7.5 10l1.8 1.8 3.2-3.6"/>`,
+    // Clipboard — copy
+    clipboard: `<rect x="5" y="4" width="10" height="13.5" rx="1.5"/><path d="M7.5 4V3a1 1 0 011-1h3a1 1 0 011 1v1"/><path d="M7.5 8.5h5M7.5 11.5h5M7.5 14.5h3"/>`,
+    // Stop — abort a run
+    stop: `<rect x="5" y="5" width="10" height="10" rx="1.5"/>`,
+    // Save — floppy disk
+    save: `<path d="M4 3h10l3 3v11H4z" transform="translate(-0.5,0)"/><path d="M6.5 3v4.5h6V3M6.5 17v-6h7v6"/>`,
+    // Edit — pencil
+    edit: `<path d="M13.5 3.5l3 3L7 16l-3.8.8L4 13z"/><path d="M11.8 5.2l3 3"/>`,
+    // Cloud — Azure / hosted
+    cloud: `<path d="M6 15.5a3.5 3.5 0 01-.4-7A4.5 4.5 0 0114.3 9a3.3 3.3 0 01-.3 6.5z"/>`,
+    // Server — local model host (Ollama etc.)
+    server: `<rect x="3.5" y="3.5" width="13" height="5.5" rx="1.2"/><rect x="3.5" y="11" width="13" height="5.5" rx="1.2"/>
+        <circle cx="6.5" cy="6.2" r="0.8" fill="currentColor" stroke="none"/><circle cx="6.5" cy="13.7" r="0.8" fill="currentColor" stroke="none"/>`,
 };
 
 /** Return an inline SVG string for `name`, sized `size` px (default 1em). */

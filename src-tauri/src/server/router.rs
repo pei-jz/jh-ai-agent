@@ -464,25 +464,64 @@ async fn continue_task(
     State(state): State<AppState>,
     Json(payload): Json<SteeringRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    // Gather context from the existing (completed) task.
-    let (prompt, workspace, caller, last_response) = {
+    // Gather context from the existing (completed) task. The chat_context is
+    // rebuilt from EVERY completed run of this task (request → answer pairs),
+    // not just the first prompt + last answer — so after several continues the
+    // agent still sees which requests were already completed, in order.
+    // AgentController labels these as "[Completed request]" and pins the NEW
+    // message as the current goal.
+    let (workspace, caller, chat_context) = {
         let tasks = state.tasks.lock().unwrap();
         let task = tasks.get(&id)
             .ok_or((StatusCode::NOT_FOUND, "task not found".to_string()))?;
-        // Most recent complete event's message = the prior final response.
-        let last_response = task.logs.iter().rev()
-            .find(|l| l.get("event").and_then(|e| e.as_str()) == Some("complete"))
-            .and_then(|l| l.get("data").and_then(|d| d.get("message")).and_then(|m| m.as_str()))
-            .unwrap_or("")
-            .to_string();
-        (task.prompt.clone(), task.workspace_path.clone(), task.caller.clone(), last_response)
-    };
 
-    // Minimal prior-conversation context for the continuation.
-    let mut chat_context = vec![serde_json::json!({ "role": "user", "content": prompt })];
-    if !last_response.is_empty() {
-        chat_context.push(serde_json::json!({ "role": "assistant", "content": last_response }));
-    }
+        // Bound context growth: older answers get clipped harder than the
+        // most recent one (the requests themselves are kept in full).
+        fn clip(s: &str, max: usize) -> String {
+            if s.chars().count() <= max { s.to_string() }
+            else {
+                let cut: String = s.chars().take(max).collect();
+                format!("{}…\n[answer truncated]", cut)
+            }
+        }
+
+        let completes: Vec<&serde_json::Value> = task.logs.iter()
+            .filter(|l| l.get("event").and_then(|e| e.as_str()) == Some("complete"))
+            .collect();
+        let n = completes.len();
+        let mut ctx: Vec<serde_json::Value> = Vec::new();
+        for (i, l) in completes.iter().enumerate() {
+            let data = l.get("data");
+            // Per-run request: recorded in resultSummary.request; the very first
+            // run falls back to the task's original prompt.
+            let req = data
+                .and_then(|d| d.get("resultSummary"))
+                .and_then(|r| r.get("request"))
+                .and_then(|m| m.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| if i == 0 { task.prompt.clone() } else { String::new() });
+            let ans = data
+                .and_then(|d| d.get("message"))
+                .and_then(|m| m.as_str())
+                .unwrap_or("");
+            let is_last = i + 1 == n;
+            if !req.is_empty() {
+                ctx.push(serde_json::json!({ "role": "user", "content": req }));
+            }
+            if !ans.is_empty() {
+                ctx.push(serde_json::json!({
+                    "role": "assistant",
+                    "content": clip(ans, if is_last { 8000 } else { 2000 })
+                }));
+            }
+        }
+        // No completed run recorded (edge case) → fall back to the original prompt.
+        if ctx.is_empty() {
+            ctx.push(serde_json::json!({ "role": "user", "content": task.prompt.clone() }));
+        }
+        (task.workspace_path.clone(), task.caller.clone(), ctx)
+    };
 
     // Re-open the task and create a fresh broadcast channel (the previous one was
     // dropped when the task first completed).

@@ -269,12 +269,17 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(IndexerState::default())
         .manage(McpState::default())
         .manage(McpWsState::default())
         .manage(PathGuard::default())
         .setup(|app| {
+            // Register the toast-notification identity (Windows) so notifications
+            // show "J.H AI Agent" instead of "Windows PowerShell" (dev/portable).
+            commands::shell::register_notification_identity();
+
             // Save settings directory path
             let config_dir = app.path().app_config_dir().unwrap_or_default();
             if !config_dir.exists() {
@@ -650,6 +655,7 @@ pub fn run() {
             // Shell operations
             commands::shell::run_command,
             commands::shell::open_path_default,
+            commands::shell::os_notify,
             // Web search (self-built, no API key — server-side to bypass CORS)
             commands::web::web_search,
             commands::web::fetch_url,
