@@ -79,6 +79,9 @@ class ApiClient {
     }
     getStats() { return this.request('/stats'); }
     getTaskLogs(id) { return this.request(`/tasks/${id}/logs`); }
+    // Full (un-slimmed) single log entry — the logs listing/replay strips the
+    // heavy per-step request payloads; the CHAT modal fetches them on demand.
+    getTaskLogEntry(id, idx) { return this.request(`/tasks/${id}/logs/${idx}`); }
     continueTask(id, payload) {
         // Re-run a completed task with a new message/payload under the SAME task id.
         return this.request(`/tasks/${id}/continue`, {

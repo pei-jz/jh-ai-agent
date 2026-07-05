@@ -193,7 +193,7 @@ body {
   height: 16px;
   display: block;
   flex-shrink: 0;
-  stroke: hsl(185, 100%, 55%);
+  stroke: var(--accent);
 }
 .titlebar-title {
   font-size: 12px;
@@ -557,7 +557,7 @@ body {
 .badge-active {
   background: var(--accent-glow);
   color: var(--accent);
-  border: 1px solid hsla(185, 100%, 55%, 0.3);
+  border: 1px solid var(--accent-glow);
 }
 .badge-active::before {
   content: '';
@@ -933,7 +933,7 @@ tr:hover td {
 .token-badge-accent {
   background: var(--accent-glow);
   color: var(--accent);
-  border-color: hsla(185, 100%, 55%, 0.2);
+  border-color: var(--accent-glow);
 }
 
 

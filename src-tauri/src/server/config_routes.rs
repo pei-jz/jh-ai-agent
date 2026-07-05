@@ -177,6 +177,9 @@ pub(crate) async fn update_config(
                 if final_config.prompt_templates.is_none() {
                     final_config.prompt_templates = old_config.prompt_templates;
                 }
+                if final_config.subagent_review.is_none() {
+                    final_config.subagent_review = old_config.subagent_review;
+                }
             }
         }
     }

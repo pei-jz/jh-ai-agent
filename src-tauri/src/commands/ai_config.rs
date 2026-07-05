@@ -131,6 +131,11 @@ pub struct AiConfig {
     /// Object: { "key": { "label": "...", "prompt": "...", "icon": "..." } }
     #[serde(default)]
     pub prompt_templates: Option<serde_json::Value>,
+
+    /// Pre-finish independent sub-agent review of file changes: "off" | "on".
+    /// None ⇒ frontend default ("off").
+    #[serde(default)]
+    pub subagent_review: Option<String>,
 }
 
 #[tauri::command]
@@ -165,6 +170,7 @@ pub async fn get_ai_config<R: tauri::Runtime>(
             fast_model_id: None,
             deep_model_id: None,
             prompt_templates: None,
+            subagent_review: None,
         });
     }
 
@@ -299,6 +305,9 @@ pub async fn save_ai_config<R: tauri::Runtime>(
                 if final_config.prompt_templates.is_none() {
                     final_config.prompt_templates = old_config.prompt_templates;
                 }
+                if final_config.subagent_review.is_none() {
+                    final_config.subagent_review = old_config.subagent_review;
+                }
             }
         }
     }
@@ -354,6 +363,7 @@ pub async fn set_rag_approval<R: tauri::Runtime>(
             fast_model_id: None,
             deep_model_id: None,
             prompt_templates: None,
+            subagent_review: None,
         }
     };
 

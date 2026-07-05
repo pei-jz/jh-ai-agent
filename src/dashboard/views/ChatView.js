@@ -150,7 +150,7 @@ export class ChatView {
                 const err = mcpManager.getError(name);
                 let badge = '';
                 if (isRunning) {
-                    badge = `<span style="font-size: 10px; background: var(--accent); color: #000; border-radius: 4px; padding: 1px 5px; font-weight: 600;">🟢 ${toolCount}t</span>`;
+                    badge = `<span style="font-size: 10px; background: var(--accent); color: var(--text-inverse); border-radius: 4px; padding: 1px 5px; font-weight: 600;">🟢 ${toolCount}t</span>`;
                 } else if (err) {
                     // Failed badge: hover for full detail (native tooltip) + click for full dialog.
                     badge = `<span class="chat-mcp-error-badge" data-name="${escapeHtml(name)}"
@@ -286,7 +286,7 @@ export class ChatView {
                 }
 
                 .msg-user .message-bubble {
-                    background: hsla(185, 100%, 55%, 0.08);
+                    background: var(--accent-glow-lg);
                     border-color: var(--border-focus);
                     border-bottom-right-radius: 2px;
                 }
@@ -654,7 +654,7 @@ export class ChatView {
                 }
                 .chat-mode-pill.active {
                     background: var(--accent);
-                    color: #000;
+                    color: var(--text-inverse);
                 }
                 .chat-mode-pill:hover:not(.active) {
                     background: var(--bg-hover);
@@ -667,7 +667,7 @@ export class ChatView {
                     align-items: center;
                     gap: 8px;
                     padding: 8px 12px;
-                    background: hsla(185, 100%, 55%, 0.05);
+                    background: var(--accent-glow-lg);
                     border: 1px solid var(--border-focus);
                     border-radius: var(--radius-md);
                     margin-bottom: 12px;
@@ -848,7 +848,7 @@ export class ChatView {
                     font-size: 10px;
                     font-weight: 700;
                     background: var(--accent);
-                    color: #000;
+                    color: var(--text-inverse);
                     border-radius: 3px;
                     padding: 1px 5px;
                     flex-shrink: 0;
@@ -1483,6 +1483,12 @@ export class ChatView {
     }
 
     destroy() {
+        // Mark stale so any still-in-flight async work (e.g. the MCP server
+        // startup in _startEnabledMcpServers, which can take seconds right
+        // after app start) can NEVER call reRender() and overwrite whichever
+        // view the user has navigated to since (the "Chat screen suddenly
+        // replaces the Monitor once after reload" bug).
+        this._destroyed = true;
         if (this._dragDropUnlisten) {
             this._dragDropUnlisten();
             this._dragDropUnlisten = null;
@@ -2185,6 +2191,9 @@ Your final responses and messages to the user MUST be in ${outputLanguage}.
     // ─── Full reRender (structural changes only) ────────────────────────────
 
     async reRender() {
+        // A destroyed (navigated-away) instance must never repaint — the
+        // .main-content container now belongs to ANOTHER view.
+        if (this._destroyed) return;
         const container = document.querySelector('.main-content');
         if (container) {
             // Preserve scroll position

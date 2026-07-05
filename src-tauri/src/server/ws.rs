@@ -82,12 +82,31 @@ async fn handle_socket(socket: WebSocket, task_id: String, state: AppState) {
     // Otherwise we keep the (already-created) subscription to relay live events.
     let rx = if is_done { None } else { rx };
 
-    // Replay stored logs to the client
-    for log_entry in &stored_logs {
-        if let Ok(msg_str) = serde_json::to_string(log_entry) {
+    // Replay stored logs to the client — SLIMMED: per-step CHAT entries embed
+    // the full conversation history/system prompt (O(steps²) bytes total),
+    // which made replay of long tasks the dominant selection cost. The client
+    // fetches a step's full payload on demand via GET /tasks/:id/logs/:idx.
+    for (i, log_entry) in stored_logs.iter().enumerate() {
+        let slim = crate::server::router::slim_log_entry(log_entry, i);
+        if let Ok(msg_str) = serde_json::to_string(&slim) {
             if ws_sender.send(Message::Text(msg_str)).await.is_err() {
                 return;
             }
+        }
+    }
+
+    // Replay-complete marker: lets the client buffer the whole backlog and
+    // render it in ONE batch instead of per-event DOM insertion. Old clients
+    // ignore this event; new clients also have a debounce fallback for old
+    // backends that don't send it.
+    let done_marker = serde_json::json!({
+        "event": "replay_done",
+        "data": { "count": stored_logs.len() },
+        "timestamp": Local::now().to_rfc3339()
+    });
+    if let Ok(msg_str) = serde_json::to_string(&done_marker) {
+        if ws_sender.send(Message::Text(msg_str)).await.is_err() {
+            return;
         }
     }
 

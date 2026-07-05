@@ -14,9 +14,11 @@ export const SAFETY_DEFAULTS = {
     historyCompressRatio: 0.5,   // compress old tool results only above this window fraction (keeps prefix cacheable below it)
     agentTemperature: 0.2,       // low temp → fewer transcription typos
     planMode: 'auto',            // 'off' | 'auto' (plan-gate complex tasks) | 'always'
+    subagentReview: 'off',       // 'off' | 'on' — pre-finish independent sub-agent review of file changes
 };
 
 const PLAN_MODES = new Set(['off', 'auto', 'always']);
+const SUBAGENT_REVIEW_MODES = new Set(['off', 'on']);
 
 /**
  * Normalize a raw ai_config object into sanitized numeric safety limits.
@@ -48,6 +50,7 @@ export function normalizeSafetyLimits(cfg = {}) {
         ? tempRaw : d.agentTemperature;
 
     const planMode = PLAN_MODES.has(cfg.plan_mode) ? cfg.plan_mode : d.planMode;
+    const subagentReview = SUBAGENT_REVIEW_MODES.has(cfg.subagent_review) ? cfg.subagent_review : d.subagentReview;
 
     return {
         maxSteps:                 num(cfg.max_steps,                   d.maxSteps),
@@ -60,5 +63,6 @@ export function normalizeSafetyLimits(cfg = {}) {
         historyCompressRatio,
         agentTemperature,
         planMode,
+        subagentReview,
     };
 }

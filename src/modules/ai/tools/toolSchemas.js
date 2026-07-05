@@ -388,5 +388,27 @@ export const TOOL_DEFINITIONS = [
             required: ['kind', 'summary', 'markdown', 'files', 'edits', 'actions'],
             additionalProperties: false
         }
+    },
+    {
+        name: 'run_subtask',
+        isSafe: true,
+        description: "Spawn an ISOLATED sub-agent to work on a self-contained piece of this task, and get back only its final report. The sub-agent does NOT see this conversation — the `brief` must stand alone: goal, exact scope (which files/dirs), acceptance criteria, and the expected output format. Use it for (a) independent investigation you want done in parallel, (b) an independent review or test of work you finished, or (c) a well-separated implementation chunk. Multiple run_subtask calls in ONE response run IN PARALLEL — never give two parallel sub-tasks overlapping files to edit. Do NOT delegate what you can do yourself in 2-3 tool calls (spawning costs more than it saves). Sub-agents cannot spawn further sub-agents and cannot ask the user questions.",
+        parameters: {
+            type: 'object',
+            properties: {
+                brief: { type: 'string', description: 'Self-contained instructions for the sub-agent: goal, scope (files/dirs it may touch), acceptance criteria, expected report format. It sees NOTHING else from this conversation.' },
+                role: {
+                    type: ['string', 'null'],
+                    enum: ['reviewer', 'tester', 'researcher', 'generic', null],
+                    description: "Preset defaults. 'reviewer' = read-only, reports findings + VERDICT, never fixes. 'tester' = writes/runs tests only (no implementation edits). 'researcher' = read-only investigation (+web). null/'generic' = full toolset."
+                },
+                tools: { type: ['array', 'null'], items: { type: 'string' }, description: 'Optional explicit tool allowlist for the sub-agent (overrides the role preset). null = use the role default.' },
+                max_steps: { type: ['integer', 'null'], description: 'Optional step budget for the sub-agent (1-20). null = role default.' },
+                model: { type: ['string', 'null'], enum: ['fast', 'deep', null], description: "Model tier for the sub-agent. null = 'fast' (cheap). Use 'deep' only for genuinely hard sub-problems." },
+                write_scope: { type: ['array', 'null'], items: { type: 'string' }, description: "REQUIRED when the sub-agent will EDIT files: the paths/dirs/globs it may modify (e.g. [\"src/moduleA\", \"docs/*.md\"]). Writes outside are blocked by the system, and two sub-tasks with overlapping scopes run sequentially instead of in parallel. null = read-only roles, or claim the whole workspace (which forces serialization with every other editing sub-task). The 'tester' role defaults to test-file patterns." }
+            },
+            required: ['brief', 'role', 'tools', 'max_steps', 'model', 'write_scope'],
+            additionalProperties: false
+        }
     }
 ];

@@ -119,7 +119,7 @@ export class ModeDropdown {
                 border-radius: 6px; cursor: pointer;
             }
             .mode-dd-opt:hover { background: var(--bg-hover); }
-            .mode-dd-opt.sel { background: hsla(185,100%,55%,0.10); }
+            .mode-dd-opt.sel { background: var(--accent-glow-lg); }
             .mode-dd-opt .mode-dd-ico { margin-top: 1px; }
             .mode-dd-texts { display: flex; flex-direction: column; gap: 2px; }
             .mode-dd-name { font-size: 12.5px; font-weight: 600; color: var(--text-primary); }

@@ -23,6 +23,7 @@ import {
     handleVerifySyntax, handleTaskProgress, handlePresentResult,
     handleAskUser
 } from './tools/handlers/agentMetaHandlers.js';
+import { isPathInScope, WRITE_ENFORCED_TOOLS } from './agent/SubagentRoles.js';
 
 // ── Built-in tool dispatch table ───────────────────────────────────────────
 // Replaces the long switch in executeTool: tool name → a thin adapter that
@@ -54,6 +55,12 @@ const TOOL_HANDLERS = {
     web_search:      (ex, c) => handleWebSearch(ex, c.args, c.onAgentStatus),
     finish_task:     (ex, c) => handleFinishTask(ex, c.args, c.onAgentStatus),
     ask_user:        (ex, c) => handleAskUser(ex, c.args, c.onAgentStatus),
+    // Sub-agent spawn — the actual runner is injected by AgentController via
+    // setSubtaskRunner() (avoids a ToolExecutor→AgentController import cycle).
+    // Not injected (Simple chat / sub-agents themselves) → clear error.
+    run_subtask:     (ex, c) => ex._subtaskRunner
+        ? ex._subtaskRunner(c.args, c.onAgentStatus)
+        : 'Error: run_subtask is not available in this context.',
     verify_syntax:   (ex, c) => handleVerifySyntax(ex, c.args, c.onAgentStatus, c.resolvedPath),
     task_progress:   (ex, c) => handleTaskProgress(ex, c.args),
 };
@@ -104,6 +111,23 @@ export class ToolExecutor {
         this._mcpRelevanceQuery = null;
         this._mcpPruneOpts = {};
         this._tavilyEnabled = false; // Add state for Tavily availability
+        // run_subtask runner injected per-run by AgentController (null = unavailable).
+        this._subtaskRunner = null;
+        // Write scope (Step 3 ownership): null = unrestricted; array of path
+        // prefixes/globs = file-mutating tools may ONLY touch matching paths.
+        // Set for sub-agents via behavior.write_scope — a HARD code boundary,
+        // independent of the persona text.
+        this._writeScope = null;
+    }
+
+    /** Attach/detach the run_subtask runner (AgentController per run). */
+    setSubtaskRunner(fn) {
+        this._subtaskRunner = (typeof fn === 'function') ? fn : null;
+    }
+
+    /** Restrict file-mutating tools to `scopes` (paths/globs). null = unrestricted. */
+    setWriteScope(scopes) {
+        this._writeScope = (Array.isArray(scopes) && scopes.length > 0) ? scopes.map(String) : null;
     }
 
     /**
@@ -172,6 +196,11 @@ export class ToolExecutor {
         if (!this._tavilyEnabled) {
             defs = defs.filter(t => t.name !== 'web_search');
         }
+        // run_subtask only exists where a runner is attached (agent runs) —
+        // don't present it to Simple chat / sub-agents.
+        if (!this._subtaskRunner) {
+            defs = defs.filter(t => t.name !== 'run_subtask');
+        }
         return defs;
     }
 
@@ -199,6 +228,8 @@ export class ToolExecutor {
         this._mcpContext = null;      // reset per-task MCP context
         this._mcpRelevanceQuery = null;        // reset MCP pruning (caller re-sets)
         this._mcpPruneOpts = {};               // reset MCP prune tuning
+        this._subtaskRunner = null;            // reset; AgentController re-injects per run
+        this._writeScope = null;               // reset; caller re-sets after startSession
         this.workspacePath = workspacePath || '.';
 
         // ── Write-allowed directories ──────────────────────────────────
@@ -830,6 +861,7 @@ export class ToolExecutor {
         const nativeTools = this.toolDefinitions
             .filter(t => !allow || allow.has(t.name))
             .filter(t => t.name !== 'web_search' || this._tavilyEnabled)
+            .filter(t => t.name !== 'run_subtask' || this._subtaskRunner)
             .map(t => ({
                 type: 'function',
                 _strict_ok: true,
@@ -965,6 +997,24 @@ export class ToolExecutor {
         //   move_file    — uses args.from / args.to, both resolved inside the handler
         const noAutoResolve = new Set(['run_command', 'grep_search', 'glob', 'move_file']);
         const resolvedPath = noAutoResolve.has(name) ? null : this.resolvePath(rawPath);
+
+        // ── Write-scope enforcement (Step 3: parallel-edit ownership) ──────
+        // A sub-agent with a write scope may only mutate files inside it. This
+        // is a HARD deny (not an approval prompt): the point is preventing
+        // collisions between parallel children, which a user click can't fix.
+        if (this._writeScope && WRITE_ENFORCED_TOOLS.has(name)) {
+            const targets = name === 'move_file'
+                ? [this.resolvePath(args.from), this.resolvePath(args.to)]
+                : [resolvedPath];
+            for (const t of targets) {
+                if (t && !isPathInScope(t, this._writeScope, this.workspacePath)) {
+                    return `Error: write blocked — "${t}" is OUTSIDE your write scope. ` +
+                        `You may only modify: ${this._writeScope.join(', ')}. ` +
+                        `Do not try to work around this; if the task genuinely requires editing that file, ` +
+                        `report it in your final summary so the orchestrator can handle it.`;
+                }
+            }
+        }
 
         try {
             // Dispatch built-ins via the registry; everything else is an MCP /

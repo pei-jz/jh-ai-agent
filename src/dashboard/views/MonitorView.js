@@ -45,6 +45,13 @@ export class MonitorView {
         this._chatDataMap = {};          // uid → chat entry[]
         this._activeStepChatEntries = []; // real-time accumulator
         this._activeStepChatUid = null;   // uid for current step's button
+        // Changed-files bar expand state (collapsed by default; survives re-renders
+        // of the bar within this view instance).
+        this._filesBarOpen = false;
+        // True once live activity has streamed for the current run. Gates the
+        // "…" thinking placeholder so tab switches (which re-render #result-runs)
+        // don't resurrect it mid-run.
+        this._liveActivitySeen = false;
         // Task-list grouping: 'date' (default) or 'workspace'. Persisted across
         // instances via a module var so it survives re-routes.
         this._taskGroupBy = _taskGroupByPref;
@@ -154,6 +161,60 @@ export class MonitorView {
         return html;
     }
 
+    /**
+     * In-place task switch (perf): tear down the previous task's live state,
+     * swap ONLY the right detail panel's DOM, rebind its handlers, and connect.
+     * The URL hash is updated via replaceState so deep links stay correct
+     * WITHOUT firing hashchange (which would rebuild the whole view).
+     */
+    _switchTask(taskId) {
+        if (!taskId) return;
+        if (taskId === this.selectedTaskId) return;
+        const task = (this.tasks || []).find(t => t.id === taskId);
+        const right = document.querySelector('.mpanel-right');
+        if (!task || !right) {
+            // List entry / panel missing (stale DOM?) — fall back to a full route.
+            window.location.hash = `#monitor?id=${taskId}`;
+            return;
+        }
+
+        // ── Tear down the previous task's live plumbing ──
+        if (this.socket) { try { this.socket.close(); } catch (_) {} this.socket = null; }
+        if (this._replayFlushTimer) { clearTimeout(this._replayFlushTimer); this._replayFlushTimer = null; }
+        this._replaying = false;
+
+        // ── Reset ALL per-task state (mirrors a fresh view's constructor) ──
+        this.selectedTaskId = taskId;
+        this.logs = [];
+        this.resultSummaries = [];
+        this.currentProgress = 0;
+        this.currentStatus = 'idle';
+        this.tokenUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+        this._chatDataMap = {};
+        this._activeStepChatEntries = [];
+        this._activeStepChatUid = null;
+        this._taskFinished = false;
+        this._awaitingUser = false;
+        this._userPickedTab = false;
+        this._filesBarOpen = false;
+        this._liveActivitySeen = false;
+        this._replayCutoffTs = 0;
+        this._allLogsDirty = false;
+
+        // ── Left list: move the selection highlight ──
+        document.querySelectorAll('#mtask-list .mtask-item').forEach(el => {
+            el.classList.toggle('selected', el.getAttribute('data-task-id') === taskId);
+        });
+
+        // ── URL without re-route ──
+        try { history.replaceState(null, '', `#monitor?id=${taskId}`); } catch (_) {}
+
+        // ── Swap the detail panel + rebind + connect ──
+        right.innerHTML = this._renderDetail(task);
+        this._bindDetailEvents();
+        this._autoConnect();
+    }
+
     /** Bind task-item clicks + group-header collapse on the (re)rendered list. */
     _bindTaskListEvents() {
         const listEl = document.getElementById('mtask-list');
@@ -161,7 +222,11 @@ export class MonitorView {
         listEl.querySelectorAll('.mtask-item').forEach(item => {
             item.addEventListener('click', () => {
                 const id = item.getAttribute('data-task-id');
-                if (id) window.location.hash = `#monitor?id=${id}`;
+                // In-place switch (perf): swapping only the right panel avoids
+                // the full destroy→rebuild of the whole view (sidebar + layout
+                // + ~1,300-line <style> + task list) that a hash re-route costs
+                // on EVERY task click.
+                if (id) this._switchTask(id);
             });
         });
         // Per-item delete (hover 🗑) — deletes straight from the list without
@@ -299,7 +364,7 @@ export class MonitorView {
                     transition: background 0.12s, color 0.12s;
                 }
                 .mgroup-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
-                .mgroup-btn.active { background: var(--accent); color: #000; border-color: var(--accent); }
+                .mgroup-btn.active { background: var(--accent); color: var(--text-inverse); border-color: var(--accent); }
                 .mtask-group-header {
                     display: flex;
                     align-items: center;
@@ -338,7 +403,7 @@ export class MonitorView {
                 }
                 .mtask-item:hover { background: var(--bg-hover); }
                 .mtask-item.selected {
-                    background: hsla(185, 100%, 55%, 0.08);
+                    background: var(--accent-glow-lg);
                     border-color: var(--accent);
                 }
                 .mtask-top {
@@ -556,19 +621,88 @@ export class MonitorView {
                     overflow-y: auto;
                     border-top: 1px dashed var(--border-light);
                 }
-                /* B: aggregated changed-files bar (sticky at top of the Task scroll). */
+                /* B: aggregated changed-files bar (sticky at top of the Task scroll).
+                   Collapsed = ONE header line; expanded = fixed-height scrollable
+                   table (so 100+ files never flood the view). */
                 .mresult-files-bar {
                     position: sticky; top: 0; z-index: 6;
-                    display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
-                    padding: 8px 12px;
+                    display: block;
                     background: var(--bg-primary);
                     border-bottom: 1px solid var(--border-light);
                 }
+                .mfb-header {
+                    display: flex; align-items: center; gap: 8px;
+                    padding: 7px 12px;
+                    cursor: pointer; user-select: none;
+                    white-space: nowrap; overflow: hidden;
+                }
+                .mfb-header:hover { background: var(--bg-secondary); }
+                .mfb-toggle { font-size: 9px; color: var(--text-tertiary); flex-shrink: 0; }
                 .mresult-files-bar .mfb-label {
                     font-size: 11px; font-weight: 700; color: var(--text-secondary);
-                    margin-right: 2px;
+                    flex-shrink: 0;
                 }
-                .mresult-files-bar .mrc-file { cursor: pointer; }
+                .mfb-preview {
+                    flex: 1; min-width: 0;
+                    font-size: 11px; color: var(--text-tertiary);
+                    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+                }
+                .mfb-table-wrap {
+                    height: 240px;           /* fixed height when open */
+                    overflow-y: auto;
+                    border-top: 1px solid var(--border-light);
+                }
+                .mfb-table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+                .mfb-table th {
+                    position: sticky; top: 0; z-index: 1;
+                    background: var(--bg-secondary);
+                    text-align: left; padding: 4px 10px;
+                    font-size: 10px; font-weight: 700; text-transform: uppercase;
+                    letter-spacing: 0.05em; color: var(--text-tertiary);
+                    border-bottom: 1px solid var(--border-light);
+                }
+                .mfb-table td {
+                    padding: 4px 10px; border-top: 1px solid var(--border-light);
+                    color: var(--text-primary);
+                }
+                .mfb-table tbody tr { cursor: pointer; }
+                .mfb-table tbody tr:hover { background: var(--bg-tertiary); }
+                .mfb-td-name { white-space: nowrap; font-weight: 600; }
+                .mfb-dir-row td {
+                    background: var(--bg-secondary);
+                    font-size: 10.5px; font-weight: 700;
+                    color: var(--text-secondary);
+                    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+                    max-width: 0;
+                }
+                .mfb-dir-n { font-weight: 400; color: var(--text-tertiary); }
+                /* Collapsible directory-grouped file list inside a result bubble. */
+                .mrc-files-details { margin-top: 8px; }
+                .mrc-files-details summary {
+                    cursor: pointer; user-select: none;
+                    font-size: 11.5px; font-weight: 700;
+                    color: var(--text-secondary);
+                    padding: 3px 0;
+                }
+                .mrc-fd-hint { font-weight: 400; font-size: 10px; color: var(--text-tertiary); }
+                .mrc-files-scroll {
+                    max-height: 240px;   /* fixed cap; scrolls internally */
+                    overflow-y: auto;
+                    margin-top: 4px;
+                    padding-right: 4px;
+                }
+                .mrc-fg { margin-bottom: 6px; }
+                .mrc-fg-dir {
+                    font-size: 10.5px; font-weight: 700;
+                    color: var(--text-secondary);
+                    margin: 4px 0 3px;
+                    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+                }
+                .mrc-fg-n {
+                    font-weight: 400; color: var(--text-tertiary);
+                    background: var(--bg-tertiary);
+                    border-radius: 8px; padding: 0 6px; font-size: 10px;
+                }
                 /* D: "working now" boundary between settled results and the live feed. */
                 .mresult-live-label {
                     display: flex; align-items: center; gap: 7px;
@@ -663,7 +797,7 @@ export class MonitorView {
                     word-break: break-word;
                 }
                 .mrc-user .mrc-bubble {
-                    background: hsla(185, 100%, 55%, 0.06);
+                    background: var(--accent-glow-lg);
                     border-radius: 12px 12px 2px 12px;
                     white-space: pre-wrap;
                     color: var(--text-primary);
@@ -2080,6 +2214,125 @@ export class MonitorView {
 
     // ─── WebSocket ──────────────────────────────────────────────────────────
 
+    /**
+     * One-shot render of the buffered replay backlog (perf: replaces per-event
+     * DOM insertion + forced layout, which was O(n²) on long tasks). Rebuilds
+     * everything the per-event path used to maintain incrementally:
+     * token totals + context gauge, result bubbles, All Logs DOM (lazily unless
+     * that tab is showing), status badge, and trailing interactive state
+     * (pending ask_user question / approval card).
+     */
+    _flushReplay() {
+        if (!this._replaying) return;
+        this._replaying = false;
+        if (this._replayFlushTimer) { clearTimeout(this._replayFlushTimer); this._replayFlushTimer = null; }
+        if (this._destroyed) return;
+
+        // ── Token totals + context gauge from the replayed usage events ──
+        this.tokenUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+        let lastUsage = null;
+        for (const l of this.logs) {
+            if (l.event !== 'token_usage') continue;
+            const d = l.data || {};
+            const cr = d.cache_read_input_tokens || 0;
+            const cc = d.cache_creation_input_tokens || 0;
+            this.tokenUsage.prompt_tokens     += d.prompt_tokens || 0;
+            this.tokenUsage.completion_tokens += d.completion_tokens || 0;
+            this.tokenUsage.total_tokens      += (d.total_tokens || ((d.prompt_tokens || 0) + (d.completion_tokens || 0) + cr + cc));
+            this.tokenUsage.cache_read_input_tokens     += cr;
+            this.tokenUsage.cache_creation_input_tokens += cc;
+            lastUsage = d;
+        }
+        const vt = document.getElementById('val-total-tokens');
+        if (vt) vt.textContent = this.tokenUsage.total_tokens.toLocaleString();
+        const vin = document.getElementById('val-in-tokens');
+        if (vin) vin.textContent = `↑${this.tokenUsage.prompt_tokens.toLocaleString()}`;
+        const vc = document.getElementById('val-cache-tokens');
+        if (vc) vc.textContent = `⚡${this.tokenUsage.cache_read_input_tokens.toLocaleString()}`;
+        const vout = document.getElementById('val-out-tokens');
+        if (vout) vout.textContent = `↓${this.tokenUsage.completion_tokens.toLocaleString()}`;
+        if (lastUsage) this._updateContextGauge(lastUsage);
+
+        // ── Result bubbles from the replayed complete events ──
+        this.resultSummaries = this.logs
+            .filter(l => l.event === 'complete' && l.data?.resultSummary)
+            .map(l => l.data.resultSummary);
+        this._renderResultPanel();
+        requestAnimationFrame(() => {
+            if (this._destroyed) return;
+            const rp = document.getElementById('result-panel');
+            if (rp) rp.scrollTop = rp.scrollHeight;
+        });
+
+        // ── All Logs DOM: build ONCE now only if that tab is visible ──
+        const consoleEl = document.getElementById('console-logs');
+        if (consoleEl) {
+            const allLogsActive = !!document.querySelector('.mfilter-btn[data-filter="all"].active');
+            if (allLogsActive) {
+                consoleEl.innerHTML = this.renderAllLogs();
+                this._allLogsDirty = false;
+                consoleEl.scrollTop = consoleEl.scrollHeight;
+            } else {
+                this._allLogsDirty = true;   // built lazily on first tab switch
+            }
+        }
+
+        // ── Status + trailing interactive state ──
+        let status = 'running';
+        for (const l of this.logs) {
+            if (l.event === 'status' && l.data?.status) status = l.data.status;
+            else if (l.event === 'complete') status = 'completed';
+            else if (l.event === 'error' && l.data?.terminal) status = 'failed';
+        }
+        this.currentStatus = status;
+        this._syncStatusBadge();
+        this._syncTaskEntry(status);
+
+        // Task finished DURING the replay (raced between getTask and connect):
+        // keep the steer box usable for a continue instead of letting the
+        // imminent socket close disable it.
+        if (status === 'completed' || status === 'failed' || status === 'aborted') {
+            this._taskFinished = true;
+            const si = document.getElementById('input-steering');
+            const sb = document.getElementById('btn-send-steering');
+            if (si) {
+                si.disabled = false;
+                si.placeholder = status === 'completed'
+                    ? '✓ Done. Add a message to continue the task (Ctrl+Enter, / for skills)'
+                    : '⚠ Stopped. Add a message to continue / retry (Ctrl+Enter, / for skills)';
+            }
+            if (sb) sb.disabled = false;
+        }
+
+        if (status === 'waiting') {
+            // Run is paused on an ask_user question — re-surface it.
+            const q = [...this.logs].reverse().find(l => l.event === 'status' && l.data?.status === 'waiting');
+            if (q) {
+                this._awaitingUser = true;
+                this._setResultLive(q.data.message || 'The agent is asking for your input — reply below to continue.', 'question');
+                this._showAskCard(q.data);
+                const si = document.getElementById('input-steering');
+                if (si) {
+                    si.disabled = false;
+                    si.placeholder = '❓ Answer the agent\'s question to continue (Ctrl+Enter)…';
+                }
+                const sb = document.getElementById('btn-send-steering');
+                if (sb) sb.disabled = false;
+            }
+        } else if (status === 'running') {
+            // A confirm_request with NO later activity is genuinely pending —
+            // re-surface the approval card. (One followed by further tool/log
+            // events was already answered; don't show a stale card.)
+            let lastConfirm = -1;
+            this.logs.forEach((l, i) => { if (l.event === 'confirm_request') lastConfirm = i; });
+            if (lastConfirm >= 0) {
+                const after = this.logs.slice(lastConfirm + 1);
+                const answered = after.some(l => l.event === 'tool_call' || l.event === 'log' || l.event === 'complete');
+                if (!answered) this._showTaskConfirm(this.logs[lastConfirm].data);
+            }
+        }
+    }
+
     connectWebSocket(taskId, preserveResults = false) {
         if (this.socket) this.socket.close();
         // The server REPLAYS all stored logs on connect, then live events. On a
@@ -2121,6 +2374,19 @@ export class MonitorView {
         // task selection rebuilds from the replay.
         if (!preserveResults) { this.logs = []; this.resultSummaries = []; }
         this._taskFinished = false;
+        // New run (fresh view or continue): no live activity seen yet — the
+        // thinking placeholder may show until the first feed line arrives.
+        this._liveActivitySeen = false;
+        // ── Replay batching (perf) ─────────────────────────────────────
+        // On a FRESH connect the server replays every stored event first.
+        // Processing them one-by-one did per-event DOM insertion + forced
+        // layout (O(n²)) — the "selecting a running task is slow" cost. So
+        // buffer the burst into this.logs only, then render ONCE on the
+        // server's replay_done marker (debounce fallback for old backends).
+        // A CONTINUE keeps the existing DOM (cutoff discards the replay), so
+        // no batching there.
+        this._replaying = !preserveResults;
+        if (this._replayFlushTimer) { clearTimeout(this._replayFlushTimer); this._replayFlushTimer = null; }
         // Fresh run streaming → show the ⏹ stop button, hide any stale "new
         // activity" pill (we'll auto-follow again from here).
         this._syncStopButton();
@@ -2147,7 +2413,9 @@ export class MonitorView {
         };
 
         this.socket.onopen = () => {
-            if (this._destroyed) return;   // stale socket opening after navigation
+            // Stale socket opening after navigation OR an in-place task switch
+            // (same instance, different selectedTaskId) must not touch the DOM.
+            if (this._destroyed || this.selectedTaskId !== taskId) return;
             // Fresh connect rebuilds All Logs from the server replay → start clean.
             // On a CONTINUE the replay is discarded (timestamp cutoff) and the
             // existing step DOM must be KEPT — wiping it here erased all previous
@@ -2170,18 +2438,38 @@ export class MonitorView {
             try {
                 // A destroyed (navigated-away) instance must never touch the DOM —
                 // the ids now belong to a NEWER MonitorView showing another task.
-                if (this._destroyed) return;
+                // Same for a stale socket after an in-place task switch: close()
+                // was called, but already-received messages can still fire here.
+                if (this._destroyed || this.selectedTaskId !== taskId) return;
                 const packet = JSON.parse(ev.data);
                 if (!packet) return;
                 packet.data = packet.data || {};
 
-                // Ignore the replay-boundary marker (newer backend) — the timestamp
-                // cutoff below handles replay dedup without it.
-                if (packet.event === 'replay_done') return;
+                // Replay-boundary marker → flush the buffered backlog in one batch.
+                if (packet.event === 'replay_done') {
+                    if (this._replaying) this._flushReplay();
+                    return;
+                }
                 // On a CONTINUE, silently drop replayed events that predate the new
                 // run (already rendered); process the new run's events as live.
                 if (this._replayCutoffTs && packet.timestamp &&
                     new Date(packet.timestamp).getTime() < this._replayCutoffTs) {
+                    return;
+                }
+
+                // ── Replay buffering (fresh connect) ────────────────────────
+                // Accumulate into this.logs only; ALL rendering is deferred to
+                // _flushReplay (triggered by replay_done, or the debounce for
+                // backends without the marker). Live events arriving during the
+                // burst are flushed with it — ordering is preserved.
+                if (this._replaying) {
+                    if (packet.event !== 'command_chunk' && packet.event !== 'confirm_resolved') {
+                        this.logs.push(packet);
+                    }
+                    clearTimeout(this._replayFlushTimer);
+                    this._replayFlushTimer = setTimeout(() => {
+                        if (!this._destroyed) this._flushReplay();
+                    }, 250);
                     return;
                 }
 
@@ -2406,6 +2694,12 @@ export class MonitorView {
                                 const msg = String(packet.data.message);
                                 if (/retry|recover/i.test(msg)) {
                                     this._updateActiveStepStatus(`↻ ${msg.slice(0, 60)}`, 'error');
+                                } else if (msg.startsWith('🤖') || msg.startsWith('🔎')) {
+                                    // Sub-agent activity / review-gate progress. Without
+                                    // this, the Task feed goes SILENT while children work
+                                    // (the parent emits no thought/tool events) and the
+                                    // "…" thinking placeholder lingers.
+                                    this._updateActiveStepStatus(msg, 'tool');
                                 }
                             }
 
@@ -2576,10 +2870,10 @@ export class MonitorView {
         // Guard with _destroyed: destroy() closes this socket, and the resulting
         // onclose used to disable the steer box of the NEW view that had already
         // re-rendered over the same DOM ids.
-        this.socket.onerror = () => { if (!this._destroyed) disableSteering(); };
+        this.socket.onerror = () => { if (!this._destroyed && this.selectedTaskId === taskId) disableSteering(); };
         // Don't disable the steer box on a normal post-completion close — the user
         // can still type to continue the task.
-        this.socket.onclose = () => { if (!this._destroyed && !this._taskFinished) disableSteering(); };
+        this.socket.onclose = () => { if (!this._destroyed && this.selectedTaskId === taskId && !this._taskFinished) disableSteering(); };
     }
 
     async loadHistoricalLogs(taskId) {
@@ -2666,10 +2960,13 @@ export class MonitorView {
             // (then _stopPendingThinking removes the dots; the live feed takes over).
             const task = (this.tasks || []).find(t => t.id === this.selectedTaskId);
             if (task?.prompt) {
+                // Thinking dots only BEFORE the first live activity — once the
+                // feed is streaming, a tab-switch re-render must not resurrect them.
                 const running = task.status === 'running' || this.currentStatus === 'running';
+                const showThinking = running && !this._liveActivitySeen;
                 return `<div class="mresult-chat">`
                     + `<div class="mrc-row mrc-user"><div class="mrc-bubble">${escapeHtml(task.prompt)}</div></div>`
-                    + (running ? `<div class="mrc-row mrc-ai"><div class="mrc-bubble mrc-thinking"><span></span><span></span><span></span></div></div>` : '')
+                    + (showThinking ? `<div class="mrc-row mrc-ai"><div class="mrc-bubble mrc-thinking"><span></span><span></span><span></span></div></div>` : '')
                     + `</div>`;
             }
             return renderResultSummary(null);   // "no result yet" placeholder
@@ -2679,16 +2976,57 @@ export class MonitorView {
         return `<div class="mresult-chat">${runs.map(r => this._resultBubble(r)).join('')}</div>`;
     }
 
+    /**
+     * Group a file list by directory for display. Directories are shown
+     * workspace-relative when they live under the selected task's workspace.
+     * @param {Array<{path:string, action?:string}>} files
+     * @returns {Array<{dir:string, dirLabel:string, files:Array<{path,name,action}>}>}
+     */
+    _groupFilesByDir(files) {
+        const ws = String((this.tasks || []).find(t => t.id === this.selectedTaskId)?.workspace_path || '')
+            .replace(/\\/g, '/').replace(/\/+$/, '');
+        const groups = new Map();
+        for (const f of (files || [])) {
+            if (!f?.path) continue;
+            const norm = String(f.path).replace(/\\/g, '/');
+            const idx = norm.lastIndexOf('/');
+            const dir = idx >= 0 ? norm.slice(0, idx) : '(root)';
+            const name = idx >= 0 ? norm.slice(idx + 1) : norm;
+            let dirLabel = dir;
+            if (ws && (dir === ws || dir.toLowerCase() === ws.toLowerCase())) dirLabel = './';
+            else if (ws && dir.toLowerCase().startsWith(ws.toLowerCase() + '/')) dirLabel = dir.slice(ws.length + 1);
+            if (!groups.has(dir)) groups.set(dir, { dir, dirLabel, files: [] });
+            groups.get(dir).files.push({ path: f.path, name, action: f.action || '' });
+        }
+        return [...groups.values()].sort((a, b) => a.dirLabel.localeCompare(b.dirLabel));
+    }
+
+    /**
+     * Collapsible, directory-grouped file list for a result bubble.
+     * Small lists start open; big ones start collapsed to a one-line summary.
+     * The list body is height-capped and scrolls internally.
+     */
+    _filesDetailsHtml(files) {
+        const groups = this._groupFilesByDir(files);
+        const body = groups.map(g =>
+            `<div class="mrc-fg">
+                <div class="mrc-fg-dir" title="${escapeHtml(g.dir)}">📂 ${escapeHtml(g.dirLabel)} <span class="mrc-fg-n">${g.files.length}</span></div>
+                <div class="mrc-files">${g.files.map(f =>
+                    `<span class="mrc-file" data-open-path="${escapeHtml(f.path)}" title="${escapeHtml(f.path)}">📄 ${escapeHtml(f.name)}${f.action ? `<span class="mrc-file-act">${escapeHtml(f.action)}</span>` : ''}</span>`
+                ).join('')}</div>
+            </div>`).join('');
+        return `<details class="mrc-files-details"${files.length <= 8 ? ' open' : ''}>
+            <summary>📄 変更ファイル ${files.length} <span class="mrc-fd-hint">(クリックで開閉)</span></summary>
+            <div class="mrc-files-scroll">${body}</div>
+        </details>`;
+    }
+
     /** One request→answer exchange rendered as chat bubbles (used by the Result view). */
     _resultBubble(r) {
         const req = String(r?.request || '').trim();
         const ans = String(r?.answer || r?.summary || '').trim();
         const files = Array.isArray(r?.files) ? r.files : [];
-        const filesHtml = files.length
-            ? `<div class="mrc-files">${files.map(f =>
-                `<span class="mrc-file" data-open-path="${escapeHtml(f.path)}" title="${escapeHtml(f.path)}">📄 ${escapeHtml(String(f.path).split(/[\\/]/).pop())}${f.action ? `<span class="mrc-file-act">${escapeHtml(f.action)}</span>` : ''}</span>`
-              ).join('')}</div>`
-            : '';
+        const filesHtml = files.length ? this._filesDetailsHtml(files) : '';
         const s = r?.stats || {};
         const chips = [];
         if (s.steps) chips.push(`📍 ${s.steps} steps`);
@@ -2735,8 +3073,8 @@ export class MonitorView {
     }
 
     /** B: aggregate every file this task touched (across all turns), deduped, into
-     *  the sticky top bar so deliverables are reachable regardless of which turn
-     *  produced them. */
+     *  the sticky top bar. Collapsed to ONE line by default (a 179-file run used
+     *  to flood the whole view); click to expand a fixed-height scrollable table. */
     _renderFilesBar() {
         const bar = document.getElementById('result-files-bar');
         if (!bar) return;
@@ -2747,12 +3085,43 @@ export class MonitorView {
             }
         }
         if (seen.size === 0) { bar.style.display = 'none'; bar.innerHTML = ''; return; }
-        const chips = [...seen.entries()].map(([path, action]) =>
-            `<span class="mrc-file" data-open-path="${escapeHtml(path)}" title="${escapeHtml(path)}">📄 ${escapeHtml(String(path).split(/[\\/]/).pop())}${action ? `<span class="mrc-file-act">${escapeHtml(action)}</span>` : ''}</span>`
+
+        const open = !!this._filesBarOpen;
+        const entries = [...seen.entries()];
+        const fname = p => String(p).split(/[\\/]/).pop();
+        // Collapsed line shows a name preview that the CSS ellipsizes.
+        const preview = entries.map(([p]) => fname(p)).join(' · ');
+        // Directory-grouped rows: one header row per directory, files under it.
+        const groups = this._groupFilesByDir(entries.map(([path, action]) => ({ path, action })));
+        const rows = groups.map(g =>
+            `<tr class="mfb-dir-row"><td colspan="2" title="${escapeHtml(g.dir)}">📂 ${escapeHtml(g.dirLabel)} <span class="mfb-dir-n">(${g.files.length})</span></td></tr>` +
+            g.files.map(f => `
+            <tr data-open-path="${escapeHtml(f.path)}" title="${escapeHtml(f.path)}">
+                <td class="mfb-td-name">📄 ${escapeHtml(f.name)}</td>
+                <td>${f.action ? `<span class="mrc-file-act">${escapeHtml(f.action)}</span>` : ''}</td>
+            </tr>`).join('')
         ).join('');
-        bar.innerHTML = `<span class="mfb-label">📁 変更ファイル ${seen.size}</span>${chips}`;
-        bar.style.display = 'flex';
-        attachFileOpenHandlers(bar);
+
+        bar.innerHTML =
+            `<div class="mfb-header" id="mfb-header" title="${open ? '閉じる / Collapse' : '展開してファイル一覧を表示 / Expand file table'}">
+                <span class="mfb-toggle">${open ? '▼' : '▶'}</span>
+                <span class="mfb-label">📁 変更ファイル ${seen.size}</span>
+                <span class="mfb-preview">${escapeHtml(preview)}</span>
+            </div>` +
+            (open
+                ? `<div class="mfb-table-wrap">
+                    <table class="mfb-table">
+                        <thead><tr><th>File</th><th>Action</th></tr></thead>
+                        <tbody>${rows}</tbody>
+                    </table>
+                </div>`
+                : '');
+        bar.style.display = 'block';
+        bar.querySelector('#mfb-header')?.addEventListener('click', () => {
+            this._filesBarOpen = !this._filesBarOpen;
+            this._renderFilesBar();
+        });
+        if (open) attachFileOpenHandlers(bar);   // row click → open in OS default app
     }
 
     /** D: show/hide the "⏳ Working…" boundary above the live feed. */
@@ -2818,6 +3187,7 @@ export class MonitorView {
         el.dataset.lastText = text;
 
         el.style.display = 'flex';
+        this._liveActivitySeen = true; // gates re-creation of the "…" placeholder on re-renders
         this._setWorkingLabel(true);   // D: mark the live region as "working now"
         this._stopPendingThinking();   // real activity started → drop the "…" placeholder
         // C: only auto-follow if the user is already at the bottom. If they've
@@ -3297,11 +3667,27 @@ export class MonitorView {
         });
     }
 
-    _showChatModal(entries) {
+    async _showChatModal(entries) {
         const overlay = document.getElementById('mchat-modal-overlay');
         const body    = document.getElementById('mchat-modal-body');
         const title   = document.getElementById('mchat-modal-title');
         if (!overlay || !body) return;
+
+        // Slim entries (listing/replay strips history / system_prompt /
+        // sent_request / tools — the O(steps²) payload fix): lazily fetch the
+        // FULL entry for this modal only. Failures degrade to the slim view.
+        try {
+            await Promise.all((entries || []).map(async (en) => {
+                if (en?.request?._slim && Number.isFinite(en?._idx)
+                    && window.apiClient && this.selectedTaskId) {
+                    const full = await window.apiClient.getTaskLogEntry(this.selectedTaskId, en._idx);
+                    if (full?.data?.request) {
+                        en.request = full.data.request;
+                        if (full.data.response !== undefined) en.response = full.data.response;
+                    }
+                }
+            }));
+        } catch (_) { /* show the slim payload */ }
 
         if (title) {
             const count = entries.length;
@@ -3535,6 +3921,20 @@ export class MonitorView {
                 }
             });
         });
+
+        this._bindDetailEvents();
+        this._autoConnect();
+    }
+
+    /**
+     * Bind every handler that lives INSIDE the right detail panel. Called from
+     * init() AND from _switchTask() (in-place task switching replaces the
+     * panel's DOM, so element listeners die with it and must be rebound; the
+     * one window-level listener — Tauri drag-drop — is tracked in
+     * this._dragUnlisten and released before rebinding).
+     */
+    _bindDetailEvents() {
+        if (this._dragUnlisten) { try { this._dragUnlisten(); } catch (_) {} this._dragUnlisten = null; }
 
         // Abort button
         const abortBtn = document.getElementById('btn-abort-task');
@@ -3863,8 +4263,9 @@ export class MonitorView {
                 }
             });
 
-            // Native Tauri Drag and Drop handling
-            let dragUnlisten;
+            // Native Tauri Drag and Drop handling (window-level listener —
+            // tracked on the instance so _bindDetailEvents/destroy release it;
+            // it used to leak one listener per view instance).
             const setDragHL = (on) => { 
                 const box = steerInput.closest('.msteering-wrapper');
                 if (box) { box.style.outline = on ? '2px dashed var(--accent)' : ''; box.style.outlineOffset = on ? '-4px' : ''; }
@@ -3889,7 +4290,11 @@ export class MonitorView {
                     if (t === 'enter' || t === 'over') setDragHL(true);
                     else if (t === 'drop') { setDragHL(false); for (const p of (event.payload.paths || [])) readDroppedPath(p); }
                     else setDragHL(false);
-                }).then(un => { dragUnlisten = un; }).catch(() => {});
+                }).then(un => {
+                    // View already destroyed / rebound while awaiting → release now.
+                    if (this._destroyed || this._dragUnlisten) { try { un(); } catch (_) {} }
+                    else this._dragUnlisten = un;
+                }).catch(() => {});
             }).catch(() => {});
 
             const sendSteer = async () => {
@@ -3976,12 +4381,16 @@ export class MonitorView {
                 if (e.key === 'Enter' && e.ctrlKey) { e.preventDefault(); sendSteer(); }
             });
         }
+    }
 
-        // Auto-connect — verify the CURRENT status first. The left-list data can
-        // be up to TASKS_CACHE_MS stale; deciding live-vs-historical from it
-        // sometimes picked "historical" for a task that was actually RUNNING,
-        // leaving a frozen view with no updates until the user switched away and
-        // back (the reported bug). One cheap GET /tasks/:id makes it correct.
+    /**
+     * Auto-connect — verify the CURRENT status first. The left-list data can
+     * be up to TASKS_CACHE_MS stale; deciding live-vs-historical from it
+     * sometimes picked "historical" for a task that was actually RUNNING,
+     * leaving a frozen view with no updates until the user switched away and
+     * back (the reported bug). One cheap GET /tasks/:id makes it correct.
+     */
+    _autoConnect() {
         if (this.selectedTaskId) {
             const cached = this.tasks.find(t => t.id === this.selectedTaskId);
             if (cached) {
@@ -4275,6 +4684,10 @@ export class MonitorView {
         // the NEW task's panels (the "other task's result shows up" bug).
         this._destroyed = true;
         if (this.socket) { this.socket.close(); this.socket = null; }
+        if (this._replayFlushTimer) { clearTimeout(this._replayFlushTimer); this._replayFlushTimer = null; }
+        // Release the window-level Tauri drag-drop listener (previously leaked
+        // one per view instance).
+        if (this._dragUnlisten) { try { this._dragUnlisten(); } catch (_) {} this._dragUnlisten = null; }
     }
 }
 

@@ -204,6 +204,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/tasks", post(create_task).get(list_tasks))
         .route("/tasks/:id", get(get_task).delete(abort_task))
         .route("/tasks/:id/logs", get(get_task_logs))
+        .route("/tasks/:id/logs/:idx", get(get_task_log_entry))
         .route("/tasks/:id/steering", post(send_steering))
         .route("/tasks/:id/continue", post(continue_task))
         .route("/tasks/:id/history", delete(delete_task_history))
@@ -338,6 +339,36 @@ async fn get_task(
     }
 }
 
+/// Strip the QUADRATICALLY-growing fields from a log entry for LISTING /
+/// REPLAY payloads: each per-step CHAT entry embeds the FULL conversation
+/// history + system prompt + assembled request of that step, so a task's raw
+/// logs grow O(steps²) — the dominant "selecting a task is slow" cost (see
+/// docs/design/monitor-selection-performance.md). The stripped entry carries
+/// `data.request._slim = true` and `data._idx` so the client can fetch the
+/// FULL entry on demand via GET /tasks/:id/logs/:idx (CHAT detail modal).
+pub(crate) fn slim_log_entry(entry: &serde_json::Value, idx: usize) -> serde_json::Value {
+    let mut e = entry.clone();
+    if let Some(data) = e.get_mut("data") {
+        let mut slimmed = false;
+        if let Some(req) = data.get_mut("request") {
+            if let Some(obj) = req.as_object_mut() {
+                for k in ["history", "system_prompt", "sent_request", "tools"] {
+                    if obj.remove(k).is_some() {
+                        slimmed = true;
+                    }
+                }
+                if slimmed {
+                    obj.insert("_slim".to_string(), serde_json::Value::Bool(true));
+                }
+            }
+        }
+        if let Some(dobj) = data.as_object_mut() {
+            dobj.insert("_idx".to_string(), serde_json::json!(idx));
+        }
+    }
+    e
+}
+
 async fn get_task_logs(
     Path(id): Path<String>,
     State(state): State<AppState>,
@@ -357,10 +388,12 @@ async fn get_task_logs(
     }
 
     // If the task still has logs in memory (live or recently completed in this
-    // session), return them as-is. Otherwise it's a task loaded from disk after
-    // an app restart — load its logs from the sidecar file lazily.
+    // session), return them (slimmed). Otherwise it's a task loaded from disk
+    // after an app restart — load its logs from the sidecar file lazily.
     if !in_mem_logs.is_empty() {
-        return Ok(Json(in_mem_logs));
+        let slim: Vec<serde_json::Value> = in_mem_logs.iter().enumerate()
+            .map(|(i, l)| slim_log_entry(l, i)).collect();
+        return Ok(Json(slim));
     }
 
     let disk_logs = crate::load_task_logs(&state.history_path, &id);
@@ -375,7 +408,36 @@ async fn get_task_logs(
         }
     }
 
-    Ok(Json(disk_logs))
+    let slim: Vec<serde_json::Value> = disk_logs.iter().enumerate()
+        .map(|(i, l)| slim_log_entry(l, i)).collect();
+    Ok(Json(slim))
+}
+
+/// GET /tasks/:id/logs/:idx — the FULL (un-slimmed) log entry at index `idx`.
+/// Used by the Monitor's CHAT detail modal to lazily load the heavy request
+/// payload (history / system_prompt / sent_request / tools) for one step.
+async fn get_task_log_entry(
+    Path((id, idx)): Path<(String, usize)>,
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let (exists, entry) = {
+        let tasks = state.tasks.lock().unwrap();
+        match tasks.get(&id) {
+            Some(task) => (true, task.logs.get(idx).cloned()),
+            None => (false, None),
+        }
+    };
+    if !exists {
+        return Err((StatusCode::NOT_FOUND, "Task not found".to_string()));
+    }
+    if let Some(e) = entry {
+        return Ok(Json(e));
+    }
+    // Memory empty (restart) — read from the sidecar file.
+    let disk_logs = crate::load_task_logs(&state.history_path, &id);
+    disk_logs.get(idx).cloned()
+        .map(Json)
+        .ok_or((StatusCode::NOT_FOUND, format!("log index {} out of range", idx)))
 }
 
 async fn abort_task(

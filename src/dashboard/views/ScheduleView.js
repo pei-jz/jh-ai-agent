@@ -125,7 +125,7 @@ export class ScheduleView {
                     transition: background 0.12s;
                 }
                 .sch-item:hover { background: var(--bg-hover); }
-                .sch-item.selected { background: hsla(185,100%,55%,0.08); border-color: var(--accent); }
+                .sch-item.selected { background: var(--accent-glow-lg); border-color: var(--accent); }
                 .sch-item-top {
                     display: flex;
                     align-items: center;
@@ -243,7 +243,7 @@ export class ScheduleView {
                 .sch-type-btn.selected {
                     background: var(--accent);
                     border-color: var(--accent);
-                    color: #000;
+                    color: var(--text-inverse);
                 }
 
                 .sch-time-row { display: flex; align-items: center; gap: 12px; }
@@ -290,7 +290,7 @@ export class ScheduleView {
                 .sch-day-btn.selected {
                     background: var(--accent);
                     border-color: var(--accent);
-                    color: #000;
+                    color: var(--text-inverse);
                 }
                 .sch-toggle-row { display: flex; align-items: center; gap: 10px; }
                 .sch-toggle {

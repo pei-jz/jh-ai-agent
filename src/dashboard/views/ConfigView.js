@@ -3,6 +3,7 @@ import { listen } from '@tauri-apps/api/event';
 import { promptTemplateManager } from '../../modules/ai/PromptTemplateManager.js';
 import { skillManager } from '../../modules/ai/SkillManager.js';
 import { icon } from '../utils/icons.js';
+import { classifyCommand } from '../../modules/ai/tools/commandPolicy.js';
 
 export class ConfigView {
     constructor() {
@@ -117,6 +118,8 @@ export class ConfigView {
 
         const planModeEl = document.getElementById('cfg-plan-mode');
         if (planModeEl) this.config.plan_mode = planModeEl.value;
+        const subagentReviewEl = document.getElementById('cfg-subagent-review');
+        if (subagentReviewEl) this.config.subagent_review = subagentReviewEl.value;
         const fastModelEl = document.getElementById('cfg-fast-model');
         if (fastModelEl) this.config.fast_model_id = fastModelEl.value || null;
         const deepModelEl = document.getElementById('cfg-deep-model');
@@ -233,6 +236,7 @@ export class ConfigView {
             agent_temperature:           (this.config.agent_temperature ?? null),
             history_compress_ratio:      (this.config.history_compress_ratio ?? null),
             plan_mode:                   (this.config.plan_mode || 'auto'),
+            subagent_review:             (this.config.subagent_review || 'off'),
             fast_model_id:               (this.config.fast_model_id || null),
             deep_model_id:               (this.config.deep_model_id || null),
             prompt_templates:            promptTemplateManager.toConfigValue()
@@ -417,7 +421,59 @@ export class ConfigView {
                 </div>
             `;
         } else if (this.activeTab === 'general') {
+            // Collapsible category state (persisted; survives reRender/restart).
+            const secOpen = (key, def = false) => {
+                try {
+                    const s = JSON.parse(localStorage.getItem('jhai_settings_sections') || '{}');
+                    return (key in s) ? !!s[key] : def;
+                } catch (_) { return def; }
+            };
+            const sec = (key, def, titleHtml, bodyHtml) => `
+                <details class="cfg-sec" data-sec="${key}"${secOpen(key, def) ? ' open' : ''}>
+                    <summary>${titleHtml}<span class="cfg-sec-chev">▾</span></summary>
+                    <div class="cfg-sec-body">${bodyHtml}</div>
+                </details>`;
             tabContentHtml = `
+                <style>
+                    .cfg-sec {
+                        border: 1px solid var(--border);
+                        border-radius: var(--radius-md);
+                        background: var(--bg-secondary);
+                        margin-bottom: 10px;
+                    }
+                    .cfg-sec > summary {
+                        list-style: none;
+                        cursor: pointer; user-select: none;
+                        display: flex; align-items: center; gap: 7px;
+                        padding: 11px 14px;
+                        font-size: 12px; font-weight: 600;
+                        color: var(--accent);
+                        text-transform: uppercase; letter-spacing: 0.06em;
+                    }
+                    .cfg-sec > summary::-webkit-details-marker { display: none; }
+                    .cfg-sec > summary:hover { background: var(--bg-tertiary); border-radius: var(--radius-md); }
+                    .cfg-sec-chev { margin-left: auto; color: var(--text-tertiary); transition: transform 0.15s; }
+                    .cfg-sec:not([open]) .cfg-sec-chev { transform: rotate(-90deg); }
+                    .cfg-sec-body { padding: 4px 16px 14px; }
+                    .cfg-sec-hint { font-size: 11.5px; color: var(--text-tertiary); margin: 0 0 14px 0; line-height: 1.5; }
+                    .cfg-cmd-row {
+                        display: flex; align-items: center; gap: 8px;
+                        padding: 4px 10px; margin-bottom: 4px;
+                        border: 1px solid var(--border-light); border-radius: 5px;
+                        font-size: 12px; background: var(--bg-primary);
+                    }
+                    .cfg-cmd-row code {
+                        flex: 1; font-family: var(--font-mono, monospace);
+                        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+                        color: var(--text-primary);
+                    }
+                    .cfg-cmd-del {
+                        background: none; border: none; cursor: pointer;
+                        color: var(--text-tertiary); font-size: 13px; padding: 2px 4px;
+                    }
+                    .cfg-cmd-del:hover { color: var(--error); }
+                    .cfg-cmd-empty { color: var(--text-tertiary); font-size: 12px; padding: 2px 0 8px; }
+                </style>
                 <div class="card settings-card" style="height: 100%;">
                     <div class="card-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
                         <div>
@@ -427,15 +483,7 @@ export class ConfigView {
                         <button class="btn btn-primary" id="btn-save-config">${icon('save', 13)} Save Settings</button>
                     </div>
                     <div class="provider-card-fields">
-                        <div class="input-group">
-                            <label class="input-label">HTTP Proxy URL (Optional)</label>
-                            <input type="text" id="cfg-proxy-url" class="input" value="${this.config.proxy_url || ''}" placeholder="http://127.0.0.1:7890">
-                        </div>
-                        <div class="input-group">
-                            <label class="input-label">Tavily API Key (Search)</label>
-                            <input type="password" id="cfg-tavily-key" class="input" value="${this.config.tavily_api_key || ''}" placeholder="tvly-...">
-                            <p class="input-hint">Required for web_search capability. Get a free API key at <a href="https://tavily.com" target="_blank" style="color: var(--accent);">tavily.com</a>.</p>
-                        </div>
+                    ${sec('basic', true, `${icon('gear', 13)} Basic — Language &amp; Network`, `
                         <div class="input-group">
                             <label class="input-label">Agent Output Language</label>
                             <select id="cfg-output-language" class="input">
@@ -453,17 +501,17 @@ export class ConfigView {
                             </select>
                             <p class="input-hint">The language the agent uses for <strong>final responses to you</strong>. Injected automatically into the system prompt; internal reasoning may use any language. This is separate from the UI language.</p>
                         </div>
-                        <!-- ── Agent Safety Limits ────────────────────────────── -->
-                        <div style="margin-top: 8px; padding: 14px 16px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-secondary);">
-                            <div style="font-size: 12px; font-weight: 600; color: var(--accent); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 4px;">
-                                ${icon('shield', 13)} Agent Safety Limits
-                            </div>
-                            <p style="font-size: 11.5px; color: var(--text-tertiary); margin: 0 0 14px 0; line-height: 1.5;">
-                                Controls when the agent loop auto-stops or gets nudged.
-                                For every field below, <strong>0 (or empty) = disabled / unlimited</strong>.
-                                Recommended approach for difficult tasks: leave step cap off, set a token / wall-clock budget you can live with, keep loop detectors generous.
-                            </p>
-
+                        <div class="input-group">
+                            <label class="input-label">HTTP Proxy URL (Optional)</label>
+                            <input type="text" id="cfg-proxy-url" class="input" value="${this.config.proxy_url || ''}" placeholder="http://127.0.0.1:7890">
+                        </div>
+                        <div class="input-group">
+                            <label class="input-label">Tavily API Key (Search)</label>
+                            <input type="password" id="cfg-tavily-key" class="input" value="${this.config.tavily_api_key || ''}" placeholder="tvly-...">
+                            <p class="input-hint">Required for web_search capability. Get a free API key at <a href="https://tavily.com" target="_blank" style="color: var(--accent);">tavily.com</a>.</p>
+                        </div>
+                    `)}
+                    ${sec('behavior', false, `${icon('llm', 13)} Agent Behavior — Plan &amp; Models`, `
                             <div class="input-group" style="margin-bottom: 12px;">
                                 <label class="input-label">Plan-First Mode</label>
                                 <select id="cfg-plan-mode" class="input">
@@ -475,6 +523,20 @@ export class ConfigView {
                                     When active, the agent must <strong>investigate → propose a phased plan → get your approval</strong>
                                     before it can run any file-modifying tool. Investigation tools (read / grep / list) are always allowed.
                                     <strong>Auto</strong> only gates tasks it judges complex; simple edits run unblocked.
+                                </p>
+                            </div>
+
+                            <div class="input-group" style="margin-bottom: 12px;">
+                                <label class="input-label">Sub-agent Review (Experimental)</label>
+                                <select id="cfg-subagent-review" class="input">
+                                    <option value="off"${(this.config.subagent_review ?? 'off') === 'off' ? ' selected' : ''}>Off — no independent review (default)</option>
+                                    <option value="on"${(this.config.subagent_review ?? 'off') === 'on' ? ' selected' : ''}>On — review file changes before finish</option>
+                                </select>
+                                <p class="input-hint">
+                                    When on, finish_task first spawns an <strong>independent read-only reviewer sub-agent</strong>
+                                    (isolated context, fast-tier model) that checks this run's file changes against the request.
+                                    Blocking findings ([BUG] / criteria violations) are sent back to the agent ONCE for fixes; style
+                                    remarks never block. Adds roughly 10–20% tokens to tasks that modify files.
                                 </p>
                             </div>
 
@@ -501,7 +563,13 @@ export class ConfigView {
                                 </select>
                                 <p class="input-hint">A high-capability model for deep reasoning. Used for plan-required/complex tasks and auto-escalation on long runs (around mid-step). If both are unset, routing is disabled (always the active model).</p>
                             </div>
-
+                    `)}
+                    ${sec('safety', false, `${icon('shield', 13)} Agent Safety Limits`, `
+                            <p class="cfg-sec-hint">
+                                Controls when the agent loop auto-stops or gets nudged.
+                                For every field below, <strong>0 (or empty) = disabled / unlimited</strong>.
+                                Recommended approach for difficult tasks: leave step cap off, set a token / wall-clock budget you can live with, keep loop detectors generous.
+                            </p>
                             <div class="input-group" style="margin-bottom: 12px;">
                                 <label class="input-label">Max Agent Steps</label>
                                 <input type="number" id="cfg-max-steps" class="input" value="${this.config.max_steps ?? 0}" min="0" max="10000" placeholder="0 = unlimited">
@@ -564,19 +632,41 @@ export class ConfigView {
                                     <strong>Recommended: 0.5</strong>. Blank = default (0.5).
                                 </p>
                             </div>
-                        </div>
-                        <!-- ── Write-Allowed Directories ──────────────────────── -->
-                        <div style="margin-top: 8px; padding: 14px 16px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-secondary);">
-                            <div style="font-size: 12px; font-weight: 600; color: var(--accent); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 4px;">
-                                📂 Write-Allowed Directories
-                            </div>
-                            <p style="font-size: 11.5px; color: var(--text-tertiary); margin: 0 0 12px 0; line-height: 1.5;">
+                    `)}
+                    ${sec('paths', false, `${icon('folder', 13)} Write-Allowed Directories`, `
+                            <p class="cfg-sec-hint">
                                 One directory per line where the agent may <strong>write without approval</strong>.
                                 <code>write_file</code> / edits to paths under these (and their subfolders) skip the approval dialog.
                                 The current workspace and approved projects are always allowed. Writes outside this list still require approval.
                             </p>
                             <textarea id="cfg-write-allowed" class="input" rows="4" placeholder="C:\\work\\reports&#10;C:\\data\\output" style="font-family: var(--font-mono, monospace); font-size: 12px; resize: vertical;">${(this.config.write_allowed_paths || []).join('\n')}</textarea>
-                        </div>
+                    `)}
+                    ${sec('commands', false, `${icon('shield', 13)} Approved Commands — Auto-Approve`, `
+                            <p class="cfg-sec-hint">
+                                Command patterns the agent may run <strong>without an approval prompt</strong>
+                                (added via the approval dialog's "Always allow"; editable here — stored on this machine).
+                                A trailing <code>*</code> matches any arguments, e.g. <code>git status *</code>.
+                                <strong>Dangerous commands</strong> (delete / format / kill / force-push …) always require approval regardless of this list.
+                            </p>
+                            <div class="input-group">
+                                <label class="input-label">Approved command patterns</label>
+                                <div id="cfg-approved-cmds"></div>
+                                <div style="display:flex; gap:8px; margin-top:6px;">
+                                    <input type="text" id="cfg-approved-cmd-new" class="input" placeholder="e.g. npm run build *" style="flex:1; font-family: var(--font-mono, monospace); font-size:12px;">
+                                    <button class="btn btn-secondary" id="btn-approved-cmd-add" type="button">${icon('plus', 12)} Add</button>
+                                </div>
+                            </div>
+                            <div class="input-group" style="margin-top:14px;">
+                                <label class="input-label">Auto-approve workspaces</label>
+                                <p class="input-hint" style="margin-top:0;">Normal-risk commands run without prompts when the task's workspace is one of these. Dangerous commands still prompt.</p>
+                                <div id="cfg-autows"></div>
+                                <div style="display:flex; gap:8px; margin-top:6px;">
+                                    <input type="text" id="cfg-autows-new" class="input" placeholder="C:\\cusor_workspace\\MyProject" style="flex:1; font-family: var(--font-mono, monospace); font-size:12px;">
+                                    <button class="btn btn-secondary" id="btn-autows-add" type="button">${icon('plus', 12)} Add</button>
+                                </div>
+                            </div>
+                    `)}
+                    ${sec('logging', false, `${icon('template', 13)} Logging &amp; Storage`, `
                         <div class="input-group">
                             <div class="toggle-wrap" id="cfg-logging-enabled-wrap">
                                 <div class="toggle ${this.config.logging_enabled ? 'active' : ''}" id="cfg-logging-enabled-toggle"></div>
@@ -587,10 +677,10 @@ export class ConfigView {
                             <label class="input-label">Log Directory</label>
                             <div style="display: flex; gap: 8px;">
                                 <input type="text" id="cfg-log-dir" class="input" value="${this.config.log_dir || ''}" placeholder="C:\\path\\to\\logs" style="flex: 1;">
-                                <button class="btn btn-secondary" id="btn-select-log-dir" style="padding: 0 12px; display: flex; align-items: center; justify-content: center; height: 36px; border: 1px solid var(--border);" type="button">📁 Select</button>
+                                <button class="btn btn-secondary" id="btn-select-log-dir" style="padding: 0 12px; display: flex; align-items: center; justify-content: center; height: 36px; border: 1px solid var(--border);" type="button">${icon('folder', 13)} Select</button>
                             </div>
                         </div>
-                        <div class="input-group" style="border-top: 1px solid var(--border-light); padding-top: 16px; margin-top: 16px;">
+                        <div class="input-group" style="margin-top: 8px;">
                             <label class="input-label">🗄 Storage Usage</label>
                             <div id="cfg-storage-usage" style="font-size:12px;color:var(--text-secondary);background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px;line-height:1.7;">
                                 <em style="color:var(--text-tertiary)">Press "Refresh" to show</em>
@@ -602,7 +692,9 @@ export class ConfigView {
                             </div>
                             <p class="input-hint">LLM-call inspection and task history (search, filter, delete) are consolidated in <strong>Monitor</strong>.</p>
                         </div>
-                        <div class="input-group" style="border-top: 1px solid var(--border-light); padding-top: 16px; margin-top: 16px;">
+                    `)}
+                    ${sec('connection', false, `${icon('plug', 13)} Connection — Token &amp; Export`, `
+                        <div class="input-group">
                             <label class="input-label">J.H AI Agent Connection Token (API Key)</label>
                             <div style="display: flex; gap: 8px;">
                                 <input type="text" id="cfg-connection-token" class="input" value="${window.apiClient ? window.apiClient.token : ''}" readonly style="flex: 1; font-family: var(--font-mono); background: var(--bg-primary); cursor: default;">
@@ -626,6 +718,7 @@ export class ConfigView {
                                 <div id="export-connection-status" style="margin-top: 8px; font-size: 11.5px;"></div>
                             </div>
                         </div>
+                    `)}
                     </div>
                 </div>
             `;
@@ -777,6 +870,96 @@ export class ConfigView {
         }
     }
 
+    // ── Approved commands / auto-approve workspaces (localStorage-backed) ──
+    // Same stores the Monitor's approval dialog writes ("Always allow" /
+    // per-workspace auto-approve): jhai_approved_commands (patterns) and
+    // jhai_autoapprove_workspaces (paths). Editable here so the user doesn't
+    // need a pending approval card to manage them.
+
+    _lsList(key) {
+        try {
+            const a = JSON.parse(localStorage.getItem(key) || '[]');
+            return Array.isArray(a) ? a.map(String) : [];
+        } catch (_) { return []; }
+    }
+
+    _lsSave(key, arr) {
+        try { localStorage.setItem(key, JSON.stringify(arr)); } catch (_) {}
+    }
+
+    _renderApprovedCmdLists() {
+        const rows = (list, key) => list.length
+            ? list.map(v => `
+                <div class="cfg-cmd-row">
+                    <code title="${escapeHtml(v)}">${escapeHtml(v)}</code>
+                    <button class="cfg-cmd-del" data-k="${key}" data-val="${escapeHtml(v)}" title="Remove" type="button">✕</button>
+                </div>`).join('')
+            : '<div class="cfg-cmd-empty">(none)</div>';
+        const cmds = document.getElementById('cfg-approved-cmds');
+        if (cmds) cmds.innerHTML = rows(this._lsList('jhai_approved_commands'), 'jhai_approved_commands');
+        const wss = document.getElementById('cfg-autows');
+        if (wss) wss.innerHTML = rows(this._lsList('jhai_autoapprove_workspaces'), 'jhai_autoapprove_workspaces');
+    }
+
+    _initApprovedCommandsSection() {
+        const cmdsEl = document.getElementById('cfg-approved-cmds');
+        if (!cmdsEl) return;   // not on the General tab
+        this._renderApprovedCmdLists();
+
+        // Delegated removal on both lists.
+        const onDel = (e) => {
+            const btn = e.target.closest('.cfg-cmd-del');
+            if (!btn) return;
+            const key = btn.getAttribute('data-k');
+            const val = btn.getAttribute('data-val');
+            this._lsSave(key, this._lsList(key).filter(v => v !== val));
+            this._renderApprovedCmdLists();
+        };
+        cmdsEl.addEventListener('click', onDel);
+        document.getElementById('cfg-autows')?.addEventListener('click', onDel);
+
+        // Add a command pattern (guard the hard safety boundary: dangerous
+        // commands can never be whitelisted, and a bare "*" is meaningless).
+        const addCmd = () => {
+            const input = document.getElementById('cfg-approved-cmd-new');
+            const pat = (input?.value || '').trim();
+            if (!pat) return;
+            if (pat === '*' || pat === '* *') {
+                alert('A bare "*" would approve every command — not allowed.');
+                return;
+            }
+            if (classifyCommand(pat.replace(/\s*\*\s*$/, '')) === 'dangerous') {
+                alert('This pattern matches a DANGEROUS command (delete / format / kill / force-push …).\nDangerous commands always require approval and cannot be whitelisted.');
+                return;
+            }
+            const list = this._lsList('jhai_approved_commands');
+            if (!list.includes(pat)) list.push(pat);
+            this._lsSave('jhai_approved_commands', list);
+            if (input) input.value = '';
+            this._renderApprovedCmdLists();
+        };
+        document.getElementById('btn-approved-cmd-add')?.addEventListener('click', addCmd);
+        document.getElementById('cfg-approved-cmd-new')?.addEventListener('keydown', e => {
+            if (e.key === 'Enter') { e.preventDefault(); addCmd(); }
+        });
+
+        // Add an auto-approve workspace path.
+        const addWs = () => {
+            const input = document.getElementById('cfg-autows-new');
+            const ws = (input?.value || '').trim();
+            if (!ws) return;
+            const list = this._lsList('jhai_autoapprove_workspaces');
+            if (!list.includes(ws)) list.push(ws);
+            this._lsSave('jhai_autoapprove_workspaces', list);
+            if (input) input.value = '';
+            this._renderApprovedCmdLists();
+        };
+        document.getElementById('btn-autows-add')?.addEventListener('click', addWs);
+        document.getElementById('cfg-autows-new')?.addEventListener('keydown', e => {
+            if (e.key === 'Enter') { e.preventDefault(); addWs(); }
+        });
+    }
+
     async render() {
         if (!this.loaded) {
             await this.loadConfig();
@@ -785,6 +968,21 @@ export class ConfigView {
     }
 
     init() {
+        // Persist the General tab's collapsible-section state (open/closed per
+        // category) so it survives reRender and app restarts.
+        document.querySelectorAll('.cfg-sec').forEach(d => {
+            d.addEventListener('toggle', () => {
+                try {
+                    const s = JSON.parse(localStorage.getItem('jhai_settings_sections') || '{}');
+                    s[d.getAttribute('data-sec')] = d.open;
+                    localStorage.setItem('jhai_settings_sections', JSON.stringify(s));
+                } catch (_) { /* best-effort */ }
+            });
+        });
+
+        // Approved-commands / auto-approve-workspaces editors (General tab).
+        this._initApprovedCommandsSection();
+
         // Toggle password show/hide
         const passwordToggles = document.querySelectorAll('.btn-toggle-password');
         passwordToggles.forEach(btn => {

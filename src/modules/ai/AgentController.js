@@ -12,6 +12,11 @@ import {
 import { detectCycle } from './agent/LoopDetector.js';
 import { normalizeSafetyLimits } from './agent/SafetyLimits.js';
 import { buildRecoveryHint } from './agent/RecoveryHints.js';
+import {
+    resolveRole, composeSubtaskPrompt, buildReviewBrief, parseReviewVerdict, clipText, childTokenBudget,
+    scopesOverlap, WRITE_ENFORCED_TOOLS, TESTER_WRITE_PATTERNS,
+    SUBTASK_MAX_PARALLEL, SUBTASK_MAX_PER_RUN, SUBTASK_REPORT_MAX_CHARS, SUBTASK_MAX_STEPS_CAP
+} from './agent/SubagentRoles.js';
 
 export class AgentController {
     constructor() {
@@ -106,6 +111,21 @@ export class AgentController {
         this._lastResultEnvelope = null;
         // One-time soft nudge if finish_task is called with no deliverable (reset per run).
         this._deliverableNudged = false;
+        // ── Sub-agent engine per-run state ────────────────────────────
+        // _isSubagent is set by the PARENT before child.run() — children never
+        // spawn further sub-agents and skip the review gate.
+        this._reviewDone = false;
+        this._subtaskCount = 0;
+        this._subtaskActive = 0;
+        // Tokens consumed by sub-agents (prompt+completion) — counted toward
+        // the PARENT's per-run token budget so delegation can't bypass the cap.
+        this._subtaskTokens = 0;
+        // Mirror of cumulativeTokens (parent's own LLM spend) readable from
+        // _runSubtask, for computing the remaining budget to hand to children.
+        this._spentTokens = 0;
+        // Write-ownership registry (Step 3): label → active write claim
+        // (scope array). Children whose claims overlap are SERIALIZED.
+        this._writeClaims = new Map();
 
         // ── Expand Intent/Recipe (behavior.intent) into behavior fields ──
         // A named AI action declared by the calling app. Inline-object form
@@ -122,6 +142,12 @@ export class AgentController {
         // For each field: 0 / null / undefined / non-numeric is treated as
         // "disabled / unlimited". Any positive integer is the hard threshold.
         const safety = await this._loadSafetyLimits();
+        // Per-run token-budget override (used by the sub-agent engine to hand a
+        // child a SLICE of the parent's budget; also available to REST callers).
+        if (this.behaviorOverrides && Number.isFinite(this.behaviorOverrides.token_budget)
+            && this.behaviorOverrides.token_budget > 0) {
+            safety.tokenBudget = Math.floor(this.behaviorOverrides.token_budget);
+        }
         // Apply the configurable history-budget ratio to the compaction logic.
         conversationMemory.setBudgetConfig({ ratio: safety.historyBudgetRatio });
         // Low temperature for agent edits (fewer transcription typos). Applied only
@@ -262,6 +288,12 @@ export class AgentController {
                 includeTaskTools: this._looksComplex(prompt),
             });
         }
+        // Write scope (Step 3): hard-restrict file-mutating tools to the given
+        // paths/globs. Set for sub-agents by _runSubtask; also honored for REST
+        // callers that pass behavior.write_scope.
+        if (Array.isArray(this.behaviorOverrides?.write_scope) && this.behaviorOverrides.write_scope.length > 0) {
+            this.toolExecutor.setWriteScope(this.behaviorOverrides.write_scope);
+        }
         // Apply MCP server filter (if any) — restricts which MCP servers contribute tools.
         if (this.behaviorOverrides && Array.isArray(this.behaviorOverrides.mcp_servers)) {
             this.toolExecutor.setMcpServerFilter(this.behaviorOverrides.mcp_servers);
@@ -280,6 +312,16 @@ export class AgentController {
         // External app callers keep the old behavior — their tool set is already
         // scoped by the intent (enabled_tools / mcp_servers).
         this.toolExecutor.setMcpRelevanceQuery(isExternalCaller ? null : prompt);
+
+        // ── run_subtask engine (docs/design/subagent-architecture.md) ──────
+        // Inject the sub-agent runner so the generic run_subtask tool works.
+        // Parent runs only: children must not recurse (their allowlists exclude
+        // run_subtask AND no runner is attached, so the tool isn't even
+        // presented to them).
+        if (!this._isSubagent) {
+            this.toolExecutor.setSubtaskRunner((args) =>
+                this._runSubtask(args, { workspacePath, onAgentStatus, onConfirm, onLog, abortSignal, safety }));
+        }
 
         // Bind tool executor event forwarding
         this.toolExecutor.onToolEvent = (event, data) => {
@@ -368,18 +410,21 @@ export class AgentController {
             }
 
             // ── Token budget enforcement (cumulativeTokens updated below per LLM call) ──
+            // Sub-agent consumption (_subtaskTokens) counts toward the same cap —
+            // delegation must not be a budget bypass.
             if (safety.tokenBudget > 0) {
-                if (cumulativeTokens >= safety.tokenBudget) {
+                const spent = cumulativeTokens + this._subtaskTokens;
+                if (spent >= safety.tokenBudget) {
                     onAgentStatus?.({ event: 'status', status: 'running', message: `Token budget (${safety.tokenBudget.toLocaleString()}) reached — auto-stopping.` });
                     finalResponse = (finalResponse || '') +
-                        `\n\n(注意: 累積トークン数が予算 ${safety.tokenBudget.toLocaleString()} に到達したため、自動停止しました。Settings → General → Token Budget で調整できます。)`;
+                        `\n\n(注意: 累積トークン数（サブエージェント分含む）が予算 ${safety.tokenBudget.toLocaleString()} に到達したため、自動停止しました。Settings → General → Token Budget で調整できます。)`;
                     break;
                 }
-                if (cumulativeTokens >= safety.tokenBudget * 0.8 && !tokenBudgetWarned) {
+                if (spent >= safety.tokenBudget * 0.8 && !tokenBudgetWarned) {
                     tokenBudgetWarned = true;
                     history.push({
                         role: 'user',
-                        content: `[System Notice] You've consumed ${cumulativeTokens.toLocaleString()} of ${safety.tokenBudget.toLocaleString()} budgeted tokens (80%). Please prioritize: call \`finish_task\` if the goal is essentially achieved, otherwise summarize progress so the user can extend the budget if needed.`
+                        content: `[System Notice] You've consumed ${spent.toLocaleString()} of ${safety.tokenBudget.toLocaleString()} budgeted tokens (80%, sub-agents included). Please prioritize: call \`finish_task\` if the goal is essentially achieved, otherwise summarize progress so the user can extend the budget if needed.`
                     });
                 }
             }
@@ -618,6 +663,7 @@ export class AgentController {
             cumulativeTokens +=
                 (genResult.usage?.prompt_tokens || 0) +
                 (genResult.usage?.completion_tokens || 0);
+            this._spentTokens = cumulativeTokens;
 
             onAgentStatus?.({
                 event: 'token_usage',
@@ -1060,6 +1106,39 @@ export class AgentController {
                         continue;
                     }
 
+                    // ── Step-1 sub-agent review gate (config: subagent_review) ──
+                    // ONE independent review of this run's file changes before the
+                    // finish is accepted. The reviewer is an isolated read-only
+                    // sub-agent; only [CRITERIA-VIOLATION]/[BUG] findings bounce the
+                    // task back — [STYLE] never blocks. Single round (per design:
+                    // bounded loops; the parent, not the reviewer, is the arbiter).
+                    if (!this._isSubagent && !this._reviewDone && safety.subagentReview === 'on'
+                        && (this.toolExecutor.getModifiedFiles()?.length > 0)) {
+                        this._reviewDone = true;
+                        onAgentStatus?.({ event: 'status', status: 'running', message: '🔎 独立レビューを実行中… / Independent sub-agent review…' });
+                        const reviewBrief = buildReviewBrief({
+                            goal: prompt,
+                            summary: ftSummaryArg || richThought,
+                            files: this.toolExecutor.getModifiedFiles().map(f => f.path),
+                        });
+                        const reportText = await this._runSubtask(
+                            { role: 'reviewer', brief: reviewBrief },
+                            { workspacePath, onAgentStatus, onConfirm, onLog, abortSignal, safety }
+                        );
+                        const { verdict, findings } = parseReviewVerdict(String(reportText || ''));
+                        if (verdict === 'fail') {
+                            this.toolExecutor.resetTaskCompleted?.();
+                            onAgentStatus?.({ event: 'status', status: 'running', message: '🔎 レビュー指摘あり — 修正のため差し戻し / Review FAIL — sent back for fixes' });
+                            history.push({ role: 'assistant', content: response });
+                            history.push({
+                                role: 'user',
+                                content: `[Sub-agent Review — FAIL] An independent reviewer inspected your changes and found blocking issues. Fix ONLY the [CRITERIA-VIOLATION] and [BUG] findings below ([STYLE] items are informational — do not act on them), verify, then call finish_task again.\n\n${clipText(findings, 6000)}`
+                            });
+                            continue;
+                        }
+                        onAgentStatus?.({ event: 'status', status: 'running', message: verdict === 'pass' ? '🔎 レビューPASS ✅' : '🔎 レビュー結果不明 — 完了を続行 (reviewer output had no VERDICT)' });
+                    }
+
                     // Longest substantive candidate wins (reports are long; the
                     // OBSERVE/PLAN/CALL thought is short meta-text).
                     finalResponse = [ftSummaryArg, richThought]
@@ -1491,21 +1570,43 @@ ${String(finalResponse || '').slice(0, 2000)}`;
                     }
 
                     if (result && result.toolCalls && result.toolCalls.length > 0) {
-                        // Format tool calls, throwing syntax error if argument parse fails even after repair
-                        const toolCallsFormatted = result.toolCalls.map(tc => {
-                            let args = tc.function.arguments;
-                            if (typeof args === 'string') {
-                                try {
-                                    args = this._safeParseJSON(args);
-                                } catch (parseErr) {
-                                    throw new SyntaxError(`JSON parsing failed for tool '${tc.function.name}': ${parseErr.message}`);
+                        // Format tool calls DEFENSIVELY — provider stream assembly can
+                        // yield imperfect entries:
+                        //   • entry without `function` (or name at top level)  → tolerate/drop
+                        //   • arguments as EMPTY string (deltas lost / no-arg call) → {}
+                        //     (the tool itself then returns a proper "missing param"
+                        //     error the model can react to — far cheaper than dumping
+                        //     the whole turn to JSON-mode fallback)
+                        // Genuinely malformed JSON still raises SyntaxError → the
+                        // self-correction retry below.
+                        const toolCallsFormatted = result.toolCalls
+                            .filter(tc => tc && (tc.function?.name || tc.name))
+                            .map(tc => {
+                                const fn = tc.function || tc;   // some providers flatten name/arguments
+                                let args = fn.arguments ?? fn.args ?? {};
+                                if (typeof args === 'string') {
+                                    const s = args.trim();
+                                    if (s === '') {
+                                        args = {};
+                                    } else {
+                                        try {
+                                            args = this._safeParseJSON(s);
+                                        } catch (parseErr) {
+                                            throw new SyntaxError(`JSON parsing failed for tool '${fn.name}': ${parseErr.message}`);
+                                        }
+                                    }
                                 }
-                            }
-                            return {
-                                name: tc.function.name,
-                                args: args
-                            };
-                        });
+                                return {
+                                    name: fn.name,
+                                    args: args
+                                };
+                            });
+                        // Every entry was malformed → treat as a native failure and
+                        // fall back to JSON mode rather than proceeding with nothing.
+                        if (toolCallsFormatted.length === 0) {
+                            nativeFailed = true;
+                            break;
+                        }
                         
                         // Strip <thought>…</thought> XML wrapper that the model may output
                         // (per protocol instruction), keeping only the inner OBSERVE/PLAN/CALL text.
@@ -1902,6 +2003,150 @@ ${String(finalResponse || '').slice(0, 2000)}`;
             b.extra_instructions = [b.extra_instructions, ...extra]
                 .filter(s => typeof s === 'string' && s.trim())
                 .join('\n\n');
+        }
+    }
+
+    /**
+     * run_subtask engine — spawn an ISOLATED child AgentController and return
+     * only its final report (string) to the parent's tool result.
+     *
+     * Token-explosion guards (design doc): the child gets ONLY the brief (no
+     * parent history), returns only a clipped report, defaults to the FAST
+     * model tier, and is bounded by max-steps + parallel/per-run caps.
+     * Consistency guards: children can't recurse, can't ask_user (persona +
+     * status filtering), and role tool-allowlists are enforced in code.
+     */
+    async _runSubtask(args, { workspacePath, onAgentStatus, onConfirm, onLog, abortSignal, safety }) {
+        const brief = String(args?.brief || '').trim();
+        if (!brief) {
+            return 'Error: run_subtask requires a non-empty "brief" STRING (self-contained: goal, scope files/dirs, acceptance criteria, expected report format). ' +
+                'One run_subtask call = ONE sub-agent; to launch several in parallel, make MULTIPLE run_subtask calls in the same response. ' +
+                'Example args: {"brief":"Goal: document module X.\\nScope: read src/x/**, write docs/x.md only.\\nCriteria: covers every exported function.\\nOutput: the doc file + a short report.","role":"generic","tools":null,"max_steps":null,"model":null,"write_scope":["docs/x.md"]}';
+        }
+        if (this._subtaskCount >= SUBTASK_MAX_PER_RUN) {
+            return `Error: sub-task limit reached (${SUBTASK_MAX_PER_RUN} per run). Do the remaining work yourself.`;
+        }
+        this._subtaskCount++;
+
+        const roleDef = resolveRole(args?.role);
+        // Tool allowlist: explicit args.tools > role preset > all built-ins.
+        // run_subtask itself is ALWAYS stripped (no recursion), as is ask_user
+        // (a sub-agent has no human to wait on; the allowlist re-adds it
+        // implicitly for termination tools, so also strip at definition level
+        // via the persona instruction — belt and suspenders is not needed here
+        // because setToolAllowlist force-includes ask_user; the persona forbids
+        // its use and the parent treats a 'waiting' child as a finished report).
+        let tools = (Array.isArray(args?.tools) && args.tools.length > 0)
+            ? args.tools.slice()
+            : (roleDef.tools ? roleDef.tools.slice()
+                : this.toolExecutor.toolDefinitions.map(t => t.name));
+        tools = tools.filter(n => n !== 'run_subtask');
+
+        const maxSteps = Math.max(1, Math.min(SUBTASK_MAX_STEPS_CAP,
+            Number(args?.max_steps) > 0 ? Number(args.max_steps) : roleDef.maxIterations));
+        const tier = (args?.model === 'deep' || args?.model === 'fast') ? args.model : roleDef.tier;
+
+        // ── Write scope + ownership claim (Step 3) ─────────────────────────
+        // Effective scope: explicit args.write_scope > tester's test-file default
+        // > null (whole workspace). A child WITH edit tools always registers a
+        // claim (unscoped = claims everything); children whose claims overlap
+        // are serialized below, so parallel edits can never touch the same files.
+        const hasEditTools = tools.some(n => WRITE_ENFORCED_TOOLS.has(n));
+        const writeScope = (Array.isArray(args?.write_scope) && args.write_scope.length > 0)
+            ? args.write_scope.map(String)
+            : (roleDef.id === 'tester' ? TESTER_WRITE_PATTERNS.slice() : null);
+        const claim = hasEditTools ? (writeScope || ['**']) : null;
+
+        const label = `sub:${roleDef.id}#${this._subtaskCount}`;
+        onAgentStatus?.({ event: 'status', status: 'running', message: `🤖 [${label}] 起動: ${brief.slice(0, 100).replace(/\s+/g, ' ')}…` });
+
+        // Parallelism cap + write-ownership wait — cheap polling semaphore
+        // (parallel calls arrive via Promise.all from the tool-execution step).
+        // Overlapping write claims SERIALIZE: the child waits for the conflicting
+        // sibling to finish instead of failing (children are step-capped, so the
+        // wait always resolves).
+        let waitNotified = false;
+        const claimConflicts = () => claim
+            && [...this._writeClaims.values()].some(c => scopesOverlap(claim, c));
+        while (this._subtaskActive >= SUBTASK_MAX_PARALLEL || claimConflicts()) {
+            if (abortSignal?.aborted) return 'Error: task aborted.';
+            if (!waitNotified && claimConflicts()) {
+                waitNotified = true;
+                onAgentStatus?.({ event: 'status', status: 'running', message: `🤖 [${label}] ⏳ 書き込み範囲が他のサブタスクと重複 — 先行の完了を待機 (serialized)` });
+            }
+            await new Promise(r => setTimeout(r, 250));
+        }
+        this._subtaskActive++;
+        if (claim) this._writeClaims.set(label, claim);
+
+        // Budget slice: when the parent runs under a token budget, each child
+        // gets a slice of it (childTokenBudget: 20%, floor 5000, capped by the
+        // unspent remainder) — and child spend feeds back into the parent's cap
+        // via _subtaskTokens. No parent budget → child inherits the global config.
+        const budgetSlice = childTokenBudget(
+            safety?.tokenBudget || 0,
+            this._spentTokens + this._subtaskTokens
+        );
+
+        const child = new AgentController();
+        child.caller = 'Subagent';
+        child._isSubagent = true;
+        child.behaviorOverrides = {
+            enabled_tools: tools,
+            max_iterations: maxSteps,
+            extra_instructions: roleDef.persona
+                + (writeScope
+                    ? `\n\n## Write scope (ENFORCED)\nYou may only create/modify/delete files matching: ${writeScope.join(', ')}. Writes outside this scope are blocked by the system — do not attempt them.`
+                    : ''),
+            intent: { tier },                      // fast/deep model routing
+            ...(budgetSlice > 0 ? { token_budget: budgetSlice } : {}),
+            ...(writeScope ? { write_scope: writeScope } : {}),
+        };
+
+        try {
+            const result = await child.run(
+                composeSubtaskPrompt(brief, roleDef),
+                workspacePath,
+                () => {},   // child stream chunks are not surfaced to the parent UI
+                (payload) => {
+                    if (!payload) return;
+                    // Cost accounting: forward token_usage so the task totals
+                    // include the child — but strip the context gauge fields so
+                    // the header keeps showing the PARENT's context occupancy.
+                    if (payload.event === 'token_usage') {
+                        // Count child spend toward the parent's token budget.
+                        this._subtaskTokens += (payload.prompt_tokens || 0) + (payload.completion_tokens || 0);
+                        const { context_used, context_limit, ...usage } = payload;
+                        onAgentStatus?.(usage);
+                        return;
+                    }
+                    // Compact progress lines: which tool the child is running.
+                    if (payload.event === 'tool_call') {
+                        onAgentStatus?.({ event: 'status', status: 'running', message: `🤖 [${label}] ⚙ ${payload.name}` });
+                    }
+                },
+                onConfirm,      // approvals (e.g. non-safe commands) still reach the user
+                null, [],       // context isolation: no clientContext, no chatContext
+                onLog ? (entry) => onLog({ ...entry, stepLabel: `🤖[${label}] ${entry?.stepLabel || ''}` }) : null,
+                abortSignal,
+                '', []
+            );
+            const report = clipText(String(result?.response || '').trim() || '(the sub-agent produced no report)', SUBTASK_REPORT_MAX_CHARS);
+            const files = (result?.modifiedFiles || []).map(f => f.path);
+            // Merge child edits into the parent's session record so the Result
+            // view's file list / review gate cover sub-agent changes too.
+            for (const f of (result?.modifiedFiles || [])) {
+                try { this.toolExecutor._recordModification?.(f.path, f.original, f.current); } catch (_) {}
+            }
+            onAgentStatus?.({ event: 'status', status: 'running', message: `🤖 [${label}] 完了 ✅` });
+            return `[Sub-agent report — role: ${roleDef.id}]\n${report}` +
+                (files.length ? `\n\nFiles modified by the sub-agent:\n${files.map(p => '- ' + p).join('\n')}` : '');
+        } catch (e) {
+            onAgentStatus?.({ event: 'status', status: 'running', message: `🤖 [${label}] 失敗: ${e?.message || e}` });
+            return `Error: sub-task (${roleDef.id}) failed: ${e?.message || e}`;
+        } finally {
+            this._subtaskActive--;
+            this._writeClaims.delete(label);   // release the write-ownership claim
         }
     }
 

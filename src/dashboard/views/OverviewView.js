@@ -65,7 +65,7 @@ export class OverviewView {
                 .dash-stats { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; flex-shrink:0; }
                 .dstat { background:var(--bg-secondary); border:1px solid var(--border); border-radius:var(--radius-lg);
                     padding:12px 16px; display:flex; flex-direction:column; gap:2px; }
-                .dstat.alert { border-color:var(--accent); background:hsla(185,100%,55%,0.06); }
+                .dstat.alert { border-color:var(--accent); background:var(--accent-glow-lg); }
                 .dstat-label { font-size:11px; color:var(--text-tertiary); text-transform:uppercase; letter-spacing:0.04em; font-weight:600; }
                 .dstat-val { font-size:26px; font-weight:700; color:var(--text-primary); font-variant-numeric:tabular-nums; line-height:1.1; }
                 .dstat-sub { font-size:11px; color:var(--text-secondary); }
