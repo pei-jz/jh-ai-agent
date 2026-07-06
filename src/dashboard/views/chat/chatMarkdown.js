@@ -5,6 +5,41 @@
 // they're unit-tested directly (see chatMarkdown.test.js).
 
 export function ensureChatMarkdownStyles() {
+    // Global, idempotent Copy-button handler. Markdown from this module is
+    // rendered in ChatView, the Monitor result view AND the spotlight overlay;
+    // previously only ChatView bound a handler, so the Copy button silently
+    // did nothing everywhere else. Document-level delegation covers them all.
+    if (!document._jhCopyCodeBound) {
+        document._jhCopyCodeBound = true;
+        document.addEventListener('click', (e) => {
+            const btn = e.target.closest('.btn-copy-code');
+            if (!btn) return;
+            const codeEl = btn.closest('.code-block-wrapper')?.querySelector('pre');
+            const text = codeEl ? codeEl.innerText : '';
+            const done = () => {
+                btn.textContent = 'Copied!';
+                setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
+            };
+            const fallback = () => {
+                try {
+                    const ta = document.createElement('textarea');
+                    ta.value = text;
+                    ta.style.cssText = 'position:fixed;opacity:0;';
+                    document.body.appendChild(ta);
+                    ta.select();
+                    document.execCommand('copy');
+                    document.body.removeChild(ta);
+                    done();
+                } catch (_) { /* clipboard unavailable */ }
+            };
+            if (navigator.clipboard?.writeText) {
+                navigator.clipboard.writeText(text).then(done).catch(fallback);
+            } else {
+                fallback();
+            }
+        });
+    }
+
     if (document.getElementById('chat-markdown-styles')) return;
     const style = document.createElement('style');
     style.id = 'chat-markdown-styles';
@@ -30,7 +65,7 @@ export function ensureChatMarkdownStyles() {
         .chat-md table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 13px; }
         .chat-md th, .chat-md td { border: 1px solid var(--border); padding: 8px 10px; text-align: left; }
         .chat-md th { background: var(--bg-tertiary); font-weight: 600; color: var(--accent); }
-        .chat-md tr:nth-child(even) { background: hsla(220, 18%, 15%, 0.3); }
+        .chat-md tr:nth-child(even) { background: var(--bg-tertiary); }
 
         /* Code Blocks */
         .chat-md .inline-code {
@@ -59,17 +94,19 @@ export function ensureChatMarkdownStyles() {
             margin: 0; padding: 12px; background: var(--bg-primary); overflow-x: auto;
         }
         .chat-md .code-block-wrapper code {
-            font-family: var(--font-mono); font-size: 12.5px; color: #e6edf3; line-height: 1.5;
+            /* Theme variable, NOT a hardcoded light gray — #e6edf3 was invisible
+               on the light theme's near-white code background. */
+            font-family: var(--font-mono); font-size: 12.5px; color: var(--text-primary); line-height: 1.5;
         }
 
         /* Thought Process */
         .chat-md .thought-process-block {
             margin: 8px 0; border-radius: 6px; border: 1px solid var(--border);
-            background: hsla(220, 20%, 14%, 0.5); overflow: hidden;
+            background: var(--bg-secondary); overflow: hidden;
         }
         .chat-md .thought-process-block > summary {
             cursor: pointer; padding: 8px 12px; font-size: 12px; font-weight: 500;
-            color: var(--text-secondary); background: hsla(220, 20%, 18%, 0.5);
+            color: var(--text-secondary); background: var(--bg-tertiary);
             user-select: none;
         }
         .chat-md .thought-process-content {
@@ -139,19 +176,33 @@ export function formatMarkdown(text) {
 
     let html = escapeHtml(text);
 
-    // Code blocks with syntax highlighting layout
+    // ── Protect code from every later pass ──────────────────────────────
+    // Fenced blocks and inline code are swapped for private-use-area
+    // placeholders and restored at the VERY END. Previously the rendered
+    // code-block HTML stayed in the string while the table/header/bold/list
+    // passes ran over it, so markdown-looking text INSIDE a code block (e.g.
+    // a \`\`\`markdown template with "- item" lines) was transformed into real
+    // <li>/<table>/<strong> elements — the "unindented bullets inside a code
+    // block" bug.
+    const codeBlocks = [];
     html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (match, lang, code) => {
-        return `<div class="code-block-wrapper">
+        codeBlocks.push(`<div class="code-block-wrapper">
             <div class="code-block-header">
                 <span class="code-block-lang">${lang || 'code'}</span>
                 <button class="btn-copy-code" type="button">Copy</button>
             </div>
             <pre><code class="language-${lang}">${code.trim()}</code></pre>
-        </div>`;
+        </div>`);
+        return `\uE000${codeBlocks.length - 1}\uE001`;
     });
 
-    // Inline code
-    html = html.replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>');
+    // Inline code — protected the same way (a backticked \`*text*\` must not
+    // become italic, etc.).
+    const inlineCodes = [];
+    html = html.replace(/`([^`]+)`/g, (match, code) => {
+        inlineCodes.push(`<code class="inline-code">${code}</code>`);
+        return `\uE002${inlineCodes.length - 1}\uE003`;
+    });
 
     // Tables parser
     const lines = html.split('\n');
@@ -223,7 +274,8 @@ export function formatMarkdown(text) {
         }
     });
 
-    // Line breaks
+    // Line breaks (code blocks are placeholders here, so their inner newlines
+    // are naturally exempt; tables/lists still need the split-exemption).
     const blocks = html.split(/(<div class="code-block-wrapper">[\s\S]*?<\/div>|<pre>[\s\S]*?<\/pre>|<table>[\s\S]*?<\/table>|<ul>[\s\S]*?<\/ul>|<ol>[\s\S]*?<\/ol>)/g);
     for (let k = 0; k < blocks.length; k++) {
         const b = blocks[k];
@@ -232,6 +284,11 @@ export function formatMarkdown(text) {
         }
     }
     html = blocks.join('');
+
+    // ── Restore protected code (inline first — blocks may not contain them,
+    // but the order is safe either way) ─────────────────────────────────
+    html = html.replace(/\uE002(\d+)\uE003/g, (m, i) => inlineCodes[Number(i)] ?? m);
+    html = html.replace(/\uE000(\d+)\uE001/g, (m, i) => codeBlocks[Number(i)] ?? m);
 
     return html;
 }

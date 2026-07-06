@@ -130,3 +130,34 @@ describe('formatMessageContent', () => {
         expect(out).toContain('still thinking');
     });
 });
+
+describe('code-block content protection', () => {
+    it('does NOT transform markdown inside a fenced code block', () => {
+        const md = '```markdown\n## head\n- item one\n- item two\n\n| a | b |\n|---|---|\n| 1 | 2 |\n```';
+        const out = formatMarkdown(md);
+        // Contents stay literal — no lists/tables/headers rendered inside <pre>
+        expect(/<pre>[\s\S]*<li>/.test(out)).toBe(false);
+        expect(/<pre>[\s\S]*<table>/.test(out)).toBe(false);
+        expect(out).toContain('- item one');
+        expect(out).toContain('| a | b |');
+        expect(out).toContain('## head');
+    });
+
+    it('does not italicize/bold inside inline code', () => {
+        const out = formatMarkdown('use `*args*` here');
+        expect(out).toContain('<code class="inline-code">*args*</code>');
+        expect(out).not.toContain('<em>args</em>');
+    });
+
+    it('numbers in normal text are unaffected by placeholder restore', () => {
+        const out = formatMarkdown('version 12 and `x`');
+        expect(out).toContain('version 12');
+        expect(out).toContain('<code class="inline-code">x</code>');
+    });
+
+    it('markdown outside the code block still renders', () => {
+        const out = formatMarkdown('- real item\n\n```js\n- fake item\n```');
+        expect(out).toContain('<ul><li>real item</li></ul>');
+        expect(out).toContain('- fake item');
+    });
+});

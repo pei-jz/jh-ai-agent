@@ -1040,17 +1040,10 @@ export class ChatView {
             // Inline on* handlers were removed so a strict CSP (script-src 'self',
             // no 'unsafe-inline') can be enforced — see tauri.conf.json.
             chatBody.addEventListener('click', (e) => {
-                // Copy-code button inside code blocks
-                const copyBtn = e.target.closest('.btn-copy-code');
-                if (copyBtn) {
-                    const codeEl = copyBtn.parentElement?.nextElementSibling;
-                    const text = codeEl ? codeEl.innerText : '';
-                    navigator.clipboard.writeText(text).then(() => {
-                        copyBtn.innerText = 'Copied!';
-                        setTimeout(() => { copyBtn.innerText = 'Copy'; }, 2000);
-                    }).catch(() => {});
-                    return;
-                }
+                // (Copy-code button is handled by the GLOBAL delegated handler
+                // installed in ensureChatMarkdownStyles — it also covers the
+                // spotlight overlay and the Monitor result view. Keeping a
+                // second handler here would double-copy.)
                 // Zoomable image in a chat bubble → open full-size in a new window
                 const img = e.target.closest('.chat-zoomable-img');
                 if (img && img.src) {
