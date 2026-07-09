@@ -142,6 +142,24 @@ export function extractToolCall(text) {
         }
     }
 
+    // 1c. DeepSeek/Qwen/MiMo-style <function=X><parameter=Y> tool calls emitted as
+    //     plain text — often embedded inside a (malformed) JSON "thought" string.
+    //     Scan the raw text so these execute instead of being swallowed as
+    //     narrative (the symptom: present_result runs with empty args).
+    if (results.tool_calls.length === 0) {
+        const fnCalls = extractFunctionTagToolCalls(text);
+        if (fnCalls.length > 0) {
+            results.tool_calls.push(...fnCalls);
+            if (!results.thought) {
+                const idx = text.search(/<tool_call>|<function=/);
+                let pre = idx > 0 ? text.slice(0, idx).trim() : '';
+                // Strip a leading JSON envelope opener like {"thought":"
+                pre = pre.replace(/^\{?\s*"?thought"?\s*:?\s*"?/i, '').trim();
+                if (pre) results.thought = pre;
+            }
+        }
+    }
+
     if (results.tool_calls.length > 0) return results;
 
     // 1.5 Outer ``` fence wrapping a single JSON envelope whose string values may
@@ -256,6 +274,76 @@ export function extractToolCall(text) {
  * has string="true", otherwise JSON-parsed (so numbers/bools/arrays/objects come
  * through typed), falling back to the raw string when not valid JSON.
  */
+/**
+ * Parse DeepSeek/Qwen/MiMo-style tool calls that some models emit as PLAIN TEXT
+ * inside the content (instead of using the native function-call API):
+ *   <tool_call>
+ *   <function=present_result>
+ *   <parameter=kind>markdown</parameter>
+ *   <parameter=markdown>```js
+ *   ...code...
+ *   ```</parameter>
+ *   </function>
+ *   </tool_call>
+ * The `<tool_call>` wrapper and the closing `</function>` are optional. Returns
+ * [{ name, args }]. Parameter values are kept as strings unless they look like a
+ * JSON scalar/array/object (so code bodies stay verbatim).
+ */
+/**
+ * A <function=…> block embedded inside a JSON "thought" string arrives
+ * JSON-escaped (literal `\n`, `\"`, `\\`). Decode those so code bodies get real
+ * newlines back and fences survive extraction. Only fires when the value clearly
+ * looks escaped (has escapes, no real newline) so genuine multi-line native
+ * values — and source that legitimately contains a `\n` literal — are untouched.
+ */
+function _maybeJsonUnescape(s) {
+    if (typeof s !== 'string') return s;
+    if (/\n/.test(s)) return s;             // already has real newlines
+    if (!/\\[ntr"\\/]/.test(s)) return s;   // no escape sequences present
+    return s.replace(/\\(.)/g, (m, ch) => {
+        switch (ch) {
+            case 'n': return '\n';
+            case 'r': return '\r';
+            case 't': return '\t';
+            case '"': return '"';
+            case '\\': return '\\';
+            case '/': return '/';
+            default: return m;
+        }
+    });
+}
+
+export function extractFunctionTagToolCalls(text) {
+    const calls = [];
+    if (typeof text !== 'string' || !text.includes('<function=')) return calls;
+    // Each block runs from <function=NAME> up to </function>, the next
+    // <function=, </tool_call>, or end-of-text (whichever comes first).
+    const fnRe = /<function=([^>\s]+)\s*>([\s\S]*?)(?=<\/function>|<function=|<\/tool_call>|$)/g;
+    let m;
+    while ((m = fnRe.exec(text)) !== null) {
+        const name = (m[1] || '').trim();
+        if (!name) continue;
+        const inner = m[2] || '';
+        const args = {};
+        const paramRe = /<parameter=([^>\s]+)\s*>([\s\S]*?)<\/parameter>/g;
+        let p;
+        while ((p = paramRe.exec(inner)) !== null) {
+            const key = (p[1] || '').trim();
+            if (!key) continue;
+            // Drop the single leading/trailing newline the pretty-printing adds.
+            const raw = p[2].replace(/^\r?\n/, '').replace(/\r?\n\s*$/, '');
+            const trimmed = raw.trim();
+            if (/^(true|false|null|-?\d+(?:\.\d+)?|\[[\s\S]*\]|\{[\s\S]*\})$/.test(trimmed)) {
+                try { args[key] = JSON.parse(trimmed); } catch { args[key] = _maybeJsonUnescape(raw); }
+            } else {
+                args[key] = _maybeJsonUnescape(raw);
+            }
+        }
+        calls.push({ name, args });
+    }
+    return calls;
+}
+
 export function extractInvokeToolCalls(text) {
     const calls = [];
     if (typeof text !== 'string' || (!text.includes('<invoke') && !text.includes('<function_calls'))) {

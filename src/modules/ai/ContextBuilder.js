@@ -155,7 +155,7 @@ JSON FORMATTING RULES (critical — most failures come from these):
         return parts.length === 0 ? '' : `<active_context>\n${parts.join('\n')}\n</active_context>\n`;
     }
 
-    async getSystemPrompt(workspacePath, toolExecutor, clientContext = null, editContext = null, kisContext = '', currentQuery = '') {
+    async getSystemPrompt(workspacePath, toolExecutor, clientContext = null, editContext = null, kisContext = '', currentQuery = '', effectiveModel = null) {
         const root = workspacePath || '.';
 
         const currentModel = llmService.getCurrentModel() || '';
@@ -237,7 +237,9 @@ JSON FORMATTING RULES (critical — most failures come from these):
         // Use the single source-of-truth in LLMService rather than duplicating the
         // provider allowlist here.  This guarantees ContextBuilder and AgentController
         // always agree on which calling mode is in effect.
-        const isNative = llmService.supportsNativeTools();
+        // Decide the protocol for the model we ACTUALLY send (tier/override),
+        // so the prompt's tool-calling instructions match the real target model.
+        const isNative = llmService.supportsNativeTools(effectiveModel);
         // Heavy (file-editing agent) vs lightweight (scoped / app-intent) prompt.
         // If the active built-in allowlist contains NO editing/exec tools, the task
         // can't edit files at all, so the multi_replace/verify/path/anti-loop rules
@@ -289,24 +291,21 @@ IMPORTANT: Final responses to the USER must be in ${outputLanguage}. Internal re
             // tools (e.g. an app's get_buffer). Listing every built-in here —
             // including ones the allowlist blocks — makes the agent try blocked
             // tools and stall on "not enabled for this task".
-            const toolDefs = toolExecutor.getToolsForNativeAPI()
-                .map(t => `<tool name="${t.function.name}">\n<description>${t.function.description}</description>\n</tool>`)
-                .join('\n');
-            const toolsSection = isNative
-                ? `Tool schemas are provided to you via the native function-calling API (the request's \`tools\` field) — invoke them directly. Built-in + any enabled MCP tools are all available there.`
-                : toolDefs;
-
-            // ── Protocol section ─────────────────────────────────────────
+            // In NATIVE mode the tool schemas are ALREADY sent authoritatively in the
+            // API `tools` field — repeating them here (a <available_tools> listing +
+            // a verbose <protocol>) only duplicates tokens and can confuse weaker
+            // models into emitting the call as text. So native mode gets NO listing
+            // and a one-line nudge; JSON mode needs the full textual listing + the
+            // JSON-envelope protocol.
+            let availableToolsBlock = '';
             let instructionsPrompt = '';
             if (isNative) {
-                instructionsPrompt = `
-<protocol>
-Invoke tools through the native function-calling mechanism. Reason as much as you
-need before acting, but keep any out-loud reasoning brief. Do NOT write the call as
-text (e.g. "CALL: read_file") — always use the actual function-call API.
-</protocol>
-`;
+                instructionsPrompt = `Call tools via the native function-calling API (the request's \`tools\` field) — never write a call as text. Keep any out-loud reasoning brief.`;
             } else {
+                const toolDefs = toolExecutor.getToolsForNativeAPI()
+                    .map(t => `<tool name="${t.function.name}">\n<description>${t.function.description}</description>\n</tool>`)
+                    .join('\n');
+                availableToolsBlock = `<available_tools>\n${toolDefs}\n</available_tools>\n\n`;
                 instructionsPrompt = ContextBuilder.getJsonModeProtocol();
             }
 
@@ -317,11 +316,7 @@ text (e.g. "CALL: read_file") — always use the actual function-call API.
 ${agentPersona}
 </system_role>
 
-<available_tools>
-${toolsSection}
-</available_tools>
-
-${instructionsPrompt}
+${availableToolsBlock}${instructionsPrompt}
 
 <task_completion>
 A task ends in exactly one of two ways — a text-only reply is never treated as completion:
@@ -344,11 +339,7 @@ For a LARGE or AMBIGUOUS request, you MAY briefly state your intended approach a
 ${agentPersona}
 </system_role>
 
-<available_tools>
-${toolsSection}
-</available_tools>
-
-${instructionsPrompt}
+${availableToolsBlock}${instructionsPrompt}
 
 <task_completion>
 A task ends ONLY by calling \`finish_task\` (goal achieved) or \`ask_user\` (blocked on
@@ -368,57 +359,20 @@ Call \`finish_task\` when ALL of these are true:
 </task_completion>
 
 <critical_rules>
+1. **Verify your edits.** After an edit the tool result echoes the new file content —
+   read it; if content dropped or structure broke, fix it before moving on. For
+   .js/.mjs/.cjs/.json run \`verify_syntax\`; for .jsx/.tsx/.ts verify via the project
+   build (e.g. \`run_command("npx vite build")\`), since node can't parse them.
+2. **Paths use forward slashes** (\`C:/proj/src/file.tsx\`), even on Windows. On a
+   "not found", follow the error's "Did you mean?" hint instead of re-guessing.
+3. **Don't spin.** Don't re-read an unchanged file or repeat an action that made no
+   progress — change approach. If ~3 approaches fail on the same subproblem, call
+   \`ask_user\` (what you tried / what failed / what you need) instead of looping.
+4. **Language:** user-facing replies in ${outputLanguage}; code / plans / commit messages in English.
 
-1. **Verify After Every Edit (MANDATORY)**:
-   - After \`write_file\` / \`multi_replace_file_content\`, the tool result includes the file's
-     new content. Inspect it. If chars are missing or structure is broken, fix immediately —
-     NEVER assume the edit succeeded.
-   - For plain .js / .mjs / .cjs / .json files, call \`verify_syntax\` after the edit.
-     For .jsx / .tsx / .ts, \`verify_syntax\` is NOT reliable (node can't parse JSX/TS) —
-     verify those with the project's own build instead, e.g. run_command("npx vite build").
-   - If you introduced a syntax error, fix it NOW before any other work.
-
-2. **Tool Choice for Edits**:
-   - Create a new file → \`write_file\`. Small targeted change → \`multi_replace_file_content\`
-     (content-based, the default). Large/awkward contiguous block, or after multi_replace
-     keeps failing → \`replace_lines\` (line-based; read_file first). Detailed mechanics for each
-     live in the tool's own \`description\` — follow them there; keep \`old_text\` SHORT and exact.
-   - If multi_replace on a long file fails twice in a row, switch to \`replace_lines\` — do NOT
-     fall back to a full \`write_file\` rewrite (full rewrites of big files drop content).
-   - NEVER use \`run_command\` with shell redirects (\`echo > file\`, \`Set-Content\`, \`sed\`) — they
-     corrupt encoding. \`write_file\` preserves the file's charset automatically (override with
-     \`"encoding"\`); \`read_file\` always returns UTF-8.
-
-3. **File Paths (Windows-safe)**:
-   - **Always use forward slashes** (\`/\`), even on Windows — backslashes cause JSON-escape
-     mistakes. Correct: \`C:/projects/app/src/file.tsx\`. Relative paths resolve against the
-     workspace root (prefer them inside the workspace).
-   - On a read_file "not found", use the error's "Did you mean?" suggestions (often an
-     extension typo: \`.ts\` vs \`.tsx\`) rather than guessing again.
-
-4. **Don't spin**: avoid re-reading an unchanged file or repeating an action that
-   didn't make progress — change approach instead. \`task_plan.md\` is auto-embedded
-   in the <task_plan> section below, so read it there, not via \`read_file\`.
-
-5. **Track multi-step work (recommended)**: for a task with several distinct steps,
-   \`task_progress\` helps you keep state across history compaction — register the
-   subtasks and update them as you go. Optional, but useful on longer tasks.
-
-6. **Stuck? Ask, Don't Spin**:
-   - If 3 different approaches all failed for the same subproblem, STOP and call \`ask_user\`
-     with what you tried, what failed, and the guidance you need. This pauses the run cleanly
-     (not a completion). Better to ask than to re-run the same investigation hoping for a
-     different result.
-
-7. **Language**:
-   - User-facing replies and status messages: ${outputLanguage}.
-   - Plans / artifacts / code / commit messages: English.
-
-8. **Continue After User Follow-up**:
-   - If the user sends a new message after a task was declared complete, do NOT immediately
-     call \`finish_task\` again — the new message means it isn't done. Re-examine, fix, verify,
-     then finish only when the new goal is met.
-
+(Tool mechanics — which edit tool to use, encoding, keeping \`old_text\` short — live
+in each tool's own description. \`task_plan\` / \`task_progress\` help you hold state
+across long tasks. A user message after "done" means it isn't done — address it.)
 </critical_rules>
 ${subagentsEnabled ? `
 <sub_agents>

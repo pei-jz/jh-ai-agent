@@ -18,6 +18,24 @@ import {
     SUBTASK_MAX_PARALLEL, SUBTASK_MAX_PER_RUN, SUBTASK_REPORT_MAX_CHARS, SUBTASK_MAX_STEPS_CAP
 } from './agent/SubagentRoles.js';
 
+/**
+ * True when a present_result envelope actually carries a deliverable. Used to
+ * stop an empty follow-up present_result from clobbering a good earlier one.
+ */
+function _envelopeHasContent(env) {
+    if (!env || typeof env !== 'object') return false;
+    const p = env.payload || {};
+    const nonEmptyStr = (v) => typeof v === 'string' && v.trim().length > 0;
+    switch (env.kind) {
+        case 'answer':    return nonEmptyStr(p.text) || nonEmptyStr(p.answer);
+        case 'code-edit': return Array.isArray(p.edits) && p.edits.length > 0;
+        case 'file-list': return Array.isArray(p.files) && p.files.length > 0;
+        case 'markdown':
+        case 'table':
+        default:          return nonEmptyStr(p.md) || nonEmptyStr(p.markdown) || nonEmptyStr(p.text);
+    }
+}
+
 export class AgentController {
     constructor() {
         this.baseMaxIterations = 100;
@@ -326,7 +344,18 @@ export class AgentController {
         // Bind tool executor event forwarding
         this.toolExecutor.onToolEvent = (event, data) => {
             // Capture the model's delivered answer (present_result) for the Result view.
-            if (event === 'result' && data?.envelope) this._lastResultEnvelope = data.envelope;
+            // Guard against a common misfire: some models call present_result twice —
+            // a good one, then an empty follow-up (e.g. kind:"answer", text:"") — which
+            // would otherwise clobber the real deliverable. Keep the earlier non-empty
+            // envelope unless the new one actually carries content.
+            if (event === 'result' && data?.envelope) {
+                const incoming = data.envelope;
+                if (!this._lastResultEnvelope
+                    || _envelopeHasContent(incoming)
+                    || !_envelopeHasContent(this._lastResultEnvelope)) {
+                    this._lastResultEnvelope = incoming;
+                }
+            }
             onAgentStatus?.({ event, ...data });
         };
 
@@ -517,7 +546,7 @@ export class AgentController {
                         systemPrompt = this.behaviorOverrides.system_prompt;
                     } else {
                         const editContext = clientContext?.editContext || null;
-                        systemPrompt = await contextBuilder.getSystemPrompt(workspacePath, this.toolExecutor, clientContext, editContext, kisContext, prompt);
+                        systemPrompt = await contextBuilder.getSystemPrompt(workspacePath, this.toolExecutor, clientContext, editContext, kisContext, prompt, this._modelOverride || llmService.getCurrentModel());
                     }
                     if (this.behaviorOverrides && this.behaviorOverrides.extra_instructions) {
                         systemPrompt += '\n\n' + this.behaviorOverrides.extra_instructions;
@@ -713,7 +742,8 @@ export class AgentController {
                 let imageDiag = { images_present: images.length, attached_this_step: false, vision_supported: false, images: [] };
                 try {
                     reqModel = llmService.getCurrentModel?.() || '';
-                    reqMode = llmService.supportsNativeTools?.() ? 'native' : 'json-text';
+                    // Decide the mode for the model actually sent (tier/override).
+                    reqMode = llmService.supportsNativeTools?.(this._modelOverride || reqModel) ? 'native' : 'json-text';
                     if (reqMode === 'native' && this.toolExecutor.getToolsForNativeAPI) {
                         reqTools = this.toolExecutor.getToolsForNativeAPI();
                     }
@@ -1112,7 +1142,15 @@ export class AgentController {
                     // sub-agent; only [CRITERIA-VIOLATION]/[BUG] findings bounce the
                     // task back — [STYLE] never blocks. Single round (per design:
                     // bounded loops; the parent, not the reviewer, is the arbiter).
+                    // Skip the gate for a WEAK model — one the user put in JSON tool
+                    // mode because its native tool-calling misbehaves. A reviewer
+                    // sub-agent on such a model burns its iterations on malformed
+                    // calls and usually returns no VERDICT anyway (→ "unknown" →
+                    // pass), so the review is pure cost + noise. supportsNativeTools()
+                    // reflects the JSON-mode opt-out list.
+                    const modelReliableForReview = llmService.supportsNativeTools?.() !== false;
                     if (!this._isSubagent && !this._reviewDone && safety.subagentReview === 'on'
+                        && modelReliableForReview
                         && (this.toolExecutor.getModifiedFiles()?.length > 0)) {
                         this._reviewDone = true;
                         onAgentStatus?.({ event: 'status', status: 'running', message: '🔎 独立レビューを実行中… / Independent sub-agent review…' });
@@ -1137,6 +1175,13 @@ export class AgentController {
                             continue;
                         }
                         onAgentStatus?.({ event: 'status', status: 'running', message: verdict === 'pass' ? '🔎 レビューPASS ✅' : '🔎 レビュー結果不明 — 完了を続行 (reviewer output had no VERDICT)' });
+                    } else if (!this._isSubagent && !this._reviewDone && safety.subagentReview === 'on'
+                        && !modelReliableForReview && (this.toolExecutor.getModifiedFiles()?.length > 0)) {
+                        // Review is ON and there ARE changes, but the model is in
+                        // JSON-tool (weak) mode → skip with a one-line note so it's
+                        // clear WHY no review ran.
+                        this._reviewDone = true;
+                        onAgentStatus?.({ event: 'status', status: 'running', message: 'ℹ レビューをスキップ（このモデルはJSONツールモード）/ Review skipped — model in JSON-tool mode' });
                     }
 
                     // Longest substantive candidate wins (reports are long; the
@@ -1522,10 +1567,12 @@ ${String(finalResponse || '').slice(0, 2000)}`;
     // ─── Phase 4: _generateWithHistory — tries native tool calling first, falls back to JSON mode ───
 
     async _generateWithHistory(history, systemPrompt, abortSignal, kisContext = '', images = [], onUpdate = null) {
-        // Use the single source-of-truth from LLMService.
-        // ContextBuilder has already built systemPrompt using the same flag, so the
-        // protocol section in the prompt always matches the API call we make here.
-        const useNativeTools = llmService.supportsNativeTools() && typeof llmService.chatWithTools === 'function';
+        // Use the single source-of-truth from LLMService, evaluated for the model
+        // we ACTUALLY send (tier/override), not the label in currentModel.
+        // ContextBuilder has already built systemPrompt using the same effective
+        // model, so the protocol section in the prompt matches the API call here.
+        const effectiveModel = this._modelOverride || llmService.getCurrentModel();
+        const useNativeTools = llmService.supportsNativeTools(effectiveModel) && typeof llmService.chatWithTools === 'function';
 
         // Resolve the agent temperature: only override when the connection has no
         // explicit temperature (so we never clobber a value the user deliberately set).
@@ -1560,7 +1607,19 @@ ${String(finalResponse || '').slice(0, 2000)}`;
                     const hasNoToolCalls = !result?.toolCalls || result.toolCalls.length === 0;
                     if (hasNoToolCalls) {
                         const txt = (result?.content || '').trim();
+                        // The model emitted its tool call as TEXT in a non-native
+                        // dialect (e.g. <function=X><parameter=Y>, common with
+                        // DeepSeek/MiMo). Recover it right here instead of dumping the
+                        // turn to a fresh JSON-mode round-trip (which often repeats the
+                        // same text form and loses the payload → empty present_result).
+                        if (txt && txt.includes('<function=')) {
+                            const recovered = this._extractToolCall(txt);
+                            if (recovered && recovered.tool_calls && recovered.tool_calls.length > 0) {
+                                return { content: JSON.stringify(recovered), usage: result.usage, sentRequest: result.sentRequest };
+                            }
+                        }
                         const looksLikeToolTextCall = /\bCALL:\s*\w/i.test(txt) ||
+                            /<function=|<tool_call>/.test(txt) ||
                             this.toolExecutor.toolDefinitions?.some(td => new RegExp(`\\b${td.name}\\b`).test(txt) && /PLAN:/i.test(txt));
                         if (!txt || looksLikeToolTextCall) {
                             nativeFailed = true;

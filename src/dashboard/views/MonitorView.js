@@ -703,6 +703,18 @@ export class MonitorView {
                     background: var(--bg-tertiary);
                     border-radius: 8px; padding: 0 6px; font-size: 10px;
                 }
+                /* Live region pins to the BOTTOM of the Task scroll so a long
+                   request/answer above can't push the progress out of view (it
+                   used to get squeezed to a single line). It still sits at the end
+                   of the content — chat-like — but stays visible while scrolling. */
+                .mresult-live-wrap {
+                    display: none;   /* shown by _setWorkingLabel when a run is live */
+                    position: sticky;
+                    bottom: 0;
+                    z-index: 8;
+                    background: var(--bg-primary);
+                    box-shadow: 0 -8px 14px -8px rgba(0,0,0,0.35);
+                }
                 /* D: "working now" boundary between settled results and the live feed. */
                 .mresult-live-label {
                     display: flex; align-items: center; gap: 7px;
@@ -805,6 +817,20 @@ export class MonitorView {
                 .mrc-ai .mrc-bubble {
                     background: var(--bg-secondary);
                     border-radius: 12px 12px 12px 2px;
+                }
+                /* Attached-image thumbnails inside a request bubble. */
+                .mrc-imgs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+                .mrc-img {
+                    max-height: 140px; max-width: 100%; border-radius: 6px;
+                    border: 1px solid var(--border); cursor: zoom-in; display: block;
+                }
+                /* #2: collapse an over-long request; click ▸/▾ to expand. */
+                .mrc-req { white-space: pre-wrap; }
+                .mrc-req.clamped .mrc-req-full { display: none; }
+                .mrc-req:not(.clamped) .mrc-req-short { display: none; }
+                .mrc-req-toggle {
+                    display: inline-block; margin-top: 4px; font-size: 11px; font-weight: 600;
+                    color: var(--accent); cursor: pointer; user-select: none;
                 }
                 /* "thinking…" placeholder shown under the just-sent user message. */
                 .mrc-thinking { display: inline-flex; gap: 4px; align-items: center; }
@@ -1465,10 +1491,17 @@ export class MonitorView {
                      before the run completes. On completion it's absorbed into the
                      run bubbles above and this is cleared. -->
                 <div id="result-pending" class="mresult-chat" style="display:none"></div>
-                <!-- D: explicit "working now" boundary between settled results and
-                     the live activity feed. -->
-                <div id="result-live-label" class="mresult-live-label" style="display:none"><span class="mll-dot"></span> ⏳ 実行中 / Working…</div>
-                <div id="result-live" class="mresult-live" style="display:none"></div>
+                <!-- Live region (label + feed) wrapped and STICKY-BOTTOM: it still
+                     flows like chat at the end of the content, but when a long
+                     request/answer would push it out of view it pins to the bottom
+                     edge of the panel — progress stays visible no matter how long
+                     the bubbles above are. -->
+                <div id="result-live-wrap" class="mresult-live-wrap">
+                    <!-- D: explicit "working now" boundary between settled results and
+                         the live activity feed. -->
+                    <div id="result-live-label" class="mresult-live-label" style="display:none"><span class="mll-dot"></span> ⏳ 実行中 / Working…</div>
+                    <div id="result-live" class="mresult-live" style="display:none"></div>
+                </div>
             </div>
             <!-- C: floating "new activity" pill — shown when the user has scrolled up
                  and fresh feed lines arrive; click to jump back to the bottom. -->
@@ -2965,7 +2998,7 @@ export class MonitorView {
                 const running = task.status === 'running' || this.currentStatus === 'running';
                 const showThinking = running && !this._liveActivitySeen;
                 return `<div class="mresult-chat">`
-                    + `<div class="mrc-row mrc-user"><div class="mrc-bubble">${escapeHtml(task.prompt)}</div></div>`
+                    + `<div class="mrc-row mrc-user"><div class="mrc-bubble">${this._requestHtml(task.prompt)}</div></div>`
                     + (showThinking ? `<div class="mrc-row mrc-ai"><div class="mrc-bubble mrc-thinking"><span></span><span></span><span></span></div></div>` : '')
                     + `</div>`;
             }
@@ -3035,8 +3068,21 @@ export class MonitorView {
         if (s.tokens) chips.push(`🧮 ${s.tokens >= 1000 ? (s.tokens / 1000).toFixed(1) + 'k' : s.tokens} tok`);
         if (s.durationMs) chips.push(`⏱ ${Math.round(s.durationMs / 1000)}s`);
         const statsHtml = chips.length ? `<div class="mrc-stats">${chips.map(c => `<span>${escapeHtml(c)}</span>`).join('')}</div>` : '';
-        return (req ? `<div class="mrc-row mrc-user"><div class="mrc-bubble">${escapeHtml(req)}</div></div>` : '')
+        return (req ? `<div class="mrc-row mrc-user"><div class="mrc-bubble">${this._requestHtml(req)}</div></div>` : '')
             + `<div class="mrc-row mrc-ai"><div class="mrc-bubble"><div class="rv-summary chat-md">${renderMarkdown(ans || '（回答なし）')}</div>${filesHtml}${statsHtml}</div></div>`;
+    }
+
+    /** #2: a request that exceeds ~100 chars is clamped, with a click-to-expand
+     *  toggle (delegated handler on #result-panel). Short requests render plain. */
+    _requestHtml(req) {
+        const s = String(req || '');
+        const LIMIT = 100;
+        if (s.length <= LIMIT) return escapeHtml(s);
+        return `<div class="mrc-req clamped">`
+            + `<span class="mrc-req-short">${escapeHtml(s.slice(0, LIMIT))}… </span>`
+            + `<span class="mrc-req-full">${escapeHtml(s)}</span>`
+            + `<span class="mrc-req-toggle" data-more="▾ 全文表示" data-less="▸ 折りたたむ">▾ 全文表示</span>`
+            + `</div>`;
     }
 
     /**
@@ -3045,12 +3091,15 @@ export class MonitorView {
      * "thinking…" AI placeholder below it. Cleared on completion, when the real
      * request→answer bubble takes its place in #result-runs.
      */
-    _showPendingUser(text) {
+    _showPendingUser(text, images = []) {
         const el = document.getElementById('result-pending');
-        if (!el || !text) return;
+        if (!el || (!text && (!images || !images.length))) return;
         el.style.display = 'flex';
+        const imgHtml = (Array.isArray(images) && images.length)
+            ? `<div class="mrc-imgs">${images.map(u => `<img class="mrc-img" src="${u}" alt="attachment">`).join('')}</div>`
+            : '';
         el.innerHTML =
-            `<div class="mrc-row mrc-user"><div class="mrc-bubble">${escapeHtml(String(text))}</div></div>` +
+            `<div class="mrc-row mrc-user"><div class="mrc-bubble">${imgHtml}${text ? escapeHtml(String(text)) : ''}</div></div>` +
             `<div class="mrc-row mrc-ai"><div class="mrc-bubble mrc-thinking"><span></span><span></span><span></span></div></div>`;
         const rp = document.getElementById('result-panel');
         if (rp) rp.scrollTop = rp.scrollHeight;
@@ -3124,10 +3173,13 @@ export class MonitorView {
         if (open) attachFileOpenHandlers(bar);   // row click → open in OS default app
     }
 
-    /** D: show/hide the "⏳ Working…" boundary above the live feed. */
+    /** D: show/hide the "⏳ Working…" boundary above the live feed, and the
+     *  sticky-bottom wrapper that keeps the live region visible. */
     _setWorkingLabel(on) {
         const el = document.getElementById('result-live-label');
         if (el) el.style.display = on ? 'flex' : 'none';
+        const wrap = document.getElementById('result-live-wrap');
+        if (wrap) wrap.style.display = on ? 'block' : 'none';
     }
 
     /** C: is the Task scroll pinned to the bottom (following live activity)? */
@@ -3979,6 +4031,20 @@ export class MonitorView {
                     if (j) j.style.display = 'none';
                 }
             });
+            // Delegated: expand/collapse long requests, and zoom attached images.
+            resultPanelEl.addEventListener('click', (e) => {
+                const tog = e.target.closest('.mrc-req-toggle');
+                if (tog) {
+                    const box = tog.closest('.mrc-req');
+                    if (box) {
+                        const clamped = box.classList.toggle('clamped');
+                        tog.textContent = clamped ? tog.dataset.more : tog.dataset.less;
+                    }
+                    return;
+                }
+                const img = e.target.closest('.mrc-img');
+                if (img) this._openImageZoom(img.src);
+            });
         }
 
         // ask_user answer card — a click (single-select) or submit (multi-select)
@@ -4311,9 +4377,10 @@ export class MonitorView {
                 // Any pending ask_user card is now being answered — drop it.
                 this._clearAskCard();
                 // Show the sent message instantly in the Task tab as a chat bubble
-                // (mirrors ChatView). Cleared when the run completes and the real
-                // request→answer bubble replaces it in #result-runs.
-                this._showPendingUser(rawText || prompt);
+                // (mirrors ChatView), INCLUDING attached image thumbnails so the
+                // attachment is visible after sending. Cleared when the run
+                // completes and the real request→answer bubble replaces it.
+                this._showPendingUser(rawText || prompt, images);
 
                 if (this._taskFinished) {
                     steerInput.value = '';

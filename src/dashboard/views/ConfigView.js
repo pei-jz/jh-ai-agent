@@ -249,6 +249,9 @@ export class ConfigView {
             // very next agent run / chat uses it without a restart.
             try {
                 const { default: llmService } = await import('../../modules/ai/LLMService.js');
+                // A saved default is authoritative — drop any earlier session
+                // (dropdown) model lock so this choice actually takes effect.
+                llmService.clearSessionModelLock();
                 await llmService.initFromConfig();
             } catch (e) {
                 console.warn('Could not refresh LLMService after save:', e);

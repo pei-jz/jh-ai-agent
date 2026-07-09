@@ -25,6 +25,11 @@ class LLMService {
         // (Anthropic uses 8192 for max_tokens since it's required there).
         this.currentMaxOutputTokens = null;
         this.currentTemperature = null;
+        // Session-scoped explicit model choice (e.g. the ChatView model dropdown).
+        // When set, it takes priority over the persisted `active_llm_instance_id`
+        // in initFromConfig() so a runtime model switch isn't reset to the saved
+        // default on the next agent run. Cleared on app restart (not persisted).
+        this._userSelectedModel = null;
         this._initNativeListener();
     }
 
@@ -46,6 +51,24 @@ class LLMService {
             const models = res?.models || [];
             this._models = models; // cache for per-task model-override resolution
             if (models.length === 0) return null;
+
+            // 0. Honor an explicit in-session choice (e.g. the model dropdown) over
+            //    the saved default, so switching models at runtime sticks across
+            //    agent runs instead of being reset by every initFromConfig().
+            if (this._userSelectedModel) {
+                const picked = models.find(m => m.id === this._userSelectedModel);
+                if (picked) {
+                    this.currentModel = picked.id;
+                    this.currentProvider = picked.provider || picked.id.split(':')[0];
+                    this.currentContextWindow = Number(picked.context_window) || 0;
+                    this.currentMaxOutputTokens = Number(picked.max_output_tokens) || null;
+                    this.currentTemperature = (picked.temperature ?? null);
+                    return picked.id;
+                }
+                // The chosen model vanished (connection removed) → drop the lock and
+                // fall back to the saved default below.
+                this._userSelectedModel = null;
+            }
 
             // Try to read the saved "active" preference
             let activeId = null;
@@ -99,9 +122,19 @@ class LLMService {
      * AgentController (to pick chatWithTools vs chat).  Having it in one place
      * guarantees those two always agree.
      */
-    supportsNativeTools() {
-        const provider = this.getCurrentProvider() || '';
-        const model    = (this.getCurrentModel()   || '').toLowerCase();
+    supportsNativeTools(modelId = null) {
+        // When a modelId is given (e.g. the tier/override model actually being
+        // sent), evaluate THAT model — not the label in currentModel. Otherwise
+        // the mode/prompt gets decided for a model that isn't the one we call.
+        let provider, model;
+        if (modelId) {
+            model = String(modelId).toLowerCase();
+            const match = (this._models || []).find(m => m.id === modelId);
+            provider = String(match?.provider || String(modelId).split(':')[0] || '').toLowerCase();
+        } else {
+            provider = this.getCurrentProvider() || '';
+            model    = (this.getCurrentModel()   || '').toLowerCase();
+        }
 
         // 1. Provider allowlist — these are verified to support function-call API.
         const NATIVE_PROVIDERS = ['openai', 'gemini', 'anthropic', 'azure'];
@@ -112,10 +145,20 @@ class LLMService {
         //    Add a model prefix/substring here if you observe "CALL: tool" text output
         //    instead of actual function calls.
         const JSON_MODE_MODELS = [
-            // none currently confirmed — remove this comment once DeepSeek is retested
-            // 'deepseek',   // uncomment if DeepSeek still misfires after prompt fix
+            // none confirmed built-in — the user-managed list below covers the rest.
         ];
-        if (JSON_MODE_MODELS.some(m => model.includes(m))) return false;
+        // User-managed opt-outs (Settings → "JSONモードで呼び出すモデル"): substrings
+        // of a model id whose NATIVE tool-calling misbehaves (e.g. XiaoMi mimo
+        // emitting <function=…> XML with empty args). Force JSON-envelope mode for
+        // them. localStorage so it needs no rebuild / config-schema change.
+        let userJsonModels = [];
+        try {
+            const raw = (typeof localStorage !== 'undefined') && localStorage.getItem('jhai_json_mode_models');
+            const arr = raw ? JSON.parse(raw) : null;
+            if (Array.isArray(arr)) userJsonModels = arr.map(s => String(s).toLowerCase()).filter(Boolean);
+        } catch (_) { /* ignore */ }
+
+        if ([...JSON_MODE_MODELS, ...userJsonModels].some(m => model.includes(m))) return false;
 
         return true;
     }
@@ -201,6 +244,9 @@ class LLMService {
 
     setCurrentModel(modelId) {
         this.currentModel = modelId;
+        // Remember this as the explicit session choice so initFromConfig() (run on
+        // every agent run) honors it instead of resetting to the saved default.
+        this._userSelectedModel = modelId || null;
         // Best-effort re-resolution of currentProvider. ChatView typically calls
         // setCurrentModel with an id like "inst_xxx:gemini-2.5-flash" — to figure
         // out the real provider we have to consult the models list (async),
@@ -214,6 +260,15 @@ class LLMService {
         this.currentMaxOutputTokens = null;
         this.currentTemperature = null;
         this._refreshCurrentProvider().catch(() => {});
+    }
+
+    /**
+     * Forget the session-scoped model choice so the next initFromConfig() falls
+     * back to the persisted default. Called when the user explicitly saves a new
+     * default in Settings — that Save is authoritative over an earlier dropdown pick.
+     */
+    clearSessionModelLock() {
+        this._userSelectedModel = null;
     }
 
     /** Background lookup of the real provider name for the currently-selected model id. */

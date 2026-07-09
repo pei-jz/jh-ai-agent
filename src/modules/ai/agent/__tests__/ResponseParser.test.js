@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
     safeParseJSON, extractToolCall, extractAllPossibleToolCalls, extractInvokeToolCalls,
+    extractFunctionTagToolCalls,
     extractThoughtFromMalformedText, cleanFinalResponse, stripReActPreamble, stripOuterCodeFence
 } from '../ResponseParser.js';
 
@@ -35,6 +36,64 @@ describe('extractToolCall — invoke XML integration', () => {
         const r = extractToolCall(text);
         expect(r.tool_calls).toEqual([{ name: 'list_files', args: { path: '.' } }]);
         expect(r.thought).toContain('調査');
+    });
+});
+
+describe('extractFunctionTagToolCalls — DeepSeek/Qwen/MiMo <function=X> dialect', () => {
+    it('parses a function block with parameters, keeping code bodies verbatim', () => {
+        const text = `<tool_call>
+<function=present_result>
+<parameter=kind>markdown</parameter>
+<parameter=summary>Refactored the loop</parameter>
+<parameter=markdown>\`\`\`javascript
+const x = 1;
+\`\`\`</parameter>
+</function>
+</tool_call>`;
+        const calls = extractFunctionTagToolCalls(text);
+        expect(calls).toHaveLength(1);
+        expect(calls[0].name).toBe('present_result');
+        expect(calls[0].args.kind).toBe('markdown');
+        expect(calls[0].args.summary).toBe('Refactored the loop');
+        expect(calls[0].args.markdown).toBe('```javascript\nconst x = 1;\n```');
+    });
+    it('handles multiple blocks and returns [] for plain prose', () => {
+        const two = `<function=a><parameter=x>1</parameter></function><function=b></function>`;
+        const calls = extractFunctionTagToolCalls(two);
+        expect(calls.map(c => c.name)).toEqual(['a', 'b']);
+        expect(calls[0].args.x).toBe(1); // numeric coercion
+        expect(extractFunctionTagToolCalls('just prose')).toEqual([]);
+    });
+    it('JSON-unescapes a single-line value that was embedded in a JSON string', () => {
+        // \n / \" / \\ arrive literal when the block sat inside a JSON thought.
+        const text = `<function=present_result><parameter=markdown>\`\`\`js\\nconst a = \\"x\\";\\nconst p = \\"a\\\\\\\\b\\";\\n\`\`\`</parameter></function>`;
+        const calls = extractFunctionTagToolCalls(text);
+        expect(calls[0].args.markdown).toBe('```js\nconst a = "x";\nconst p = "a\\\\b";\n```');
+    });
+    it('leaves genuine multi-line (real newline) values untouched', () => {
+        const text = `<function=f><parameter=code>line1\nline\\tafter</parameter></function>`;
+        // Has a real newline → not treated as escaped; the \\t stays literal.
+        expect(extractFunctionTagToolCalls(text)[0].args.code).toBe('line1\nline\\tafter');
+    });
+});
+
+describe('extractToolCall — <function=X> dialect embedded in a JSON thought', () => {
+    it('recovers the tool call the model buried inside a malformed thought string', () => {
+        // The exact failure shape: a JSON envelope whose thought carries the
+        // <tool_call><function=...> dialect and NO tool_calls array.
+        const text = `{"thought":"Now I have the full file context. Let me refactor it.<tool_call>
+<function=present_result>
+<parameter=kind>markdown</parameter>
+<parameter=markdown>\`\`\`js
+ok();
+\`\`\`</parameter>
+</function>
+</tool_call>`;
+        const r = extractToolCall(text);
+        expect(r.tool_calls).toHaveLength(1);
+        expect(r.tool_calls[0].name).toBe('present_result');
+        expect(r.tool_calls[0].args.markdown).toContain('ok();');
+        expect(r.thought).toContain('refactor');
     });
 });
 

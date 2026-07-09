@@ -232,6 +232,7 @@ export class ChatView {
                 .chat-body {
                     flex: 1;
                     overflow-y: auto;
+                    min-height: 200px;
                     padding-right: 8px;
                     margin-bottom: 16px;
                     display: flex;
@@ -555,6 +556,13 @@ export class ChatView {
                 .chat-preview-item.preview-image {
                     padding: 4px 24px 4px 4px;
                 }
+
+                .chat-jsonmode-toggle {
+                    display: inline-flex; align-items: center; gap: 5px;
+                    font-size: 11px; color: var(--text-tertiary); cursor: pointer;
+                    user-select: none; white-space: nowrap;
+                }
+                .chat-jsonmode-toggle input { cursor: pointer; margin: 0; }
 
                 .chat-preview-item img {
                     width: 32px;
@@ -927,6 +935,8 @@ export class ChatView {
                 .generating-indicator {
                     display: flex;
                     padding: 10px 14px;
+                    min-height: 60px;
+                    align-items: center;
                     align-self: flex-start;
                     background: var(--bg-secondary);
                     border: 1px solid var(--border);
@@ -965,6 +975,9 @@ export class ChatView {
                             <select id="chat-model-select" class="select chat-models-select">
                                 ${modelOptions}
                             </select>
+                            <label id="chat-jsonmode-wrap" class="chat-jsonmode-toggle" title="このモデルはツール呼び出しにJSON形式を使う（native function-callが不安定なモデル向け）">
+                                <input type="checkbox" id="chat-jsonmode-cb"> <span>JSON tools</span>
+                            </label>
                             <button id="btn-new-chat" class="btn btn-primary btn-sm">${icon('doc-plus', 14)} New Chat</button>
                             <button id="btn-chat-history" class="btn btn-secondary btn-sm">${icon('history', 14)} History</button>
                             <button id="btn-clear-chat" class="btn btn-secondary btn-sm">${icon('trash', 14)} Clear Chat</button>
@@ -1170,8 +1183,25 @@ export class ChatView {
             modelSelect.addEventListener('change', (e) => {
                 this.selectedModel = e.target.value;
                 llmService.setCurrentModel(this.selectedModel);
+                this._syncJsonModeToggle();
             });
         }
+
+        // "JSON tools" per-model toggle — force JSON-envelope tool calls for a model
+        // whose native function-calling misbehaves (stored in localStorage
+        // `jhai_json_mode_models`; read by LLMService.supportsNativeTools).
+        this._syncJsonModeToggle();
+        document.getElementById('chat-jsonmode-cb')?.addEventListener('change', (e) => {
+            const model = (llmService.getCurrentModel() || '').trim();
+            if (!model) return;
+            let list = [];
+            try { list = JSON.parse(localStorage.getItem('jhai_json_mode_models') || '[]'); } catch (_) {}
+            if (!Array.isArray(list)) list = [];
+            const low = model.toLowerCase();
+            list = list.filter(m => String(m).toLowerCase() !== low);
+            if (e.target.checked) list.push(model);
+            try { localStorage.setItem('jhai_json_mode_models', JSON.stringify(list)); } catch (_) {}
+        });
 
         // ChatView is simple-chat only: no workspace, no agent-mode toggle, no
         // tools-enable toggle. Web search + relevant MCP tools are always on.
@@ -1493,6 +1523,16 @@ export class ChatView {
      * become available to the chat (in BOTH Simple and Agent mode). Best-effort
      * and idempotent. Called when tools are enabled or when switching modes.
      */
+    /** Reflect whether the CURRENT model is on the JSON-tools list into the checkbox. */
+    _syncJsonModeToggle() {
+        const cb = document.getElementById('chat-jsonmode-cb');
+        if (!cb) return;
+        const model = (llmService.getCurrentModel() || '').toLowerCase();
+        let list = [];
+        try { list = JSON.parse(localStorage.getItem('jhai_json_mode_models') || '[]'); } catch (_) {}
+        cb.checked = Array.isArray(list) && !!model && list.some(m => model.includes(String(m).toLowerCase()));
+    }
+
     async _startEnabledMcpServers() {
         if (!this.allMcpServers || Object.keys(this.allMcpServers).length === 0) return;
         // Re-entry guard: this is called from init(), and the reRender() below
