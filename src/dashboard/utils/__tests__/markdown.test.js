@@ -1,7 +1,33 @@
 import { describe, it, expect } from 'vitest';
 import {
-    escapeHtml, renderMarkdown, renderResultSummary, renderFileList, filesFromModified
+    escapeHtml, renderMarkdown, renderResultSummary, renderFileList, filesFromModified,
+    normalizeLeakedEscapes
 } from '../markdown.js';
+
+describe('normalizeLeakedEscapes', () => {
+    it('unescapes a fully escape-leaked blob (no real newlines)', () => {
+        expect(normalizeLeakedEscapes('line1\\nline2\\n\\n## H')).toBe('line1\nline2\n\n## H');
+    });
+    it('leaves well-formed markdown untouched (real newlines, no literals)', () => {
+        const md = '# Title\n\n- a\n- b';
+        expect(normalizeLeakedEscapes(md)).toBe(md);
+    });
+    it('does not rewrite when a stray literal is outnumbered by real newlines', () => {
+        const s = 'a\nb\nc with a literal \\n inside';   // 2 real vs 1 literal
+        expect(normalizeLeakedEscapes(s)).toBe(s);
+    });
+    it('also unescapes \\t and \\"', () => {
+        expect(normalizeLeakedEscapes('a\\tb\\n\\"q\\"')).toBe('a\tb\n"q"');
+    });
+    it('handles null/undefined', () => {
+        expect(normalizeLeakedEscapes(null)).toBe('');
+        expect(normalizeLeakedEscapes(undefined)).toBe('');
+    });
+    it('renderMarkdown renders leaked \\n as real line breaks', () => {
+        const html = renderMarkdown('## A\\n\\nbody text');
+        expect(html).toContain('<h2');   // the "## A" became a heading after repair
+    });
+});
 
 describe('escapeHtml', () => {
     it('escapes HTML metacharacters', () => {

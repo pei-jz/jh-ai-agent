@@ -7,7 +7,7 @@
 
 import { invoke } from '@tauri-apps/api/core';
 export {
-    escapeHtml, renderMarkdown, renderResultSummary, renderFileList, filesFromModified
+    escapeHtml, renderMarkdown, renderResultSummary, renderFileList, filesFromModified, normalizeLeakedEscapes
 } from './markdown.js';
 
 /**

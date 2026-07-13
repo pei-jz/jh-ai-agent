@@ -18,6 +18,16 @@ import {
     SUBTASK_MAX_PARALLEL, SUBTASK_MAX_PER_RUN, SUBTASK_REPORT_MAX_CHARS, SUBTASK_MAX_STEPS_CAP
 } from './agent/SubagentRoles.js';
 
+// Tools blocked by the Plan-First gate until the user approves the plan —
+// anything that mutates the workspace or runs shell commands. Investigation
+// tools (read_file / grep_search / glob / list_files), present_result, ask_user
+// and finish_task are intentionally NOT gated: the agent needs them to build and
+// deliver the plan and to pause for approval.
+const PLAN_GATED_TOOLS = new Set([
+    'write_file', 'multi_replace_file_content', 'replace_lines',
+    'delete_file', 'move_file', 'run_command',
+]);
+
 /**
  * True when a present_result envelope actually carries a deliverable. Used to
  * stop an empty follow-up present_result from clobbering a good earlier one.
@@ -145,6 +155,22 @@ export class AgentController {
         // (scope array). Children whose claims overlap are SERIALIZED.
         this._writeClaims = new Map();
 
+        // ── Efficiency instrumentation (step-reduction measurement) ───────
+        // Continuously measure the two dominant token sinks so a regression in
+        // re-read suppression or history compaction is VISIBLE in the per-task
+        // logs (📊 Efficiency Report at finish) instead of only surfacing as a
+        // vague "this took too many steps". Measurement only — never steers.
+        this._readCounts = new Map();   // normalized path → times read_file'd
+        this._efficiency = {
+            reReads: 0,                 // read_file calls on an already-read path
+            reReadChars: 0,             // approx chars re-fetched (wasted context)
+            compressions: 0,            // _compressToolResultsInHistory invocations
+            compactions: 0,             // conversationMemory.compactHistory invocations
+            compactionCharsSaved: 0,    // history chars removed by compaction
+            promptTokens: 0,            // cumulative prompt (input) tokens
+            completionTokens: 0,        // cumulative completion (output) tokens
+        };
+
         // ── Expand Intent/Recipe (behavior.intent) into behavior fields ──
         // A named AI action declared by the calling app. Inline-object form
         // { systemPrompt?, tools?[], resultKind? } is expanded here into the
@@ -185,10 +211,34 @@ export class AgentController {
         const isExternalCaller = (this.caller && !INTERACTIVE_CALLERS.includes(this.caller))
             || !!(this.behaviorOverrides && (this.behaviorOverrides.mcp_servers || this.behaviorOverrides.intent));
         this._isExternalCaller = isExternalCaller;
-        // (Plan-first approval gate removed — it required a synchronous human
-        // approver, which only DirectChat had, and DirectChat no longer routes
-        // through AgentController. Multi-step tasks now self-organize via the
-        // task_progress nudge injected on the first iteration below.)
+
+        // ── Plan-First approval gate ─────────────────────────────────────
+        // For a complex task, the agent must FIRST deliver a concrete plan and
+        // get the user's approval before it may edit files or run commands.
+        // Enforced in code (PLAN_GATED_TOOLS blocked until approved), not just
+        // by prompt. Config: safety.planMode = 'off' | 'auto' (complex only) |
+        // 'always'. ONLY interactive, human-watched runs (DirectChat/NewTask)
+        // and only the FIRST turn of a task — a continuation (chatContext
+        // present) is the approval reply itself, so it proceeds to implement.
+        // Sub-agents and unattended/external callers never plan-gate (no human
+        // to approve → would deadlock). A per-request bypass phrase skips it.
+        const planMode = safety.planMode || 'auto';
+        const isFreshTurn = !Array.isArray(chatContext) || chatContext.length === 0;
+        const planBypass = /計画(は)?(不要|いらない|なし)|そのまま実装|プラン不要|no\s*plan|skip\s*plan|just\s*implement/i.test(String(prompt || ''));
+        // Only callers with a HUMAN watching in real time can approve a plan.
+        // 'Schedule' is in INTERACTIVE_CALLERS (full toolset) but runs UNATTENDED,
+        // so it must NOT plan-gate (ask_user would pause forever).
+        const PLAN_FIRST_CALLERS = new Set(['DirectChat', 'NewTask']);
+        this._planFirstActive = planMode !== 'off'
+            && PLAN_FIRST_CALLERS.has(this.caller)
+            && !this._isSubagent
+            && isFreshTurn
+            && !planBypass
+            && (planMode === 'always' || this._looksComplex(prompt));
+        this._planApproved = !this._planFirstActive;
+        if (this._planFirstActive) {
+            onAgentStatus?.({ event: 'status', status: 'running', message: '📋 計画優先モード — まず計画を提示し承認を得ます / Plan-first: proposing a plan for approval' });
+        }
         //
         // Model routing (fast/deep tiers) + auto-escalation. fast = default for
         // quick/app-intent tasks; deep = complex tasks and long-run escalation.
@@ -494,9 +544,21 @@ export class AgentController {
                 onAgentStatus?.({ event: 'status', status: 'running', message: `📌 Steering applied: "${preview}"` });
             }
 
-            // First-iteration planning injection: for a multi-step task, nudge the
-            // agent to register subtasks up front, then proceed without waiting.
-            if (iteration === 1 && this._looksComplex(prompt)) {
+            // First-iteration planning injection.
+            if (iteration === 1 && this._planFirstActive) {
+                // Plan-First: deliver a concrete plan + get approval BEFORE editing.
+                history.push({
+                    role: 'user',
+                    content: '[Plan-First — approval required]\n' +
+                        'This is a complex task. Editing files and running commands are BLOCKED by the system until the user approves your plan.\n' +
+                        'Do this now:\n' +
+                        '1. Investigate as needed with READ-ONLY tools (read_file / grep_search / glob / list_files) to make the plan concrete and correct.\n' +
+                        '2. Deliver the plan with `present_result(kind:"markdown", ...)` using EXACTLY these sections:\n' +
+                        '   ## ゴール\n   ## 変更対象ファイル (list each file + what changes)\n   ## アプローチ\n   ## リスク・確認事項\n   ## テスト方法\n' +
+                        '3. Then call `ask_user(question:"この計画で実装を進めてよろしいですか？修正があれば教えてください。", context:<one-line plan gist>, options:["はい、実装して","修正したい"], multi_select:false)` and STOP.\n' +
+                        'The user\'s reply arrives as your next turn; after approval the edit/command tools are unblocked. Do NOT attempt any edit or command before then.'
+                });
+            } else if (iteration === 1 && this._looksComplex(prompt)) {
                 history.push({
                     role: 'user',
                     content: '[Planning Required] This task has multiple steps. Your VERY FIRST tool call MUST be `task_progress(action="set", items=[...])` — list every subtask before touching any file or running any command. After registering, proceed immediately with execution without waiting for confirmation.'
@@ -526,13 +588,21 @@ export class AgentController {
                         const histTokens = tokenEstimator.estimateConversation(history, '').totalTokens;
                         if (compressLimit > 0 && histTokens > compressLimit * safety.historyCompressRatio) {
                             this._compressToolResultsInHistory(history);
+                            this._efficiency.compressions++;
                         }
                     } catch (_) {
                         // Estimation unavailable — fall back to always-compress so
                         // we never risk overflowing the context window.
                         this._compressToolResultsInHistory(history);
+                        this._efficiency.compressions++;
                     }
+                    const _histCharsBefore = this._historyChars(history);
                     let compactedHistory = await conversationMemory.compactHistory(history, currentModel, this.toolExecutor.getFileCache(), onLog);
+                    const _histCharsAfter = this._historyChars(compactedHistory);
+                    if (_histCharsAfter < _histCharsBefore) {
+                        this._efficiency.compactions++;
+                        this._efficiency.compactionCharsSaved += (_histCharsBefore - _histCharsAfter);
+                    }
 
                     // ── Apply caller's behavior overrides ──────────────────
                     // If the task was started via REST API with a `behavior` field
@@ -693,6 +763,8 @@ export class AgentController {
                 (genResult.usage?.prompt_tokens || 0) +
                 (genResult.usage?.completion_tokens || 0);
             this._spentTokens = cumulativeTokens;
+            this._efficiency.promptTokens += (genResult.usage?.prompt_tokens || 0);
+            this._efficiency.completionTokens += (genResult.usage?.completion_tokens || 0);
 
             onAgentStatus?.({
                 event: 'token_usage',
@@ -921,6 +993,24 @@ export class AgentController {
                     }
                 }
 
+                // ── Plan-First gate: block edits/commands until the plan is
+                //    approved. The agent must present a plan + ask_user first;
+                //    read/investigation tools, present_result and ask_user pass.
+                if (this._planFirstActive && !this._planApproved) {
+                    const gated = toolCall.tool_calls.filter(tc => PLAN_GATED_TOOLS.has(tc.name));
+                    if (gated.length > 0) {
+                        const names = [...new Set(gated.map(g => g.name))].join(', ');
+                        onAgentStatus?.({ event: 'status', status: 'running', message: `📋 計画承認待ち — 編集/コマンドをブロック中 (${names})` });
+                        history.push({ role: 'assistant', content: response });
+                        history.push({
+                            role: 'user',
+                            content: `[Plan-First — blocked] The tool(s) ${names} are disabled until the user approves your plan. Do NOT retry them now.\n` +
+                                `First deliver a concrete plan with present_result(kind:"markdown") — sections: ## ゴール / ## 変更対象ファイル / ## アプローチ / ## リスク・確認事項 / ## テスト方法 — then call ask_user(question:"この計画で実装を進めてよろしいですか？修正があれば教えてください。", context:<one-line gist>, options:["はい、実装して","修正したい"], multi_select:false) and STOP. Edits are unblocked once the user approves (your next turn).`
+                        });
+                        continue;
+                    }
+                }
+
                 // Phase 4: Permission-based tool classification + parallel execution
                 const safeCalls = [];
                 const dangerousCalls = [];
@@ -960,6 +1050,7 @@ export class AgentController {
                     for (const { call, result, duration } of safeResults) {
                         const isError = typeof result === 'string' && result.startsWith('Error');
                         if (isError) hasErrors = true;
+                        this._trackReadEfficiency(call, result, isError);
                         if (onLog) this._logToolTelemetry(onLog, iteration, call, result, duration, isError);
                         results.push({ tool_call_name: call.name, result });
                     }
@@ -974,7 +1065,8 @@ export class AgentController {
                     }, onConfirm);
                     const toolDuration = Date.now() - toolStartTime;
                     const isError = typeof result === 'string' && result.startsWith('Error');
-                    
+
+                    this._trackReadEfficiency(call, result, isError);
                     if (onLog) this._logToolTelemetry(onLog, iteration, call, result, toolDuration, isError);
                     results.push({ tool_call_name: call.name, result });
 
@@ -1163,7 +1255,7 @@ export class AgentController {
                             { role: 'reviewer', brief: reviewBrief },
                             { workspacePath, onAgentStatus, onConfirm, onLog, abortSignal, safety }
                         );
-                        const { verdict, findings } = parseReviewVerdict(String(reportText || ''));
+                        const { verdict, findings, reason } = parseReviewVerdict(String(reportText || ''));
                         if (verdict === 'fail') {
                             this.toolExecutor.resetTaskCompleted?.();
                             onAgentStatus?.({ event: 'status', status: 'running', message: '🔎 レビュー指摘あり — 修正のため差し戻し / Review FAIL — sent back for fixes' });
@@ -1174,7 +1266,14 @@ export class AgentController {
                             });
                             continue;
                         }
-                        onAgentStatus?.({ event: 'status', status: 'running', message: verdict === 'pass' ? '🔎 レビューPASS ✅' : '🔎 レビュー結果不明 — 完了を続行 (reviewer output had no VERDICT)' });
+                        // verdict is now 'pass' for any substantive report with no
+                        // blocking findings (parseReviewVerdict tiers) — 'unknown'
+                        // only survives for an empty/garbage reviewer report.
+                        const passMsg = reason === 'explicit-verdict' || reason === 'standalone-token'
+                            ? '🔎 レビューPASS ✅'
+                            : '🔎 レビューPASS ✅（VERDICT明記なし — 指摘なしと判定）';
+                        onAgentStatus?.({ event: 'status', status: 'running', message: verdict === 'pass' ? passMsg : '🔎 レビュー結果を取得できず（空レポート）— 完了を続行' });
+                        if (onLog) { try { onLog({ method: 'REVIEW', status: 200, stepLabel: '🔎 Review Verdict', response: { verdict, reason, findings: String(findings).slice(0, 2000) } }); } catch (_) {} }
                     } else if (!this._isSubagent && !this._reviewDone && safety.subagentReview === 'on'
                         && !modelReliableForReview && (this.toolExecutor.getModifiedFiles()?.length > 0)) {
                         // Review is ON and there ARE changes, but the model is in
@@ -1335,6 +1434,9 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
         }
 
         this.toolExecutor.endSession();
+
+        // 📊 Continuous efficiency measurement (step-reduction regression watch).
+        this._emitEfficiencyReport(onLog, iteration);
 
         return {
             response: finalResponse,
@@ -1753,6 +1855,114 @@ ${String(finalResponse || '').slice(0, 2000)}`;
                 response: logResponse
             });
         } catch (e) { }
+    }
+
+    /**
+     * A short, human-readable hint of what a tool call is acting on — the command
+     * for run_command, the file basename for file tools, the query for searches.
+     * Used to make progress lines (esp. sub-agent activity) describe the actual
+     * work instead of just repeating a bare tool name. Returns '' when there's
+     * nothing concise to show.
+     */
+    _toolArgHint(name, args) {
+        try {
+            const a = args || {};
+            const base = (p) => String(p || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop();
+            switch (name) {
+                case 'run_command':
+                    return String(a.command || '').replace(/\s+/g, ' ').trim().slice(0, 60);
+                case 'read_file':
+                case 'write_file':
+                case 'replace_lines':
+                case 'multi_replace_file_content':
+                case 'delete_file':
+                case 'verify_syntax':
+                case 'create_artifact':
+                    return base(a.path);
+                case 'move_file':
+                    return base(a.to || a.from);
+                case 'grep_search':
+                    return String(a.query || '').slice(0, 40);
+                case 'list_files':
+                case 'glob':
+                    return String(a.path || a.pattern || '').slice(0, 40);
+                case 'web_search':
+                    return String(a.query || '').slice(0, 40);
+                case 'run_subtask':
+                    return String(a.role || 'generic');
+                default:
+                    return '';
+            }
+        } catch (_) { return ''; }
+    }
+
+    /** Total character weight of a history array (cheap proxy for token size). */
+    _historyChars(history) {
+        if (!Array.isArray(history)) return 0;
+        let n = 0;
+        for (const m of history) {
+            const c = m && m.content;
+            n += typeof c === 'string' ? c.length : (c ? JSON.stringify(c).length : 0);
+        }
+        return n;
+    }
+
+    /**
+     * Efficiency instrumentation — count read_file RE-READS (a file fetched more
+     * than once), the dominant avoidable token sink on long tasks. First read of
+     * a path is expected; every subsequent successful read on the same path is a
+     * re-read whose bytes are (usually) redundant context. Measurement only.
+     */
+    _trackReadEfficiency(call, result, isError) {
+        try {
+            if (isError || !call || call.name !== 'read_file') return;
+            const raw = call.args?.path ?? call.args?.file ?? '';
+            if (!raw) return;
+            const key = String(raw).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+            const prev = this._readCounts.get(key) || 0;
+            this._readCounts.set(key, prev + 1);
+            if (prev >= 1) {
+                this._efficiency.reReads++;
+                this._efficiency.reReadChars += (typeof result === 'string' ? result.length : 0);
+            }
+        } catch (_) { /* instrumentation only */ }
+    }
+
+    /**
+     * Build the end-of-run 📊 Efficiency Report (logged to onLog). Surfaces the
+     * two measured token sinks so a regression in re-read suppression or history
+     * compaction is caught by inspecting the per-task log, not guessed at.
+     */
+    _emitEfficiencyReport(onLog, iterations) {
+        if (!onLog) return;
+        try {
+            const e = this._efficiency;
+            const topReReads = [...this._readCounts.entries()]
+                .filter(([, n]) => n > 1)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 8)
+                .map(([path, n]) => ({ path, reads: n }));
+            onLog({
+                method: 'METRICS',
+                status: 200,
+                stepLabel: '📊 Efficiency Report',
+                response: {
+                    steps: iterations,
+                    prompt_tokens: e.promptTokens,
+                    completion_tokens: e.completionTokens,
+                    distinct_files_read: this._readCounts.size,
+                    re_reads: e.reReads,
+                    re_read_chars_approx: e.reReadChars,
+                    compressions: e.compressions,
+                    compactions: e.compactions,
+                    compaction_chars_saved: e.compactionCharsSaved,
+                    top_re_read_files: topReReads,
+                    hint: e.reReads > 3
+                        ? 'Elevated re-reads — check that read_file "UNCHANGED" suppression + read-content preservation in compression are working.'
+                        : 'Re-read volume nominal.',
+                },
+            });
+        } catch (_) { /* logging only */ }
     }
 
     // ─── Phase 3: History Compression (JHEditor detailed version) ───
@@ -2179,9 +2389,13 @@ ${String(finalResponse || '').slice(0, 2000)}`;
                         onAgentStatus?.(usage);
                         return;
                     }
-                    // Compact progress lines: which tool the child is running.
+                    // Compact progress lines: which tool the child is running AND
+                    // what it's acting on (command / file), so the feed shows the
+                    // actual work — e.g. "⚙ run_command: cargo build" — instead of
+                    // a bare tool name repeated for every step.
                     if (payload.event === 'tool_call') {
-                        onAgentStatus?.({ event: 'status', status: 'running', message: `🤖 [${label}] ⚙ ${payload.name}` });
+                        const hint = this._toolArgHint(payload.name, payload.args);
+                        onAgentStatus?.({ event: 'status', status: 'running', message: `🤖 [${label}] ⚙ ${payload.name}${hint ? ': ' + hint : ''}` });
                     }
                 },
                 onConfirm,      // approvals (e.g. non-safe commands) still reach the user

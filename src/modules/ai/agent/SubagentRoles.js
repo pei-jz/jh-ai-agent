@@ -227,19 +227,75 @@ export function childTokenBudget(parentBudget, alreadySpent) {
     return Math.max(5000, Math.min(Math.floor(budget * 0.2), remaining));
 }
 
+/** Findings block = from the FINDINGS: marker if present, else the whole report. */
+function extractFindings(s) {
+    const fIdx = s.search(/FINDINGS\s*:/i);
+    return (fIdx >= 0 ? s.slice(fIdx) : s).trim();
+}
+
 /**
- * Parse a reviewer report into { verdict: 'pass'|'fail'|'unknown', findings }.
- * The LAST "VERDICT:" occurrence wins (models sometimes restate the template).
- * No verdict found → 'unknown' (the gate treats unknown as pass — a broken
- * reviewer must never deadlock the implementer).
+ * Remove the persona's own template example lines so a report that merely echoes
+ * the instructions (e.g. the "- [BUG] path/file.js:123 — description…" sample)
+ * doesn't get mistaken for a real blocking finding by the tag heuristic.
+ */
+function stripTemplateLegend(s) {
+    return String(s)
+        .replace(/\(or VERDICT:\s*FAIL\)/gi, '')
+        .replace(/\[BUG\]\s*path\/file\.[a-z]+:\d+\s*—\s*description[.…]*/gi, '')
+        .replace(/\[STYLE\]\s*…/gi, '')
+        .replace(/no findings\s*→\s*"FINDINGS:\s*none"/gi, '');
+}
+
+const FAIL_TOKEN = /fail|不合格|却下/i;
+const mapVerdictToken = (t) => (FAIL_TOKEN.test(String(t)) ? 'fail' : 'pass');
+
+/**
+ * Parse a reviewer report into { verdict: 'pass'|'fail'|'unknown', findings, reason }.
+ *
+ * Multi-tier detection — designed so a reviewer that inspected the changes but
+ * forgot the exact "VERDICT:" block does NOT collapse to the ambiguous "unknown"
+ * state (which showed up in the UI as "レビュー結果不明" and left the run without a
+ * clean review outcome). Only a genuinely empty/garbage report is 'unknown'.
+ *
+ * Priority:
+ *   1. Explicit `VERDICT: PASS/FAIL` (or 合格/不合格/承認/却下) — LAST wins.
+ *   2. A standalone verdict token on its own line (PASS / FAIL / 合格 / 不合格).
+ *   3. A real report that lists blocking findings ([CRITERIA-VIOLATION]/[BUG]) → fail.
+ *   4. Explicit "all good" language (no issues / 問題なし / LGTM / FINDINGS: none) → pass.
+ *   5. A substantive report with no blocking tags and no fail language → pass
+ *      (the reviewer looked and reported nothing blocking; a missing VERDICT line
+ *      must never deadlock the implementer).
+ *   6. Empty / trivial report → unknown.
  */
 export function parseReviewVerdict(text) {
     const s = String(text || '');
-    const matches = [...s.matchAll(/VERDICT\s*:\s*(PASS|FAIL)/gi)];
-    if (matches.length === 0) return { verdict: 'unknown', findings: s.trim() };
-    const verdict = matches[matches.length - 1][1].toLowerCase() === 'fail' ? 'fail' : 'pass';
-    // Findings = everything from the FINDINGS: marker if present, else whole report.
-    const fIdx = s.search(/FINDINGS\s*:/i);
-    const findings = (fIdx >= 0 ? s.slice(fIdx) : s).trim();
-    return { verdict, findings };
+    const trimmed = s.trim();
+
+    // 1) Explicit verdict — the authoritative signal; last occurrence wins.
+    const explicit = [...s.matchAll(/VERDICT\s*[:：]?\s*\**\s*(PASS|FAIL|合格|不合格|承認|却下)\b/gi)];
+    if (explicit.length > 0) {
+        return { verdict: mapVerdictToken(explicit[explicit.length - 1][1]), findings: extractFindings(s), reason: 'explicit-verdict' };
+    }
+
+    // 2) Standalone verdict token on its own line.
+    const standalone = [...s.matchAll(/(?:^|\n)\s*\**\s*(PASS|FAIL|合格|不合格)\s*\**\s*(?=$|\n)/gi)];
+    if (standalone.length > 0) {
+        return { verdict: mapVerdictToken(standalone[standalone.length - 1][1]), findings: extractFindings(s), reason: 'standalone-token' };
+    }
+
+    // 6) Genuinely empty / trivial → unknown (only remaining unknown path).
+    if (trimmed.length < 12) return { verdict: 'unknown', findings: trimmed, reason: 'empty-report' };
+
+    // 3) Blocking finding tags in a real report (template legend stripped first).
+    if (/\[(CRITERIA-VIOLATION|BUG)\]/i.test(stripTemplateLegend(s))) {
+        return { verdict: 'fail', findings: extractFindings(s), reason: 'blocking-tag-heuristic' };
+    }
+
+    // 4) Conservative "all clear" language.
+    if (/(no (?:blocking |critical )?(?:issues|problems|defects|bugs)(?: (?:found|detected))?|問題(?:は)?(?:あり|有り)ません|問題な(?:し|い)|指摘(?:事項)?(?:は)?(?:あり|有り)ません|looks good|\blgtm\b|承認|approved|合格|all (?:criteria|requirements)(?: are)? (?:met|satisfied)|FINDINGS\s*:\s*none)/i.test(s)) {
+        return { verdict: 'pass', findings: extractFindings(s), reason: 'pass-phrase-heuristic' };
+    }
+
+    // 5) Substantive report, nothing blocking → pass (never deadlock the implementer).
+    return { verdict: 'pass', findings: extractFindings(s), reason: 'no-blocking-findings' };
 }

@@ -359,9 +359,12 @@ Call \`finish_task\` when ALL of these are true:
 </task_completion>
 
 <critical_rules>
-1. **Verify your edits.** After an edit the tool result echoes the new file content —
-   read it; if content dropped or structure broke, fix it before moving on. For
-   .js/.mjs/.cjs/.json run \`verify_syntax\`; for .jsx/.tsx/.ts verify via the project
+1. **Edit surgically, verify automatically.** Prefer \`multi_replace_file_content\`
+   (short unique anchors) or \`replace_lines\` (large contiguous blocks, addressed by
+   line number — no re-typing) over rewriting a whole file with \`write_file\`; full
+   rewrites routinely drop content. Every edit is auto-syntax-checked (.json/.js) and
+   echoes the new content: if the result shows a \`❌ SYNTAX GATE\` block or dropped
+   content, fix it before anything else. For .jsx/.tsx/.ts verify via the project
    build (e.g. \`run_command("npx vite build")\`), since node can't parse them.
 2. **Paths use forward slashes** (\`C:/proj/src/file.tsx\`), even on Windows. On a
    "not found", follow the error's "Did you mean?" hint instead of re-guessing.

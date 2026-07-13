@@ -108,14 +108,19 @@ export function applyConsolidation(facts, plan) {
 /**
  * Select the top-`limit` facts most relevant to `query` (keyword overlap), ties
  * broken by recency then original order. Returns an array of fact objects.
+ * `minScore` (default 0 = no floor) drops facts below the relevance threshold, so
+ * a query unrelated to a fact won't pull it into the prompt. relevanceScore is
+ * hits/query-units in [0,1]; 0.5 for an empty query (so the floor never bites
+ * when there's nothing to judge relevance against).
  */
-export function selectRelevantFacts(facts, query = '', limit = 5) {
+export function selectRelevantFacts(facts, query = '', limit = 5, minScore = 0) {
     if (!Array.isArray(facts) || facts.length === 0) return [];
     const scored = facts.map((f, idx) => ({
         f,
         score: relevanceScore({ summary: f.fact, topic: '', actions: [], keyFiles: [] }, query),
         idx,
     }));
-    scored.sort((a, b) => b.score - a.score || (b.f.timestamp || 0) - (a.f.timestamp || 0) || b.idx - a.idx);
-    return scored.slice(0, limit).map(s => s.f);
+    const eligible = minScore > 0 ? scored.filter(s => s.score >= minScore) : scored;
+    eligible.sort((a, b) => b.score - a.score || (b.f.timestamp || 0) - (a.f.timestamp || 0) || b.idx - a.idx);
+    return eligible.slice(0, limit).map(s => s.f);
 }

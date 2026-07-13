@@ -464,10 +464,72 @@ export class ToolExecutor {
             ? `\n[Structural Warning] ${warnings.join('; ')}. The edit may have corrupted the file — INSPECT the content below and fix immediately if broken. Also call verify_syntax for .js/.ts/.json files.`
             : '';
 
+        // ── Auto syntax gate (diff-verification) ──────────────────────────
+        // Immediately catch an edit that BREAKS a parseable code file, instead
+        // of relying on the model to remember verify_syntax on a later turn —
+        // the highest-value guard against the "edit corrupts file → many wasted
+        // steps to notice" failure mode. Best-effort + non-fatal.
+        let syntaxBlock = '';
+        try {
+            syntaxBlock = await this._autoSyntaxGate(editPath, currentContent, verifiedContent);
+        } catch (_) { /* guard only — never block the edit itself */ }
+
         return `Success: ${opSummary} in ${editPath}. ` +
             `(${oldLines} → ${newLines} lines, delta ${lineDelta >= 0 ? '+' : ''}${lineDelta})` +
-            warnBlock + editCountWarning +
+            syntaxBlock + warnBlock + editCountWarning +
             `\n\n=== File content after edit (first ${Math.min(newLines, PREVIEW_LINES)} lines) ===\n${preview}`;
+    }
+
+    /**
+     * Post-edit syntax verification, run automatically inside _finalizeEdit.
+     *   .json               → JSON.parse (in-process, instant)
+     *   .js / .mjs / .cjs   → `node --check` (real V8 parser); node-missing is
+     *                         probed once per session then skipped
+     *   other (.ts/.tsx/…)  → skipped (node --check can't parse JSX/TS; the
+     *                         structural brace check + build step cover those)
+     * Returns '' when OK/skipped, or a prominent hard-error block to prepend to
+     * the edit result so the model fixes the breakage on its very next turn.
+     */
+    async _autoSyntaxGate(editPath, before, after) {
+        const lower = String(editPath).toLowerCase();
+
+        if (lower.endsWith('.json')) {
+            try { JSON.parse(after); return ''; } catch (e) {
+                let beforeOk = true;
+                try { JSON.parse(before); } catch (_) { beforeOk = false; }
+                const m = String(e.message).match(/position\s+(\d+)/i);
+                const loc = m ? ` (line ${after.slice(0, parseInt(m[1], 10)).split('\n').length})` : '';
+                return `\n[❌ SYNTAX GATE — invalid JSON after this edit${loc}]: ${e.message}. ` +
+                    (beforeOk
+                        ? `Your edit BROKE the JSON — fix it NOW before any other action.`
+                        : `The file was already invalid and your edit did not fix it — correct the JSON now.`);
+            }
+        }
+
+        if (/\.(js|mjs|cjs)$/.test(lower)) {
+            if (this._nodeAvailable === false) return '';   // probed missing earlier this session
+            const quoted = `"${String(editPath).replace(/"/g, '\\"')}"`;
+            try {
+                await invoke('run_command', { command: `node --check ${quoted}`, cwd: this.workspacePath });
+                this._nodeAvailable = true;
+                return '';
+            } catch (e) {
+                const raw = String(e?.message || e || '');
+                if (/is not recognized|command not found|ENOENT/i.test(raw) && !/SyntaxError/i.test(raw)) {
+                    this._nodeAvailable = false;             // don't re-probe a missing node
+                    return '';
+                }
+                const lines = raw.split('\n').filter(l => l.trim().length > 0);
+                const sig = lines.findIndex(l => /SyntaxError|Unexpected|Invalid/i.test(l));
+                const slice = sig >= 0
+                    ? lines.slice(Math.max(0, sig - 1), sig + 2).join('\n')
+                    : lines.slice(0, 4).join('\n');
+                return `\n[❌ SYNTAX GATE — node --check failed after this edit]:\n${slice}\n` +
+                    `Fix this syntax error NOW before any other action — the edit likely dropped or mismatched a token.`;
+            }
+        }
+
+        return '';
     }
 
     /**

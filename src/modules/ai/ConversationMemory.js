@@ -4,6 +4,14 @@ import LLMService from './LLMService.js';
 import { sanitizeXmlTags, relevanceScore, scoreMessageImportance } from './memory/MemoryScoring.js';
 import { mergeFacts as mergeFactsInto, selectRelevantFacts, pruneFacts, applyConsolidation } from './memory/FactStore.js';
 
+// Minimum relevance (hits / query-units, 0..1) for a past-session summary or a
+// durable fact to be injected into the prompt. Kept LOW because the score
+// naturally shrinks for long queries (many units, few hits); the goal is only to
+// drop memories UNRELATED to the current task (score ≈ 0), not to demand a high
+// overlap. Without this floor, top-K selection injected the most-recent/loosely-
+// related sessions even for an unrelated task (same-workspace cross-task bleed).
+const MEMORY_MIN_RELEVANCE = 0.08;
+
 class ConversationMemory {
     constructor() {
         this.entries = [];
@@ -679,20 +687,25 @@ JSON output format:
         }
 
         let selected;
-        if (currentQuery && this.entries.length > 3) {
-            // Score all entries, pick top 3 by relevance (ties broken by recency).
-            const scored = this.entries.map((e, idx) => ({
-                entry: e,
-                score: this._relevanceScore(e, currentQuery),
-                idx   // preserve original order for tie-breaking
-            }));
+        if (currentQuery) {
+            // Score all entries; keep only those clearing the relevance floor, then
+            // take the top 3. An unrelated task → 0 relevant sessions → no episodic
+            // memory injected (was: top-3 / recent-3 regardless of relevance, which
+            // pulled unrelated same-workspace sessions into the prompt).
+            const scored = this.entries
+                .map((e, idx) => ({ entry: e, score: this._relevanceScore(e, currentQuery), idx }))
+                .filter(s => s.score >= MEMORY_MIN_RELEVANCE);
             scored.sort((a, b) => b.score - a.score || b.idx - a.idx);
             selected = scored.slice(0, 3).map(s => s.entry);
             // Re-sort by date so the context reads chronologically.
             selected.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
         } else {
+            // No query to judge against → recent sessions (unchanged).
             selected = this.entries.slice(-3);
         }
+
+        // Nothing relevant → skip the episodic section entirely (facts may still show).
+        if (selected.length === 0) return factsSection;
 
         const memoryText = selected.map(e => {
             if (e.topic && e.summary) {
@@ -718,7 +731,10 @@ JSON output format:
      */
     _getFactsContext(currentQuery = '', limit = 5) {
         // Selection/ranking → ./memory/FactStore.js (unit-tested); formatting stays here.
-        const top = selectRelevantFacts(this.facts, currentQuery, limit);
+        // Apply the relevance floor only when there's a query to judge against, so
+        // facts unrelated to the current task aren't pulled in.
+        const top = selectRelevantFacts(this.facts, currentQuery, limit,
+            currentQuery ? MEMORY_MIN_RELEVANCE : 0);
         if (top.length === 0) return '';
         const lines = top.map(f => `  • ${sanitizeXmlTags(f.fact)}`).join('\n');
         return `\n[Durable Project Facts (long-term memory)]\n${lines}\n`;

@@ -27,9 +27,32 @@ function renderInline(escaped) {
  * Supports: headings, fenced code, un/ordered lists, GFM tables, blockquotes,
  * horizontal rules, paragraphs, and inline formatting. Small by design.
  */
+/**
+ * Repair "escape leakage": a weak model sometimes emits its answer as a JSON
+ * STRING whose escapes (\n \t \") were never unescaped, so the UI shows literal
+ * backslash-n instead of line breaks. Only fires when literal `\n` sequences are
+ * at least as common as real newlines (so genuinely-formatted markdown — which
+ * has real newlines and no `\n` literals — is left untouched, and a stray `\n`
+ * inside otherwise-normal prose won't trigger a rewrite).
+ * @param {string} s
+ * @returns {string}
+ */
+export function normalizeLeakedEscapes(s) {
+    const str = String(s == null ? '' : s);
+    const real = (str.match(/\n/g) || []).length;
+    const literal = (str.match(/\\n/g) || []).length;
+    if (literal === 0 || literal < real) return str;
+    return str
+        .replace(/\\r\\n/g, '\n')
+        .replace(/\\n/g, '\n')
+        .replace(/\\r/g, '\n')
+        .replace(/\\t/g, '\t')
+        .replace(/\\"/g, '"');
+}
+
 export function renderMarkdown(md) {
     if (!md) return '';
-    const lines = String(md).replace(/\r\n/g, '\n').split('\n');
+    const lines = normalizeLeakedEscapes(String(md)).replace(/\r\n/g, '\n').split('\n');
     let html = '';
     let i = 0;
     let inList = null; // 'ul' | 'ol' | null

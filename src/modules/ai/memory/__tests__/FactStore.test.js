@@ -140,4 +140,25 @@ describe('selectRelevantFacts', () => {
         const top = selectRelevantFacts(facts, '', 1); // no query → equal relevance
         expect(top[0].timestamp).toBe(20);
     });
+    it('minScore drops facts unrelated to the query', () => {
+        const facts = [
+            { fact: 'auth uses JWT tokens', timestamp: 1 },
+            { fact: 'styling uses tailwind css grid', timestamp: 2 },
+        ];
+        // Query overlaps only the auth fact → the unrelated one is filtered out.
+        const top = selectRelevantFacts(facts, 'auth token', 5, 0.1);
+        expect(top).toHaveLength(1);
+        expect(top[0].fact).toMatch(/auth/);
+    });
+    it('minScore=0 keeps the old (no-floor) behaviour', () => {
+        const facts = [
+            { fact: 'auth uses JWT tokens', timestamp: 1 },
+            { fact: 'styling uses tailwind', timestamp: 2 },
+        ];
+        expect(selectRelevantFacts(facts, 'auth', 5, 0)).toHaveLength(2);
+    });
+    it('empty query is unaffected by minScore (0.5 baseline clears the floor)', () => {
+        const facts = [{ fact: 'anything', timestamp: 1 }];
+        expect(selectRelevantFacts(facts, '', 5, 0.1)).toHaveLength(1);
+    });
 });

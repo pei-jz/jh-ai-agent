@@ -1,4 +1,4 @@
-import { renderResultSummary, attachFileOpenHandlers, ensureResultViewStyles, renderMarkdown } from '../utils/resultView.js';
+import { renderResultSummary, attachFileOpenHandlers, ensureResultViewStyles, renderMarkdown, normalizeLeakedEscapes } from '../utils/resultView.js';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { AGENT_MODES, DEFAULT_MODE_ID, buildBehavior } from '../../modules/ai/AgentModes.js';
@@ -1635,8 +1635,9 @@ export class MonitorView {
                 continue;
             }
 
-            // CHAT API call → collect for button (not inline)
-            if (log.event === 'log' && log.data && log.data.method !== 'TOOL') {
+            // CHAT API call → collect for button (not inline). METRICS/REVIEW are
+            // NOT chat — they render inline as their own cards (below).
+            if (log.event === 'log' && this._isChatLog(log.data)) {
                 if (stepId !== null) {
                     stepChatEntries.push(log.data);
                     continue; // skip inline rendering
@@ -1727,12 +1728,14 @@ export class MonitorView {
             case 'tool_call':       return this._fmtTool(log);
             case 'file_modified':   return this._fmtFile(log);
             case 'status':          return this._fmtStatus(log);
-            case 'complete':        return `<div class="mlog mlog-success log-success"><span class="mlog-icon">✅</span><span class="mlog-body"><strong>Complete:</strong> ${escapeHtml(log.data.message || '')}</span></div>`;
-            case 'finish_task':     return `<div class="mlog mlog-success log-success"><span class="mlog-icon">🏁</span><span class="mlog-body"><strong>Finished:</strong> ${escapeHtml(log.data.summary || '')}</span></div>`;
+            case 'complete':        return `<div class="mlog mlog-success log-success"><span class="mlog-icon">✅</span><span class="mlog-body"><strong>Complete:</strong> ${escapeHtml(normalizeLeakedEscapes(log.data.message || ''))}</span></div>`;
+            case 'finish_task':     return `<div class="mlog mlog-success log-success"><span class="mlog-icon">🏁</span><span class="mlog-body"><strong>Finished:</strong> ${escapeHtml(normalizeLeakedEscapes(log.data.summary || ''))}</span></div>`;
             case 'error':           return `<div class="mlog mlog-error log-error"><span class="mlog-icon">❌</span><span class="mlog-body"><strong>Error:</strong> ${escapeHtml(log.data.error || '')}</span></div>`;
             case 'log':
                 // TOOL telemetry stays inline; CHAT is handled as step header button
                 if (log.data?.method === 'TOOL') return this._fmtTelemetry(log.data);
+                if (log.data?.method === 'METRICS') return this._fmtEfficiency(log.data);
+                if (log.data?.method === 'REVIEW') return this._fmtReview(log.data);
                 return ''; // CHAT handled by renderAllLogs / connectWebSocket
             case 'confirm_request': return this._fmtConfirm(log.data);
             default:                return `<div class="mlog mlog-status log-status"><span class="mlog-icon" style="opacity:0.5">·</span><span class="mlog-body">${escapeHtml(JSON.stringify(log.data).slice(0,120))}</span></div>`;
@@ -1758,6 +1761,8 @@ export class MonitorView {
             rawText = String(log.data.text || '');
         }
 
+        // Repair escape-leaked text (literal \n from a weak model's JSON string).
+        rawText = normalizeLeakedEscapes(rawText);
         const uid = Math.random().toString(36).slice(2, 7);
         const summary = this._extractThoughtSummary(rawText);
         const detailHtml = this._formatThoughtDetail(parsedObj, rawText);
@@ -2029,6 +2034,57 @@ export class MonitorView {
         return `<div class="mlog mlog-status log-status"><span class="mlog-icon" style="opacity:0.5">·</span><span class="mlog-body" style="color:var(--text-tertiary)">${escapeHtml(txt)}</span></div>`;
     }
 
+    /** A "log" entry is CHAT-like (→ step-header button) unless it's a typed card. */
+    _isChatLog(data) {
+        const m = data && data.method;
+        return !!data && m !== 'TOOL' && m !== 'METRICS' && m !== 'REVIEW';
+    }
+
+    /** 📊 Efficiency Report card — the end-of-run step-reduction metrics. */
+    _fmtEfficiency(d) {
+        const r = (d && d.response) || {};
+        const k = n => (n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n || 0));
+        const warn = (r.re_reads || 0) > 3;
+        const chips = [
+            `📍 ${r.steps ?? '?'} steps`,
+            `🧮 ↑${k(r.prompt_tokens)} ↓${k(r.completion_tokens)} tok`,
+            `📄 ${r.distinct_files_read ?? 0} files read`,
+            `♻ ${r.re_reads ?? 0} re-reads`,
+        ];
+        if (r.re_read_chars_approx) chips.push(`🗑 ~${k(r.re_read_chars_approx)} wasted chars`);
+        if (r.compactions) chips.push(`🗜 ${r.compactions}× compact · -${k(r.compaction_chars_saved)} chars`);
+        const chipsHtml = chips.map(c =>
+            `<span style="display:inline-block;padding:2px 8px;border-radius:10px;background:var(--bg-tertiary);font-size:11px">${escapeHtml(c)}</span>`
+        ).join(' ');
+        const top = (r.top_re_read_files || []);
+        const topHtml = top.length
+            ? `<details style="margin-top:6px"><summary style="cursor:pointer;font-size:11px;opacity:.8">再読込ファイル / re-read files (${top.length})</summary>`
+              + `<table style="margin-top:4px;font-size:11px;border-collapse:collapse">`
+              + top.map(f => `<tr><td style="padding:1px 8px 1px 0;opacity:.85">${escapeHtml(f.path)}</td><td style="opacity:.7">${f.reads}×</td></tr>`).join('')
+              + `</table></details>`
+            : '';
+        const hintHtml = r.hint
+            ? `<div style="margin-top:6px;font-size:11px;color:${warn ? 'var(--error)' : 'var(--text-tertiary)'}">${escapeHtml(r.hint)}</div>`
+            : '';
+        return `<div class="mlog mlog-status" style="border-left:3px solid ${warn ? 'var(--error)' : 'var(--accent)'}">
+            <span class="mlog-icon">📊</span>
+            <div class="mlog-body">
+                <strong>Efficiency Report</strong>
+                <div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:4px">${chipsHtml}</div>
+                ${topHtml}${hintHtml}
+            </div>
+        </div>`;
+    }
+
+    /** 🔎 Independent-review verdict line (from the sub-agent review gate). */
+    _fmtReview(d) {
+        const r = (d && d.response) || {};
+        const v = r.verdict || '?';
+        const icon = v === 'pass' ? '✅' : v === 'fail' ? '❌' : '❔';
+        const reason = r.reason ? ` <span style="opacity:.6">(${escapeHtml(r.reason)})</span>` : '';
+        return `<div class="mlog mlog-status"><span class="mlog-icon">🔎</span><span class="mlog-body"><strong>Review:</strong> ${icon} ${escapeHtml(String(v))}${reason}</span></div>`;
+    }
+
     _fmtTelemetry(d) {
         if (!d) return '';
         const isErr = d.status >= 400 || d.error;
@@ -2287,9 +2343,7 @@ export class MonitorView {
         if (lastUsage) this._updateContextGauge(lastUsage);
 
         // ── Result bubbles from the replayed complete events ──
-        this.resultSummaries = this.logs
-            .filter(l => l.event === 'complete' && l.data?.resultSummary)
-            .map(l => l.data.resultSummary);
+        this._rebuildResultSummaries();
         this._renderResultPanel();
         requestAnimationFrame(() => {
             if (this._destroyed) return;
@@ -2405,7 +2459,7 @@ export class MonitorView {
         // On a CONTINUE (reconnect after finishing), keep the accumulated run
         // bubbles AND logs so the conversation + All Logs stay intact. A fresh
         // task selection rebuilds from the replay.
-        if (!preserveResults) { this.logs = []; this.resultSummaries = []; }
+        if (!preserveResults) { this.logs = []; this.resultSummaries = []; this._seenCompleteKeys = new Set(); }
         this._taskFinished = false;
         // New run (fresh view or continue): no live activity seen yet — the
         // thinking placeholder may show until the first feed line arrives.
@@ -2588,7 +2642,7 @@ export class MonitorView {
                     `);
 
                 // ── CHAT API call → step header button ─────────────
-                } else if (packet.event === 'log' && packet.data && packet.data.method !== 'TOOL') {
+                } else if (packet.event === 'log' && this._isChatLog(packet.data)) {
                     this._activeStepChatEntries.push(packet.data);
 
                     // Get or create uid
@@ -2697,7 +2751,10 @@ export class MonitorView {
                                 const realSteps = consoleEl.querySelectorAll('.mstep:not(#mstep-init)');
                                 const activeStep = realSteps[realSteps.length - 1];
                                 if (activeStep) activeStep.dataset.lastTool = toolName;
-                                this._updateActiveStepStatus(`⚙ Running: ${toolName}…`, 'tool');
+                                // Show what the tool is acting on (command / file), not just its name.
+                                const runHint = this._toolActionLabel({ name: toolName, request: packet.data.args })
+                                    .replace(/^✓\s*/, '');
+                                this._updateActiveStepStatus(`⚙ Running: ${runHint}…`, 'tool');
                             } else if (packet.event === 'confirm_request') {
                                 this._updateActiveStepStatus('⏸ Awaiting approval…', 'confirm');
                                 // (Task-view card + OS notification are handled at the
@@ -2705,21 +2762,29 @@ export class MonitorView {
                             } else if (packet.event === 'error') {
                                 this._updateActiveStepStatus('⚠ Error — recovering', 'error');
                             } else if (packet.event === 'log' && packet.data?.method === 'TOOL') {
-                                // Tool finished (this is the telemetry event sent after
-                                // each tool returns). The header was showing "⚙ Running: X…"
-                                // — now that the tool is done, prefer the thought summary
-                                // (the "story" of this step) if we captured one. Otherwise
-                                // fall back to a past-tense "✓ X done".
-                                const realSteps = consoleEl.querySelectorAll('.mstep:not(#mstep-init)');
-                                const activeStep = realSteps[realSteps.length - 1];
-                                if (activeStep) {
-                                    const storedThought = activeStep.dataset.thoughtSummary;
-                                    const toolName = packet.data.name || activeStep.dataset.lastTool || 'tool';
-                                    if (storedThought) {
-                                        // Same 'tool' priority as the in-flight status, so this overwrite is allowed
-                                        this._updateActiveStepStatus(storedThought, 'tool');
-                                    } else {
-                                        this._updateActiveStepStatus(`✓ ${toolName} done`, 'tool');
+                                // Tool finished (telemetry event sent after each tool returns).
+                                const label = String(packet.data.stepLabel || '');
+                                const isSub = label.includes('🤖') || label.includes('sub:');
+                                if (isSub) {
+                                    // SUB-AGENT tool finished. The forwarded
+                                    // "🤖 [sub:…] ⚙ tool: arg" status line already
+                                    // shows what the child is doing. Re-showing the
+                                    // PARENT step's stored thought here made the SAME
+                                    // line ("Rustのビルドが成功しました…") repeat after
+                                    // every child tool, flooding the feed. So show the
+                                    // child tool's own action instead.
+                                    this._updateActiveStepStatus(this._toolActionLabel(packet.data), 'tool');
+                                } else {
+                                    // Parent tool finished. The header was showing
+                                    // "⚙ Running: X…" — prefer this step's thought
+                                    // summary (the "story") if captured, else past-tense.
+                                    const realSteps = consoleEl.querySelectorAll('.mstep:not(#mstep-init)');
+                                    const activeStep = realSteps[realSteps.length - 1];
+                                    if (activeStep) {
+                                        const storedThought = activeStep.dataset.thoughtSummary;
+                                        const toolName = packet.data.name || activeStep.dataset.lastTool || 'tool';
+                                        this._updateActiveStepStatus(
+                                            storedThought || `✓ ${toolName} done`, 'tool');
                                     }
                                 }
                             } else if (packet.event === 'status' && packet.data.message) {
@@ -2814,11 +2879,13 @@ export class MonitorView {
                     // (OS completion notification handled globally in main.js.)
                     // Accumulate the result summary (one per run) for the Task tab.
                     if (packet.event === 'complete' && packet.data?.resultSummary) {
-                        this.resultSummaries.push(packet.data.resultSummary);
-                        // ALWAYS refresh the Task panel content so a continuation's new
-                        // result appears even when the user is already on that tab
-                        // (previously only _activateResultTab re-rendered — so a
-                        // continued run's result showed in All Logs but not here).
+                        // The packet is already in this.logs (pushed above), so rebuild
+                        // the whole set from the canonical log store — idempotent and
+                        // deduped, immune to the replay/continue double-fire AND to the
+                        // "a run goes missing" push race. Then re-render the Task panel
+                        // so a continuation's new result appears even when the user is
+                        // already on that tab.
+                        this._rebuildResultSummaries();
                         this._renderResultPanel();
                     }
                     // Switch to the Task tab on completion — but only if the user
@@ -2852,10 +2919,19 @@ export class MonitorView {
                     if ((packet.event === 'complete' || packet.event === 'error') && !this._awaitingUser) {
                         const feed = document.getElementById('result-live');
                         if (feed) { feed.innerHTML = ''; feed.style.display = 'none'; feed.dataset.lastText = ''; }
-                        // The pending user bubble is now absorbed into the run bubbles
-                        // (#result-runs, re-rendered from the resultSummary) — drop it
-                        // so the message isn't shown twice.
-                        this._clearPendingUser();
+                        // Only DROP the pending user bubble when a fresh run bubble
+                        // actually replaced it — i.e. a resultSummary was pushed +
+                        // rendered into #result-runs this completion. Otherwise (a
+                        // mid-run STEER that folded into the current run, or a
+                        // completion carrying no summary) clearing it would make the
+                        // just-sent request+answer VANISH from the Task view (the
+                        // reported "二回目以降の要求が表示されない / 結果が一時的に消える"
+                        // symptom). In that case, freeze it into a persistent bubble.
+                        if (packet.event === 'complete' && packet.data?.resultSummary) {
+                            this._clearPendingUser();
+                        } else {
+                            this._finalizePendingUser(packet.data?.message);
+                        }
                         // Any leftover approval / ask slot is moot once the run ends.
                         this._clearTaskConfirm();
                         this._clearAskCard();
@@ -2925,10 +3001,9 @@ export class MonitorView {
             if (Array.isArray(logs) && logs.length > 0) {
                 this.logs = logs.map(l => ({ ...l, data: l.data || {} }));
                 // Recover ALL run results from the persisted `complete` events
-                // (a continued task has more than one).
-                this.resultSummaries = this.logs
-                    .filter(l => l.event === 'complete' && l.data?.resultSummary)
-                    .map(l => l.data.resultSummary);
+                // (a continued task has more than one) — same canonical derivation
+                // as the live/replay paths.
+                this._rebuildResultSummaries();
                 // Seed the context gauge from the newest LLM call of the stored run.
                 const lastUsage = [...this.logs].reverse().find(l => l.event === 'token_usage');
                 if (lastUsage) this._updateContextGauge(lastUsage.data);
@@ -3110,6 +3185,27 @@ export class MonitorView {
         if (el) { el.innerHTML = ''; el.style.display = 'none'; }
     }
 
+    /**
+     * Freeze the pending user bubble into a PERSISTENT exchange when no
+     * resultSummary arrived to replace it (mid-run steer fold-in, or a
+     * completion with no summary). Drops the "thinking…" dots and, if we have a
+     * final message, appends it as the AI answer — so the follow-up request and
+     * its result stay visible in the Task view instead of vanishing.
+     */
+    _finalizePendingUser(answerText) {
+        const el = document.getElementById('result-pending');
+        if (!el || el.style.display === 'none' || !el.innerHTML.trim()) return;
+        // Drop only the thinking placeholder; keep the user's request bubble.
+        el.querySelectorAll('.mrc-thinking').forEach(t => t.closest('.mrc-row')?.remove());
+        const ans = String(answerText || '').trim();
+        if (ans && !el.querySelector('.mrc-ai')) {
+            const row = document.createElement('div');
+            row.className = 'mrc-row mrc-ai';
+            row.innerHTML = `<div class="mrc-bubble"><div class="rv-summary chat-md">${renderMarkdown(ans)}</div></div>`;
+            el.appendChild(row);
+        }
+    }
+
     /** Drop the "thinking…" placeholder under the pending user message once real
      *  activity starts streaming — the "⏳ 実行中 / Working…" feed below now shows
      *  progress, so the dots would just sit there stale until completion. Keeps
@@ -3207,6 +3303,28 @@ export class MonitorView {
     }
 
     /** Re-render the run bubbles (NOT the live feed sibling) and rebind file links. */
+    /**
+     * Canonical source of the Task-tab result bubbles: derive `resultSummaries`
+     * from `this.logs` (every `complete` event that carries a resultSummary),
+     * deduped by timestamp+request. ALL paths (live complete, continue, reload,
+     * replay-flush) call this so they can never diverge — the previous split
+     * between "incremental push + dedup set" (live) and "filter/map from logs"
+     * (reload) let a run silently go missing from one path but not the other.
+     */
+    _rebuildResultSummaries() {
+        const seen = new Set();
+        const out = [];
+        for (const l of (this.logs || [])) {
+            if (l.event !== 'complete' || !l.data?.resultSummary) continue;
+            const rs = l.data.resultSummary;
+            const key = `${l.timestamp || ''}|${String(rs.request || '').slice(0, 120)}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            out.push(rs);
+        }
+        this.resultSummaries = out;
+    }
+
     _renderResultPanel() {
         ensureResultViewStyles();
         this._renderFilesBar();
@@ -3228,6 +3346,26 @@ export class MonitorView {
      * the work progressing, not just a single stale line. Consecutive duplicates
      * are skipped and the feed is capped to keep it light.
      */
+    /**
+     * Concise "what a finished tool did" label from a TOOL telemetry entry —
+     * mirrors AgentController._toolArgHint (command / file basename / query),
+     * preserving any "🤖 [sub:…]" prefix from the forwarded stepLabel so the
+     * feed reads e.g. "🤖 [sub:reviewer#1] ✓ run_command: cargo build".
+     */
+    _toolActionLabel(data) {
+        const name = data?.name || 'tool';
+        const req = data?.request || {};
+        const base = (p) => String(p || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop();
+        let detail = '';
+        if (name === 'run_command') detail = String(req.command || '').replace(/\s+/g, ' ').trim().slice(0, 60);
+        else if (['read_file', 'write_file', 'replace_lines', 'multi_replace_file_content', 'delete_file', 'verify_syntax', 'create_artifact'].includes(name)) detail = base(req.path);
+        else if (name === 'move_file') detail = base(req.to || req.from);
+        else if (name === 'grep_search' || name === 'web_search') detail = String(req.query || '').slice(0, 40);
+        else if (name === 'list_files' || name === 'glob') detail = String(req.path || req.pattern || '').slice(0, 40);
+        const prefix = String(data?.stepLabel || '').match(/🤖\s*\[[^\]]+\]/)?.[0] || '';
+        return `${prefix ? prefix + ' ' : ''}✓ ${name}${detail ? ': ' + detail : ''}`;
+    }
+
     _setResultLive(text, type = 'live') {
         const el = document.getElementById('result-live');
         if (!el || !text) return;

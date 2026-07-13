@@ -107,14 +107,42 @@ describe('parseReviewVerdict', () => {
     it('is case-insensitive', () => {
         expect(parseReviewVerdict('verdict: pass').verdict).toBe('pass');
     });
-    it('no verdict → unknown (gate must not deadlock)', () => {
-        const { verdict, findings } = parseReviewVerdict('I looked around, seems fine.');
-        expect(verdict).toBe('unknown');
-        expect(findings).toContain('seems fine');
+    it('reports explicit-verdict reason', () => {
+        expect(parseReviewVerdict('VERDICT: PASS').reason).toBe('explicit-verdict');
     });
-    it('tolerates empty/null input', () => {
+
+    // ── Robustness tiers: a reviewer that forgot the exact VERDICT block must
+    //    NOT collapse to "unknown" (the "レビュー結果不明" bug). ──
+    it('standalone PASS/FAIL token on its own line', () => {
+        expect(parseReviewVerdict('I checked the diff.\nPASS\n').verdict).toBe('pass');
+        expect(parseReviewVerdict('Problems remain.\nFAIL').verdict).toBe('fail');
+    });
+    it('blocking finding tag with no VERDICT → fail', () => {
+        const { verdict, reason } = parseReviewVerdict(
+            'Reviewed the changes.\nFINDINGS:\n- [BUG] a.js:10 — off-by-one');
+        expect(verdict).toBe('fail');
+        expect(reason).toBe('blocking-tag-heuristic');
+    });
+    it('does NOT treat the echoed template legend as a real blocking finding', () => {
+        // Report that only parrots the persona's example line, no real finding.
+        const { verdict } = parseReviewVerdict(
+            'I inspected everything and it is correct.\n- [BUG] path/file.js:123 — description…');
+        expect(verdict).toBe('pass');
+    });
+    it('"no issues found" language with no VERDICT → pass', () => {
+        expect(parseReviewVerdict('Inspected all files, no issues found.').verdict).toBe('pass');
+        expect(parseReviewVerdict('全ファイルを確認しました。問題ありません。').verdict).toBe('pass');
+    });
+    it('substantive report, nothing blocking → pass (never deadlock)', () => {
+        const { verdict, reason } = parseReviewVerdict(
+            'I looked around the module and everything matches the acceptance criteria.');
+        expect(verdict).toBe('pass');
+        expect(reason).toBe('no-blocking-findings');
+    });
+    it('only an empty/trivial report is unknown', () => {
         expect(parseReviewVerdict('').verdict).toBe('unknown');
         expect(parseReviewVerdict(null).verdict).toBe('unknown');
+        expect(parseReviewVerdict('ok').verdict).toBe('unknown');
     });
 });
 

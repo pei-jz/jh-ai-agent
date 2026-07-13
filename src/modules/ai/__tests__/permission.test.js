@@ -7,6 +7,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 vi.mock('../McpManager.js', () => ({ mcpManager: { getAllTools: () => [] } }));
 
 const { ToolExecutor } = await import('../ToolExecutor.js');
+const { invoke } = await import('@tauri-apps/api/core');
 let toolExecutor;
 const WS = 'C:/work/proj';
 
@@ -117,5 +118,62 @@ describe('ToolExecutor._confirmUnsafe (fail-closed gate)', () => {
   it('defers to the approval channel for unsafe ops', async () => {
     await expect(toolExecutor._confirmUnsafe(false, async () => true, {})).resolves.toBe(true);
     await expect(toolExecutor._confirmUnsafe(false, async () => false, {})).resolves.toBe(false);
+  });
+});
+
+describe('ToolExecutor._autoSyntaxGate (post-edit diff-verification)', () => {
+  beforeEach(() => {
+    toolExecutor = new ToolExecutor();
+    toolExecutor.workspacePath = WS;
+    invoke.mockReset();
+  });
+
+  it('passes valid JSON silently', async () => {
+    const out = await toolExecutor._autoSyntaxGate('a.json', '{"x":1}', '{"x":2}');
+    expect(out).toBe('');
+  });
+
+  it('flags JSON the edit BROKE (was valid → now invalid)', async () => {
+    const out = await toolExecutor._autoSyntaxGate('a.json', '{"x":1}', '{"x":2');
+    expect(out).toContain('SYNTAX GATE');
+    expect(out).toContain('BROKE');
+  });
+
+  it('notes JSON that was already invalid before the edit', async () => {
+    const out = await toolExecutor._autoSyntaxGate('a.json', '{bad', '{still bad');
+    expect(out).toContain('already invalid');
+  });
+
+  it('runs node --check for .js and passes on exit 0', async () => {
+    invoke.mockResolvedValueOnce('');
+    const out = await toolExecutor._autoSyntaxGate('src/a.js', 'const a=1;', 'const a=2;');
+    expect(out).toBe('');
+    expect(toolExecutor._nodeAvailable).toBe(true);
+    expect(invoke).toHaveBeenCalledWith('run_command', expect.objectContaining({ command: expect.stringContaining('node --check') }));
+  });
+
+  it('flags a .js SyntaxError from node --check', async () => {
+    invoke.mockRejectedValueOnce(new Error('a.js:1\nconst a=(\n\nSyntaxError: Unexpected end of input'));
+    const out = await toolExecutor._autoSyntaxGate('src/a.js', 'const a=1;', 'const a=(');
+    expect(out).toContain('SYNTAX GATE');
+    expect(out).toContain('node --check');
+  });
+
+  it('skips (and remembers) when node is not installed', async () => {
+    invoke.mockRejectedValueOnce(new Error("'node' is not recognized as an internal or external command"));
+    const out = await toolExecutor._autoSyntaxGate('src/a.js', 'const a=1;', 'const a=2;');
+    expect(out).toBe('');
+    expect(toolExecutor._nodeAvailable).toBe(false);
+    // A second call must NOT re-probe node.
+    invoke.mockClear();
+    const out2 = await toolExecutor._autoSyntaxGate('src/b.js', 'x', 'y');
+    expect(out2).toBe('');
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it('skips non-code files (.tsx)', async () => {
+    const out = await toolExecutor._autoSyntaxGate('src/a.tsx', '<App/>', '<App2/>');
+    expect(out).toBe('');
+    expect(invoke).not.toHaveBeenCalled();
   });
 });
