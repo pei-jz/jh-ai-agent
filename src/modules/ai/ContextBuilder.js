@@ -300,7 +300,13 @@ IMPORTANT: Final responses to the USER must be in ${outputLanguage}. Internal re
             let availableToolsBlock = '';
             let instructionsPrompt = '';
             if (isNative) {
-                instructionsPrompt = `Call tools via the native function-calling API (the request's \`tools\` field) — never write a call as text. Keep any out-loud reasoning brief.`;
+                // NOTE: narration is asked for in NATIVE mode ONLY. The JSON-mode
+                // protocol demands exactly one JSON object with NO surrounding
+                // commentary — asking a JSON-mode model to narrate would corrupt
+                // the envelope the parser depends on.
+                instructionsPrompt = `Call tools via the native function-calling API (the request's \`tools\` field) — never write a call as text.
+
+Before each tool call, say what you are about to do and why, in 1–2 short sentences of plain prose (${outputLanguage}). Write it as if talking to the user — this is shown live so they can follow your progress. Keep it conversational: NO JSON, NO code, NO tool syntax, no headings or bullet lists in that narration — the tool call itself carries the arguments.`;
             } else {
                 const toolDefs = toolExecutor.getToolsForNativeAPI()
                     .map(t => `<tool name="${t.function.name}">\n<description>${t.function.description}</description>\n</tool>`)

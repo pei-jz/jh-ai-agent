@@ -1,4 +1,5 @@
 import { renderResultSummary, attachFileOpenHandlers, ensureResultViewStyles, renderMarkdown, normalizeLeakedEscapes } from '../utils/resultView.js';
+import { extractNarration } from '../utils/narration.js';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { AGENT_MODES, DEFAULT_MODE_ID, buildBehavior } from '../../modules/ai/AgentModes.js';
@@ -746,6 +747,25 @@ export class MonitorView {
                     color: var(--text-secondary);
                     cursor: default;
                 }
+                /* Mechanical trace (tool calls / results) — deliberately quiet so it
+                   doesn't compete with the reasoning above it. */
+                .mtask-feed-item:not(.is-think):not(.is-question) {
+                    color: var(--text-tertiary);
+                    font-size: 11.5px;
+                }
+                /* THE THINKING — the thing worth reading. Prominent: primary colour,
+                   a little larger/heavier, and its own indented block so a run reads
+                   as "reasoning → the tools it triggered". */
+                .mtask-feed-item.is-think {
+                    color: var(--text-primary);
+                    font-size: 12.5px;
+                    font-weight: 500;
+                    line-height: 1.6;
+                    margin: 6px 0 2px;
+                    padding-left: 8px;
+                    border-left: 2px solid var(--accent);
+                }
+                .mtask-feed-item.is-think .mtask-feed-tx { -webkit-line-clamp: 5; }
                 /* Each entry is clamped to 2 lines so one long thought doesn't sprawl.
                    Click to toggle the full text (title also carries it for hover). */
                 .mtask-feed-tx {
@@ -818,6 +838,24 @@ export class MonitorView {
                     background: var(--bg-secondary);
                     border-radius: 12px 12px 12px 2px;
                 }
+                /* Live narration — the model's in-flight prose. Lighter/dashed so
+                   it reads as "being said right now", distinct from a settled
+                   answer bubble (which is solid). Replaced by the real result
+                   bubble on completion. */
+                .mrc-narration .mrc-bubble {
+                    background: transparent;
+                    border-style: dashed;
+                    border-color: var(--border);
+                    color: var(--text-secondary);
+                }
+                .mrc-narration .mrc-bubble::after {
+                    content: '▍';
+                    color: var(--accent);
+                    animation: mcaret 1s step-end infinite;
+                    margin-left: 2px;
+                }
+                @keyframes mcaret { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+
                 /* Attached-image thumbnails inside a request bubble. */
                 .mrc-imgs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
                 .mrc-img {
@@ -1491,6 +1529,17 @@ export class MonitorView {
                      before the run completes. On completion it's absorbed into the
                      run bubbles above and this is cleared. -->
                 <div id="result-pending" class="mresult-chat" style="display:none"></div>
+                <!-- Live deliverable: a present_result (e.g. a plan) rendered the
+                     moment the agent emits it — so it's visible ALONGSIDE a
+                     following ask_user question, not only after the run completes.
+                     Cleared on completion (the permanent run bubble replaces it). -->
+                <div id="result-live-deliverable" class="mresult-chat" style="display:none"></div>
+                <!-- Live narration: the model's own prose ("what I'm about to do and
+                     why"), streamed token-by-token so the wait reads like a
+                     conversation instead of a silent tool log. Prose only —
+                     extractNarration() cuts at the first JSON/code/tool-call marker.
+                     Cleared on completion (the permanent result bubble takes over). -->
+                <div id="result-narration" class="mresult-chat" style="display:none"></div>
                 <!-- Live region (label + feed) wrapped and STICKY-BOTTOM: it still
                      flows like chat at the end of the content, but when a long
                      request/answer would push it out of view it pins to the bottom
@@ -1724,6 +1773,18 @@ export class MonitorView {
             // and `command_run` duplicates that, so skip both here.
             case 'command_chunk':   return '';
             case 'command_run':     return '';
+            // UI-SIGNAL events (onToolEvent): these exist to drive the app/UI —
+            // the editor opening a file, the Task view's live cards, etc. They are
+            // NOT log entries: every one of them duplicates a tool_call line that
+            // already renders above plus the TOOL telemetry below. Without these
+            // cases they fell through to `default:` and dumped raw JSON like
+            // {"_idx":609,"matchCount":10,"pattern":"…"} into All Logs.
+            case 'grep_search':
+            case 'task_progress':
+            case 'open_file':
+            case 'artifact_modified':
+            case 'ask_user':
+            case 'result':          return '';
             case 'thought':         return this._fmtThought(log);
             case 'tool_call':       return this._fmtTool(log);
             case 'file_modified':   return this._fmtFile(log);
@@ -1767,15 +1828,22 @@ export class MonitorView {
         const summary = this._extractThoughtSummary(rawText);
         const detailHtml = this._formatThoughtDetail(parsedObj, rawText);
 
+        // A plain-text thought's "detail" is just the same sentence again — the
+        // expand arrow then opened a box repeating the summary verbatim. Only
+        // offer the expander when the detail actually ADDS something (a structured
+        // JSON thought, or text longer than the extracted summary).
+        const detailText = String(detailHtml).replace(/<[^>]*>/g, '').trim();
+        const hasMore = detailText.length > summary.trim().length + 8;
+
         return `
             <div class="mlog mlog-thought log-thought">
                 <span class="mlog-icon">🧠</span>
                 <div class="mlog-body">
                     <div class="mlog-thought-summary" data-uid="${uid}">
                         <span>${escapeHtml(summary)}</span>
-                        <button class="mlog-expand-btn" data-uid="${uid}" data-target="thought-detail-${uid}">▶</button>
+                        ${hasMore ? `<button class="mlog-expand-btn" data-uid="${uid}" data-target="thought-detail-${uid}">▶</button>` : ''}
                     </div>
-                    <div class="mlog-thought-detail" id="thought-detail-${uid}">${detailHtml}</div>
+                    ${hasMore ? `<div class="mlog-thought-detail" id="thought-detail-${uid}">${detailHtml}</div>` : ''}
                 </div>
             </div>
         `;
@@ -2008,16 +2076,26 @@ export class MonitorView {
         // Suppress meaningless noise
         if (!txt || txt === 'Waiting for user input...' || txt.trim().startsWith('{')) return '';
 
+        // "<the step's thought> (step N)" — AgentController emits this status right
+        // before the `thought` event carrying the SAME text. The step header already
+        // shows it and the 🧠 thought line renders it in full, so this line was a
+        // pure triplicate.
+        if (/\(step\s*\d+\)\s*$/.test(txt)) return '';
+
         // Suppress redundant status logs (formatted as tool calls instead)
         if (txt.startsWith('Reading file:') ||
             txt.startsWith('Writing file:') ||
             txt.startsWith('Editing file:') ||
             txt.startsWith('Running command:') ||
             txt.startsWith('Searching for') ||
+            txt.startsWith('Searching:') ||          // grep_search's own status
+            txt.startsWith('Searching the web:') ||
             txt.startsWith('Exploring directory:') ||
             txt.startsWith('Deep scanning directory:') ||
             txt.startsWith('Creating artifact:') ||
             txt.startsWith('Updating artifact:') ||
+            txt.startsWith('Presenting result') ||
+            txt.startsWith('Asking the user:') ||
             txt.startsWith('Proposed plan:') ||
             txt.startsWith('Calling MCP tool:')) {
             return '';
@@ -2544,6 +2622,16 @@ export class MonitorView {
                     return;
                 }
 
+                // ── Live token stream → narration ───────────────────────────
+                // Handled here and RETURNED: 'stream' fires per token, so it must
+                // never reach this.logs (the server doesn't persist it either) or
+                // the All Logs renderer. Skipped during replay (a replayed backlog
+                // has no stream events, but be explicit).
+                if (packet.event === 'stream') {
+                    if (!this._replaying) this._appendNarration(packet.data?.chunk || '');
+                    return;
+                }
+
                 // ── Replay buffering (fresh connect) ────────────────────────
                 // Accumulate into this.logs only; ALL rendering is deferred to
                 // _flushReplay (triggered by replay_done, or the debounce for
@@ -2561,13 +2649,18 @@ export class MonitorView {
                 }
 
                 // Any non-terminal event means a run is actively streaming → the
-                // steer box is in "steer" (not "continue") mode. This also correctly
-                // flips back after a reconnect replays an older `complete` event.
+                // steer box is in "steer" (not "continue") mode.
                 if (packet.event && packet.event !== 'complete' && packet.event !== 'error') {
                     this._taskFinished = false;
-                    // A fresh run is streaming again → clear any prior "waiting for
-                    // answer" state. The 'waiting' status event itself re-sets this
-                    // flag later in this same handler, so this is safe.
+                }
+                // Clear the ask_user "waiting" state ONLY when a NEW run is actually
+                // progressing (a thought / tool_call / running-status). Do NOT clear
+                // it on token_usage/log events — those fire while the result summary
+                // is built AFTER ask_user, and clearing here made the trailing
+                // `complete` wipe the question (the "Askが見えない" bug). The
+                // 'waiting' status handler re-sets it below in this same handler.
+                if (packet.event === 'thought' || packet.event === 'tool_call'
+                    || (packet.event === 'status' && packet.data?.status === 'running')) {
                     this._awaitingUser = false;
                 }
 
@@ -2592,6 +2685,18 @@ export class MonitorView {
                 // re-visit replayed the event).
                 if (packet.event === 'confirm_request') {
                     this._showTaskConfirm(packet.data);
+                }
+                // Live deliverable (present_result) — render it NOW so a plan is
+                // visible together with a following ask_user question. Only fires
+                // LIVE (replay is buffered above, so this never runs during flush).
+                if (packet.event === 'result' && packet.data?.envelope) {
+                    this._showLiveDeliverable(packet.data.envelope);
+                }
+                // New LLM step → the next stream chunks belong to a NEW narration
+                // bubble. Done at top level (not inside the All Logs branch below)
+                // so it still fires when the console DOM isn't present.
+                if (packet.event === 'status' && packet.data.message?.startsWith('Thinking... (step ')) {
+                    this._startNarrationStep();
                 }
 
                 const consoleEl = document.getElementById('console-logs');
@@ -2783,8 +2888,13 @@ export class MonitorView {
                                     if (activeStep) {
                                         const storedThought = activeStep.dataset.thoughtSummary;
                                         const toolName = packet.data.name || activeStep.dataset.lastTool || 'tool';
+                                        // Header → the step's thought (its "story").
+                                        // Feed → this tool's OWN action; echoing the
+                                        // thought here duplicated it right under its
+                                        // own "⚙ Running: X…" line.
                                         this._updateActiveStepStatus(
-                                            storedThought || `✓ ${toolName} done`, 'tool');
+                                            storedThought || `✓ ${toolName} done`, 'tool',
+                                            this._toolActionLabel(packet.data));
                                     }
                                 }
                             } else if (packet.event === 'status' && packet.data.message) {
@@ -2887,6 +2997,10 @@ export class MonitorView {
                         // already on that tab.
                         this._rebuildResultSummaries();
                         this._renderResultPanel();
+                        // The permanent run bubble now carries the deliverable — drop
+                        // the live one (even when ask_user keeps the run "waiting", so
+                        // the plan isn't shown twice).
+                        this._clearLiveDeliverable();
                     }
                     // Switch to the Task tab on completion — but only if the user
                     // hasn't manually navigated elsewhere during this run. (Replayed
@@ -2947,6 +3061,8 @@ export class MonitorView {
                         // failed run is exactly when "just keep going" is most useful.
                         this._taskFinished = true;
                         this._syncStopButton();   // A: hide the ⏹ stop button (run over)
+                        this._clearLiveDeliverable();   // run over → drop any live plan bubble
+                        this._clearNarration();         // …and the live narration (result bubble takes over)
                         // ask_user pauses the run and returns via 'complete' — but the
                         // task is NOT actually done, it's waiting for the user's answer.
                         // Keep the question-answer framing so the reply box reads as
@@ -3206,6 +3322,87 @@ export class MonitorView {
         }
     }
 
+    /** Extract the human-readable body from a present_result envelope. */
+    _envelopeText(env) {
+        const p = env?.payload || {};
+        if (typeof p.md === 'string' && p.md.trim()) return p.md;
+        if (typeof p.text === 'string' && p.text.trim()) return p.text;
+        if (Array.isArray(p.files) && p.files.length) {
+            return p.files.map(f => `- ${f?.path || f}`).join('\n');
+        }
+        return String(env?.summary || '').trim();
+    }
+
+    /** Render a present_result deliverable as a LIVE AI bubble during the run, so
+     *  a plan is visible together with a following ask_user question (not only
+     *  after completion). Replaced by the permanent run bubble on complete. */
+    _showLiveDeliverable(envelope) {
+        const el = document.getElementById('result-live-deliverable');
+        if (!el) return;
+        const text = this._envelopeText(envelope);
+        if (!text) return;
+        el.style.display = 'flex';
+        el.innerHTML = `<div class="mrc-row mrc-ai"><div class="mrc-bubble"><div class="rv-summary chat-md">${renderMarkdown(text)}</div></div></div>`;
+        this._stopPendingThinking();
+        const rp = document.getElementById('result-panel');
+        if (rp) rp.scrollTop = rp.scrollHeight;
+    }
+
+    _clearLiveDeliverable() {
+        const el = document.getElementById('result-live-deliverable');
+        if (el) { el.innerHTML = ''; el.style.display = 'none'; }
+    }
+
+    /**
+     * Live narration: append the model's streamed tokens as prose so the user can
+     * see what it's thinking/doing while it works. DISPLAY-ONLY — the stream is
+     * never stored, never rendered in All Logs, and never feeds the result
+     * summary, so this cannot affect the report / finish output / JHEditor.
+     * extractNarration() cuts at the first JSON/code/tool-call marker, so a
+     * JSON-mode model (whole reply = one envelope) renders NOTHING here.
+     * Rendering is rAF-coalesced — a per-token markdown re-render would thrash.
+     */
+    _appendNarration(chunk) {
+        if (!chunk) return;
+        this._streamBuf = (this._streamBuf || '') + chunk;
+        if (this._narrationRaf) return;                  // a render is already queued
+        this._narrationRaf = requestAnimationFrame(() => {
+            this._narrationRaf = null;
+            if (this._destroyed) return;
+            const el = document.getElementById('result-narration');
+            if (!el) return;
+            const prose = extractNarration(this._streamBuf);
+            if (!prose) return;                          // pure machinery → show nothing
+            const follow = this._isTaskAtBottom();
+            el.style.display = 'flex';
+            if (!this._narrationBody || !this._narrationBody.isConnected) {
+                const row = document.createElement('div');
+                row.className = 'mrc-row mrc-ai mrc-narration';
+                row.innerHTML = `<div class="mrc-bubble"><div class="rv-summary chat-md"></div></div>`;
+                el.appendChild(row);
+                this._narrationBody = row.querySelector('.rv-summary');
+            }
+            this._narrationBody.innerHTML = renderMarkdown(prose);
+            this._stopPendingThinking();
+            if (follow) this._scrollTaskToBottom();
+        });
+    }
+
+    /** New LLM step → start a fresh narration bubble (the previous one stays,
+     *  so the run reads as an interleaved back-and-forth with the tool feed). */
+    _startNarrationStep() {
+        this._streamBuf = '';
+        this._narrationBody = null;
+    }
+
+    _clearNarration() {
+        if (this._narrationRaf) { cancelAnimationFrame(this._narrationRaf); this._narrationRaf = null; }
+        this._streamBuf = '';
+        this._narrationBody = null;
+        const el = document.getElementById('result-narration');
+        if (el) { el.innerHTML = ''; el.style.display = 'none'; }
+    }
+
     /** Drop the "thinking…" placeholder under the pending user message once real
      *  activity starts streaming — the "⏳ 実行中 / Working…" feed below now shows
      *  progress, so the dots would just sit there stale until completion. Keeps
@@ -3374,6 +3571,16 @@ export class MonitorView {
         if (this._taskFinished) return;
         // Skip a repeat of the last line (status updates fire many times per step).
         if (el.dataset.lastText === text) return;
+        // The narration bubble already streamed THIS step's reasoning as prose —
+        // the trailing `thought` event carries the same content (it's an extract of
+        // the very same response), so a feed line here would just echo it. Only
+        // applies while a narration bubble exists (JSON-mode models have none, so
+        // the feed line remains their fallback).
+        if ((type === 'thought' || type === 'live') && this._narrationBody) {
+            const nar = String(this._narrationBody.textContent || '').trim();
+            const s = String(text).trim();
+            if (nar && s && (nar.includes(s) || s.includes(nar))) return;
+        }
         el.dataset.lastText = text;
 
         el.style.display = 'flex';
@@ -3384,13 +3591,17 @@ export class MonitorView {
         // scrolled up to read, don't yank them — show the "new activity" pill.
         const wasAtBottom = this._isTaskAtBottom();
         const icon = type === 'tool' ? '🔧' : type === 'error' ? '⚠️'
-            : type === 'question' ? '❓' : type === 'confirm' ? '⏸' : '🔍';
+            : type === 'question' ? '❓' : type === 'confirm' ? '⏸' : '💭';
         const str = String(text);
         const item = document.createElement('div');
-        // Long entries are clamped to 2 lines (CSS) and expand on click. A question
-        // card is never clamped (it's important and already highlighted).
-        const clampable = type !== 'question' && str.length > 90;
+        // The agent's REASONING is the thing worth reading — 'thought'/'live' lines
+        // get the prominent treatment (is-think: primary colour, 5-line clamp);
+        // tool/mechanical lines stay dim and tight (2 lines) so they read as the
+        // supporting trace rather than competing with the thinking.
+        const isThink = type === 'thought' || type === 'live';
+        const clampable = type !== 'question' && str.length > (isThink ? 220 : 90);
         item.className = 'mtask-feed-item'
+            + (isThink ? ' is-think' : '')
             + (type === 'error' ? ' is-error' : '')
             + (type === 'question' ? ' is-question' : '')
             + (clampable ? ' clampable' : '');
@@ -3518,10 +3729,19 @@ export class MonitorView {
      * is DOING right now is more useful than what it was THINKING. The thought
      * is already visible in the step body anyway.
      */
-    _updateActiveStepStatus(text, type = 'live') {
+    /**
+     * @param {string} text     header text (the step's "story")
+     * @param {string} [type]   feed/severity type
+     * @param {string} [feedText] when given, the FEED shows this instead of `text`.
+     *   Needed because the two surfaces want different things: on tool completion
+     *   the HEADER should show the step's thought, but echoing that thought into
+     *   the chronological feed repeated it right after its own "Running: X" line
+     *   (the reported duplicate). The feed gets the tool's own action instead.
+     */
+    _updateActiveStepStatus(text, type = 'live', feedText = undefined) {
         // The compact live strip reflects the LATEST activity (no priority gating) —
         // it's the "what's happening right now" indicator shown above both views.
-        this._setResultLive(text, type);
+        this._setResultLive(feedText === undefined ? text : feedText, type);
 
         const consoleEl = document.getElementById('console-logs');
         if (!consoleEl) return;

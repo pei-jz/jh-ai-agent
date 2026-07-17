@@ -11,6 +11,46 @@
 import { invoke } from '@tauri-apps/api/core';
 
 /**
+ * Coerce a "list of strings" tool argument that a model may hand over in any of
+ * several shapes. Strict `Array.isArray` silently dropped the non-array forms,
+ * which is how ask_user's `options` arrived empty (the model sent the JSON as a
+ * string). Accepts: a real array, a JSON-array string, or a newline/comma
+ * separated string. Always returns a clean array of non-empty strings.
+ * @param {*} v
+ * @returns {string[]}
+ */
+export function coerceStringArray(v) {
+    const clean = (arr) => arr.map(o => String(o ?? '').trim()).filter(Boolean);
+    if (Array.isArray(v)) return clean(v);
+    if (typeof v !== 'string') return [];
+    const s = v.trim();
+    if (!s) return [];
+    if (s.startsWith('[')) {
+        try {
+            const parsed = JSON.parse(s);
+            if (Array.isArray(parsed)) return clean(parsed);
+        } catch (_) { /* not valid JSON — fall through to separators */ }
+    }
+    // Newline-separated wins over comma (an option's own text often has commas).
+    if (s.includes('\n')) return clean(s.split('\n'));
+    if (s.includes(',')) return clean(s.split(','));
+    return clean([s]);
+}
+
+/**
+ * Coerce a boolean tool argument. Models frequently emit these as strings —
+ * including Python-style "True"/"False" — where `!!"False"` is wrongly true.
+ * @param {*} v
+ * @returns {boolean}
+ */
+export function coerceBool(v) {
+    if (typeof v === 'boolean') return v;
+    if (typeof v === 'number') return v !== 0;
+    if (typeof v === 'string') return /^(true|yes|y|1|on)$/i.test(v.trim());
+    return !!v;
+}
+
+/**
  * present_result — deliver the FINAL structured result to the calling app
  * (AI-Hub Result Contract). Normalizes the flat strict-schema args into the
  * `{ kind, payload, actions[], summary }` envelope and emits it as a `result`
@@ -202,11 +242,13 @@ export async function handleAskUser(ctx, args, onAgentStatus) {
         return 'Error: ask_user requires a non-empty "question". State exactly what you need from the user and why you cannot proceed.';
     }
     const context = (args && typeof args.context === 'string') ? args.context.trim() : '';
-    // Optional multiple-choice: sanitize to a list of non-empty strings.
-    const options = Array.isArray(args?.options)
-        ? args.options.map(o => String(o || '').trim()).filter(Boolean)
-        : [];
-    const multiSelect = !!args?.multi_select && options.length > 0;
+    // Optional multiple-choice. Coerce leniently: models routinely hand these in
+    // as STRINGS rather than real JSON types (e.g. options='["A","B"]' and
+    // multi_select="False" — Python-style — which is what the XML <parameter>
+    // arg format produces). The strict Array.isArray/!! checks silently dropped
+    // them, so a question WITH choices rendered as a plain free-text ask.
+    const options = coerceStringArray(args?.options);
+    const multiSelect = coerceBool(args?.multi_select) && options.length > 0;
     onAgentStatus?.(`Asking the user: ${question.slice(0, 80)}`);
     ctx._awaitingUser = true;
     ctx._userQuestion = context ? `${question}\n\n${context}` : question;
