@@ -388,11 +388,15 @@ class LLMService {
         const payload = {
             provider: providerName,
             model: modelName,
-            messages: messages.map(m => ({ role: m.role, content: m.content })),
+            messages: messages.map(m => this._wireMessage(m)),
             system_prompt: systemPrompt || null,
             images: images.length > 0 ? images : null,
             base_url: providerName === 'azure' ? config.azure_endpoint : (providerName === 'ollama' ? 'http://localhost:11434' : null),
-            api_version: providerName === 'azure' ? '2024-08-01-preview' : null,
+            // Azure default: 2024-10-21 (GA) — the previous 2024-08-01-preview
+            // predates prompt-caching support, so cached_tokens was never
+            // reported (⚡0 in the UI). A per-instance api_version in Settings
+            // still overrides this on the Rust side.
+            api_version: providerName === 'azure' ? '2024-10-21' : null,
             api_key: null,
             proxy: config.proxy_url || null,
             request_id: requestId,
@@ -445,6 +449,20 @@ class LLMService {
      * @param {Array} images - Optional base64 images
      * @returns {Object} { content: string, toolCalls: Array|null, usage: Object }
      */
+    /**
+     * Serialize one history message for the Rust layer. Besides role/content,
+     * forwards the NATIVE tool-call fields (assistant.tool_calls / tool role's
+     * tool_call_id + name) — the previous map stripped them, which forced the
+     * history into a text-envelope form that weak models then imitated.
+     */
+    _wireMessage(m) {
+        const o = { role: m.role, content: m.content ?? '' };
+        if (m.tool_calls) o.tool_calls = m.tool_calls;
+        if (m.tool_call_id) o.tool_call_id = m.tool_call_id;
+        if (m.name) o.name = m.name;
+        return o;
+    }
+
     async chatWithTools(messages, systemPrompt, tools, abortSignal, images = [], temperatureOverride = null, modelOverride = null) {
         // If no model is set yet (e.g. agent started before initFromConfig finished),
         // try to load it on-demand. Fail with a clear message if there's still none.
@@ -484,11 +502,12 @@ class LLMService {
         const payload = {
             provider: providerName,
             model: modelName,
-            messages: messages.map(m => ({ role: m.role, content: m.content })),
+            messages: messages.map(m => this._wireMessage(m)),
             system_prompt: systemPrompt || null,
             images: images.length > 0 ? images : null,
             base_url: providerName === 'azure' ? config.azure_endpoint : (providerName === 'ollama' ? 'http://localhost:11434' : null),
-            api_version: providerName === 'azure' ? '2024-08-01-preview' : null,
+            // Azure default: 2024-10-21 (GA) — see chat() note (prompt caching).
+            api_version: providerName === 'azure' ? '2024-10-21' : null,
             api_key: null,
             proxy: config.proxy_url || null,
             request_id: requestId,

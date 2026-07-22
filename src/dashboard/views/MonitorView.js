@@ -722,12 +722,18 @@ export class MonitorView {
                     margin: 6px 12px 0; padding: 5px 10px;
                     font-size: 11px; font-weight: 700; color: var(--accent);
                     background: var(--accent-glow, rgba(90,150,255,0.10));
-                    border-radius: 6px;
+                    border-radius: 6px; cursor: pointer; user-select: none;
                 }
                 .mresult-live-label .mll-dot {
                     width: 7px; height: 7px; border-radius: 50%;
                     background: var(--accent); animation: mlive-pulse 1.2s ease-in-out infinite;
+                    flex-shrink: 0;
                 }
+                .mresult-live-label .mll-text { flex: 1; }
+                .mresult-live-label .mll-chev {
+                    font-size: 9px; opacity: 0.8; transition: transform 0.12s ease;
+                }
+                .mresult-live-label.is-folded .mll-chev { transform: rotate(-90deg); }
                 /* C: floating "new activity" pill above the steer box. */
                 .mresult-jump {
                     position: absolute; left: 50%; transform: translateX(-50%);
@@ -765,7 +771,26 @@ export class MonitorView {
                     padding-left: 8px;
                     border-left: 2px solid var(--accent);
                 }
-                .mtask-feed-item.is-think .mtask-feed-tx { -webkit-line-clamp: 5; }
+                /* ── Reasoning GROUP: header (the reasoning) + body (the tool lines
+                   it triggered). Click the header to fold the whole block; a new
+                   reasoning auto-folds the prior groups. Header stays visible full;
+                   body hides when collapsed. ── */
+                .mtask-group { display: flex; flex-direction: column; }
+                .mtask-group-head { cursor: pointer; }
+                .mtask-group-head .mtask-feed-tx { -webkit-line-clamp: unset; }   /* header shown in full */
+                .mtask-group-body {
+                    display: flex; flex-direction: column; gap: 5px;
+                    margin: 5px 0 4px 3px; padding-left: 12px;
+                    border-left: 2px solid var(--border-light);
+                }
+                .mtask-group.collapsed .mtask-group-body { display: none; }
+                .mtask-group.collapsed .mtask-group-head { opacity: 0.72; font-weight: 400; }
+                .mtask-feed-chev {
+                    flex-shrink: 0; margin-left: auto; align-self: flex-start;
+                    color: var(--accent); font-size: 9px; opacity: 0.75;
+                    transition: transform 0.12s ease; padding-top: 3px;
+                }
+                .mtask-group.collapsed .mtask-group-head .mtask-feed-chev { transform: rotate(-90deg); }
                 /* Each entry is clamped to 2 lines so one long thought doesn't sprawl.
                    Click to toggle the full text (title also carries it for hover). */
                 .mtask-feed-tx {
@@ -842,11 +867,14 @@ export class MonitorView {
                    it reads as "being said right now", distinct from a settled
                    answer bubble (which is solid). Replaced by the real result
                    bubble on completion. */
+                .mrc-narration { cursor: pointer; }
                 .mrc-narration .mrc-bubble {
                     background: transparent;
                     border-style: dashed;
                     border-color: var(--border);
                     color: var(--text-secondary);
+                    position: relative;
+                    padding-right: 22px;   /* room for the chevron */
                 }
                 .mrc-narration .mrc-bubble::after {
                     content: '▍';
@@ -855,6 +883,31 @@ export class MonitorView {
                     margin-left: 2px;
                 }
                 @keyframes mcaret { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+                /* Fold/unfold toggle — collapsed shows a single dimmed line so past
+                   reasoning stays available but out of the way. */
+                .mrc-nar-chev {
+                    position: absolute; top: 8px; right: 8px;
+                    color: var(--accent); font-size: 9px; opacity: 0.75;
+                    transition: transform 0.12s ease;
+                }
+                .mrc-narration.collapsed { opacity: 0.7; }
+                .mrc-narration.collapsed .mrc-nar-chev { transform: rotate(-90deg); }
+                .mrc-narration.collapsed .mrc-bubble::after { display: none; }  /* no caret on folded */
+                .mrc-narration.collapsed .rv-summary {
+                    display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical;
+                    overflow: hidden;
+                }
+
+                /* Delivered proposal/result (present_result) — a solid accent-edged
+                   card with a header so it stands out from the reasoning trace. */
+                .mrc-bubble.mrc-deliverable {
+                    border: 1px solid var(--accent);
+                    background: var(--bg-secondary);
+                }
+                .mrc-deliverable-h {
+                    font-size: 11px; font-weight: 700; color: var(--accent);
+                    margin: -2px 0 8px; letter-spacing: 0.02em;
+                }
 
                 /* Attached-image thumbnails inside a request bubble. */
                 .mrc-imgs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
@@ -1548,7 +1601,13 @@ export class MonitorView {
                 <div id="result-live-wrap" class="mresult-live-wrap">
                     <!-- D: explicit "working now" boundary between settled results and
                          the live activity feed. -->
-                    <div id="result-live-label" class="mresult-live-label" style="display:none"><span class="mll-dot"></span> ⏳ 実行中 / Working…</div>
+                    <!-- Click to fold the activity list away (see the results/plan
+                         above). Auto-folds when the run pauses on ask_user. -->
+                    <div id="result-live-label" class="mresult-live-label" style="display:none" title="クリックで実行ログを開閉 / Toggle activity log">
+                        <span class="mll-dot"></span>
+                        <span class="mll-text"> ⏳ 実行中 / Working…</span>
+                        <span class="mll-chev">▼</span>
+                    </div>
                     <div id="result-live" class="mresult-live" style="display:none"></div>
                 </div>
             </div>
@@ -2511,6 +2570,24 @@ export class MonitorView {
         // (the "in-progress request missing from All Logs" bug).
         if (!preserveResults) this._replayCutoffTs = 0;
 
+        // On a CONTINUE, the reconnect re-plays the whole prior task (which we
+        // already have rendered). DISCARD that backlog until the server's
+        // `replay_done` marker, then process the new run LIVE. This is
+        // deterministic — unlike the timestamp cutoff it can't be defeated by
+        // client/server clock differences or by `to_rfc3339()`'s nanosecond
+        // precision confusing `new Date()`, which could drop the new run's early
+        // events (the "OKしても進まない" bug). A 4s safety timer clears it in case
+        // an old backend never sends the marker.
+        this._discardUntilReplayDone = !!preserveResults;
+        clearTimeout(this._discardReplayTimer);
+        if (preserveResults) {
+            this._discardReplayTimer = setTimeout(() => { this._discardUntilReplayDone = false; }, 4000);
+        }
+        // A new run is streaming → re-expand the activity feed (it auto-folds when
+        // the previous run paused on ask_user).
+        this._setFeedCollapsed(false);
+        this._feedGroupBody = null;   // start a fresh reasoning-group chain
+
         this.currentProgress = 0;
         this.currentStatus = 'running';
         // Token totals are the TASK's whole-life cumulative (the server also
@@ -2610,13 +2687,20 @@ export class MonitorView {
                 if (!packet) return;
                 packet.data = packet.data || {};
 
-                // Replay-boundary marker → flush the buffered backlog in one batch.
+                // Replay-boundary marker → flush the buffered backlog (fresh
+                // connect) / end the continue's discard window.
                 if (packet.event === 'replay_done') {
                     if (this._replaying) this._flushReplay();
+                    if (this._discardUntilReplayDone) {
+                        this._discardUntilReplayDone = false;
+                        clearTimeout(this._discardReplayTimer);
+                    }
                     return;
                 }
-                // On a CONTINUE, silently drop replayed events that predate the new
-                // run (already rendered); process the new run's events as live.
+                // On a CONTINUE: drop the replayed backlog (already rendered) until
+                // the marker above; everything after is the NEW run, processed live.
+                if (this._discardUntilReplayDone) return;
+                // Fallback for a backend without the marker: timestamp cutoff.
                 if (this._replayCutoffTs && packet.timestamp &&
                     new Date(packet.timestamp).getTime() < this._replayCutoffTs) {
                     return;
@@ -2966,6 +3050,10 @@ export class MonitorView {
                         this._awaitingUser = true;
                         // OS notification handled globally in main.js.
                         this._setResultLive(packet.data.message || 'The agent is asking for your input — reply below to continue.', 'question');
+                        // #2: the run PAUSED for input → fold the tall activity list so
+                        // the plan (present_result) above + the question are what's
+                        // visible, not the scroll of finished tool calls.
+                        this._setFeedCollapsed(true);
                         // Interactive choices (Yes/No / multi-select) when offered.
                         this._showAskCard(packet.data);
                         const si = document.getElementById('input-steering');
@@ -3033,6 +3121,7 @@ export class MonitorView {
                     if ((packet.event === 'complete' || packet.event === 'error') && !this._awaitingUser) {
                         const feed = document.getElementById('result-live');
                         if (feed) { feed.innerHTML = ''; feed.style.display = 'none'; feed.dataset.lastText = ''; }
+                        this._feedGroupBody = null;   // groups are gone with the feed
                         // Only DROP the pending user bubble when a fresh run bubble
                         // actually replaced it — i.e. a resultSummary was pushed +
                         // rendered into #result-runs this completion. Otherwise (a
@@ -3342,7 +3431,11 @@ export class MonitorView {
         const text = this._envelopeText(envelope);
         if (!text) return;
         el.style.display = 'flex';
-        el.innerHTML = `<div class="mrc-row mrc-ai"><div class="mrc-bubble"><div class="rv-summary chat-md">${renderMarkdown(text)}</div></div></div>`;
+        // A labelled header so it's unmistakable that the agent DELIVERED something
+        // (a plan / answer) — otherwise, next to a following ask_user question, it
+        // was easy to miss that the plan was sitting right there.
+        const kindLabel = { markdown: '📋 提案 / Proposal', table: '📊 結果 / Result', 'file-list': '📁 ファイル / Files', 'code-edit': '✏️ 変更案 / Changes' }[envelope?.kind] || '📋 回答 / Result';
+        el.innerHTML = `<div class="mrc-row mrc-ai"><div class="mrc-bubble mrc-deliverable"><div class="mrc-deliverable-h">${kindLabel}</div><div class="rv-summary chat-md">${renderMarkdown(text)}</div></div></div>`;
         this._stopPendingThinking();
         const rp = document.getElementById('result-panel');
         if (rp) rp.scrollTop = rp.scrollHeight;
@@ -3376,9 +3469,13 @@ export class MonitorView {
             const follow = this._isTaskAtBottom();
             el.style.display = 'flex';
             if (!this._narrationBody || !this._narrationBody.isConnected) {
+                // New reasoning step → fold every PRIOR narration bubble so only the
+                // current reasoning is expanded (click a folded one to re-open it).
+                el.querySelectorAll('.mrc-narration').forEach(b => b.classList.add('collapsed'));
                 const row = document.createElement('div');
                 row.className = 'mrc-row mrc-ai mrc-narration';
-                row.innerHTML = `<div class="mrc-bubble"><div class="rv-summary chat-md"></div></div>`;
+                row.innerHTML = `<div class="mrc-bubble"><span class="mrc-nar-chev">▼</span><div class="rv-summary chat-md"></div></div>`;
+                row.addEventListener('click', () => row.classList.toggle('collapsed'));
                 el.appendChild(row);
                 this._narrationBody = row.querySelector('.rv-summary');
             }
@@ -3473,6 +3570,22 @@ export class MonitorView {
         if (el) el.style.display = on ? 'flex' : 'none';
         const wrap = document.getElementById('result-live-wrap');
         if (wrap) wrap.style.display = on ? 'block' : 'none';
+        if (on) this._applyFeedCollapsed();
+    }
+
+    /** #2/#4: fold/unfold the live activity list (keeps the "実行中" label). Folding
+     *  frees vertical space so the results / plan above are readable — done
+     *  automatically when the run pauses on ask_user, and manually via the label. */
+    _setFeedCollapsed(collapsed) {
+        this._feedCollapsed = collapsed;
+        this._applyFeedCollapsed();
+    }
+    _applyFeedCollapsed() {
+        const feed = document.getElementById('result-live');
+        const label = document.getElementById('result-live-label');
+        const collapsed = !!this._feedCollapsed;
+        if (feed) feed.style.display = collapsed ? 'none' : 'flex';
+        if (label) label.classList.toggle('is-folded', collapsed);
     }
 
     /** C: is the Task scroll pinned to the bottom (following live activity)? */
@@ -3583,7 +3696,9 @@ export class MonitorView {
         }
         el.dataset.lastText = text;
 
-        el.style.display = 'flex';
+        // Respect a user/auto fold — the item is still appended (visible when
+        // unfolded), just not force-shown.
+        if (!this._feedCollapsed) el.style.display = 'flex';
         this._liveActivitySeen = true; // gates re-creation of the "…" placeholder on re-renders
         this._setWorkingLabel(true);   // D: mark the live region as "working now"
         this._stopPendingThinking();   // real activity started → drop the "…" placeholder
@@ -3599,22 +3714,48 @@ export class MonitorView {
         // tool/mechanical lines stay dim and tight (2 lines) so they read as the
         // supporting trace rather than competing with the thinking.
         const isThink = type === 'thought' || type === 'live';
-        const clampable = type !== 'question' && str.length > (isThink ? 220 : 90);
+        const isQuestion = type === 'question';
+        // Tool/mechanical lines: clamp to 2 lines, click to expand.
+        const clampable = !isThink && !isQuestion && str.length > 90;
         item.className = 'mtask-feed-item'
             + (isThink ? ' is-think' : '')
             + (type === 'error' ? ' is-error' : '')
-            + (type === 'question' ? ' is-question' : '')
+            + (isQuestion ? ' is-question' : '')
             + (clampable ? ' clampable' : '');
         item.title = str;   // full text on hover
         item.innerHTML =
             `<span class="mtask-feed-ic">${icon}</span>` +
-            `<span class="mtask-feed-tx">${escapeHtml(str)}</span>`;
-        if (clampable) {
-            item.addEventListener('click', () => item.classList.toggle('expanded'));
+            `<span class="mtask-feed-tx">${escapeHtml(str)}</span>` +
+            (isThink ? `<span class="mtask-feed-chev">▼</span>` : '');
+
+        if (isThink) {
+            // GROUP: a reasoning line is the HEADER; the tool lines it triggers
+            // (until the NEXT reasoning) are the BODY. Clicking the header folds
+            // the whole block. A new reasoning auto-folds every PRIOR group, so the
+            // feed reads as "reasoning → the steps it drove", newest expanded.
+            el.querySelectorAll('.mtask-group').forEach(g => g.classList.add('collapsed'));
+            const group = document.createElement('div');
+            group.className = 'mtask-group';
+            item.classList.add('mtask-group-head');
+            const body = document.createElement('div');
+            body.className = 'mtask-group-body';
+            group.appendChild(item);
+            group.appendChild(body);
+            item.addEventListener('click', () => group.classList.toggle('collapsed'));
+            el.appendChild(group);
+            this._feedGroupBody = body;
+        } else if (isQuestion) {
+            // The ask_user question stands alone and ENDS the current group.
+            this._feedGroupBody = null;
+            el.appendChild(item);
+        } else {
+            // Tool / status line → into the current reasoning's body (or top-level
+            // for anything before the first reasoning of the run).
+            if (clampable) item.addEventListener('click', () => item.classList.toggle('expanded'));
+            (this._feedGroupBody && this._feedGroupBody.isConnected ? this._feedGroupBody : el).appendChild(item);
         }
-        el.appendChild(item);
-        // Cap the feed so a long run doesn't grow an unbounded DOM.
-        while (el.children.length > 50) el.removeChild(el.firstElementChild);
+        // Cap the feed so a long run doesn't grow an unbounded DOM (whole groups).
+        while (el.children.length > 40) el.removeChild(el.firstElementChild);
         // Keep the newest activity in view within the feed's own bounded scroll.
         el.scrollTop = el.scrollHeight;
         // C: follow the panel bottom only if the user was already there.
@@ -4381,6 +4522,9 @@ export class MonitorView {
         // the user is back at the bottom on their own.
         const jumpBtn = document.getElementById('result-jump');
         if (jumpBtn) jumpBtn.addEventListener('click', () => this._scrollTaskToBottom());
+        // #4: click the "実行中" label to fold/unfold the activity list.
+        const liveLabel = document.getElementById('result-live-label');
+        if (liveLabel) liveLabel.addEventListener('click', () => this._setFeedCollapsed(!this._feedCollapsed));
         const resultPanelEl = document.getElementById('result-panel');
         if (resultPanelEl) {
             resultPanelEl.addEventListener('scroll', () => {

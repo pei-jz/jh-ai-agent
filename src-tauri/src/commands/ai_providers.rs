@@ -62,6 +62,33 @@ pub(crate) fn build_openai_messages(
     let has_images = images.as_ref().map_or(false, |i| !i.is_empty());
     let msg_len = messages.len();
     for (i, m) in messages.into_iter().enumerate() {
+        // ── Native tool-call turns (standards-aligned history) ──────────
+        // assistant + tool_calls and role:"tool" results pass through in the
+        // OpenAI wire format. A tool message WITHOUT an id (shouldn't happen,
+        // but a compacted/legacy history could) is downgraded to user text —
+        // sending it as role:"tool" would 400.
+        if m.role == "assistant" && m.tool_calls.is_some() {
+            full.push(serde_json::json!({
+                "role": "assistant",
+                "content": if m.content.is_empty() { serde_json::Value::Null } else { serde_json::json!(m.content) },
+                "tool_calls": m.tool_calls.unwrap()
+            }));
+            continue;
+        }
+        if m.role == "tool" {
+            match m.tool_call_id {
+                Some(id) => full.push(serde_json::json!({
+                    "role": "tool", "tool_call_id": id, "content": m.content
+                })),
+                None => full.push(serde_json::json!({
+                    "role": "user",
+                    "content": format!("[Tool result{}]\n{}",
+                        m.name.map(|n| format!(" — {}", n)).unwrap_or_default(), m.content)
+                })),
+            }
+            continue;
+        }
+
         let is_last_user = m.role == "user" && i + 1 == msg_len;
         if is_last_user && has_images && vision_ok {
             let mut parts = vec![serde_json::json!({ "type": "text", "text": m.content })];
@@ -396,8 +423,51 @@ mod provider_helper_tests {
 
     fn msgs() -> Vec<LlmMessage> {
         vec![
-            LlmMessage { role: "user".into(), content: "describe this".into() },
+            LlmMessage { role: "user".into(), content: "describe this".into(), ..Default::default() },
         ]
+    }
+
+    #[test]
+    fn build_messages_passes_native_tool_turns_through() {
+        let tc = serde_json::json!([{
+            "id": "call_1", "type": "function",
+            "function": { "name": "read_file", "arguments": "{\"path\":\"a.js\"}" }
+        }]);
+        let ms = vec![
+            LlmMessage { role: "assistant".into(), content: "reading the file".into(), tool_calls: Some(tc.clone()), ..Default::default() },
+            LlmMessage { role: "tool".into(), content: "file body".into(), tool_call_id: Some("call_1".into()), name: Some("read_file".into()), ..Default::default() },
+        ];
+        let out = build_openai_messages(None, ms, &None, true);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0]["role"], "assistant");
+        assert_eq!(out[0]["tool_calls"], tc);
+        assert_eq!(out[1]["role"], "tool");
+        assert_eq!(out[1]["tool_call_id"], "call_1");
+        assert_eq!(out[1]["content"], "file body");
+    }
+
+    #[test]
+    fn build_messages_downgrades_orphan_tool_message_to_user_text() {
+        // A tool result without an id (legacy/compacted history) must NOT go out
+        // as role:"tool" — providers 400 on it. It becomes readable user text.
+        let ms = vec![
+            LlmMessage { role: "tool".into(), content: "result".into(), name: Some("grep_search".into()), ..Default::default() },
+        ];
+        let out = build_openai_messages(None, ms, &None, true);
+        assert_eq!(out[0]["role"], "user");
+        let c = out[0]["content"].as_str().unwrap();
+        assert!(c.contains("grep_search"));
+        assert!(c.contains("result"));
+    }
+
+    #[test]
+    fn build_messages_empty_assistant_content_with_tool_calls_is_null() {
+        let tc = serde_json::json!([{ "id": "c", "type": "function", "function": { "name": "x", "arguments": "{}" } }]);
+        let ms = vec![
+            LlmMessage { role: "assistant".into(), content: "".into(), tool_calls: Some(tc), ..Default::default() },
+        ];
+        let out = build_openai_messages(None, ms, &None, true);
+        assert!(out[0]["content"].is_null());
     }
 
     #[test]

@@ -454,7 +454,15 @@ JSON output format:
         const originalUserMsg = history.find(m => m.role === 'user');
         const messagesToCompact = history.filter(m => m !== originalUserMsg);
 
-        const keepRecent = Math.min(4, messagesToCompact.length);
+        let keepRecent = Math.min(4, messagesToCompact.length);
+        // Native-format history: the kept window must not START with a role:"tool"
+        // result whose assistant(tool_calls) turn got summarized away — providers
+        // reject an orphaned tool message. Widen the window until it opens on a
+        // non-tool message (i.e. include the paired assistant turn).
+        while (keepRecent < messagesToCompact.length &&
+               messagesToCompact[messagesToCompact.length - keepRecent]?.role === 'tool') {
+            keepRecent++;
+        }
         const recentMessages = messagesToCompact.slice(-keepRecent);
         const oldMessages = messagesToCompact.slice(0, messagesToCompact.length - keepRecent);
 

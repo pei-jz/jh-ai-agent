@@ -12,10 +12,24 @@ use super::ai_providers::{
 };
 use super::ai_config::AiConfig;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct LlmMessage {
     pub role: String,
     pub content: String,
+    /// NATIVE tool-call history (standards-aligned): an assistant turn that
+    /// invoked tools carries them here in OpenAI wire format
+    /// `[{id, type:"function", function:{name, arguments:string}}]`.
+    /// Providers are RL-trained on this structure — replaying prior turns as a
+    /// JSON text envelope taught weak models to answer in text (KIMI K3 bug).
+    #[serde(default)]
+    pub tool_calls: Option<serde_json::Value>,
+    /// For role:"tool" result messages: the id of the call this answers.
+    #[serde(default)]
+    pub tool_call_id: Option<String>,
+    /// For role:"tool" messages: the tool name (needed by Gemini's
+    /// functionResponse; informational elsewhere).
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -309,9 +323,60 @@ pub async fn llm_chat_native<R: Runtime>(
             body_obj
         }
         "anthropic" => {
-            let mut full_messages = Vec::new();
+            let mut full_messages: Vec<serde_json::Value> = Vec::new();
             let msg_len = payload.messages.len();
             for (i, m) in payload.messages.into_iter().enumerate() {
+                // ── Native tool-call turns → Anthropic content blocks ──────
+                // assistant + tool_calls → [{text?}, {tool_use, id, name, input}…]
+                // role:"tool"            → user turn with tool_result block(s);
+                //                          CONSECUTIVE tool results merge into ONE
+                //                          user turn (Anthropic requires results in
+                //                          the immediately-following user message).
+                if m.role == "assistant" && m.tool_calls.is_some() {
+                    let mut blocks: Vec<serde_json::Value> = Vec::new();
+                    if !m.content.trim().is_empty() {
+                        blocks.push(serde_json::json!({ "type": "text", "text": m.content }));
+                    }
+                    if let Some(arr) = m.tool_calls.as_ref().and_then(|v| v.as_array()) {
+                        for tc in arr {
+                            let f = &tc["function"];
+                            let input: serde_json::Value = f["arguments"].as_str()
+                                .and_then(|s| serde_json::from_str(s).ok())
+                                .unwrap_or_else(|| serde_json::json!({}));
+                            blocks.push(serde_json::json!({
+                                "type": "tool_use",
+                                "id": tc["id"].as_str().unwrap_or("call_0"),
+                                "name": f["name"].as_str().unwrap_or(""),
+                                "input": input
+                            }));
+                        }
+                    }
+                    full_messages.push(serde_json::json!({ "role": "assistant", "content": blocks }));
+                    continue;
+                }
+                if m.role == "tool" {
+                    let result_block = serde_json::json!({
+                        "type": "tool_result",
+                        "tool_use_id": m.tool_call_id.clone().unwrap_or_else(|| "call_0".to_string()),
+                        "content": m.content
+                    });
+                    // Merge into the previous user turn if it's already a
+                    // tool_result container (consecutive results of one step).
+                    let merged = if let Some(last) = full_messages.last_mut() {
+                        let is_result_turn = last["role"] == "user"
+                            && last["content"].as_array()
+                                .map_or(false, |a| a.iter().all(|b| b["type"] == "tool_result"));
+                        if is_result_turn {
+                            last["content"].as_array_mut().unwrap().push(result_block.clone());
+                            true
+                        } else { false }
+                    } else { false };
+                    if !merged {
+                        full_messages.push(serde_json::json!({ "role": "user", "content": [result_block] }));
+                    }
+                    continue;
+                }
+
                 if m.role == "user" && i == msg_len - 1 && payload.images.as_ref().map_or(false, |imgs| !imgs.is_empty()) {
                     let mut content_parts = Vec::new();
                     content_parts.push(serde_json::json!({ "type": "text", "text": m.content }));
@@ -428,6 +493,42 @@ pub async fn llm_chat_native<R: Runtime>(
             let mut contents = Vec::new();
             let msg_len = payload.messages.len();
             for (i, m) in payload.messages.into_iter().enumerate() {
+                // ── Native tool-call turns → Gemini parts ──────────────────
+                // assistant + tool_calls → role "model" with functionCall parts;
+                // role:"tool" → role "user" with a functionResponse part (v1beta
+                // matches responses to calls by NAME + order, not id).
+                if m.role == "assistant" && m.tool_calls.is_some() {
+                    let mut parts = Vec::new();
+                    if !m.content.trim().is_empty() {
+                        parts.push(serde_json::json!({ "text": m.content }));
+                    }
+                    if let Some(arr) = m.tool_calls.as_ref().and_then(|v| v.as_array()) {
+                        for tc in arr {
+                            let f = &tc["function"];
+                            let args: serde_json::Value = f["arguments"].as_str()
+                                .and_then(|s| serde_json::from_str(s).ok())
+                                .unwrap_or_else(|| serde_json::json!({}));
+                            parts.push(serde_json::json!({
+                                "functionCall": { "name": f["name"].as_str().unwrap_or(""), "args": args }
+                            }));
+                        }
+                    }
+                    contents.push(serde_json::json!({ "role": "model", "parts": parts }));
+                    continue;
+                }
+                if m.role == "tool" {
+                    contents.push(serde_json::json!({
+                        "role": "user",
+                        "parts": [{
+                            "functionResponse": {
+                                "name": m.name.clone().unwrap_or_else(|| "tool".to_string()),
+                                "response": { "result": m.content }
+                            }
+                        }]
+                    }));
+                    continue;
+                }
+
                 let role = if m.role == "assistant" { "model" } else { "user" };
                 let mut parts = Vec::new();
                 parts.push(serde_json::json!({ "text": m.content }));
@@ -446,7 +547,7 @@ pub async fn llm_chat_native<R: Runtime>(
                         }
                     }
                 }
-                
+
                 contents.push(serde_json::json!({
                     "role": role,
                     "parts": parts
@@ -589,11 +690,47 @@ pub async fn llm_chat_native<R: Runtime>(
         // Anthropic emits: content_block_start(type=tool_use) then content_block_delta(input_json_delta)
         let mut anthropic_tool_acc: BTreeMap<u64, serde_json::Value> = BTreeMap::new();
 
-        while let Some(item) = stream.next().await {
-            match item {
-                Ok(bytes) => {
-                    let text = String::from_utf8_lossy(&bytes);
-                    for line in text.split('\n') {
+        // ── SSE line reassembly ──────────────────────────────────────────
+        // A network chunk boundary can fall ANYWHERE — including the middle of
+        // an SSE `data:` line. The previous loop decoded each chunk on its own
+        // and split it on '\n', so a split line produced two useless halves:
+        // the head failed to parse as JSON and the tail didn't start with
+        // "data: ", so BOTH were silently dropped. The characters in that
+        // fragment were simply lost from the response.
+        //
+        // For prose that looks like a typo; for a streamed tool call it
+        // corrupts the arguments, because the lost fragment is often just a
+        // separator — which is exactly the observed damage:
+        //     "name":"read_file"      → "nameread_file"     (lost `":`)
+        //     "a.jsx","offset":1      → "a.jsxoffset":1     (lost `","`)
+        // Decoding per chunk also mangled any multi-byte UTF-8 character
+        // straddling a boundary into U+FFFD (garbled Japanese).
+        //
+        // Fix: accumulate BYTES and only ever decode/dispatch COMPLETE lines,
+        // keeping the trailing partial line for the next chunk.
+        let mut sse_buf: Vec<u8> = Vec::new();
+        let mut eos = false;
+        while !eos {
+            let chunk: Option<Vec<u8>> = match stream.next().await {
+                Some(Ok(b)) => Some(b.to_vec()),
+                Some(Err(e)) => {
+                    let _ = app.emit("llm-chunk", StreamChunk {
+                        request_id: rid.clone(),
+                        delta: String::new(),
+                        done: true,
+                        error: Some(format!("Stream error: {}", e)),
+                        usage: None,
+                    });
+                    None
+                }
+                // End of stream: feed a synthetic newline so a final line that
+                // arrived without its terminator is still processed, once.
+                None => { eos = true; Some(b"\n".to_vec()) }
+            };
+            match chunk {
+                Some(bytes) => {
+                    sse_buf.extend_from_slice(&bytes);
+                    for line in take_complete_lines(&mut sse_buf) {
                         let line = line.trim();
                         if line.is_empty() { continue; }
 
@@ -788,16 +925,7 @@ pub async fn llm_chat_native<R: Runtime>(
                         }
                     }
                 }
-                Err(e) => {
-                    let _ = app.emit("llm-chunk", StreamChunk {
-                        request_id: rid.clone(),
-                        delta: String::new(),
-                        done: true,
-                        error: Some(format!("Stream error: {}", e)),
-                        usage: None,
-                    });
-                    break;
-                }
+                None => break,   // stream error — already reported above
             }
         }
 
@@ -869,6 +997,24 @@ pub async fn llm_chat_native<R: Runtime>(
     Ok(())
 }
 
+/// Split every COMPLETE line (one terminated by `\n`) off the SSE byte buffer,
+/// leaving any trailing partial line in the buffer for the next network chunk.
+///
+/// Decoding is deliberately done here, per whole line, so a multi-byte UTF-8
+/// character split across a chunk boundary is never lossy-decoded into U+FFFD.
+/// Pure.
+pub(crate) fn take_complete_lines(buf: &mut Vec<u8>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut consumed = 0usize;
+    while let Some(pos) = buf[consumed..].iter().position(|&b| b == b'\n') {
+        let end = consumed + pos;
+        out.push(String::from_utf8_lossy(&buf[consumed..end]).into_owned());
+        consumed = end + 1;
+    }
+    buf.drain(..consumed);
+    out
+}
+
 fn log_interaction(dir: &str, provider: &str, model: &str, request: &serde_json::Value, response: &str) -> Result<(), String> {
     let log_path = std::path::Path::new(dir).join("ai_communication.log");
     
@@ -899,4 +1045,77 @@ fn log_interaction(dir: &str, provider: &str, model: &str, request: &serde_json:
 
     writeln!(file, "{}", entry.to_string()).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod sse_reassembly_tests {
+    use super::take_complete_lines;
+
+    /// Feed the buffer chunk by chunk, collecting every line the reader sees.
+    fn drive(chunks: &[&[u8]]) -> Vec<String> {
+        let mut buf: Vec<u8> = Vec::new();
+        let mut seen = Vec::new();
+        for c in chunks {
+            buf.extend_from_slice(c);
+            seen.extend(take_complete_lines(&mut buf));
+        }
+        // End-of-stream flush (the synthetic newline the reader appends).
+        buf.push(b'\n');
+        seen.extend(take_complete_lines(&mut buf));
+        seen.into_iter().filter(|l| !l.trim().is_empty()).collect()
+    }
+
+    #[test]
+    fn line_split_across_chunks_is_reassembled_not_lost() {
+        // THE BUG: a tool-call argument fragment straddling a chunk boundary.
+        // Splitting per chunk dropped both halves, silently deleting `","` from
+        // the arguments and producing "a.jsxoffset".
+        let lines = drive(&[
+            b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"fun",
+            b"ction\":{\"arguments\":\"\\\"a.jsx\\\",\\\"offset\\\"\"}}]}}]}\n",
+        ]);
+        assert_eq!(lines.len(), 1);
+        let json: serde_json::Value =
+            serde_json::from_str(lines[0].trim_start_matches("data: ")).expect("must parse");
+        assert_eq!(
+            json["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"],
+            "\"a.jsx\",\"offset\""
+        );
+    }
+
+    #[test]
+    fn multibyte_utf8_split_across_chunks_survives() {
+        // "日本語" = 9 bytes; cut mid-character. Per-chunk lossy decoding turned
+        // the halves into U+FFFD (garbled Japanese in narration and args).
+        let s = "data: 日本語\n".as_bytes();
+        let cut = 8; // inside the second char
+        let lines = drive(&[&s[..cut], &s[cut..]]);
+        assert_eq!(lines, vec!["data: 日本語".to_string()]);
+        assert!(!lines[0].contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn partial_line_is_retained_until_terminated() {
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice(b"data: {\"a\":1}\ndata: partial");
+        let first = take_complete_lines(&mut buf);
+        assert_eq!(first, vec!["data: {\"a\":1}".to_string()]);
+        assert_eq!(buf, b"data: partial");   // held for the next chunk
+        buf.extend_from_slice(b"-rest\n");
+        assert_eq!(take_complete_lines(&mut buf), vec!["data: partial-rest".to_string()]);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn handles_crlf_and_many_lines_in_one_chunk() {
+        let lines = drive(&[b"data: a\r\ndata: b\r\n\r\ndata: [DONE]\r\n"]);
+        let trimmed: Vec<&str> = lines.iter().map(|l| l.trim()).collect();
+        assert_eq!(trimmed, vec!["data: a", "data: b", "data: [DONE]"]);
+    }
+
+    #[test]
+    fn final_line_without_trailing_newline_is_still_delivered() {
+        let lines = drive(&[b"data: {\"last\":true}"]);
+        assert_eq!(lines, vec!["data: {\"last\":true}".to_string()]);
+    }
 }

@@ -1011,6 +1011,22 @@ export class AgentController {
                     }
                 }
 
+                // ── Standards-aligned (native) history bookkeeping ────────────
+                // In a native session every tool call gets a provider id (or a
+                // synthesized one), kept in an IDENTITY map so loop-detection
+                // signatures (which stringify the call objects) stay unaffected.
+                // The ids correlate the assistant.tool_calls entry with its
+                // role:"tool" result message — the OpenAI/Anthropic/Gemini wire
+                // contract. JSON-mode sessions keep the text protocol untouched.
+                const nativeHistory = llmService.supportsNativeTools?.() === true;
+                const nativeIds = genResult?.nativeTurn?.ids || null;
+                const callIdOf = new Map();
+                if (nativeHistory) {
+                    toolCall.tool_calls.forEach((c, i) => {
+                        callIdOf.set(c, (nativeIds && nativeIds[i]) || `call_syn_${iteration}_${i}`);
+                    });
+                }
+
                 // Phase 4: Permission-based tool classification + parallel execution
                 const safeCalls = [];
                 const dangerousCalls = [];
@@ -1030,7 +1046,7 @@ export class AgentController {
                 // Handle Denied Calls immediately
                 for (const call of deniedCalls) {
                     const errorMsg = `Error: Execution blocked by user permission settings (Deny).`;
-                    results.push({ tool_call_name: call.name, result: errorMsg });
+                    results.push({ tool_call_name: call.name, result: errorMsg, id: callIdOf.get(call) });
                     hasErrors = true;
                     onAgentStatus?.({ event: 'tool_call', name: call.name, args: call.args, status: 'denied' });
                 }
@@ -1052,7 +1068,7 @@ export class AgentController {
                         if (isError) hasErrors = true;
                         this._trackReadEfficiency(call, result, isError);
                         if (onLog) this._logToolTelemetry(onLog, iteration, call, result, duration, isError);
-                        results.push({ tool_call_name: call.name, result });
+                        results.push({ tool_call_name: call.name, result, id: callIdOf.get(call) });
                     }
                 }
 
@@ -1068,7 +1084,7 @@ export class AgentController {
 
                     this._trackReadEfficiency(call, result, isError);
                     if (onLog) this._logToolTelemetry(onLog, iteration, call, result, toolDuration, isError);
-                    results.push({ tool_call_name: call.name, result });
+                    results.push({ tool_call_name: call.name, result, id: callIdOf.get(call) });
 
                     if (isError) {
                         hasErrors = true;
@@ -1220,7 +1236,10 @@ export class AgentController {
                         this._deliverableNudged = true;
                         this.toolExecutor.resetTaskCompleted?.();
                         onAgentStatus?.({ event: 'status', status: 'running', message: '📝 成果物が未提示 — 本文の出力を促しています' });
-                        history.push({ role: 'assistant', content: response });
+                        this._pushAssistantToolTurn(history, response, toolCall, genResult, callIdOf);
+                        // Native protocol: an assistant turn with tool_calls MUST be
+                        // followed by its tool results before any other message.
+                        if (callIdOf.size > 0) this._pushToolResultsTurn(history, results, true, null);
                         history.push({
                             role: 'user',
                             content: '[Deliverable Missing] You called finish_task but produced no deliverable: no present_result, no file changes, and only a brief "what I did" note. If the user asked for actual content (a report / analysis / answer / proposal), output the FULL content NOW — call present_result (kind:"markdown") with the complete text, or put the complete text in finish_task\'s summary. If the task genuinely needed no textual deliverable, just call finish_task again and it will complete.'
@@ -1259,7 +1278,8 @@ export class AgentController {
                         if (verdict === 'fail') {
                             this.toolExecutor.resetTaskCompleted?.();
                             onAgentStatus?.({ event: 'status', status: 'running', message: '🔎 レビュー指摘あり — 修正のため差し戻し / Review FAIL — sent back for fixes' });
-                            history.push({ role: 'assistant', content: response });
+                            this._pushAssistantToolTurn(history, response, toolCall, genResult, callIdOf);
+                            if (callIdOf.size > 0) this._pushToolResultsTurn(history, results, true, null);
                             history.push({
                                 role: 'user',
                                 content: `[Sub-agent Review — FAIL] An independent reviewer inspected your changes and found blocking issues. Fix ONLY the [CRITERIA-VIOLATION] and [BUG] findings below ([STYLE] items are informational — do not act on them), verify, then call finish_task again.\n\n${clipText(findings, 6000)}`
@@ -1296,11 +1316,9 @@ export class AgentController {
                 // Reset text-only counter: we just made at least one tool call.
                 textOnlyCount = 0;
 
-                history.push({ role: 'assistant', content: response });
-                history.push({
-                    role: 'user',
-                    content: `Tool Execution Results:\n${JSON.stringify(results, null, 2)}${recoveryHint}\n\nConsider what these results tell you, then make your next tool call — or call finish_task if the user's goal is fully achieved.`
-                });
+                this._pushAssistantToolTurn(history, response, toolCall, genResult, callIdOf);
+                this._pushToolResultsTurn(history, results, callIdOf.size > 0,
+                    `${recoveryHint}\n\nConsider what these results tell you, then make your next tool call — or call finish_task if the user's goal is fully achieved.`);
             } else {
                 const looksLikeToolAttempt = response.includes('tool_calls') || (response.includes('"name"') && response.includes('"args"'));
                 if (looksLikeToolAttempt && jsonParseRetryCount < 3) {
@@ -1717,7 +1735,13 @@ ${String(finalResponse || '').slice(0, 2000)}`;
                         if (txt && txt.includes('<function=')) {
                             const recovered = this._extractToolCall(txt);
                             if (recovered && recovered.tool_calls && recovered.tool_calls.length > 0) {
-                                return { content: JSON.stringify(recovered), usage: result.usage, sentRequest: result.sentRequest };
+                                // Synthesize call ids so this recovered turn can still be
+                                // written to history in native format (id-correlated).
+                                const nativeTurn = {
+                                    text: typeof recovered.thought === 'string' ? recovered.thought : '',
+                                    ids: recovered.tool_calls.map((_, i) => `call_rec_${Date.now()}_${i}`),
+                                };
+                                return { content: JSON.stringify(recovered), usage: result.usage, sentRequest: result.sentRequest, nativeTurn };
                             }
                         }
                         const looksLikeToolTextCall = /\bCALL:\s*\w/i.test(txt) ||
@@ -1782,7 +1806,17 @@ ${String(finalResponse || '').slice(0, 2000)}`;
                             tool_calls: toolCallsFormatted
                         });
 
-                        return { content, usage: result.usage, sentRequest: result.sentRequest };
+                        // nativeTurn: what run() needs to write STANDARDS-ALIGNED
+                        // history — the assistant's prose + each call's provider id
+                        // (kept parallel to toolCallsFormatted; synthesized when the
+                        // provider didn't stream one, e.g. Gemini).
+                        const nativeTurn = {
+                            text: thought,
+                            ids: result.toolCalls
+                                .filter(tc => tc && (tc.function?.name || tc.name))
+                                .map((tc, i) => tc.id || `call_syn_${Date.now()}_${i}`),
+                        };
+                        return { content, usage: result.usage, sentRequest: result.sentRequest, nativeTurn };
                     }
 
                     return { content: result.content || '', usage: result.usage, sentRequest: result.sentRequest };
@@ -1993,6 +2027,58 @@ ${String(finalResponse || '').slice(0, 2000)}`;
         }
     }
 
+    /**
+     * Write the assistant turn to history. NATIVE sessions get the standards-
+     * aligned form — prose `content` + `tool_calls` array with ids (what the
+     * model was RL-trained on; replaying turns as a JSON text envelope taught
+     * weak models to answer in text). JSON-mode sessions keep the legacy text
+     * envelope so that protocol stays self-consistent end to end.
+     */
+    _pushAssistantToolTurn(history, response, toolCall, genResult, callIdOf) {
+        if (!callIdOf || callIdOf.size === 0 || !toolCall?.tool_calls?.length) {
+            history.push({ role: 'assistant', content: response });
+            return;
+        }
+        const thought = genResult?.nativeTurn?.text
+            || (typeof toolCall.thought === 'string' ? toolCall.thought : (toolCall.thought?.current_task || ''))
+            || '';
+        history.push({
+            role: 'assistant',
+            content: thought,
+            tool_calls: toolCall.tool_calls.map((c, i) => ({
+                id: callIdOf.get(c) || `call_syn_x_${i}`,
+                type: 'function',
+                function: { name: c.name, arguments: JSON.stringify(c.args ?? {}) },
+            })),
+        });
+    }
+
+    /**
+     * Write this iteration's tool results. Native → one role:"tool" message per
+     * call (id-correlated; Rust converts per provider) + an optional trailing
+     * user note; JSON-mode → the legacy single "Tool Execution Results:" user
+     * message (byte-identical to the previous format).
+     */
+    _pushToolResultsTurn(history, results, native, tailText) {
+        if (native) {
+            for (const r of results) {
+                history.push({
+                    role: 'tool',
+                    tool_call_id: r.id || 'call_unknown',
+                    name: r.tool_call_name,
+                    content: typeof r.result === 'string' ? r.result : JSON.stringify(r.result ?? ''),
+                });
+            }
+            const tail = (tailText || '').trim();
+            if (tail) history.push({ role: 'user', content: tail });
+        } else {
+            history.push({
+                role: 'user',
+                content: `Tool Execution Results:\n${JSON.stringify(results, null, 2)}${tailText || ''}`,
+            });
+        }
+    }
+
     _compressToolResultsInHistory(history) {
         // ── Compression policy (revised) ─────────────────────────────────
         //   • Keep the 3 most-recent tool result groups VERBATIM. This is the
@@ -2010,17 +2096,25 @@ ${String(finalResponse || '').slice(0, 2000)}`;
         const KEEP_RECENT_RESULTS = 3;
         const ERROR_KEEP_CHARS    = 2000;
 
-        // Pass 1: find indices of tool-result messages and classify each as error/success.
-        const toolResultIndices = [];
+        // Pass 1: collect result GROUPS newest-first. A group is either the
+        // legacy single "Tool Execution Results:" user message (JSON mode) or a
+        // consecutive run of role:"tool" messages (native standards-aligned
+        // history) — one group per agent iteration in both protocols.
+        const groups = [];
         for (let i = history.length - 1; i >= 0; i--) {
             const m = history[i];
             if (m.role === 'user' && typeof m.content === 'string' &&
                 m.content.startsWith('Tool Execution Results:')) {
-                toolResultIndices.push(i);
+                groups.push({ kind: 'text', idx: i });
+            } else if (m.role === 'tool') {
+                let start = i;
+                while (start - 1 >= 0 && history[start - 1].role === 'tool') start--;
+                groups.push({ kind: 'native', start, end: i });
+                i = start;   // skip past the whole run
             }
         }
-        // toolResultIndices is newest-first; the first KEEP_RECENT_RESULTS are exempt.
-        const toCompress = toolResultIndices.slice(KEEP_RECENT_RESULTS);
+        // groups is newest-first; the first KEEP_RECENT_RESULTS are exempt.
+        const toCompress = groups.slice(KEEP_RECENT_RESULTS);
         if (toCompress.length === 0) return;
 
         // ── Re-read suppression: preserve the latest read_file SNAPSHOT verbatim ──
@@ -2031,15 +2125,62 @@ ${String(finalResponse || '').slice(0, 2000)}`;
         // result (one file, within a char budget) so the current snapshot stays
         // available and re-reads become unnecessary.
         const SNAPSHOT_CHAR_BUDGET = 40000;
-        let preserveIdx = -1;
-        for (const idx of toolResultIndices) { // newest-first
-            if (this._resultGroupHasReadContent(history[idx]?.content, SNAPSHOT_CHAR_BUDGET)) {
-                preserveIdx = idx;
-                break;
+        let preserveIdx = -1;         // legacy text-group message to keep verbatim
+        let preserveNativeIdx = -1;   // native role:"tool" read_file message to keep
+        for (const g of groups) { // newest-first
+            if (g.kind === 'text') {
+                if (this._resultGroupHasReadContent(history[g.idx]?.content, SNAPSHOT_CHAR_BUDGET)) {
+                    preserveIdx = g.idx;
+                    break;
+                }
+            } else {
+                let found = -1;
+                for (let j = g.end; j >= g.start; j--) {
+                    const m = history[j];
+                    if (m.name === 'read_file' && typeof m.content === 'string' &&
+                        !m.content.startsWith('Error') &&
+                        m.content.length > 500 && m.content.length <= SNAPSHOT_CHAR_BUDGET) {
+                        found = j;
+                        break;
+                    }
+                }
+                if (found !== -1) { preserveNativeIdx = found; break; }
             }
         }
 
-        for (const i of toCompress) {
+        for (const g of toCompress) {
+            // ── Native group: per role:"tool" message compression ─────────
+            if (g.kind === 'native') {
+                let hadNativeError = false;
+                for (let j = g.start; j <= g.end; j++) {
+                    if (j === preserveNativeIdx) continue;   // latest file snapshot stays
+                    const m = history[j];
+                    if (typeof m.content !== 'string') continue;
+                    if (m.content.startsWith('Error')) {
+                        hadNativeError = true;
+                        if (m.content.length > ERROR_KEEP_CHARS) {
+                            m.content = m.content.substring(0, ERROR_KEEP_CHARS) + '… [truncated]';
+                        }
+                    } else if (m.content.length > 200) {
+                        m.content = '(Completed — result summarized to save context)';
+                    }
+                }
+                // Scrub the failed call's args from the preceding assistant turn —
+                // same rationale as the legacy path: huge typo-ridden old_text noise.
+                if (hadNativeError && g.start > 0) {
+                    const prev = history[g.start - 1];
+                    if (prev.role === 'assistant' && Array.isArray(prev.tool_calls)) {
+                        for (const tc of prev.tool_calls) {
+                            if (tc?.function) {
+                                tc.function.arguments = '{"_scrubbed":"prior call failed — args removed to keep context clean"}';
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+
+            const i = g.idx;
             if (i === preserveIdx) continue; // keep the latest file snapshot intact
             const original = history[i].content;
             let summary = '[System: Past tool execution results have been summarized.]';
