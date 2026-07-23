@@ -652,6 +652,11 @@ pub fn run() {
             commands::search::glob_files,
             commands::search::delete_file,
             commands::search::move_file,
+            // Git tools (dedicated, permission-aware)
+            commands::git::git_status,
+            commands::git::git_diff,
+            commands::git::git_log,
+            commands::git::git_commit,
             // Shell operations
             commands::shell::run_command,
             commands::shell::open_path_default,
@@ -665,6 +670,8 @@ pub fn run() {
             commands::mcp::mcp_ws_close,
             commands::mcp::mcp_write,
             commands::mcp::mcp_kill,
+            commands::mcp::mcp_http_send,
+            commands::mcp::browser_worker_path,
             // Skill file management
             commands::ai_config::get_app_config_dir,
             commands::ai_config::list_skill_files,

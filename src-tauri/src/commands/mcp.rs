@@ -232,3 +232,217 @@ pub async fn mcp_ws_close(
     }
     Ok(())
 }
+
+// ── MCP over outbound Streamable HTTP (T2) ──────────────────────────────────
+// JHAI connects OUT to a remote MCP server over HTTP (the "Streamable HTTP"
+// transport, MCP spec 2025-03-26). The JS McpHttpClient keeps all JSON-RPC /
+// session logic; this command is a thin reqwest bridge that POSTs one JSON-RPC
+// message and returns the raw response body + status + content-type. Keeping
+// the HTTP I/O in Rust avoids webview CORS limits and lets the JS layer reuse
+// the exact same handshake/tool-discovery code as the stdio client.
+
+/// Result of one HTTP round-trip to a remote MCP server.
+#[derive(serde::Serialize)]
+pub struct McpHttpResponse {
+    pub status: u16,
+    pub content_type: String,
+    pub body: String,
+    /// Value of the `mcp-session-id` response header, if present (stateful servers).
+    pub session_id: Option<String>,
+}
+
+/// POST one JSON-RPC message to a remote MCP endpoint (Streamable HTTP).
+///
+/// `headers` are extra request headers (e.g. Authorization, MCP-Protocol-Version,
+/// Mcp-Session-Id) supplied by the JS client. The bridge always sets Accept to
+/// `application/json, text/event-stream` per the spec and Content-Type to JSON.
+#[tauri::command]
+pub async fn mcp_http_send(
+    url: String,
+    body: String,
+    headers: Option<Vec<(String, String)>>,
+) -> Result<McpHttpResponse, String> {
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err("mcp_http_send: url must start with http:// or https://".to_string());
+    }
+
+    // ── SSRF hardening: forbid cross-host redirects ──────────────────────────
+    // The endpoint is user-configured (trusted), but a redirect is attacker-
+    // controllable by the remote: a 30x to http://169.254.169.254/ or
+    // http://localhost/… would turn a benign config into a probe of internal
+    // services. Allow redirects only when the target host is unchanged (path
+    // canonicalisation, http→https on the same host); block any host change.
+    let origin_host = reqwest::Url::parse(&url).ok().and_then(|u| u.host_str().map(str::to_string));
+    let redirect_policy = reqwest::redirect::Policy::custom(move |attempt| {
+        if attempt.previous().len() > 5 {
+            return attempt.error("too many redirects");
+        }
+        let same_host = attempt.url().host_str().map(str::to_string) == origin_host;
+        if same_host { attempt.follow() } else { attempt.stop() }
+    });
+
+    let client = reqwest::Client::builder()
+        .user_agent("JH-AI-Agent/McpHttpClient")
+        .timeout(std::time::Duration::from_secs(60))
+        .redirect(redirect_policy)
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let mut req = client
+        .post(&url)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .header(reqwest::header::ACCEPT, "application/json, text/event-stream")
+        .body(body);
+
+    if let Some(hdrs) = headers {
+        for (k, v) in hdrs {
+            if let Ok(name) = reqwest::header::HeaderName::from_bytes(k.as_bytes()) {
+                if let Ok(value) = reqwest::header::HeaderValue::from_str(&v) {
+                    req = req.header(name, value);
+                }
+            }
+        }
+    }
+
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("mcp_http_send request failed: {}", e))?;
+
+    let status = resp.status().as_u16();
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let session_id = resp
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| format!("reading mcp_http_send response failed: {}", e))?;
+
+    Ok(McpHttpResponse {
+        status,
+        content_type,
+        body,
+        session_id,
+    })
+}
+
+// ── Browser worker provisioning (Phase 2) ───────────────────────────────────
+// The Playwright worker (resources/browser_worker.mjs) is embedded in the
+// binary with include_str! so it survives bundling (the Vite frontend bundle
+// loses real file paths). On first use we write it to <config_dir>/browser/
+// and hand the absolute path back to the JS BrowserBridge, which spawns it via
+// mcp_spawn. Idempotent — subsequent calls just return the existing path.
+
+/// Embedded Playwright worker source (kept in resources/ so it's editable).
+const BROWSER_WORKER_SRC: &str = include_str!("../../resources/browser_worker.mjs");
+
+/// Worker location + a base directory from which Node can resolve `playwright`.
+#[derive(serde::Serialize)]
+pub struct BrowserWorkerInfo {
+    /// Absolute path to the materialised worker script.
+    pub path: String,
+    /// A directory containing `node_modules/playwright` (or None if not found).
+    /// Passed to the worker as JHAI_PLAYWRIGHT_BASE so its createRequire anchor
+    /// can resolve the package despite the worker living in the config dir.
+    pub playwright_base: Option<String>,
+}
+
+#[cfg(test)]
+mod playwright_base_tests {
+    use super::find_playwright_base_from;
+
+    #[test]
+    fn finds_node_modules_playwright_walking_upward() {
+        // <tmp>/proj/node_modules/playwright  +  <tmp>/proj/src/deep
+        let base = std::env::temp_dir().join(format!("jhai_pw_{}", std::process::id()));
+        let proj = base.join("proj");
+        let deep = proj.join("src").join("deep");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::create_dir_all(proj.join("node_modules").join("playwright")).unwrap();
+
+        // From a nested dir, the walk should locate the project root.
+        let found = find_playwright_base_from(&deep).expect("should find base");
+        assert_eq!(
+            std::fs::canonicalize(found).unwrap(),
+            std::fs::canonicalize(&proj).unwrap()
+        );
+
+        // A sibling tree without node_modules/playwright yields None.
+        let other = base.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        assert!(find_playwright_base_from(&other).is_none());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+}
+
+/// Search upward from `start` for a directory whose `node_modules/playwright`
+/// exists. Returns that directory (the one CONTAINING node_modules).
+fn find_playwright_base_from(start: &std::path::Path) -> Option<String> {
+    let mut cur = start;
+    loop {
+        if cur.join("node_modules").join("playwright").is_dir() {
+            return Some(cur.to_string_lossy().to_string());
+        }
+        match cur.parent() {
+            Some(p) => cur = p,
+            None => return None,
+        }
+    }
+}
+
+/// Best-effort discovery of a base dir that can resolve `playwright`, checking
+/// the process working dir (covers `npm run tauri dev`) then the executable dir.
+fn find_playwright_base() -> Option<String> {
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Some(b) = find_playwright_base_from(&cwd) {
+            return Some(b);
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            if let Some(b) = find_playwright_base_from(dir) {
+                return Some(b);
+            }
+        }
+    }
+    None
+}
+
+/// Ensure the browser worker script exists on disk; return its path + a base
+/// directory from which `playwright` can be resolved.
+#[tauri::command]
+pub async fn browser_worker_path<R: Runtime>(app: AppHandle<R>) -> Result<BrowserWorkerInfo, String> {
+    use tauri::Manager;
+    let dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|e| e.to_string())?
+        .join("browser");
+    if !dir.exists() {
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    }
+    let path = dir.join("browser_worker.mjs");
+    // (Re)write only when missing or stale so local edits to a deployed worker
+    // aren't clobbered on every call.
+    let stale = match std::fs::read_to_string(&path) {
+        Ok(existing) => existing != BROWSER_WORKER_SRC,
+        Err(_) => true,
+    };
+    if stale {
+        std::fs::write(&path, BROWSER_WORKER_SRC).map_err(|e| e.to_string())?;
+    }
+    Ok(BrowserWorkerInfo {
+        path: path.to_string_lossy().to_string(),
+        playwright_base: find_playwright_base(),
+    })
+}

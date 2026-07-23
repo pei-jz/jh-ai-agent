@@ -4,6 +4,7 @@ import { promptTemplateManager } from '../../modules/ai/PromptTemplateManager.js
 import { skillManager } from '../../modules/ai/SkillManager.js';
 import { icon } from '../utils/icons.js';
 import { classifyCommand } from '../../modules/ai/tools/commandPolicy.js';
+import { CONFIG_SECTION_STYLES, CONFIG_MODAL_STYLES } from './ConfigView.styles.js';
 
 export class ConfigView {
     constructor() {
@@ -437,46 +438,7 @@ export class ConfigView {
                     <div class="cfg-sec-body">${bodyHtml}</div>
                 </details>`;
             tabContentHtml = `
-                <style>
-                    .cfg-sec {
-                        border: 1px solid var(--border);
-                        border-radius: var(--radius-md);
-                        background: var(--bg-secondary);
-                        margin-bottom: 10px;
-                    }
-                    .cfg-sec > summary {
-                        list-style: none;
-                        cursor: pointer; user-select: none;
-                        display: flex; align-items: center; gap: 7px;
-                        padding: 11px 14px;
-                        font-size: 12px; font-weight: 600;
-                        color: var(--accent);
-                        text-transform: uppercase; letter-spacing: 0.06em;
-                    }
-                    .cfg-sec > summary::-webkit-details-marker { display: none; }
-                    .cfg-sec > summary:hover { background: var(--bg-tertiary); border-radius: var(--radius-md); }
-                    .cfg-sec-chev { margin-left: auto; color: var(--text-tertiary); transition: transform 0.15s; }
-                    .cfg-sec:not([open]) .cfg-sec-chev { transform: rotate(-90deg); }
-                    .cfg-sec-body { padding: 4px 16px 14px; }
-                    .cfg-sec-hint { font-size: 11.5px; color: var(--text-tertiary); margin: 0 0 14px 0; line-height: 1.5; }
-                    .cfg-cmd-row {
-                        display: flex; align-items: center; gap: 8px;
-                        padding: 4px 10px; margin-bottom: 4px;
-                        border: 1px solid var(--border-light); border-radius: 5px;
-                        font-size: 12px; background: var(--bg-primary);
-                    }
-                    .cfg-cmd-row code {
-                        flex: 1; font-family: var(--font-mono, monospace);
-                        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-                        color: var(--text-primary);
-                    }
-                    .cfg-cmd-del {
-                        background: none; border: none; cursor: pointer;
-                        color: var(--text-tertiary); font-size: 13px; padding: 2px 4px;
-                    }
-                    .cfg-cmd-del:hover { color: var(--error); }
-                    .cfg-cmd-empty { color: var(--text-tertiary); font-size: 12px; padding: 2px 0 8px; }
-                </style>
+                <style>${CONFIG_SECTION_STYLES}</style>
                 <div class="card settings-card" style="height: 100%;">
                     <div class="card-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
                         <div>
@@ -804,6 +766,16 @@ export class ConfigView {
                             <input type="number" id="modal-inst-temp" class="input" min="0" max="2" step="0.1" value="${this.getModalValue('temperature') ?? ''}" placeholder="Provider default (blank). Use ~0.2 for reliable agent tool-use.">
                             <small style="color: var(--text-secondary); font-size: 11px; margin-top: 4px;">Lower = more deterministic (better for tool-calling). Leave blank for the provider default.</small>
                         </div>
+
+                        <div class="input-group">
+                            <label class="input-label">Pricing — USD per 1M tokens (optional)</label>
+                            <div style="display:flex; gap:8px;">
+                                <input type="number" id="modal-inst-cost-in" class="input" min="0" step="0.01" value="${this.getModalValue('cost_per_1m_input') ?? ''}" placeholder="Input ↑">
+                                <input type="number" id="modal-inst-cost-cache" class="input" min="0" step="0.01" value="${this.getModalValue('cost_per_1m_cache_read') ?? ''}" placeholder="Cache ⚡">
+                                <input type="number" id="modal-inst-cost-out" class="input" min="0" step="0.01" value="${this.getModalValue('cost_per_1m_output') ?? ''}" placeholder="Output ↓">
+                            </div>
+                            <small style="color: var(--text-secondary); font-size: 11px; margin-top: 4px;">Used for the dashboard cost estimate when THIS model is active. e.g. GPT-4o ≈ 2.5 / — / 10; Claude Sonnet ≈ 3 / 0.3 / 15. Cache blank ⇒ ~10% of input.</small>
+                        </div>
                     </div>
 
                     <div id="modal-test-status" style="margin-top: 12px; font-size: 12px; display: none; padding: 8px 12px; border-radius: var(--radius-sm); font-weight: 500;"></div>
@@ -820,16 +792,7 @@ export class ConfigView {
         ` : '';
 
         return `
-            <style>
-                .settings-tab-btn:hover {
-                    color: var(--text-primary) !important;
-                    background: var(--bg-hover) !important;
-                }
-                .settings-tab-btn.active:hover {
-                    color: var(--accent) !important;
-                    background: var(--bg-tertiary) !important;
-                }
-            </style>
+            <style>${CONFIG_MODAL_STYLES}</style>
 
             <div class="view-container">
                 <div class="view-header">
@@ -1537,6 +1500,17 @@ export class ConfigView {
                 const tempRaw = tempEl && tempEl.value !== '' ? parseFloat(tempEl.value) : NaN;
                 const temperature = Number.isFinite(tempRaw) && tempRaw >= 0 && tempRaw <= 2 ? tempRaw : null;
 
+                // Per-model pricing (USD per 1M tokens). Blank ⇒ null (falls back to
+                // global/default rates; cache falls back to ~10% of input).
+                const readRate = (id) => {
+                    const el = document.getElementById(id);
+                    const n = el && el.value !== '' ? parseFloat(el.value) : NaN;
+                    return Number.isFinite(n) && n >= 0 ? n : null;
+                };
+                const costInput = readRate('modal-inst-cost-in');
+                const costCacheRead = readRate('modal-inst-cost-cache');
+                const costOutput = readRate('modal-inst-cost-out');
+
                 if (!model) {
                     alert('Model Name is required.');
                     return;
@@ -1554,6 +1528,9 @@ export class ConfigView {
                         inst.context_window = contextWindow;
                         inst.max_output_tokens = maxOutputTokens;
                         inst.temperature = temperature;
+                        inst.cost_per_1m_input = costInput;
+                        inst.cost_per_1m_cache_read = costCacheRead;
+                        inst.cost_per_1m_output = costOutput;
                     }
                 } else {
                     // Create new
@@ -1567,7 +1544,10 @@ export class ConfigView {
                         api_version: apiVersion || null,
                         context_window: contextWindow,
                         max_output_tokens: maxOutputTokens,
-                        temperature: temperature
+                        temperature: temperature,
+                        cost_per_1m_input: costInput,
+                        cost_per_1m_cache_read: costCacheRead,
+                        cost_per_1m_output: costOutput
                     };
                     if (!this.config.llm_instances) {
                         this.config.llm_instances = [];

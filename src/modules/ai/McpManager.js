@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { McpClient } from './McpClient.js';
 import { McpWsClient } from './McpWsClient.js';
+import { McpHttpClient } from './McpHttpClient.js';
 
 export class McpManager {
     constructor() {
@@ -115,7 +116,11 @@ export class McpManager {
             await this.clients.get(name).stop();
         }
 
-        const client = new McpClient(name, config.command, config.args || [], config.env || {});
+        // Transport dispatch: `http` connects OUT to a remote MCP server over
+        // Streamable HTTP (T2); anything else uses the local stdio subprocess.
+        const client = (config.transport === 'http')
+            ? new McpHttpClient(name, config.url, config.headers || {})
+            : new McpClient(name, config.command, config.args || [], config.env || {});
         const success = await client.start();
         if (success) {
             this.clients.set(name, client);
@@ -156,11 +161,20 @@ export class McpManager {
         return await client.callTool(toolName, args, meta);
     }
 
-    async addServer(name, command, args = [], env = {}) {
+    /**
+     * Add a server. Two shapes are supported:
+     *   stdio (local subprocess): addServer(name, { command, args?, env? })
+     *   http  (remote Streamable HTTP): addServer(name, { transport:'http', url, headers? })
+     * The legacy positional form addServer(name, command, args, env) is kept
+     * for backward compatibility with existing callers.
+     */
+    async addServer(name, commandOrConfig, args = [], env = {}) {
         if (!this.serversConfig.mcpServers) {
             this.serversConfig.mcpServers = {};
         }
-        const config = { command, args, env };
+        const config = (typeof commandOrConfig === 'object' && commandOrConfig !== null)
+            ? { ...commandOrConfig }
+            : { command: commandOrConfig, args, env };
         this.serversConfig.mcpServers[name] = config;
         await this.saveConfig();
         return this.startClient(name, config);

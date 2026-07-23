@@ -7,6 +7,7 @@ import {
     findClosestRegion, visualizeWS
 } from './tools/FileEdit.js';
 import { TOOL_DEFINITIONS } from './tools/toolSchemas.js';
+import { isToolAdvertised, readToolGroupState } from './tools/toolGroups.js';
 import { selectMcpTools } from './tools/ToolRelevance.js';
 import { classifyCommand, suggestApprovalPattern, isApprovedByPatterns } from './tools/commandPolicy.js';
 import {
@@ -18,6 +19,13 @@ import {
 import {
     handleDeleteFile, handleMoveFile, handleRunCommand
 } from './tools/handlers/fsShellHandlers.js';
+import {
+    handleBrowserNavigate, handleBrowserContent, handleBrowserClick,
+    handleBrowserType, handleBrowserEval, handleBrowserScreenshot, handleBrowserClose
+} from './tools/handlers/browserHandlers.js';
+import {
+    handleGitStatus, handleGitDiff, handleGitLog, handleGitCommit
+} from './tools/handlers/gitHandlers.js';
 import {
     handleArtifact, handleFinishTask,
     handleVerifySyntax, handleTaskProgress, handlePresentResult,
@@ -63,6 +71,19 @@ const TOOL_HANDLERS = {
         : 'Error: run_subtask is not available in this context.',
     verify_syntax:   (ex, c) => handleVerifySyntax(ex, c.args, c.onAgentStatus, c.resolvedPath),
     task_progress:   (ex, c) => handleTaskProgress(ex, c.args),
+    // Browser automation (Phase 2)
+    browser_navigate:   (ex, c) => handleBrowserNavigate(ex, c.args, c.onAgentStatus),
+    browser_content:    (ex, c) => handleBrowserContent(ex, c.args, c.onAgentStatus),
+    browser_click:      (ex, c) => handleBrowserClick(ex, c.args, c.onAgentStatus),
+    browser_type:       (ex, c) => handleBrowserType(ex, c.args, c.onAgentStatus),
+    browser_eval:       (ex, c) => handleBrowserEval(ex, c.args, c.onAgentStatus),
+    browser_screenshot: (ex, c) => handleBrowserScreenshot(ex, c.args, c.onAgentStatus),
+    browser_close:      (ex, c) => handleBrowserClose(ex, c.args, c.onAgentStatus),
+    // Git tools (Phase 3)
+    git_status: (ex, c) => handleGitStatus(ex, c.args, c.onAgentStatus),
+    git_diff:   (ex, c) => handleGitDiff(ex, c.args, c.onAgentStatus),
+    git_log:    (ex, c) => handleGitLog(ex, c.args, c.onAgentStatus),
+    git_commit: (ex, c) => handleGitCommit(ex, c.args, c.onConfirm, c.onAgentStatus),
 };
 
 export class ToolExecutor {
@@ -201,6 +222,11 @@ export class ToolExecutor {
         if (!this._subtaskRunner) {
             defs = defs.filter(t => t.name !== 'run_subtask');
         }
+        // Optional tool groups (browser / git): drop those the user disabled or
+        // that proved unusable (Playwright missing) so the LLM isn't offered
+        // tools it can't run. Core tools are unaffected.
+        const groupState = readToolGroupState();
+        defs = defs.filter(t => isToolAdvertised(t.name, groupState));
         return defs;
     }
 
@@ -814,6 +840,17 @@ export class ToolExecutor {
             case 'multi_replace_file_content':
             case 'replace_lines':
                 return this._isWriteAllowed(pickPath()) ? 'Allow' : 'Ask';
+            // Browser tools: side-effecting ones (navigate/click/type/eval) ask;
+            // read-only ones (content/screenshot/close) follow isSafe → default Allow.
+            case 'browser_navigate':
+            case 'browser_click':
+            case 'browser_type':
+            case 'browser_eval':
+                return 'Ask';
+            // git_commit is the only mutating git tool → gate it. The read-only
+            // git_status/git_diff/git_log follow isSafe → default Allow.
+            case 'git_commit':
+                return 'Ask';
             default:
                 return 'Allow';
         }
@@ -920,10 +957,12 @@ export class ToolExecutor {
         // Built-in tool schemas are authored strict-compliant, so they are
         // always eligible for OpenAI Structured Outputs. The `_strict_ok` hint
         // is read by the Rust layer, which sets function.strict per provider.
+        const groupState = readToolGroupState();
         const nativeTools = this.toolDefinitions
             .filter(t => !allow || allow.has(t.name))
             .filter(t => t.name !== 'web_search' || this._tavilyEnabled)
             .filter(t => t.name !== 'run_subtask' || this._subtaskRunner)
+            .filter(t => isToolAdvertised(t.name, groupState))
             .map(t => ({
                 type: 'function',
                 _strict_ok: true,

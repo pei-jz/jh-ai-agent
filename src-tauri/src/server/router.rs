@@ -617,47 +617,70 @@ async fn get_stats(State(state): State<AppState>) -> Json<serde_json::Value> {
     let tasks = state.tasks.lock().unwrap();
     let mut total_tasks = 0;
     let mut total_tokens = 0;
-    let mut prompt_tokens = 0;
-    let mut completion_tokens = 0;
-    
+    let mut prompt_tokens = 0u64;
+    let mut completion_tokens = 0u64;
+    let mut cache_read_tokens = 0u64;
+
     for task in tasks.values() {
         total_tasks += 1;
-        prompt_tokens += task.token_usage.prompt_tokens;
-        completion_tokens += task.token_usage.completion_tokens;
+        prompt_tokens += task.token_usage.prompt_tokens as u64;
+        completion_tokens += task.token_usage.completion_tokens as u64;
+        cache_read_tokens += task.token_usage.cache_read_input_tokens as u64;
         total_tokens += task.token_usage.total_tokens;
     }
-    
-    // Cost is an ESTIMATE from configurable per-token rates (USD per 1M tokens),
-    // computed separately for prompt vs completion. Rates are read from
-    // ai_config.json (cost_per_1m_prompt / cost_per_1m_completion) so they can be
-    // set to the active model's real pricing instead of a single hardcoded number.
-    let (rate_p, rate_c) = read_cost_rates(&state.config_path);
-    let estimated_cost = (prompt_tokens as f64 / 1_000_000.0) * rate_p
-        + (completion_tokens as f64 / 1_000_000.0) * rate_c;
+
+    // Cost is an ESTIMATE using the ACTIVE model's per-1M-token rates (input /
+    // cache-read / output), so it reflects the pricing of the model actually in
+    // use. Rates come from the active LLM instance's cost_per_1m_* fields
+    // (Settings → Connections), matching the ↑ / ⚡ / ↓ token line items. Cached
+    // input is billed at its own (usually ~10%) rate. (Historical tasks don't
+    // record their model, so all token volume is priced at the active model's
+    // rates — an approximation across mixed-model history.)
+    let (rate_in, rate_cache, rate_out) = read_cost_rates(&state.config_path);
+    let estimated_cost = (prompt_tokens as f64 / 1_000_000.0) * rate_in
+        + (cache_read_tokens as f64 / 1_000_000.0) * rate_cache
+        + (completion_tokens as f64 / 1_000_000.0) * rate_out;
 
     Json(serde_json::json!({
         "totalTasks": total_tasks,
         "totalTokens": total_tokens,
         "promptTokens": prompt_tokens,
         "completionTokens": completion_tokens,
+        "cacheReadTokens": cache_read_tokens,
         "estimatedCost": estimated_cost,
-        "costRates": { "prompt_per_1m": rate_p, "completion_per_1m": rate_c }
+        "costRates": { "input_per_1m": rate_in, "cache_read_per_1m": rate_cache, "output_per_1m": rate_out }
     }))
 }
 
-/// Read per-1M-token USD cost rates from ai_config.json. Falls back to a generic
-/// low estimate when unset; set cost_per_1m_prompt / cost_per_1m_completion to the
-/// real pricing of the model you use (e.g. DeepSeek vs GPT-4o differ ~50×).
-fn read_cost_rates(config_path: &PathBuf) -> (f64, f64) {
-    let mut prompt_rate = 0.5;       // generic placeholder; configurable
-    let mut completion_rate = 1.5;
+/// Per-1M-token USD rates (input, cache-read, output) for the ACTIVE model.
+/// Resolution order per rate: active instance's cost_per_1m_* → legacy global
+/// cost_per_1m_prompt/completion keys → a generic placeholder. Cache-read
+/// defaults to ~10% of the input rate when the model doesn't specify one.
+fn read_cost_rates(config_path: &PathBuf) -> (f64, f64, f64) {
+    let mut input_rate = 0.5;       // generic placeholder; configurable per model
+    let mut output_rate = 1.5;
+    let mut cache_rate: Option<f64> = None;
     if let Ok(txt) = std::fs::read_to_string(config_path) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) {
-            if let Some(p) = v.get("cost_per_1m_prompt").and_then(|x| x.as_f64()) { prompt_rate = p; }
-            if let Some(c) = v.get("cost_per_1m_completion").and_then(|x| x.as_f64()) { completion_rate = c; }
+            // Legacy global keys (kept for back-compat).
+            if let Some(p) = v.get("cost_per_1m_prompt").and_then(|x| x.as_f64()) { input_rate = p; }
+            if let Some(c) = v.get("cost_per_1m_completion").and_then(|x| x.as_f64()) { output_rate = c; }
+            // Active instance's per-model rates take precedence.
+            let active_id = v.get("active_llm_instance_id").and_then(|x| x.as_str());
+            if let Some(insts) = v.get("llm_instances").and_then(|x| x.as_array()) {
+                let active = insts.iter().find(|i| {
+                    active_id.map_or(false, |id| i.get("id").and_then(|x| x.as_str()) == Some(id))
+                }).or_else(|| insts.first());   // no active id ⇒ first instance
+                if let Some(inst) = active {
+                    if let Some(x) = inst.get("cost_per_1m_input").and_then(|x| x.as_f64()) { input_rate = x; }
+                    if let Some(x) = inst.get("cost_per_1m_output").and_then(|x| x.as_f64()) { output_rate = x; }
+                    if let Some(x) = inst.get("cost_per_1m_cache_read").and_then(|x| x.as_f64()) { cache_rate = Some(x); }
+                }
+            }
         }
     }
-    (prompt_rate, completion_rate)
+    // Cache-read: use the configured value, else assume the common ~10%-of-input.
+    (input_rate, cache_rate.unwrap_or(input_rate * 0.1), output_rate)
 }
 
 // Helpers

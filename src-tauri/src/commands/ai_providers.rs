@@ -8,6 +8,10 @@
 
 use super::ai::LlmMessage;
 
+/// Sentinel splitting the cacheable system prefix from the volatile suffix.
+/// Emitted by ContextBuilder.js (SYSTEM_CACHE_BREAK).
+pub(crate) const SYS_CACHE_BREAK: &str = "<<<JHAI_SYSTEM_CACHE_BREAK>>>";
+
 /// Whether a model accepts image (vision) content. Non-vision models served via
 /// an OpenAI-compatible endpoint (e.g. DeepSeek) reject `image_url` content parts
 /// with a 400 "unknown variant image_url" — so we must send text-only to them.
@@ -523,5 +527,363 @@ mod provider_helper_tests {
         let (stable, volatile) = split_system_on_cache_break(&sys, BREAK);
         assert_eq!(stable, "STABLE");
         assert!(volatile.is_none());
+    }
+}
+
+/// Build the provider-specific request body (OpenAI-family / Anthropic / Gemini)
+/// for `llm_chat_native`. Consumes `payload.messages` (and, for Gemini, the
+/// system prompt) via the &mut borrow; other payload fields are left for the
+/// caller. Behaviour is identical to the former inline `match` in ai.rs.
+pub(crate) fn build_request_body(
+    provider: &str,
+    model: &str,
+    messages: Vec<LlmMessage>,
+    system_prompt: Option<String>,
+    images: &Option<Vec<String>>,
+    tools: &Option<serde_json::Value>,
+    resolved_max_tokens: Option<u32>,
+    resolved_temperature: Option<f32>,
+) -> serde_json::Value {
+    match provider {
+        "openai" | "ollama" | "azure" | "generic" => {
+            // Message array (incl. vision attach/drop) → build_openai_messages (unit-tested).
+            //
+            // ── Prompt caching (OpenAI-family: automatic prefix cache) ──
+            // OpenAI/Azure/DeepSeek cache on EXACT prefix match only — no
+            // breakpoints like Anthropic's cache_control. The system prompt's
+            // VOLATILE tail (task_plan / workflow phase / artifacts) used to be
+            // folded into the system message, so the FIRST message changed every
+            // agent step and the prefix cache never hit (observed: cached_tokens
+            // ≈ 0 on Azure). Split on the sentinel instead: the STABLE region
+            // stays the system message (byte-identical all run → system + tools
+            // + history prefix stays cacheable), and the volatile region is
+            // re-injected as a clearly-labeled FINAL user message below.
+            let vision_ok = model_supports_vision(provider, &model);
+            let (sys_stable, sys_volatile) = match system_prompt {
+                Some(s) => {
+                    let (stable, volatile) = split_system_on_cache_break(&s, SYS_CACHE_BREAK);
+                    (Some(stable), volatile)
+                }
+                None => (None, None),
+            };
+            let msgs = messages;
+            let mut full_messages = build_openai_messages(sys_stable, msgs, images, vision_ok);
+            if let Some(vol) = sys_volatile {
+                full_messages.push(serde_json::json!({
+                    "role": "user",
+                    "content": format!(
+                        "[Current Task Context — treat as system-level instructions; auto-updated each step]\n{}",
+                        vol
+                    )
+                }));
+            }
+            let mut body_obj = serde_json::json!({
+                "model": model,
+                "messages": full_messages,
+                "stream": true,
+                // Ask OpenAI-compatible endpoints to emit a final usage-only chunk
+                // (choices:[] + usage:{...}). Unknown-field-tolerant servers ignore
+                // it; those that honor it give us real token counts.
+                "stream_options": { "include_usage": true }
+            });
+            // Response-control params (OpenAI-compatible): only set when provided,
+            // so unconfigured connections keep the provider's default behavior.
+            if let Some(obj) = body_obj.as_object_mut() {
+                if let Some(mt) = resolved_max_tokens {
+                    obj.insert("max_tokens".to_string(), serde_json::json!(mt));
+                }
+                if let Some(temp) = resolved_temperature {
+                    obj.insert("temperature".to_string(), serde_json::json!(temp));
+                }
+            }
+            // Forward native tool definitions if provided. Excluded for "ollama"
+            // (its OpenAI-compat layer doesn't reliably support function calling
+            // — falls back to text JSON via the system prompt).
+            if provider != "ollama" {
+                if let Some(tools) = tools {
+                    // OpenAI Structured Outputs (strict) is supported by openai,
+                    // azure, and (opt-in) generic OpenAI-compatible endpoints.
+                    let strict_supported =
+                        matches!(provider, "openai" | "azure" | "generic");
+                    let cleaned = clean_openai_tools(tools, strict_supported);
+                    if let Some(obj) = body_obj.as_object_mut() {
+                        obj.insert("tools".to_string(), cleaned);
+                        obj.insert("tool_choice".to_string(), serde_json::json!("auto"));
+                    }
+                }
+            }
+            body_obj
+        }
+        "anthropic" => {
+            let mut full_messages: Vec<serde_json::Value> = Vec::new();
+            let msgs = messages;
+            let msg_len = msgs.len();
+            for (i, m) in msgs.into_iter().enumerate() {
+                // ── Native tool-call turns → Anthropic content blocks ──────
+                // assistant + tool_calls → [{text?}, {tool_use, id, name, input}…]
+                // role:"tool"            → user turn with tool_result block(s);
+                //                          CONSECUTIVE tool results merge into ONE
+                //                          user turn (Anthropic requires results in
+                //                          the immediately-following user message).
+                if m.role == "assistant" && m.tool_calls.is_some() {
+                    let mut blocks: Vec<serde_json::Value> = Vec::new();
+                    if !m.content.trim().is_empty() {
+                        blocks.push(serde_json::json!({ "type": "text", "text": m.content }));
+                    }
+                    if let Some(arr) = m.tool_calls.as_ref().and_then(|v| v.as_array()) {
+                        for tc in arr {
+                            let f = &tc["function"];
+                            let input: serde_json::Value = f["arguments"].as_str()
+                                .and_then(|s| serde_json::from_str(s).ok())
+                                .unwrap_or_else(|| serde_json::json!({}));
+                            blocks.push(serde_json::json!({
+                                "type": "tool_use",
+                                "id": tc["id"].as_str().unwrap_or("call_0"),
+                                "name": f["name"].as_str().unwrap_or(""),
+                                "input": input
+                            }));
+                        }
+                    }
+                    full_messages.push(serde_json::json!({ "role": "assistant", "content": blocks }));
+                    continue;
+                }
+                if m.role == "tool" {
+                    let result_block = serde_json::json!({
+                        "type": "tool_result",
+                        "tool_use_id": m.tool_call_id.clone().unwrap_or_else(|| "call_0".to_string()),
+                        "content": m.content
+                    });
+                    // Merge into the previous user turn if it's already a
+                    // tool_result container (consecutive results of one step).
+                    let merged = if let Some(last) = full_messages.last_mut() {
+                        let is_result_turn = last["role"] == "user"
+                            && last["content"].as_array()
+                                .map_or(false, |a| a.iter().all(|b| b["type"] == "tool_result"));
+                        if is_result_turn {
+                            last["content"].as_array_mut().unwrap().push(result_block.clone());
+                            true
+                        } else { false }
+                    } else { false };
+                    if !merged {
+                        full_messages.push(serde_json::json!({ "role": "user", "content": [result_block] }));
+                    }
+                    continue;
+                }
+
+                if m.role == "user" && i == msg_len - 1 && images.as_ref().map_or(false, |imgs| !imgs.is_empty()) {
+                    let mut content_parts = Vec::new();
+                    content_parts.push(serde_json::json!({ "type": "text", "text": m.content }));
+
+                    if let Some(images) = images {
+                        for img in images {
+                            let (mime, data) = parse_image_data_url(img);
+                            content_parts.push(serde_json::json!({
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": mime,
+                                    "data": data
+                                }
+                            }));
+                        }
+                    }
+                    full_messages.push(serde_json::json!({ "role": m.role, "content": content_parts }));
+                } else {
+                    full_messages.push(serde_json::json!({ "role": m.role, "content": m.content }));
+                }
+            }
+
+            // ── Conversation-history caching ───────────────────────────────
+            // Mark the LAST message block with cache_control so the growing
+            // history is billed incrementally: on the next step the prior turns
+            // are a cached prefix (~10%), and only the newest turn is full price.
+            // String content must be promoted to block form to carry the marker.
+            if let Some(last) = full_messages.last_mut() {
+                if last["content"].is_string() {
+                    let text = last["content"].as_str().unwrap_or("").to_string();
+                    last["content"] = serde_json::json!([
+                        { "type": "text", "text": text, "cache_control": { "type": "ephemeral" } }
+                    ]);
+                } else if let Some(arr) = last["content"].as_array_mut() {
+                    if let Some(lp) = arr.last_mut() {
+                        lp["cache_control"] = serde_json::json!({ "type": "ephemeral" });
+                    }
+                }
+            }
+            {
+                // Anthropic REQUIRES max_tokens. Use the configured value, else a
+                // sane 8192 default (previously a hardcoded 8096 — a typo that also
+                // ignored model capability). temperature is optional.
+                let mut body = serde_json::json!({
+                    "model": model,
+                    "messages": full_messages,
+                    "stream": true,
+                    "max_tokens": resolved_max_tokens.unwrap_or(8192)
+                });
+                if let Some(temp) = resolved_temperature {
+                    body["temperature"] = serde_json::json!(temp);
+                }
+
+                // ── Prompt caching (Anthropic, GA — no beta header needed) ──
+                // The system prompt is split on SYS_CACHE_BREAK into a STABLE prefix
+                // (persona + tool rules + project summary + memory…) and a VOLATILE
+                // suffix (task_plan / workflow / artifacts). Only the prefix carries
+                // `cache_control`, so the large static block is billed at ~10% on
+                // cache hits while the changing tail doesn't bust the cached prefix.
+                // (No sentinel ⇒ legacy single cached block.)
+                if let Some(sys) = system_prompt.clone().filter(|s| !s.is_empty()) {
+                    if let Some(idx) = sys.find(SYS_CACHE_BREAK) {
+                        let prefix = sys[..idx].to_string();
+                        let suffix = sys[idx + SYS_CACHE_BREAK.len()..].to_string();
+                        let mut blocks = Vec::new();
+                        if !prefix.trim().is_empty() {
+                            blocks.push(serde_json::json!({
+                                "type": "text", "text": prefix,
+                                "cache_control": { "type": "ephemeral" }
+                            }));
+                        }
+                        if !suffix.trim().is_empty() {
+                            blocks.push(serde_json::json!({ "type": "text", "text": suffix }));
+                        }
+                        body["system"] = serde_json::Value::Array(blocks);
+                    } else {
+                        body["system"] = serde_json::json!([
+                            { "type": "text", "text": sys, "cache_control": { "type": "ephemeral" } }
+                        ]);
+                    }
+                }
+
+                // Convert OpenAI-format tools to Anthropic format:
+                // { type, function: { name, description, parameters } }
+                // → { name, description, input_schema }
+                if let Some(tools) = tools {
+                    if let Some(arr) = tools.as_array() {
+                        let mut anthropic_tools: Vec<serde_json::Value> = arr.iter()
+                            .filter_map(|t| {
+                                let f = &t["function"];
+                                let name = f["name"].as_str()?;
+                                Some(serde_json::json!({
+                                    "name": name,
+                                    "description": f["description"].as_str().unwrap_or(""),
+                                    "input_schema": f["parameters"].clone()
+                                }))
+                            })
+                            .collect();
+                        if !anthropic_tools.is_empty() {
+                            // Cache the (static) tool definitions too — mark the last
+                            // tool, which caches the whole tools block up to that point.
+                            if let Some(last) = anthropic_tools.last_mut() {
+                                last["cache_control"] = serde_json::json!({ "type": "ephemeral" });
+                            }
+                            body["tools"] = serde_json::Value::Array(anthropic_tools);
+                        }
+                    }
+                }
+                body
+            }
+        }
+        "gemini" => {
+            let mut contents = Vec::new();
+            let msgs = messages;
+            let msg_len = msgs.len();
+            for (i, m) in msgs.into_iter().enumerate() {
+                // ── Native tool-call turns → Gemini parts ──────────────────
+                // assistant + tool_calls → role "model" with functionCall parts;
+                // role:"tool" → role "user" with a functionResponse part (v1beta
+                // matches responses to calls by NAME + order, not id).
+                if m.role == "assistant" && m.tool_calls.is_some() {
+                    let mut parts = Vec::new();
+                    if !m.content.trim().is_empty() {
+                        parts.push(serde_json::json!({ "text": m.content }));
+                    }
+                    if let Some(arr) = m.tool_calls.as_ref().and_then(|v| v.as_array()) {
+                        for tc in arr {
+                            let f = &tc["function"];
+                            let args: serde_json::Value = f["arguments"].as_str()
+                                .and_then(|s| serde_json::from_str(s).ok())
+                                .unwrap_or_else(|| serde_json::json!({}));
+                            parts.push(serde_json::json!({
+                                "functionCall": { "name": f["name"].as_str().unwrap_or(""), "args": args }
+                            }));
+                        }
+                    }
+                    contents.push(serde_json::json!({ "role": "model", "parts": parts }));
+                    continue;
+                }
+                if m.role == "tool" {
+                    contents.push(serde_json::json!({
+                        "role": "user",
+                        "parts": [{
+                            "functionResponse": {
+                                "name": m.name.clone().unwrap_or_else(|| "tool".to_string()),
+                                "response": { "result": m.content }
+                            }
+                        }]
+                    }));
+                    continue;
+                }
+
+                let role = if m.role == "assistant" { "model" } else { "user" };
+                let mut parts = Vec::new();
+                parts.push(serde_json::json!({ "text": m.content }));
+
+                // Attach images to the last user message
+                if m.role == "user" && i == msg_len - 1 {
+                    if let Some(images) = images {
+                        for img in images {
+                            let (mime, data) = parse_image_data_url(img);
+                            parts.push(serde_json::json!({
+                                "inline_data": {
+                                    "mime_type": mime,
+                                    "data": data
+                                }
+                            }));
+                        }
+                    }
+                }
+
+                contents.push(serde_json::json!({
+                    "role": role,
+                    "parts": parts
+                }));
+            }
+            // Build optional generationConfig (maxOutputTokens / temperature).
+            let mut gen_config = serde_json::Map::new();
+            if let Some(mt) = resolved_max_tokens {
+                gen_config.insert("maxOutputTokens".to_string(), serde_json::json!(mt));
+            }
+            if let Some(temp) = resolved_temperature {
+                gen_config.insert("temperature".to_string(), serde_json::json!(temp));
+            }
+
+            let mut g_body = if let Some(sys) = system_prompt.map(|s| s.replace(SYS_CACHE_BREAK, "\n")) {
+                serde_json::json!({
+                    "contents": contents,
+                    "system_instruction": {
+                        "parts": [{ "text": sys }]
+                    }
+                })
+            } else {
+                serde_json::json!({
+                    "contents": contents
+                })
+            };
+            if !gen_config.is_empty() {
+                g_body["generationConfig"] = serde_json::Value::Object(gen_config);
+            }
+            // Native function calling: convert OpenAI-format tools to Gemini
+            // functionDeclarations so the model returns structured functionCall
+            // parts instead of free-form JSON text.
+            if let Some(tools) = tools {
+                if let Some(decls) = openai_tools_to_gemini(tools) {
+                    g_body["tools"] = serde_json::json!([{ "functionDeclarations": decls }]);
+                    g_body["toolConfig"] = serde_json::json!({
+                        "functionCallingConfig": { "mode": "AUTO" }
+                    });
+                }
+            }
+            g_body
+        }
+        _ => unreachable!(),
     }
 }

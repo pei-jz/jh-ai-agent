@@ -29,6 +29,20 @@ pub struct LlmInstance {
     /// For agentic tool-use, a low value (e.g. 0.2) improves reliability.
     #[serde(default)]
     pub temperature: Option<f32>,
+
+    // ── Per-model pricing (USD per 1M tokens) ─────────────────────────────
+    // Used to estimate task cost with THIS model's real rates instead of a
+    // single global placeholder. All optional; unset ⇒ falls back to the
+    // legacy global cost_per_1m_* keys, then to a generic default.
+    /// Full-priced (non-cached) input tokens — the "↑" figure.
+    #[serde(default)]
+    pub cost_per_1m_input: Option<f64>,
+    /// Cache-read input tokens — the "⚡" figure (typically ~10% of input).
+    #[serde(default)]
+    pub cost_per_1m_cache_read: Option<f64>,
+    /// Output/completion tokens — the "↓" figure.
+    #[serde(default)]
+    pub cost_per_1m_output: Option<f64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]

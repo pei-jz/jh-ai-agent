@@ -410,5 +410,144 @@ export const TOOL_DEFINITIONS = [
             required: ['brief', 'role', 'tools', 'max_steps', 'model', 'write_scope'],
             additionalProperties: false
         }
+    },
+    // ── Browser automation (Phase 2, Playwright worker) ─────────────────────
+    {
+        name: 'browser_navigate',
+        isSafe: false,
+        description: 'Open a URL in a headless browser (Playwright) and return the page title + final URL. Use this to render JS-heavy pages that fetch_url cannot. Requires Playwright installed (`npm i -D playwright && npx playwright install chromium`).',
+        parameters: {
+            type: 'object',
+            properties: {
+                url: { type: 'string', description: 'The URL to navigate to (http:// or https://).' }
+            },
+            required: ['url'],
+            additionalProperties: false
+        }
+    },
+    {
+        name: 'browser_content',
+        isSafe: true,
+        description: 'Return the rendered HTML of the current browser page (after JS execution). Truncated for large pages. Use after browser_navigate to read the DOM.',
+        parameters: { type: 'object', properties: {}, additionalProperties: false }
+    },
+    {
+        name: 'browser_click',
+        isSafe: false,
+        description: 'Click an element in the current browser page by CSS selector.',
+        parameters: {
+            type: 'object',
+            properties: {
+                selector: { type: 'string', description: 'CSS selector of the element to click.' }
+            },
+            required: ['selector'],
+            additionalProperties: false
+        }
+    },
+    {
+        name: 'browser_type',
+        isSafe: false,
+        description: 'Type text into an input/textarea in the current browser page, by CSS selector.',
+        parameters: {
+            type: 'object',
+            properties: {
+                selector: { type: 'string', description: 'CSS selector of the input element.' },
+                text: { type: 'string', description: 'Text to enter.' },
+                clear: { type: ['boolean', 'null'], description: 'Optional. Clear existing value first (default true).' }
+            },
+            required: ['selector', 'text', 'clear'],
+            additionalProperties: false
+        }
+    },
+    {
+        name: 'browser_eval',
+        isSafe: false,
+        description: 'Evaluate a JavaScript expression in the current browser page and return its JSON-serialisable result. Powerful but executes arbitrary page script — use carefully.',
+        parameters: {
+            type: 'object',
+            properties: {
+                script: { type: 'string', description: 'JavaScript to evaluate in the page context (e.g. "document.title").' }
+            },
+            required: ['script'],
+            additionalProperties: false
+        }
+    },
+    {
+        name: 'browser_screenshot',
+        isSafe: true,
+        description: 'Capture a PNG screenshot of the current browser page and save it inside the workspace. Returns the saved path + byte size.',
+        parameters: {
+            type: 'object',
+            properties: {
+                path: { type: ['string', 'null'], description: 'Optional. Workspace-relative path for the PNG (default: screenshot_<ts>.png).' },
+                fullPage: { type: ['boolean', 'null'], description: 'Optional. Capture the full scrollable page (default false = viewport).' }
+            },
+            required: ['path', 'fullPage'],
+            additionalProperties: false
+        }
+    },
+    {
+        name: 'browser_close',
+        isSafe: true,
+        description: 'Close the headless browser and free its resources. Call when done with a browsing session.',
+        parameters: { type: 'object', properties: {}, additionalProperties: false }
+    },
+    // ── Git tools (Phase 3, dedicated + permission-aware) ───────────────────
+    {
+        name: 'git_status',
+        isSafe: true,
+        description: 'Show the git working-tree status (porcelain v2 + branch info) for the repo at cwd (defaults to the workspace). Read-only. Use this to understand what changed before committing.',
+        parameters: {
+            type: 'object',
+            properties: {
+                cwd: { type: ['string', 'null'], description: 'Optional. Repo directory (relative resolved against the workspace). Defaults to the workspace root.' }
+            },
+            required: ['cwd'],
+            additionalProperties: false
+        }
+    },
+    {
+        name: 'git_diff',
+        isSafe: true,
+        description: 'Show git changes as a unified diff. By default working-tree vs index; set staged=true for index vs HEAD. Optionally limit to one file with path. Read-only.',
+        parameters: {
+            type: 'object',
+            properties: {
+                cwd: { type: ['string', 'null'], description: 'Optional. Repo directory (defaults to the workspace root).' },
+                staged: { type: ['boolean', 'null'], description: 'Optional. Show staged changes (--cached) instead of unstaged. Default false.' },
+                path: { type: ['string', 'null'], description: 'Optional. Limit the diff to a single file path.' }
+            },
+            required: ['cwd', 'staged', 'path'],
+            additionalProperties: false
+        }
+    },
+    {
+        name: 'git_log',
+        isSafe: true,
+        description: 'Show recent git commit history, one per line ("<short-hash> <subject> (<relative-time>)"). Read-only.',
+        parameters: {
+            type: 'object',
+            properties: {
+                cwd: { type: ['string', 'null'], description: 'Optional. Repo directory (defaults to the workspace root).' },
+                max_count: { type: ['integer', 'null'], description: 'Optional. Number of commits to show (default 20, max 200).' }
+            },
+            required: ['cwd', 'max_count'],
+            additionalProperties: false
+        }
+    },
+    {
+        name: 'git_commit',
+        isSafe: false,
+        description: 'Stage changes and create a git commit. Stages the given paths, or ALL changes when paths is empty. This is the only MUTATING git tool — always confirm with the user first. Provide a clear, conventional commit message.',
+        parameters: {
+            type: 'object',
+            properties: {
+                cwd: { type: ['string', 'null'], description: 'Optional. Repo directory (defaults to the workspace root).' },
+                message: { type: 'string', description: 'Commit message (non-empty).' },
+                paths: { type: ['array', 'null'], items: { type: 'string' }, description: 'Optional. Specific paths to stage. Empty/null stages all changes (git add -A).' }
+            },
+            required: ['cwd', 'message', 'paths'],
+            additionalProperties: false
+        }
     }
 ];
