@@ -25,22 +25,67 @@
 // clear message if it isn't installed (`npm i -D playwright` + `npx playwright install`).
 
 import readline from 'node:readline';
+import path from 'node:path';
+import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
 
 let browser = null;
 let context = null;
 let page = null;
+let _pwCache = null;
 
 const send = (obj) => process.stdout.write(JSON.stringify(obj) + '\n');
 
-async function loadPlaywright() {
-    try {
-        const pw = await import('playwright');
-        return pw;
-    } catch (e) {
-        throw new Error(
-            'Playwright is not installed. Run: npm i -D playwright && npx playwright install chromium'
-        );
+/** Yield `start` and every ancestor directory up to the filesystem root. */
+function* ancestors(start) {
+    let cur = path.resolve(start);
+    for (;;) {
+        yield cur;
+        const parent = path.dirname(cur);
+        if (parent === cur) break;
+        cur = parent;
     }
+}
+
+/**
+ * Load Playwright by ABSOLUTE path.
+ *
+ * The worker runs from the app config dir (materialised there so it survives
+ * Vite bundling), so a bare `import('playwright')` resolves node_modules from
+ * the config dir upward and NEVER reaches the project's install — the feature
+ * looked permanently "not installed". Instead we anchor Node's own resolver
+ * (createRequire) at candidate bases that DO sit at/below the project tree:
+ *   1. JHAI_PLAYWRIGHT_BASE — a dir the Rust side found to contain
+ *      node_modules/playwright (passed via env by BrowserBridge).
+ *   2. process.cwd() and its ancestors — covers `npm run tauri dev` (cwd = project root).
+ * require.resolve() walks node_modules up from the base, so any base within the
+ * project tree finds it; we then dynamic-import the resolved entry by file URL.
+ */
+async function loadPlaywright() {
+    if (_pwCache) return _pwCache;
+    const bases = [];
+    if (process.env.JHAI_PLAYWRIGHT_BASE) bases.push(process.env.JHAI_PLAYWRIGHT_BASE);
+    bases.push(...ancestors(process.cwd()));
+    for (const base of bases) {
+        try {
+            // The anchor file need not exist; it only fixes the resolver's start dir.
+            const req = createRequire(path.join(base, 'package.json'));
+            const entry = req.resolve('playwright');
+            const mod = await import(pathToFileURL(entry).href);
+            _pwCache = mod.default ?? mod;   // playwright is CJS → exports on .default/named
+            return _pwCache;
+        } catch (_) { /* try the next base */ }
+    }
+    // Last resort: bare import (works if playwright happens to be resolvable here).
+    try {
+        const mod = await import('playwright');
+        _pwCache = mod.default ?? mod;
+        return _pwCache;
+    } catch (_) { /* fall through to the actionable error */ }
+    throw new Error(
+        'Playwright is not installed (or not resolvable from the project). ' +
+        'Run in the project root: npm i -D playwright && npx playwright install chromium'
+    );
 }
 
 async function ensurePage() {
