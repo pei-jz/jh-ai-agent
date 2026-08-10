@@ -1,0 +1,1082 @@
+// The ordering rules that used to live inside DOM handlers and could not be
+// tested. Every case here corresponds to a reported Task-view symptom.
+
+import { describe, it, expect, beforeEach } from 'vitest';
+import { TaskTimeline, buildTimeline, envelopeText, splitForPanes, chapters, replayLineType, replayStepNo, withTurnDividers, clockText, withExchangeFolds, exchangeCount, collapsedIds } from '../taskTimeline.js';
+
+const kinds = (tl) => tl.items.map(i => i.kind);
+
+let tl;
+beforeEach(() => { tl = new TaskTimeline(); });
+
+describe('reasoning groups', () => {
+    it('nests the lines a reasoning step produced under it', () => {
+        tl.pushActivity('thought', 'I will read the workbook');
+        tl.pushActivity('tool', 'read_office a.xlsx');
+        tl.pushActivity('tool', 'read_office b.xlsx');
+
+        expect(kinds(tl)).toEqual(['group']);
+        expect(tl.items[0].lines.map(l => l.text)).toEqual(['read_office a.xlsx', 'read_office b.xlsx']);
+    });
+
+    it('a new reasoning line starts a new group', () => {
+        tl.pushActivity('thought', 'first');
+        tl.pushActivity('tool', 'a');
+        tl.pushActivity('thought', 'second');
+        tl.pushActivity('tool', 'b');
+
+        expect(kinds(tl)).toEqual(['group', 'group']);
+        expect(tl.items[0].lines).toHaveLength(1);
+        expect(tl.items[1].lines).toHaveLength(1);
+    });
+
+    it('bumps rev when a line joins a group, so a renderer notices', () => {
+        const g = tl.pushActivity('thought', 'x');
+        const before = g.rev;
+        tl.pushActivity('tool', 'y');
+        expect(g.rev).toBe(before + 1);
+    });
+
+    it('lines before the first reasoning stand on their own', () => {
+        tl.pushActivity('tool', 'early');
+        expect(kinds(tl)).toEqual(['activity']);
+    });
+
+    it('ignores blank lines instead of emitting empty rows', () => {
+        expect(tl.pushActivity('tool', '   ')).toBe(null);
+        expect(tl.pushActivity('thought', null)).toBe(null);
+        expect(tl.items).toHaveLength(0);
+    });
+});
+
+describe('narration', () => {
+    it('REPLACES itself as prose streams in, rather than stacking copies', () => {
+        tl.pushNarration('Let me');
+        tl.pushNarration('Let me look at');
+        tl.pushNarration('Let me look at the sheets');
+
+        expect(kinds(tl)).toEqual(['narration']);
+        expect(tl.items[0].text).toBe('Let me look at the sheets');
+        expect(tl.items[0].rev).toBe(2);
+    });
+
+    it('a new reasoning step closes the open narration', () => {
+        tl.pushNarration('first prose');
+        tl.pushActivity('thought', 'now acting');
+        tl.pushNarration('second prose');
+        expect(kinds(tl)).toEqual(['narration', 'group', 'narration']);
+    });
+});
+
+describe('deliverable (present_result)', () => {
+    it('an EMPTY follow-up envelope must not clobber real content', () => {
+        tl.pushDeliverable('markdown', '# The report');
+        tl.pushDeliverable('answer', '');
+        expect(tl.items).toHaveLength(1);
+        expect(tl.items[0].text).toBe('# The report');
+    });
+
+    it('a non-empty follow-up updates in place', () => {
+        tl.pushDeliverable('markdown', 'draft');
+        tl.pushDeliverable('markdown', 'final');
+        expect(tl.items).toHaveLength(1);
+        expect(tl.items[0].text).toBe('final');
+        expect(tl.items[0].rev).toBe(1);
+    });
+
+    it('ignores an empty first envelope', () => {
+        expect(tl.pushDeliverable('markdown', '  ')).toBe(null);
+        expect(tl.items).toHaveLength(0);
+    });
+});
+
+describe('ask_user', () => {
+    it('keeps the question and its choices in ONE item', () => {
+        const ask = tl.pushAsk({ text: '❓ どちらにしますか', options: ['A', 'B'], multi: false });
+        expect(ask.text).toBe('どちらにしますか');       // the ❓ prefix is display, not content
+        expect(ask.options).toEqual(['A', 'B']);
+    });
+
+    it('a FREE-TEXT question still produces an item — it used to vanish entirely', () => {
+        // Options were what created the card; without them the question only
+        // existed inside a feed that had just been collapsed.
+        const ask = tl.pushAsk({ text: '対象のシート名を教えてください' });
+        expect(ask).not.toBe(null);
+        expect(ask.options).toEqual([]);
+        expect(kinds(tl)).toContain('ask');
+    });
+
+    it('ends the current reasoning group', () => {
+        tl.pushActivity('thought', 'thinking');
+        tl.pushAsk({ text: 'q?' });
+        tl.pushActivity('tool', 'after');
+        // The tool line must NOT be swallowed by the pre-question group.
+        expect(tl.items[0].lines).toHaveLength(0);
+        expect(kinds(tl)).toEqual(['group', 'ask', 'activity']);
+    });
+
+    it('drops junk options rather than rendering empty buttons', () => {
+        expect(tl.pushAsk({ text: 'q', options: ['ok', '', 3, null] }).options).toEqual(['ok']);
+    });
+
+    it('updates the open question instead of stacking a second one', () => {
+        tl.pushAsk({ text: 'first' });
+        tl.pushAsk({ text: 'second', options: ['x'] });
+        expect(tl.items.filter(i => i.kind === 'ask')).toHaveLength(1);
+        expect(tl.items[0].text).toBe('second');
+    });
+
+    it('an answered question stays as a record of the exchange', () => {
+        tl.pushAsk({ text: 'q' });
+        tl.resolveAsk('my answer');
+        const ask = tl.items.find(i => i.kind === 'ask');
+        expect(ask.answered).toBe(true);
+        expect(ask.answer).toBe('my answer');
+    });
+
+    it('resolving with no open question is a no-op', () => {
+        expect(tl.resolveAsk('x')).toBe(null);
+    });
+});
+
+describe('confirm', () => {
+    it('holds at most one pending approval', () => {
+        tl.pushConfirm('run npm test?');
+        tl.pushConfirm('run npm build?');
+        expect(tl.items.filter(i => i.kind === 'confirm')).toHaveLength(1);
+        expect(tl.items[0].text).toBe('run npm build?');
+    });
+
+    it('resolving REMOVES it — a decided approval is not history worth keeping', () => {
+        tl.pushConfirm('x');
+        tl.resolveConfirm();
+        expect(kinds(tl)).toEqual([]);
+    });
+
+    it('resolving nothing is a no-op', () => {
+        expect(tl.resolveConfirm()).toBe(null);
+    });
+});
+
+describe('run completion', () => {
+    it('KEEPS the reasoning steps, folded — they are how the run got there', () => {
+        // Deleting them meant the story could only be read while it was being
+        // written. Folded, a step costs one line.
+        tl.pushRequest('compare the sheets');
+        tl.pushActivity('thought', 'reading');
+        tl.pushActivity('tool', 'read_office');
+        tl.pushNarration('working…');
+        tl.pushDeliverable('markdown', '# Report');
+        tl.pushRun({ request: 'compare the sheets', answer: '# Report', files: [], stats: {} });
+
+        // The REQUEST leads its own exchange and survives completion: it is the
+        // thing every step below it answers to.
+        expect(kinds(tl)).toEqual(['request', 'group', 'run']);
+        const step = tl.items[1];
+        expect(step.collapsed).toBe(true);
+        expect(step.live).toBe(false);
+        expect(step.lines).toHaveLength(1);        // its tool line is still there
+        expect(tl.items[2].answer).toBe('# Report');
+    });
+
+    it('still drops the transient prose and the loose request bubble', () => {
+        tl.pushRequest('do it');
+        tl.pushNarration('thinking out loud');
+        tl.pushRun({ request: 'do it', answer: 'done' });
+        // The prose goes; the request stays, where and when it was made.
+        expect(kinds(tl)).toEqual(['request', 'run']);
+    });
+
+    it('an UNANSWERED question survives, and sits BELOW the exchange', () => {
+        // Reported: the question rendered ABOVE the request that led to it, so the
+        // panel read "answer this — and here, below, is what you asked for".
+        tl.pushActivity('thought', 'thinking');
+        tl.pushAsk({ text: 'which sheet?' });
+        tl.pushRun({ request: 'r', answer: 'a' });
+
+        expect(kinds(tl)).toEqual(['request', 'group', 'run', 'ask']);
+    });
+
+    it('KEEPS a delivered report the run answer does not restate', () => {
+        // The agent can present a report and then pause on a question; the run's
+        // `answer` is then only its closing thought. Dropping the deliverable made
+        // the report the user was reading vanish on completion.
+        tl.pushDeliverable('markdown', '# 詳細レポート\nここに本文');
+        tl.pushAsk({ text: 'どの案にしますか' });
+        tl.pushRun({ request: 'r', answer: '案を提示しました' });
+
+        expect(kinds(tl)).toEqual(['request', 'run', 'deliverable', 'ask']);
+        expect(tl.items[2].text).toContain('詳細レポート');
+    });
+
+    it('drops a deliverable the answer already contains (no double report)', () => {
+        const report = '# レポート本文';
+        tl.pushDeliverable('markdown', report);
+        tl.pushRun({ request: 'r', answer: `${report}\n\n以上です` });
+        expect(kinds(tl)).toEqual(['request', 'run']);
+    });
+
+    it('an ANSWERED question is folded away like the rest of the trace', () => {
+        tl.pushAsk({ text: 'q' });
+        tl.resolveAsk('a');
+        tl.pushRun({ request: 'r', answer: 'x' });
+        expect(kinds(tl)).toEqual(['request', 'run']);
+    });
+
+    it('several runs accumulate as a conversation', () => {
+        tl.pushRun({ request: 'one', answer: 'first' });
+        tl.pushActivity('thought', 'more work');
+        tl.pushRun({ request: 'two', answer: 'second' });
+        // Each exchange opens with its own request, in order.
+        expect(kinds(tl)).toEqual(['request', 'run', 'request', 'group', 'run']);
+        expect(tl.items.filter(i => i.kind === 'request').map(i => i.text)).toEqual(['one', 'two']);
+    });
+
+    it('prefers `answer`, falling back to `summary`', () => {
+        tl.pushRun({ request: 'r', summary: 'only summary' });
+        expect(tl.items[1].answer).toBe('only summary');
+    });
+
+    it('ignores a completion with no summary object', () => {
+        expect(tl.pushRun(null)).toBe(null);
+        expect(tl.items).toHaveLength(0);
+    });
+});
+
+describe('clearLive', () => {
+    it('drops the trace but keeps runs and an open question', () => {
+        tl.pushRun({ request: 'r', answer: 'a' });
+        tl.pushActivity('thought', 't');
+        tl.pushAsk({ text: 'q' });
+        tl.clearLive();
+        expect(kinds(tl)).toEqual(['request', 'run', 'ask']);
+    });
+});
+
+describe('trimming', () => {
+    it('bounds the live trace', () => {
+        const small = new TaskTimeline({ maxLive: 5 });
+        for (let i = 0; i < 20; i++) small.pushActivity('tool', `line ${i}`);
+        expect(small.items.length).toBeLessThanOrEqual(5);
+        // The NEWEST lines are the ones kept.
+        expect(small.items[small.items.length - 1].text).toBe('line 19');
+    });
+
+    it('never trims a completed run or an open question', () => {
+        const small = new TaskTimeline({ maxLive: 3 });
+        small.pushRun({ request: 'r', answer: 'a' });
+        small.pushAsk({ text: 'q' });
+        for (let i = 0; i < 20; i++) small.pushActivity('tool', `l${i}`);
+        expect(kinds(small)).toContain('run');
+        expect(kinds(small)).toContain('ask');
+    });
+
+    it('reopens grouping safely when the open group was trimmed away', () => {
+        const small = new TaskTimeline({ maxLive: 2 });
+        small.pushActivity('thought', 'head');
+        for (let i = 0; i < 10; i++) small.pushActivity('tool', `l${i}`);
+        expect(() => small.pushActivity('tool', 'after')).not.toThrow();
+    });
+});
+
+describe('snapshot / restore', () => {
+    it('survives a teardown as DATA, not DOM — grouping keeps working after', () => {
+        tl.pushActivity('thought', 'head');
+        tl.pushActivity('tool', 'a');
+        const snap = tl.snapshot();
+
+        const fresh = new TaskTimeline();
+        expect(fresh.restore(snap)).toBe(true);
+        // The old code stored a DOM node here; after a restore it was detached
+        // and every later line silently stopped nesting.
+        fresh.pushActivity('tool', 'b');
+        const group = fresh.items.find(i => i.kind === 'group');
+        expect(group.lines.map(l => l.text)).toEqual(['a', 'b']);
+    });
+
+    it('a snapshot is independent of the live timeline', () => {
+        tl.pushActivity('thought', 'x');
+        const snap = tl.snapshot();
+        tl.pushActivity('tool', 'later');
+        expect(snap.items[0].lines).toHaveLength(0);
+    });
+
+    it('rejects junk', () => {
+        expect(tl.restore(null)).toBe(false);
+        expect(tl.restore({})).toBe(false);
+    });
+
+    it('new ids do not collide with restored ones', () => {
+        tl.pushActivity('thought', 'a');
+        tl.pushActivity('thought', 'b');
+        const fresh = new TaskTimeline();
+        fresh.restore(tl.snapshot());
+        const added = fresh.pushActivity('thought', 'c');
+        expect(fresh.items.map(i => i.id)).toHaveLength(3);
+        expect(fresh.items.filter(i => i.id === added.id)).toHaveLength(1);
+    });
+});
+
+describe('buildTimeline (replay)', () => {
+    const complete = (request, answer, ts) => ({
+        event: 'complete', timestamp: ts,
+        data: { resultSummary: { request, answer, files: [], stats: {} } },
+    });
+
+    it('recovers every completed run from stored logs', () => {
+        const tl2 = buildTimeline([complete('one', 'a', 't1'), complete('two', 'b', 't2')]);
+        // request → run, twice: a replay reconstructs the same shape as the live
+        // path, where the request is an item of its own.
+        expect(kinds(tl2)).toEqual(['request', 'run', 'request', 'run']);
+        expect(tl2.items.filter(i => i.kind === 'request').map(i => i.text)).toEqual(['one', 'two']);
+    });
+
+    it('dedupes a replayed completion (the continue/replay double-fire)', () => {
+        const tl2 = buildTimeline([complete('one', 'a', 't1'), complete('one', 'a', 't1')]);
+        expect(kinds(tl2)).toEqual(['request', 'run']);
+    });
+
+    it('shows the request when nothing has completed yet, so the view is never blank', () => {
+        const tl2 = buildTimeline([], { prompt: 'compare the sheets' });
+        expect(kinds(tl2)).toEqual(['request']);
+        expect(tl2.items[0].text).toBe('compare the sheets');
+    });
+
+    it('does not add the prompt bubble once a run exists (the run brought its own)', () => {
+        const tl2 = buildTimeline([complete('one', 'a', 't1')], { prompt: 'one' });
+        expect(kinds(tl2)).toEqual(['request', 'run']);
+    });
+
+    it('restores a pending question from a waiting status', () => {
+        const tl2 = buildTimeline([
+            { event: 'status', data: { status: 'waiting', message: '❓ which sheet?', options: ['A'] } },
+        ]);
+        const ask = tl2.items.find(i => i.kind === 'ask');
+        expect(ask.text).toBe('which sheet?');
+        expect(ask.options).toEqual(['A']);
+    });
+
+    it('tolerates malformed log entries', () => {
+        expect(() => buildTimeline([null, 'x', {}, { event: 'complete' }])).not.toThrow();
+        expect(buildTimeline(null).items).toEqual([]);
+    });
+});
+
+describe('remaining edges', () => {
+    it('pushRequest ignores a blank prompt', () => {
+        expect(tl.pushRequest('   ')).toBe(null);
+        expect(tl.pushRequest(null)).toBe(null);
+        expect(tl.items).toHaveLength(0);
+    });
+
+    it('pushError records a line, and ignores a blank one', () => {
+        expect(tl.pushError('')).toBe(null);
+        tl.pushError('boom');
+        expect(tl.items[0]).toMatchObject({ kind: 'error', text: 'boom' });
+    });
+
+    it('pushConfirm ignores a blank body', () => {
+        expect(tl.pushConfirm('')).toBe(null);
+    });
+
+    it('pushAsk ignores a blank question', () => {
+        expect(tl.pushAsk({ text: '  ' })).toBe(null);
+        expect(tl.pushAsk({})).toBe(null);
+    });
+
+    it('pushNarration ignores whitespace-only prose', () => {
+        expect(tl.pushNarration('   ')).toBe(null);
+    });
+
+    it('closeNarration makes the next prose a new item', () => {
+        tl.pushNarration('first');
+        tl.closeNarration();
+        tl.pushNarration('second');
+        expect(tl.items.filter(i => i.kind === 'narration')).toHaveLength(2);
+    });
+
+    it('a question line routed through pushActivity closes the group and adds nothing', () => {
+        tl.pushActivity('thought', 'head');
+        expect(tl.pushActivity('question', 'q?')).toBe(null);
+        tl.pushActivity('tool', 'after');
+        expect(tl.items[0].lines).toHaveLength(0);
+    });
+
+    it('liveItems exposes only the in-flight trace', () => {
+        tl.pushRun({ request: 'r', answer: 'a' });
+        tl.pushActivity('thought', 't');
+        expect(tl.liveItems.map(i => i.kind)).toEqual(['group']);
+    });
+
+    it('reset() empties everything', () => {
+        tl.pushActivity('thought', 'x');
+        tl.reset();
+        expect(tl.items).toEqual([]);
+        expect(tl.pushActivity('tool', 'y').kind).toBe('activity');   // no stale group
+    });
+
+    it('restore rebuilds the open narration too', () => {
+        tl.pushNarration('prose');
+        const fresh = new TaskTimeline();
+        fresh.restore(tl.snapshot());
+        fresh.pushNarration('prose extended');
+        expect(fresh.items.filter(i => i.kind === 'narration')).toHaveLength(1);
+    });
+
+    it('buildTimeline keeps the prompt bubble ahead of a restored question', () => {
+        const tl2 = buildTimeline(
+            [{ event: 'status', data: { status: 'waiting', message: 'q?' } }],
+            { prompt: 'do the thing' },
+        );
+        expect(tl2.items.map(i => i.kind)).toEqual(['request', 'ask']);
+    });
+});
+
+describe('envelopeText', () => {
+    it('reads the payload key each present_result kind actually uses', () => {
+        expect(envelopeText({ payload: { md: '# md' } })).toBe('# md');
+        expect(envelopeText({ payload: { text: 'plain' } })).toBe('plain');
+        // Some callers hand through the schema's own arg name.
+        expect(envelopeText({ payload: { markdown: '# alt' } })).toBe('# alt');
+    });
+
+    it('renders a file list as lines', () => {
+        expect(envelopeText({ payload: { files: [{ path: 'a.js' }, 'b.js'] } })).toBe('- a.js\n- b.js');
+    });
+
+    it('falls back to the envelope summary', () => {
+        expect(envelopeText({ summary: 'short answer' })).toBe('short answer');
+    });
+
+    it('returns empty for junk', () => {
+        expect(envelopeText(null)).toBe('');
+        expect(envelopeText({})).toBe('');
+        expect(envelopeText({ payload: { md: '   ' } })).toBe('');
+    });
+});
+
+describe('replaying a delivered report', () => {
+    it('restores it from the stored result event, so a reload matches the live view', () => {
+        const tl2 = buildTimeline([
+            { event: 'result', data: { envelope: { kind: 'markdown', payload: { md: '# 保存されたレポート' } } } },
+            { event: 'complete', timestamp: 't1', data: { resultSummary: { request: 'r', answer: '完了しました' } } },
+        ]);
+        expect(kinds(tl2)).toEqual(['request', 'run', 'deliverable']);
+        expect(tl2.items[2].text).toContain('保存されたレポート');
+    });
+
+    it('ignores a result event with no envelope', () => {
+        expect(() => buildTimeline([{ event: 'result', data: {} }])).not.toThrow();
+    });
+});
+
+describe('splitForPanes — the deliverable becomes a document, in place', () => {
+    it('features a present_result and takes it out of the stream', () => {
+        tl.pushActivity('thought', 'working');
+        tl.pushDeliverable('markdown', '# レポート本文');
+        const { stream, doc } = splitForPanes(tl.items);
+
+        expect(doc.kind).toBe('document');
+        expect(doc.text).toBe('# レポート本文');
+        // The document sits IN PLACE, where the agent produced it.
+        expect(stream.map(i => i.kind)).toEqual(['group', 'document']);
+    });
+
+    it('falls back to the newest run answer, keeping its request in the stream', () => {
+        tl.pushRun({ request: 'シートを比較して', answer: '# 比較結果', files: [{ path: 'r.md' }], stats: { steps: 3 } });
+        const { stream, doc } = splitForPanes(tl.items);
+
+        expect(doc.text).toBe('# 比較結果');
+        expect(doc.files).toHaveLength(1);
+        expect(doc.stats.steps).toBe(3);
+        // The conversation still reads in order — the request is not swallowed.
+        expect(stream.map(i => i.kind)).toEqual(['request', 'document']);
+        expect(stream[0].text).toBe('シートを比較して');
+    });
+
+    it('prefers the present_result over the run answer', () => {
+        tl.pushDeliverable('markdown', 'THE REPORT');
+        tl.pushRun({ request: 'r', answer: '作成しました' });
+        expect(splitForPanes(tl.items).doc.text).toBe('THE REPORT');
+    });
+
+    it('features the NEWEST run and leaves older ones in the stream', () => {
+        tl.pushRun({ request: 'one', answer: 'first answer' });
+        tl.pushRun({ request: 'two', answer: 'second answer' });
+        const { stream, doc } = splitForPanes(tl.items);
+        expect(doc.text).toBe('second answer');
+        // A divider closes the first exchange before the second one's request.
+        // The document replaces the run it came from, in place — nothing is
+        // derived, so no request appears twice.
+        expect(stream.map(i => i.kind)).toEqual(['request', 'run', 'turn', 'request', 'document']);
+    });
+
+    it('has no document when nothing has been delivered', () => {
+        tl.pushRequest('do it');
+        tl.pushActivity('thought', 'thinking');
+        expect(splitForPanes(tl.items).doc).toBe(null);
+    });
+
+    it('ignores a run whose answer is empty', () => {
+        tl.pushRun({ request: 'r', answer: '   ' });
+        expect(splitForPanes(tl.items).doc).toBe(null);
+    });
+
+    it('derived ids are stable, so the renderer reuses the document node', () => {
+        tl.pushDeliverable('markdown', 'x');
+        const a = splitForPanes(tl.items).doc;
+        const b = splitForPanes(tl.items).doc;
+        expect(a.id).toBe(b.id);
+        expect(a.rev).toBe(b.rev);
+    });
+
+    it('the document rev tracks its source, so an update re-renders', () => {
+        tl.pushDeliverable('markdown', 'draft');
+        const before = splitForPanes(tl.items).doc.rev;
+        tl.pushDeliverable('markdown', 'final');
+        const after = splitForPanes(tl.items).doc;
+        expect(after.rev).toBeGreaterThan(before);
+        expect(after.text).toBe('final');
+    });
+
+    it('tolerates junk input', () => {
+        expect(splitForPanes(null)).toEqual({ stream: [], doc: null });
+    });
+});
+
+describe('step folding lives in the model', () => {
+    it('opening a new step folds every earlier one — exactly one stays open', () => {
+        tl.pushActivity('thought', 'step 1');
+        tl.pushActivity('thought', 'step 2');
+        tl.pushActivity('thought', 'step 3');
+        const groups = tl.items.filter(i => i.kind === 'group');
+        expect(groups.map(g => !!g.collapsed)).toEqual([true, true, false]);
+    });
+
+    it('bumps rev on the groups it folds, so the renderer repaints them', () => {
+        const first = tl.pushActivity('thought', 'step 1');
+        const before = first.rev;
+        tl.pushActivity('thought', 'step 2');
+        expect(first.rev).toBeGreaterThan(before);
+        // Folding an already-folded group must not churn it again.
+        const after = first.rev;
+        tl.pushActivity('thought', 'step 3');
+        expect(first.rev).toBe(after);
+    });
+
+    it('a tool line does not reopen an earlier step', () => {
+        const first = tl.pushActivity('thought', 'step 1');
+        tl.pushActivity('thought', 'step 2');
+        tl.pushActivity('tool', 'running something');
+        expect(first.collapsed).toBe(true);
+    });
+
+    it('the fold survives a snapshot/restore round trip', () => {
+        tl.pushActivity('thought', 'a');
+        tl.pushActivity('thought', 'b');
+        const fresh = new TaskTimeline();
+        fresh.restore(tl.snapshot());
+        expect(fresh.items.filter(i => i.kind === 'group').map(g => !!g.collapsed)).toEqual([true, false]);
+    });
+});
+
+describe('step lines carry the file their tool touched', () => {
+    it('keeps the tool, path and write flag as fields', () => {
+        tl.pushActivity('thought', 'editing');
+        tl.pushActivity('tool', '✓ write_file: a.js', { tool: 'write_file', path: 'src/a.js', write: true });
+        const line = tl.items[0].lines[0];
+        expect(line).toMatchObject({ tool: 'write_file', path: 'src/a.js', write: true });
+    });
+
+    it('omits the fields when the tool acted on no file', () => {
+        tl.pushActivity('thought', 'building');
+        tl.pushActivity('tool', '✓ run_command: npm test', { tool: 'run_command', path: '', write: false });
+        const line = tl.items[0].lines[0];
+        expect(line.tool).toBe('run_command');
+        expect(line.path).toBeUndefined();
+        expect(line.write).toBeUndefined();
+    });
+
+    it('ignores meta with no tool name', () => {
+        tl.pushActivity('thought', 'x');
+        tl.pushActivity('tool', 'plain line', { path: 'a.js' });
+        expect(tl.items[0].lines[0].path).toBeUndefined();
+    });
+
+    it('carries the fields on a standalone line too (before any reasoning)', () => {
+        tl.pushActivity('tool', '✓ read_file: a.js', { tool: 'read_file', path: 'a.js' });
+        expect(tl.items[0]).toMatchObject({ kind: 'activity', tool: 'read_file', path: 'a.js' });
+    });
+});
+
+describe('chapters', () => {
+    it('numbers the reasoning steps of an in-flight run', () => {
+        tl.pushRequest('do the thing');
+        tl.pushActivity('thought', 'first');
+        tl.pushActivity('thought', 'second');
+        tl.pushAsk({ text: 'which one?' });
+
+        expect(chapters(tl.items).map(c => c.label))
+            .toEqual(['Request', 'Step 01', 'Step 02', 'Question']);
+    });
+
+    it('after completion the steps stay navigable alongside the outcome', () => {
+        tl.pushRequest('do the thing');
+        tl.pushActivity('thought', 'first');
+        tl.pushAsk({ text: 'which one?' });
+        tl.pushRun({ request: 'do the thing', answer: 'done' });
+
+        expect(chapters(tl.items).map(c => c.label))
+            .toEqual(['Request', 'Step 01', 'Deliverable', 'Question']);
+    });
+
+    it('labels an answered question differently', () => {
+        tl.pushAsk({ text: 'q' });
+        tl.resolveAsk('a');
+        expect(chapters(tl.items)[0].label).toBe('Answered');
+    });
+
+    it('skips narration and plain activity lines — they are not chapters', () => {
+        tl.pushNarration('thinking out loud');
+        tl.pushActivity('tool', 'a tool line');
+        expect(chapters(tl.items)).toEqual([]);
+    });
+
+    it('points at real item ids so a jump can find the node', () => {
+        tl.pushActivity('thought', 'step');
+        const [c] = chapters(tl.items);
+        expect(tl.items.some(i => i.id === c.id)).toBe(true);
+    });
+
+    it('tolerates junk', () => {
+        expect(chapters(null)).toEqual([]);
+    });
+});
+
+describe('replayLineType', () => {
+    it('recognises the mechanical lines the live formatter produces', () => {
+        expect(replayLineType('⚙ Running: read_file: a.js…')).toBe('tool');
+        expect(replayLineType('✓ read_file: a.js')).toBe('tool');
+        expect(replayLineType('🤖 [sub:reviewer#1] ✓ run_command')).toBe('tool');
+    });
+
+    it('recognises failures and pauses', () => {
+        expect(replayLineType('⚠ Error — recovering')).toBe('error');
+        expect(replayLineType('↻ retrying')).toBe('error');
+        expect(replayLineType('Error: something broke')).toBe('error');
+        expect(replayLineType('⏸ Awaiting approval…')).toBe('confirm');
+    });
+
+    it('treats anything else as the model reasoning', () => {
+        expect(replayLineType('I will read the workbook first.')).toBe('thought');
+        expect(replayLineType('')).toBe('thought');
+    });
+});
+
+describe('replaying a run rebuilds its STEPS', () => {
+    // The steps used to live only in the live socket's memory, so any rebuild
+    // from logs — including the one completion triggers — erased the story.
+    const status = (message) => ({ event: 'status', data: { status: 'running', message } });
+
+    it('reconstructs reasoning steps and their tool lines', () => {
+        const tl2 = buildTimeline([
+            status('I will look at the config'),
+            status('⚙ Running: read_file: a.js…'),
+            status('✓ read_file: a.js'),
+            status('Now I will check the tests'),
+            status('✓ run_command: npm test'),
+        ]);
+        const groups = tl2.items.filter(i => i.kind === 'group');
+        expect(groups).toHaveLength(2);
+        expect(groups[0].lines).toHaveLength(2);
+        expect(groups[1].lines).toHaveLength(1);
+    });
+
+    it('keeps the steps after the completion event', () => {
+        const tl2 = buildTimeline([
+            status('thinking'),
+            status('✓ read_file: a.js'),
+            { event: 'complete', timestamp: 't1', data: { resultSummary: { request: 'r', answer: 'done' } } },
+        ]);
+        expect(tl2.items.map(i => i.kind)).toEqual(['request', 'group', 'run']);
+        expect(tl2.items[1].collapsed).toBe(true);
+    });
+
+    it('ignores status events with no message', () => {
+        expect(() => buildTimeline([{ event: 'status', data: { status: 'running' } }])).not.toThrow();
+        expect(buildTimeline([{ event: 'status', data: { status: 'running' } }]).items).toEqual([]);
+    });
+});
+
+describe('replay does not explode the step count', () => {
+    const status = (message) => ({ event: 'status', data: { status: 'running', message } });
+
+    it('treats the view\'s own placeholders as tool lines, not new steps', () => {
+        // A 2-step run replayed as a dozen numbered cards because every
+        // "Thinking… (step N)" looked like fresh reasoning.
+        for (const m of ['Thinking... (step 28)', 'Calling LLM…', 'Receiving…',
+            'Searching: --bg-card-solid in src/styles…', 'Presenting result (markdown)',
+            'Asking the user: proceed?', 'Running: read_file…', 'Awaiting approval…']) {
+            expect(replayLineType(m), m).toBe('tool');
+        }
+    });
+
+    it('still treats a real sentence as reasoning', () => {
+        expect(replayLineType('Running the tests is the fastest way to confirm this.')).toBe('thought');
+        expect(replayLineType('分析が完了しました。')).toBe('thought');
+    });
+
+    it('a run of placeholders produces ONE step, not one each', () => {
+        const tl2 = buildTimeline([
+            status('I will review the styles'),
+            status('Thinking... (step 1)'),
+            status('Searching: mtl-panes…'),
+            status('Presenting result (markdown)'),
+        ]);
+        expect(tl2.items.filter(i => i.kind === 'group')).toHaveLength(1);
+    });
+
+    it('replays TOOL telemetry with the file it touched', () => {
+        const tl2 = buildTimeline([
+            status('I will read the config'),
+            { event: 'log', data: { method: 'TOOL', name: 'read_file', request: { path: 'src/a.js' } } },
+        ]);
+        const line = tl2.items.find(i => i.kind === 'group').lines[0];
+        expect(line).toMatchObject({ tool: 'read_file', path: 'src/a.js' });
+    });
+
+    it('extracts the agent\'s own step number when a line carries one', () => {
+        expect(replayStepNo('Thinking... (step 28)')).toBe(28);
+        expect(replayStepNo('no number here')).toBe(null);
+    });
+});
+
+describe('withTurnDividers', () => {
+    const req = (id, text) => ({ id, rev: 0, kind: 'request', text });
+
+    it('does NOT divide before the very first request', () => {
+        expect(withTurnDividers([req('i1', 'first')]).map(i => i.kind)).toEqual(['request']);
+    });
+
+    it('closes the previous exchange before each later request', () => {
+        const out = withTurnDividers([
+            { id: 'g1', kind: 'group' }, { id: 'r1', kind: 'run' },
+            req('i5', 'second'), { id: 'g2', kind: 'group' },
+        ]);
+        expect(out.map(i => i.kind)).toEqual(['group', 'run', 'turn', 'request', 'group']);
+    });
+
+    it('numbers the exchanges', () => {
+        const out = withTurnDividers([req('a', '1'), { id: 'r', kind: 'run' }, req('b', '2')]);
+        expect(out.find(i => i.kind === 'turn').n).toBe(2);
+    });
+
+    it('divides before a FIRST request that follows earlier content', () => {
+        // A continued task can show the previous run before its next request.
+        const out = withTurnDividers([{ id: 'r0', kind: 'run' }, req('i9', 'next')]);
+        expect(out.map(i => i.kind)).toEqual(['run', 'turn', 'request']);
+    });
+
+    it('gives each divider a stable id derived from its request', () => {
+        const out = withTurnDividers([req('a', '1'), { id: 'r', kind: 'run' }, req('b', '2')]);
+        expect(out.find(i => i.kind === 'turn').id).toBe('turn:b');
+    });
+
+    it('leaves a stream with no request untouched', () => {
+        const items = [{ id: 'g', kind: 'group' }];
+        expect(withTurnDividers(items).map(i => i.kind)).toEqual(['group']);
+    });
+
+    it('tolerates junk', () => {
+        expect(withTurnDividers(null)).toEqual([]);
+    });
+});
+
+describe('replayed items keep the REAL time, not the redraw time', () => {
+    // `at` is EPOCH MILLISECONDS. It used to be a preformatted "HH:MM:SS", which
+    // meant the model held a rendering: it could not be compared or sorted, and
+    // an item that inherited another's stamp inherited a plausible-looking lie.
+    it('stamps each item from its log entry', () => {
+        const tl2 = buildTimeline([
+            { event: 'status', timestamp: '2026-07-29T12:19:18Z', data: { status: 'running', message: 'I will look' } },
+        ]);
+        expect(tl2.items[0].at).toBe(Date.parse('2026-07-29T12:19:18Z'));
+        expect(clockText(tl2.items[0].at)).toMatch(/^\d{2}:\d{2}:18$/);   // seconds are timezone-proof
+    });
+
+    it('a run carries the completion time, not the moment of the rebuild', () => {
+        const tl2 = buildTimeline([
+            { event: 'complete', timestamp: '2026-07-29T09:05:07Z', data: { resultSummary: { request: 'r', answer: 'a' } } },
+        ]);
+        expect(tl2.items.find(i => i.kind === 'run').at).toBe(Date.parse('2026-07-29T09:05:07Z'));
+    });
+
+    it('the request carries the time it was SENT, not the run completion', () => {
+        // Reported: "the request's clock changes, and it moves below the steps".
+        // Both came from deriving the request at the run's position.
+        const tl2 = buildTimeline([
+            { event: 'status', timestamp: '2026-07-29T09:00:00Z', data: { status: 'running', message: 'I will look' } },
+            { event: 'complete', timestamp: '2026-07-29T09:05:07Z', data: { resultSummary: { request: 'r', answer: 'a' } } },
+        ]);
+        const req = tl2.items.find(i => i.kind === 'request');
+        expect(req.at).toBe(Date.parse('2026-07-29T09:00:00Z'));
+        // …and it leads the exchange rather than trailing it.
+        expect(tl2.items.indexOf(req)).toBe(0);
+    });
+
+    it('a live request keeps its own stamp when the run completes', () => {
+        tl.setClock('2026-07-29T09:00:00Z');
+        const req = tl.pushRequest('do it');
+        tl.setClock('2026-07-29T09:04:00Z');
+        tl.pushActivity('thought', 'working');
+        tl.setClock('2026-07-29T09:09:00Z');
+        tl.pushRun({ request: 'do it', answer: 'done' });
+
+        expect(tl.items[0]).toBe(req);                       // the SAME item
+        expect(req.at).toBe(Date.parse('2026-07-29T09:00:00Z'));
+    });
+
+    it('different log times produce different stamps', () => {
+        const tl2 = buildTimeline([
+            { event: 'status', timestamp: '2026-07-29T01:00:11Z', data: { status: 'running', message: 'first' } },
+            { event: 'status', timestamp: '2026-07-29T01:30:22Z', data: { status: 'running', message: 'second' } },
+        ]);
+        const [a, b] = tl2.items.map(i => i.at);
+        expect(a).not.toBe(b);
+    });
+
+    it('setClock(null) returns to wall-clock for the live path', () => {
+        tl.setClock('2026-07-29T00:00:00Z');
+        tl.setClock(null);
+        const item = tl.pushRequest('live now');
+        expect(Math.abs(item.at - Date.now())).toBeLessThan(5000);
+    });
+
+    it('a log entry with no timestamp falls back rather than rendering blank', () => {
+        const tl2 = buildTimeline([{ event: 'status', data: { status: 'running', message: 'x' } }]);
+        expect(clockText(tl2.items[0].at)).toMatch(/^\d{2}:\d{2}:\d{2}$/);
+    });
+
+    it('clockText says nothing for a stamp it cannot read, rather than "NaN:NaN"', () => {
+        expect(clockText(undefined)).toBe('');
+        expect(clockText('21:22:14')).toBe('');
+    });
+});
+
+describe('steps are never trimmed', () => {
+    it('keeps every step, however many', () => {
+        const small = new TaskTimeline({ maxLive: 5 });
+        for (let i = 0; i < 200; i++) small.pushActivity('thought', `step ${i}`);
+        expect(small.items.filter(i => i.kind === 'group')).toHaveLength(200);
+    });
+
+    it('still bounds the transient lines', () => {
+        const small = new TaskTimeline({ maxLive: 5 });
+        for (let i = 0; i < 50; i++) small.pushActivity('tool', `line ${i}`);
+        expect(small.items.filter(i => i.kind === 'activity').length).toBeLessThanOrEqual(5);
+    });
+});
+
+describe('a single-request task gets NO divider', () => {
+    it('does not divide above the only request', () => {
+        // A replayed run renders its steps before its derived request, which used
+        // to look like "there is content above me, so I must be a later turn".
+        const out = withTurnDividers([
+            { id: 'g1', kind: 'group' },
+            { id: 'r1:req', kind: 'request', text: 'the only ask' },
+            { id: 'r1:doc', kind: 'document', text: 'the answer' },
+        ]);
+        expect(out.map(i => i.kind)).toEqual(['group', 'request', 'document']);
+    });
+
+    it('divides once a run has actually completed', () => {
+        const out = withTurnDividers([
+            { id: 'r1', kind: 'run' },
+            { id: 'i9', kind: 'request', text: 'second ask' },
+        ]);
+        expect(out.map(i => i.kind)).toEqual(['run', 'turn', 'request']);
+    });
+});
+
+describe('withExchangeFolds — folding is per exchange, not per story', () => {
+    // request → working → outcome, twice.
+    const stream = () => [
+        { id: 'r1', rev: 0, kind: 'request', text: 'first', at: 1000 },
+        { id: 'g1', rev: 1, kind: 'group', head: { text: 'a' }, lines: [], at: 2000 },
+        { id: 'g2', rev: 1, kind: 'group', head: { text: 'b' }, lines: [], at: 5000 },
+        { id: 'd1', rev: 0, kind: 'run', answer: 'done', at: 9000 },
+        { id: 'r2', rev: 0, kind: 'request', text: 'second', at: 10000 },
+        { id: 'g3', rev: 0, kind: 'group', head: { text: 'c' }, lines: [], at: 11000 },
+    ];
+
+    it('folds ONLY the exchange it was asked to fold', () => {
+        // Reported: closing one request closed every request, because the state
+        // was a single class on the list.
+        const out = withExchangeFolds(stream(), new Set([1]));
+        expect(out.map(i => i.kind)).toEqual(['request', 'fold', 'run', 'request', 'group']);
+    });
+
+    it('the fold summary says how much working it stands for, and how long', () => {
+        const fold = withExchangeFolds(stream(), new Set([1])).find(i => i.kind === 'fold');
+        expect(fold.steps).toBe(2);
+        expect(fold.at).toBe(2000);
+        expect(fold.to).toBe(5000);
+        expect(fold.ex).toBe(1);
+    });
+
+    it('leaves the outcome, the question and the request visible — only working folds', () => {
+        const out = withExchangeFolds([
+            { id: 'r1', rev: 0, kind: 'request', at: 1 },
+            { id: 'g1', rev: 0, kind: 'group', at: 2 },
+            { id: 'a1', rev: 0, kind: 'ask', text: 'q', at: 3 },
+            { id: 'g2', rev: 0, kind: 'group', at: 4 },
+            { id: 'x1', rev: 0, kind: 'deliverable', text: 'r', at: 5 },
+        ], new Set([1]));
+        expect(out.map(i => i.kind)).toEqual(['request', 'fold', 'ask', 'fold', 'deliverable']);
+    });
+
+    it('marks the request so its toggle can show the state', () => {
+        const [req] = withExchangeFolds(stream(), new Set([1]));
+        expect(req._ex).toBe(1);
+        expect(req._folded).toBe(true);
+        expect(withExchangeFolds(stream(), new Set())[0]._folded).toBe(false);
+    });
+
+    it('changes nothing when nothing is folded', () => {
+        expect(withExchangeFolds(stream(), new Set()).map(i => i.kind))
+            .toEqual(['request', 'group', 'group', 'run', 'request', 'group']);
+    });
+
+    it('gives the summary a rev that follows its members, so a live count refreshes', () => {
+        const a = withExchangeFolds(stream(), new Set([1])).find(i => i.kind === 'fold');
+        const busier = stream();
+        busier[1].rev = 7;
+        const b = withExchangeFolds(busier, new Set([1])).find(i => i.kind === 'fold');
+        expect(b.rev).not.toBe(a.rev);
+        expect(b.id).toBe(a.id);           // …but the same node is reused
+    });
+
+    it('folds working that arrived before any request (ex 0)', () => {
+        const out = withExchangeFolds([{ id: 'g', rev: 0, kind: 'group', at: 1 }], new Set([0]));
+        expect(out.map(i => i.kind)).toEqual(['fold']);
+    });
+
+    it('tolerates junk', () => {
+        expect(withExchangeFolds(null)).toEqual([]);
+        expect(withExchangeFolds(stream(), null).map(i => i.kind)).toHaveLength(6);
+    });
+});
+
+describe('exchangeCount', () => {
+    it('counts the requests — an exchange opens with one', () => {
+        expect(exchangeCount([{ kind: 'request' }, { kind: 'group' }, { kind: 'request' }])).toBe(2);
+        expect(exchangeCount([])).toBe(0);
+        expect(exchangeCount(null)).toBe(0);
+    });
+});
+
+describe('a folded exchange folds its RESULT too', () => {
+    const stream = () => [
+        { id: 'r1', rev: 0, kind: 'request', text: 'first', at: 1000 },
+        { id: 'g1', rev: 0, kind: 'group', at: 2000 },
+        { id: 'o1', rev: 0, kind: 'run', answer: '# a long report', at: 9000 },
+        { id: 'r2', rev: 0, kind: 'request', text: 'second', at: 10000 },
+        { id: 'o2', rev: 0, kind: 'document', text: '# another', at: 11000 },
+    ];
+
+    it('marks the outcome bodyless rather than dropping it', () => {
+        const out = withExchangeFolds(stream(), new Set([1]));
+        expect(out.map(i => i.kind)).toEqual(['request', 'fold', 'run', 'request', 'document']);
+        const run = out.find(i => i.kind === 'run');
+        // `_bodyless` is the whole signal: the renderer draws the header alone and
+        // treats it as folded. The fold LOOKUP travels separately (collapsedIds) so
+        // items stay reference-stable.
+        expect(run._bodyless).toBe(true);
+        expect(run.answer).toBe('# a long report');   // the content is still there
+    });
+
+    it('carries the exchange, so the folded result can open it', () => {
+        expect(withExchangeFolds(stream(), new Set([1])).find(i => i.kind === 'run')._ex).toBe(1);
+        expect(withExchangeFolds(stream(), new Set([2])).find(i => i.kind === 'document')._ex).toBe(2);
+    });
+
+    it('leaves an OPEN result rendered, but still stamped with its exchange', () => {
+        // The header of an open result closes it, and that fold has to go through
+        // the exchange state — so it needs to know which exchange it is in.
+        const open = withExchangeFolds(stream(), new Set([1])).find(i => i.id === 'o2');
+        expect(open._bodyless).toBeUndefined();
+        expect(open._ex).toBe(2);
+        expect(open.rev).toBe(0);          // unchanged, so the node is not redrawn
+    });
+
+    it('folds the WORKING and the RESULT independently', () => {
+        // Reading an answer while skimming its steps is the normal case.
+        const stepsOnly = withExchangeFolds(stream(), { working: new Set([1]), outcome: new Set() });
+        expect(stepsOnly.find(i => i.kind === 'fold')).toBeTruthy();
+        expect(stepsOnly.find(i => i.id === 'o1')._bodyless).toBeUndefined();
+
+        const resultOnly = withExchangeFolds(stream(), { working: new Set(), outcome: new Set([1]) });
+        expect(resultOnly.find(i => i.kind === 'fold')).toBeUndefined();
+        expect(resultOnly.find(i => i.id === 'o1')._bodyless).toBe(true);
+    });
+
+    it('a bare Set still folds both — the shorthand for "collapse everything"', () => {
+        const out = withExchangeFolds(stream(), new Set([1]));
+        expect(out.find(i => i.kind === 'fold')).toBeTruthy();
+        expect(out.find(i => i.id === 'o1')._bodyless).toBe(true);
+    });
+
+    it('bumps rev on the copy so the renderer redraws when folding changes', () => {
+        const open = withExchangeFolds(stream(), new Set()).find(i => i.id === 'o1');
+        const shut = withExchangeFolds(stream(), new Set([1])).find(i => i.id === 'o1');
+        expect(shut.rev).not.toBe(open.rev);
+    });
+});
+
+
+describe('collapsedIds — the fold lookup', () => {
+    it('collects the ids the model has folded', () => {
+        const tl = new TaskTimeline();
+        tl.pushActivity('thought', 'one');
+        tl.pushActivity('thought', 'two');     // folds 'one'
+        tl.pushActivity('thought', 'three');   // folds 'two'
+        const ids = collapsedIds(tl.items);
+        const groups = tl.items.filter(i => i.kind === 'group');
+        expect(ids.has(groups[0].id)).toBe(true);
+        expect(ids.has(groups[1].id)).toBe(true);
+        // Exactly the newest stays open.
+        expect(ids.has(groups[2].id)).toBe(false);
+    });
+
+    it('folds every step once the run completes', () => {
+        const tl = new TaskTimeline();
+        tl.pushRequest('do it');
+        tl.pushActivity('thought', 'one');
+        tl.pushRun({ request: 'do it', answer: 'done' });
+        const groups = tl.items.filter(i => i.kind === 'group');
+        expect(collapsedIds(tl.items).has(groups[0].id)).toBe(true);
+    });
+
+    it('reflects setCollapsed both ways', () => {
+        const tl = new TaskTimeline();
+        const g = tl.pushActivity('thought', 'only');
+        expect(collapsedIds(tl.items).has(g.id)).toBe(false);
+        expect(tl.setCollapsed(g.id, true)).toBe(true);
+        expect(collapsedIds(tl.items).has(g.id)).toBe(true);
+        expect(tl.setCollapsed(g.id, false)).toBe(true);
+        expect(collapsedIds(tl.items).has(g.id)).toBe(false);
+    });
+
+    it('setCollapsed reports NO change when the flag already matches', () => {
+        // The caller re-renders on true; a pointless render per click is waste.
+        const tl = new TaskTimeline();
+        const g = tl.pushActivity('thought', 'only');
+        expect(tl.setCollapsed(g.id, false)).toBe(false);
+        expect(tl.setCollapsed('nope', true)).toBe(false);
+    });
+
+    it('is empty for nothing', () => {
+        expect(collapsedIds([]).size).toBe(0);
+        expect(collapsedIds(null).size).toBe(0);
+    });
+});

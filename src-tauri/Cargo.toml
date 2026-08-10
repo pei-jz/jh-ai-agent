@@ -1,0 +1,91 @@
+[package]
+name = "jh-ai-agent"
+version = "0.1.0"
+description = "J.H AI Agent — standalone Tauri-based AI agent server."
+authors = ["J.H AI Agent Contributors"]
+edition = "2021"
+license = "MIT"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "jh_ai_agent_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-ico", "image-png"] }
+tauri-plugin-opener = "2"
+tauri-plugin-shell = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-notification = "2"
+# Signed auto-update. The plugin verifies a minisign signature over the downloaded
+# bundle before it installs anything, so the update channel cannot be used to push
+# code we did not sign. The PUBLIC key lives in tauri.conf.json; the private key is
+# supplied to the release build through TAURI_SIGNING_PRIVATE_KEY and never enters
+# this repository — see docs/RELEASING.md.
+tauri-plugin-updater = "2"
+# Relaunch after an update is installed.
+tauri-plugin-process = "2"
+# Used directly by os_notify (shell.rs) so we can force our own AppUserModelID —
+# the plugin skips it when running from target\debug|release, which makes Windows
+# attribute the toast to "Windows PowerShell" instead of the app name.
+notify-rust = "4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# HTTP server
+axum = { version = "0.7", features = ["ws"] }
+axum-extra = { version = "0.9", features = ["typed-header"] }
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.5", features = ["cors"] }
+tower = "0.4"
+
+# HTTP client for LLM communication
+reqwest = { version = "0.12", features = ["stream", "json", "rustls-tls", "socks"] }
+futures-util = "0.3"
+
+# Utilities
+chrono = "0.4"
+uuid = { version = "1", features = ["v4"] }
+rand = "0.8"
+rfd = "0.14"
+# `dates` gives as_datetime(): without it a date cell reads back as its raw
+# Excel serial number (46231), which the model would treat as a quantity.
+calamine = { version = "0.25.0", features = ["dates"] }
+# Office documents for the agent: docx/pptx are OOXML zip packages, so reading
+# their text needs a zip reader + an XML pull-parser. xlsx WRITING uses
+# rust_xlsxwriter (pure Rust — no C toolchain added to the build).
+zip = { version = "2", default-features = false, features = ["deflate"] }
+quick-xml = "0.36"
+rust_xlsxwriter = "0.79"
+# EDITING an existing workbook is a different job from writing a new one:
+# rust_xlsxwriter cannot read, so "read it and write it back" would silently drop
+# every formula, format and untouched sheet. umya-spreadsheet round-trips the file.
+umya-spreadsheet = "3"
+# Embedded Office images are handed to the vision path as base64.
+base64 = "0.22"
+# Licence-key signature verification (commands/license.rs). Verification only —
+# the signing key belongs to whoever issues licences and is not in this repo.
+# `rand_core` is a dev-only need for minting test keys.
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "fast"] }
+
+# Directory scanning (lightweight, no RAG)
+ignore = "0.4"
+
+# Content search & file-pattern globbing (for grep_search / glob tools)
+regex = "1"
+globset = "0.4"
+
+# Encoding detection and conversion for file I/O
+encoding_rs = "0.8"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+wiremock = "0.6.5"

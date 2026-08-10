@@ -1,0 +1,45 @@
+These .wasm files are third-party software redistributed with J.H AI Agent.
+This file travels with them because a compiled .wasm carries no notice of its own,
+and MIT requires the notice to be included in copies. Full detail, including the
+outstanding item on the grammar binaries, is in THIRD-PARTY-NOTICES.md at the repo
+root.
+
+────────────────────────────────────────────────────────────────────────
+tree-sitter.wasm — the tree-sitter runtime (web-tree-sitter)
+https://github.com/tree-sitter/tree-sitter
+────────────────────────────────────────────────────────────────────────
+
+The MIT License (MIT)
+
+Copyright (c) 2018-2021 Max Brunsfeld
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+────────────────────────────────────────────────────────────────────────
+tree-sitter-javascript.wasm, tree-sitter-python.wasm, tree-sitter-rust.wasm
+prebuilt by tree-sitter-wasms — https://github.com/Gregoor/tree-sitter-wasms
+────────────────────────────────────────────────────────────────────────
+
+The packaging is released into the public domain under the Unlicense and imposes
+no conditions.
+
+The grammars themselves come from tree-sitter/tree-sitter-javascript,
+tree-sitter/tree-sitter-python and tree-sitter/tree-sitter-rust, each MIT-licensed.
+Their verbatim notices are not reproduced here yet — see the open item in
+THIRD-PARTY-NOTICES.md §1. Do not ship a public release without resolving it.
