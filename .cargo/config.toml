@@ -1,0 +1,7 @@
+# Build environment settings
+# PROTOC_INCLUDE and TEMP are set by dev.ps1 / build.ps1 wrapper scripts
+# to avoid issues with non-ASCII characters in user home paths on Windows.
+#
+# If you need to run cargo directly (not via the wrapper scripts), set:
+#   $env:PROTOC_INCLUDE = "<project-root>\.proto_include"
+#   $env:TEMP = "<project-root>\.tmp_build"

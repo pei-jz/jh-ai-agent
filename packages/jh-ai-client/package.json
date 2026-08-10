@@ -1,0 +1,20 @@
+{
+  "name": "@jh/ai-client",
+  "version": "0.1.0",
+  "description": "Minimal vanilla-JS client for invoking JH AI Agent from sibling JH applications.",
+  "type": "module",
+  "main": "index.js",
+  "module": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./chat-panel.js": "./chat-panel.js"
+  },
+  "files": [
+    "index.js",
+    "chat-panel.js",
+    "README.md"
+  ],
+  "author": "J.H AI Agent Contributors",
+  "license": "MIT",
+  "private": true
+}
