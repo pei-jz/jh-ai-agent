@@ -20,30 +20,109 @@ function jaccard(a, b) {
 const SIM_THRESHOLD = 0.7; // high → only merge clear near-duplicates
 
 /**
+ * Hard cap on the stored text of one fact. Every write path goes through
+ * `capFactText` — the length limit used to be an inline `substring(0, 300)`
+ * repeated at each call site, so the Memory tab's manual edit (which is a write
+ * path too) silently stored unbounded text.
+ */
+export const FACT_MAX_CHARS = 300;
+
+/** Trim a fact to the stored length. Non-strings become ''. */
+export function capFactText(text) {
+    return String(text ?? '').substring(0, FACT_MAX_CHARS);
+}
+
+/**
+ * The memory layer a fact has reached. A fact written before the layers existed
+ * has no `type`; it reads as semantic, because it already survived the old
+ * store's pruning and demoting it would silently discard working memory.
+ */
+export function factType(f) {
+    return (f && f.type) || 'semantic';
+}
+
+/**
+ * Promotion matrix (plan §1.2 B3). Frequency alone is the wrong test: "always
+ * run npm test" is a project rule the first time it is stated, while "edited
+ * ConfigView.js" is a diary entry however often it recurs. So the KIND decides
+ * the bar, and the count only decides when an observation clears it.
+ *
+ *   norm         → semantic immediately, but at LOW confidence; re-statement
+ *                  raises it. (Trusted early, not trusted much.)
+ *   observation  → episodic until seen 3 times, then semantic.
+ *   worklog      → never stored at all.
+ *
+ * Deliberately NOT trusting the summariser's own "durable" filter: if that
+ * filter worked, consolidateFacts (which exists to drop stale and duplicated
+ * facts at 80% of capacity) would have nothing to do.
+ */
+export const PROMOTION_HITS = { norm: 1, observation: 3 };
+
+/** Re-evaluate one fact's layer and confidence after its hit count changed. */
+export function applyPromotion(f) {
+    const kind = f.kind || 'observation';
+    const hits = f.hits || 1;
+    if (kind === 'norm') {
+        f.type = 'semantic';
+        // Stated once: plausible. Restated: increasingly a rule.
+        f.confidence = Math.min(0.9, 0.5 + 0.15 * (hits - 1));
+    } else {
+        const promoted = hits >= PROMOTION_HITS.observation;
+        f.type = promoted ? 'semantic' : 'episodic';
+        f.confidence = promoted ? 0.7 : 0.4;
+    }
+    return f;
+}
+
+/**
  * Merge newly-extracted facts into `facts` (mutated in place), deduping by exact
  * normalized text OR strong word-overlap (Jaccard ≥ 0.7) so re-phrasings of the
  * same fact bump a hit count instead of piling up. Facts < 8 chars are ignored.
+ *
+ * `newFacts` entries may be plain strings (legacy, and anything a model returns
+ * in the old shape) or `{ text, kind }` from FactExtraction.
+ *
+ * Merging additionally requires the CATEGORY to agree, so an observation's three
+ * sightings are three sightings in the same area of the project — the same fact
+ * noticed once each in three unrelated tasks is weaker evidence, not stronger.
+ *
  * @returns the same `facts` array (for chaining)
  */
-export function mergeFacts(facts, newFacts, sessionId = null) {
+export function mergeFacts(facts, newFacts, sessionId = null, category = '') {
     if (!Array.isArray(facts) || !Array.isArray(newFacts)) return facts;
     for (const raw of newFacts) {
-        const text = String(raw || '').trim();
+        const cand = typeof raw === 'string' ? { text: raw, kind: 'observation' } : raw;
+        const text = String(cand?.text || '').trim();
         if (!text || text.length < 8) continue;
+        // A self-declared work log is not memory. Dropping it here — rather than
+        // letting it in and pruning later — is what keeps the store readable.
+        if (cand.kind === 'worklog') continue;
+
         const n = norm(text);
         const ws = wordSet(text);
-        const existing = facts.find(f => norm(f.fact) === n || jaccard(wordSet(f.fact), ws) >= SIM_THRESHOLD);
+        const sameCategory = (f) => !category || !f.category || f.category === category;
+        const existing = facts.find(f => sameCategory(f)
+            && (norm(f.fact) === n || jaccard(wordSet(f.fact), ws) >= SIM_THRESHOLD));
+
         if (existing) {
             existing.hits = (existing.hits || 1) + 1;
             existing.timestamp = Date.now();
+            // A fact restated as a rule is upgraded; the reverse never happens.
+            if (cand.kind === 'norm') existing.kind = 'norm';
+            applyPromotion(existing);
         } else {
-            facts.push({
-                fact: text.substring(0, 300),
+            const fact = {
+                fact: capFactText(text),
                 date: new Date().toISOString().split('T')[0],
                 timestamp: Date.now(),
                 sessionId: sessionId || null,
                 hits: 1,
-            });
+                kind: cand.kind || 'observation',
+                category: category || '',
+                scope: 'workspace',
+                evidence: sessionId ? [`session:${sessionId}`] : [],
+            };
+            facts.push(applyPromotion(fact));
         }
     }
     return facts;
@@ -52,10 +131,16 @@ export function mergeFacts(facts, newFacts, sessionId = null) {
 /**
  * Retention score for pruning: hit count decayed by age with a 90-day
  * half-life. A fact reaffirmed often stays; one never re-referenced fades.
+ *
+ * Weighted by layer since the split: an episodic fact is still on probation, so
+ * it is the first thing dropped when the store overflows — the alternative is a
+ * single-sighting observation displacing an established project rule.
  */
+const TYPE_WEIGHT = { semantic: 1, procedural: 1, episodic: 0.6 };
+
 export function retentionScore(f, now = Date.now()) {
     const ageDays = Math.max(0, (now - (f.timestamp || 0)) / 86_400_000);
-    return (f.hits || 1) * Math.pow(0.5, ageDays / 90);
+    return (f.hits || 1) * (TYPE_WEIGHT[factType(f)] ?? 1) * Math.pow(0.5, ageDays / 90);
 }
 
 /**
@@ -96,7 +181,7 @@ export function applyConsolidation(facts, plan) {
             target.timestamp = Math.max(target.timestamp || 0, facts[i].timestamp || 0);
         }
         if (typeof m.text === 'string' && m.text.trim().length >= 8) {
-            target.fact = m.text.trim().substring(0, 300);
+            target.fact = capFactText(m.text.trim());
         }
     }
 
@@ -121,6 +206,12 @@ export function selectRelevantFacts(facts, query = '', limit = 5, minScore = 0) 
         idx,
     }));
     const eligible = minScore > 0 ? scored.filter(s => s.score >= minScore) : scored;
-    eligible.sort((a, b) => b.score - a.score || (b.f.timestamp || 0) - (a.f.timestamp || 0) || b.idx - a.idx);
+    // Relevance first — confidence only breaks ties, so an established rule wins
+    // over an equally-relevant single sighting without ever outranking a fact
+    // that actually matches the query better.
+    eligible.sort((a, b) => b.score - a.score
+        || (b.f.confidence ?? 0.6) - (a.f.confidence ?? 0.6)
+        || (b.f.timestamp || 0) - (a.f.timestamp || 0)
+        || b.idx - a.idx);
     return eligible.slice(0, limit).map(s => s.f);
 }

@@ -27,12 +27,11 @@ const mount = (props = {}) => render(TaskHeader, {
 }).container;
 
 describe('TaskHeader — what it leads with', () => {
-    it('puts the request first, then the vital signs, then the ids', () => {
+    it('puts the request first, then the vital signs', () => {
         const el = mount({ steps: 77, usage: { total_tokens: 2901720 } });
-        const order = ['.mdh-title', '.mdh-meta', '.mdh-sub']
+        const order = ['.mdh-title', '.mdh-meta']
             .map(sel => [...el.querySelectorAll('*')].indexOf(el.querySelector(sel)));
         expect(order[0]).toBeLessThan(order[1]);
-        expect(order[1]).toBeLessThan(order[2]);
     });
 
     it('shows the prompt, and keeps the full text as a tooltip', () => {
@@ -41,16 +40,13 @@ describe('TaskHeader — what it leads with', () => {
         expect(el.querySelector('.mdh-title').title).toBe(task.prompt);
     });
 
-    it('carries the provenance without the workspace — that moved to the inspector', () => {
-        const sub = mount().querySelector('.mdh-sub').textContent;
-        expect(sub).toContain('#a78b33ad');
-        expect(sub).toContain('NewTask');
-        expect(sub).not.toContain('cusor_workspace');
-    });
-
-    it('drops the caller fragment when there is none', () => {
-        const el = mount({ task: { ...task, caller: '' } });
-        expect(el.querySelector('.mdh-sub').textContent).not.toContain('caller');
+    it('does NOT repeat the id / caller — the inspector beside it carries those', () => {
+        // A header line that only restates what is already visible next to it
+        // costs a row of fixed furniture above the story and adds nothing.
+        const el = mount();
+        expect(el.querySelector('.mdh-sub')).toBe(null);
+        expect(el.textContent).not.toContain('#a78b33ad');
+        expect(el.textContent).not.toContain('caller');
     });
 
     it('renders nothing without a task', () => {

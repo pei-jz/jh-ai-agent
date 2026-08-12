@@ -251,7 +251,11 @@ class TaskBridge {
             this.emitTaskEvent(taskId, 'complete', {
                 message: result.response,
                 modifiedFiles: result.modifiedFiles,
-                resultSummary: result.resultSummary
+                resultSummary: result.resultSummary,
+                // Set when a safety limit cut the run short instead of the agent
+                // finishing. The task still completes — the work so far is real and
+                // resumable — but the UI must not present it as a clean finish.
+                stopReason: result.stopReason || null,
             });
 
         } catch (err) {

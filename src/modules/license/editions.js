@@ -5,10 +5,10 @@
 // without grepping the whole app, and the answer drifts from the price list.
 //
 // Read docs/design/licensing.md before changing anything here. The short version:
-// this repository is MIT, so a client-side gate is removable by anyone who recompiles.
-// That is a consequence of the licence we chose, not a bug to be patched. The gate
-// exists to identify paying customers and to make the commercial boundary explicit —
-// not to be an unbreakable wall.
+// this repository ships under MIT OR Apache-2.0 — both permissive — so a client-side
+// gate is removable by anyone who recompiles. That is a consequence of the licence we
+// chose, not a bug to be patched. The gate exists to identify paying customers and to
+// make the commercial boundary explicit, not to be an unbreakable wall.
 
 /** Ordered from least to most capable. Order matters: `atLeast` relies on it. */
 export const EDITIONS = ['community', 'pro', 'enterprise'];
@@ -19,7 +19,7 @@ export const EDITIONS = ['community', 'pro', 'enterprise'];
  * FALSE on purpose. The machinery (signature verification, expiry, this table, the
  * Settings UI) is complete and flipping this to `true` makes it bite. It is off
  * because the commercial decision has not been made, and gating Office generation
- * today would cost more adoption than it could earn — see licensing.md §6.
+ * today would cost more adoption than it could earn — see licensing.md §8.
  *
  * This is "not switched on yet", not "not finished".
  */
@@ -74,17 +74,30 @@ export function atLeast(edition, required) {
 }
 
 /**
- * May this edition use this feature?
+ * Would this edition be allowed this feature IF enforcement were on?
  *
- * Fails OPEN in two cases, both on purpose: an unlisted feature, and enforcement
- * being switched off. A licence check that accidentally denies a paying customer
- * their tool mid-task is worse than one that lets a free user through.
+ * Separate from `hasFeature` so the gating rules are testable while the master switch
+ * is off. Otherwise the day someone flips ENFORCEMENT_ENABLED is the first day this
+ * logic ever runs — and finding out then which features close is far too late.
+ *
+ * Fails OPEN for an unlisted feature: forgetting a table entry must never lock
+ * something, because a licence check that denies a paying customer their tool
+ * mid-task is worse than one that lets a free user through.
  */
-export function hasFeature(edition, feature) {
-    if (!ENFORCEMENT_ENABLED) return true;
+export function featureAllowed(edition, feature) {
     const required = FEATURE_MINIMUM[feature];
     if (!required) return true;
     return atLeast(edition, required);
+}
+
+/**
+ * May this edition use this feature? The question the app should ask.
+ *
+ * Returns true for everything while ENFORCEMENT_ENABLED is false — see that constant.
+ */
+export function hasFeature(edition, feature) {
+    if (!ENFORCEMENT_ENABLED) return true;
+    return featureAllowed(edition, feature);
 }
 
 /** Which features an edition unlocks beyond the free baseline. For the UI. */

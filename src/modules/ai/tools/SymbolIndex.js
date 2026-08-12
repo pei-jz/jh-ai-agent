@@ -40,6 +40,7 @@ export function languageOf(path) {
     if (['js', 'jsx', 'mjs', 'cjs', 'ts', 'tsx'].includes(ext)) return 'js';
     if (ext === 'rs') return 'rust';
     if (ext === 'py') return 'python';
+    if (ext === 'java') return 'java';
     return '';
 }
 
@@ -78,6 +79,57 @@ const PATTERNS = {
         [/^\s*(?:async\s+)?def\s+([A-Za-z_][\w]*)/, 'function', 1],
         [/^\s*class\s+([A-Za-z_][\w]*)/, 'class', 1],
     ],
+    // Java. Order matters — one symbol per line, first match wins — so the TYPE
+    // declarations come before methods, `@interface` before `interface` (the latter
+    // would match the former's tail), and the method pattern (which REQUIRES a return
+    // type) before the constructor pattern (which must not have one).
+    java: [
+        [/^\s*(?:(?:public|protected|private|static|final|abstract|sealed|non-sealed|strictfp)\s+)*class\s+([A-Za-z_$][\w$]*)/, 'class', 1],
+        [/^\s*(?:(?:public|protected|private|static|final|abstract|sealed|non-sealed|strictfp)\s+)*@interface\s+([A-Za-z_$][\w$]*)/, 'annotation', 1],
+        [/^\s*(?:(?:public|protected|private|static|final|abstract|sealed|non-sealed|strictfp)\s+)*interface\s+([A-Za-z_$][\w$]*)/, 'interface', 1],
+        [/^\s*(?:(?:public|protected|private|static|final|abstract|strictfp)\s+)*enum\s+([A-Za-z_$][\w$]*)/, 'enum', 1],
+        [/^\s*(?:(?:public|protected|private|static|final|abstract)\s+)*record\s+([A-Za-z_$][\w$]*)/, 'record', 1],
+        // `<modifiers> [<T>] ReturnType name(` — the return type is what distinguishes
+        // a declaration from a call. See JAVA_NOT_TYPES for why that is not enough.
+        [/^\s*(?:(?:public|protected|private|static|final|abstract|synchronized|native|default|strictfp)\s+)*(?:<[^>]+>\s*)?([A-Za-z_$][\w$.]*(?:\s*<[^;=(]*>)?(?:\s*\[\s*\])*)\s+([A-Za-z_$][\w$]*)\s*\(/, 'method', 2],
+        // A constructor has NO return type, so it only gets here after the method
+        // pattern failed. Capitalised, to avoid matching a bare call.
+        [/^\s*(?:(?:public|protected|private)\s+)*([A-Z][\w$]*)\s*\(/, 'constructor', 1],
+    ],
+};
+
+/**
+ * Words that can stand exactly where a Java return type would.
+ *
+ * `return foo(x)` parses as "type `return`, name `foo`, then (" and would be indexed
+ * as a definition of `foo` — pointing the agent at a CALL SITE while claiming it is
+ * the definition. A wrong file:line is the one failure this module promises never to
+ * produce (see the header), so these are refused outright.
+ */
+const JAVA_NOT_TYPES = new Set([
+    'return', 'new', 'throw', 'throws', 'if', 'else', 'for', 'while', 'do', 'switch',
+    'case', 'catch', 'try', 'finally', 'assert', 'yield', 'super',
+    'this', 'instanceof', 'import', 'package',
+    // Modifiers belong here too. The modifier group is optional, so `public Foo(x)`
+    // can also parse as "type `public`, name `Foo`" — which would index every
+    // CONSTRUCTOR as a method and leave the constructor pattern unreachable.
+    'public', 'protected', 'private', 'static', 'final', 'abstract', 'synchronized',
+    'native', 'default', 'strictfp', 'sealed', 'non-sealed',
+]);
+
+/**
+ * Which prefix marks a declaration publicly visible, per language.
+ *
+ * Per-language rather than one shared regex on purpose: Java's marker is `public`,
+ * which also appears on TypeScript class members, and quietly reclassifying those
+ * would shift search ranking (matchSymbols scores `exported` higher) for every
+ * existing JS/TS project.
+ */
+const EXPORT_MARKER = {
+    js: /^\s*export\b/,
+    rust: /^\s*pub\b/,
+    java: /^\s*(?:@\w+(?:\([^)]*\))?\s+)*public\b/,
+    python: null,   // no visibility keyword
 };
 
 // JS keywords that look like a method call at indentation (`if (x) {`).
@@ -116,7 +168,7 @@ export function extractSymbols(path, content) {
         }
 
         // Skip comments so a commented-out definition isn't indexed.
-        if (lang === 'js' || lang === 'rust') {
+        if (lang === 'js' || lang === 'rust' || lang === 'java') {
             const trimmed = raw.trim();
             if (inBlockComment) {
                 if (trimmed.includes('*/')) inBlockComment = false;
@@ -137,13 +189,16 @@ export function extractSymbols(path, content) {
             const name = m[group];
             if (!name) continue;
             if (lang === 'js' && kind === 'method' && JS_NOT_METHODS.has(name)) continue;
+            // Java: refuse a "return type" that is really a keyword — see JAVA_NOT_TYPES.
+            if (lang === 'java' && kind === 'method'
+                && JAVA_NOT_TYPES.has(String(m[1] || '').trim())) continue;
             out.push({
                 name,
                 kind,
                 line: i + 1,
                 path,
                 signature: clean(raw).trim().slice(0, 200),
-                exported: /^\s*(?:export\b|pub\b)/.test(raw),
+                exported: EXPORT_MARKER[lang]?.test(raw) || false,
             });
             break;   // one symbol per line
         }

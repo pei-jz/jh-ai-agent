@@ -18,6 +18,9 @@
     let expanded = $state(false);
 </script>
 
+<!-- Only a clampable line is interactive, and role/tabindex are set together
+     below; the compiler cannot see that through the conditional. -->
+<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
 <div
     class="mtask-feed-item"
     class:is-error={p.isError}

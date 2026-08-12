@@ -7,6 +7,7 @@
   AND by a matching branch in the save handler, two places to keep in step.
 -->
 <script>
+    import { untrack } from 'svelte';
     import { icon } from '../../utils/icons.js';
     import { skillRefusal } from '../../views/config/lists.js';
 
@@ -23,7 +24,8 @@
     } = $props();
 
     const isEdit = $derived(!!editing);
-    let form = $state({ name: '', content: editing?.content || '' });
+    // Seeded once — see the note in ConnectionModal.svelte.
+    let form = $state(untrack(() => ({ name: '', content: editing?.content || '' })));
     let error = $state('');
 
     const submit = () => {

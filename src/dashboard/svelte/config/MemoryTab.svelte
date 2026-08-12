@@ -10,6 +10,9 @@
 -->
 <script>
     import { icon } from '../../utils/icons.js';
+    import { t } from '../../../i18n/index.js';
+
+    import { cardSummary } from '../../../modules/ai/memory/CardStore.js';
 
     let {
         workspace = '',
@@ -18,6 +21,8 @@
         /** null until a workspace has been loaded — distinct from "loaded, empty". */
         facts = null,
         episodes = null,
+        /** Experience cards: lessons (what failed) and insights (what worked). */
+        cards = null,
         onWorkspaceChange = null,
         onBrowse = null,
         onLoad = null,
@@ -26,11 +31,18 @@
         onClearFacts = null,
         onDeleteEpisode = null,
         onClearEpisodes = null,
+        onToggleCard = null,
+        onDeleteCard = null,
+        onClearCards = null,
     } = $props();
 
-    const loaded = $derived(Array.isArray(facts) || Array.isArray(episodes));
+    const loaded = $derived(Array.isArray(facts) || Array.isArray(episodes) || Array.isArray(cards));
     const factList = $derived(Array.isArray(facts) ? facts : []);
     const episodeList = $derived(Array.isArray(episodes) ? episodes : []);
+    const cardList = $derived(Array.isArray(cards) ? cards : []);
+
+    /** A fact with no `type` predates the layer split — it reads as semantic. */
+    const factType = (f) => f.type || 'semantic';
 
     const OUTCOME = { success: '✅', error: '❌' };
     const outcomeIcon = (o) => OUTCOME[o] || '⚠️';
@@ -49,14 +61,13 @@
 
 <div class="card settings-card cfg-tab-card">
     <div class="card-header cfg-tab-head-plain">
-        <h3>{@html icon('memory')} Agent Memory</h3>
-        <p class="subtitle">View, edit, and delete the agent's long-term memory
-            (durable facts &amp; session history)</p>
+        <h3>{@html icon('memory')} {t('memory.title')}</h3>
+        <p class="subtitle">{t('memory.subtitle')}</p>
     </div>
     <div class="provider-card-fields">
         <div class="input-group">
-            <label class="input-label" for="memory-ws-input">Workspace (memory is stored per
-                workspace: <code>&lt;workspace&gt;/.agent/</code>)</label>
+            <label class="input-label" for="memory-ws-input"
+                >{t('memory.workspace', { path: '<workspace>/.agent/' })}</label>
             <div class="cfg-row-inline">
                 <input id="memory-ws-input" class="input cfg-grow" type="text" value={workspace}
                     list="memory-ws-list" placeholder={'C:\\path\\to\\workspace'}
@@ -65,32 +76,33 @@
                     {#each projects as p (p)}<option value={p}></option>{/each}
                 </datalist>
                 <button class="btn btn-secondary" id="btn-memory-ws-browse" type="button"
-                    onclick={() => onBrowse?.()}>📁</button>
+                    title={t('memory.browse')}
+                    onclick={() => onBrowse?.()}>{@html icon('folder', 13)}</button>
                 <button class="btn btn-primary" id="btn-memory-load" type="button"
-                    onclick={() => onLoad?.()}>Load</button>
+                    onclick={() => onLoad?.()}>{t('memory.load')}</button>
             </div>
         </div>
 
         {#if !loaded}
-            <div class="cfg-mem-hint">Select a workspace and press "Load" to show the stored memory.</div>
+            <div class="cfg-mem-hint">{t('memory.selectHint')}</div>
         {:else}
             <div class="cfg-mem-box">
                 <div class="cfg-mem-head">
                     <div class="cfg-mem-title">
-                        📌 Durable Facts (injected into the system prompt — {factList.length})
+                        {@html icon('memory', 13)} {t('memory.facts', { count: factList.length })}
                     </div>
                     <button class="btn btn-secondary cfg-btn-tiny cfg-btn-danger"
                         id="btn-memory-facts-clear" onclick={() => onClearFacts?.()}>
-                        {@html icon('trash', 12)} Clear All</button>
+                        {@html icon('trash', 12)} {t('memory.clearAll')}</button>
                 </div>
                 {#if !factList.length}
-                    <div class="cfg-mem-empty">No facts stored yet.</div>
+                    <div class="cfg-mem-empty">{t('memory.facts.empty')}</div>
                 {:else}
                     <div class="cfg-mem-scroll" id="memory-facts-list">
                         <table class="rv-table cfg-mem-table">
                             <thead><tr>
-                                <th class="cfg-mem-th">Fact</th>
-                                <th>Date</th><th>Hits</th><th></th>
+                                <th class="cfg-mem-th">{t('memory.facts.col')}</th>
+                                <th>{t('memory.col.date')}</th><th>{t('memory.col.hits')}</th><th></th>
                             </tr></thead>
                             <tbody>
                                 {#each factList as f, i (i)}
@@ -104,24 +116,84 @@
                                                         if (e.key === 'Enter') { e.preventDefault(); commitEdit(); }
                                                         if (e.key === 'Escape') editingIdx = -1;
                                                     }}>
-                                            {:else}{f.fact || ''}{/if}
+                                            {:else}
+                                                <!-- Which layer this fact reached: an episodic one is
+                                                     still on probation and is pruned first. -->
+                                                <span class="cfg-mem-badge is-{factType(f)}">{factType(f)}</span>
+                                                {f.fact || ''}
+                                            {/if}
                                         </td>
                                         <td class="cfg-mem-meta">{f.date || ''}</td>
                                         <td class="cfg-mem-hits">{f.hits || 1}</td>
                                         <td class="cfg-mem-acts">
                                             {#if editingIdx === i}
                                                 <button class="btn btn-secondary cfg-btn-tiny"
-                                                    onclick={commitEdit}>Save</button>
+                                                    onclick={commitEdit}>{t('common.save')}</button>
                                                 <button class="btn btn-secondary cfg-btn-tiny"
-                                                    onclick={() => (editingIdx = -1)}>Cancel</button>
+                                                    onclick={() => (editingIdx = -1)}>{t('common.cancel')}</button>
                                             {:else}
                                                 <button class="btn btn-secondary cfg-btn-tiny memory-fact-edit"
-                                                    data-idx={i} onclick={() => startEdit(i, f.fact)}
+                                                    data-idx={i} title={t('memory.edit')}
+                                                    onclick={() => startEdit(i, f.fact)}
                                                 >{@html icon('edit', 12)}</button>
                                                 <button class="btn btn-secondary cfg-btn-tiny cfg-btn-danger memory-fact-del"
-                                                    data-idx={i} onclick={() => onDeleteFact?.(i)}
+                                                    data-idx={i} title={t('common.delete')}
+                                                    onclick={() => onDeleteFact?.(i)}
                                                 >{@html icon('trash', 12)}</button>
                                             {/if}
+                                        </td>
+                                    </tr>
+                                {/each}
+                            </tbody>
+                        </table>
+                    </div>
+                {/if}
+            </div>
+
+            <!-- Experience cards. The switch is the point: a wrong lesson that the
+                 user cannot turn off is exactly how a memory poisons an agent. -->
+            <div class="cfg-mem-box">
+                <div class="cfg-mem-head">
+                    <div class="cfg-mem-title">
+                        {@html icon('brain', 13)} {t('memory.cards', { count: cardList.length })}
+                    </div>
+                    <button class="btn btn-secondary cfg-btn-tiny cfg-btn-danger"
+                        id="btn-memory-cards-clear" onclick={() => onClearCards?.()}>
+                        {@html icon('trash', 12)} {t('memory.clearAll')}</button>
+                </div>
+                {#if !cardList.length}
+                    <div class="cfg-mem-empty">{t('memory.cards.empty')}</div>
+                {:else}
+                    <div class="cfg-mem-scroll" id="memory-cards-list">
+                        <table class="rv-table cfg-mem-table">
+                            <thead><tr>
+                                <th class="cfg-mem-th">{t('memory.cards.col')}</th>
+                                <th>{t('memory.col.cost')}</th><th>{t('memory.col.hits')}</th>
+                                <th>{t('memory.col.use')}</th><th></th>
+                            </tr></thead>
+                            <tbody>
+                                {#each cardList as c, i (c.id || i)}
+                                    {@const s = cardSummary(c)}
+                                    <tr class:is-off={c.disabled}>
+                                        <td class="cfg-mem-fact">
+                                            <span class="cfg-mem-badge is-{s.badge}">{s.badge}</span>
+                                            {s.headline}
+                                            <div class="cfg-mem-summary">{s.detail}</div>
+                                        </td>
+                                        <td class="cfg-mem-hits">{c.costSteps ?? '—'}</td>
+                                        <td class="cfg-mem-hits">{c.hits || 1}</td>
+                                        <td class="cfg-mem-acts">
+                                            <label class="cfg-mem-toggle">
+                                                <input type="checkbox" class="memory-card-toggle"
+                                                    checked={!c.disabled} data-idx={i}
+                                                    onchange={(e) => onToggleCard?.(i, !e.currentTarget.checked)}>
+                                            </label>
+                                        </td>
+                                        <td class="cfg-mem-acts">
+                                            <button class="btn btn-secondary cfg-btn-tiny cfg-btn-danger memory-card-del"
+                                                data-idx={i} title={t('common.delete')}
+                                                onclick={() => onDeleteCard?.(i)}
+                                            >{@html icon('trash', 12)}</button>
                                         </td>
                                     </tr>
                                 {/each}
@@ -134,14 +206,14 @@
             <div class="cfg-mem-box">
                 <div class="cfg-mem-head">
                     <div class="cfg-mem-title">
-                        📚 Episodes (summaries of past sessions — latest {episodeList.length})
+                        {@html icon('history', 13)} {t('memory.episodes', { count: episodeList.length })}
                     </div>
                     <button class="btn btn-secondary cfg-btn-tiny cfg-btn-danger"
                         id="btn-memory-episodes-clear" onclick={() => onClearEpisodes?.()}>
-                        {@html icon('trash', 12)} Clear All</button>
+                        {@html icon('trash', 12)} {t('memory.clearAll')}</button>
                 </div>
                 {#if !episodeList.length}
-                    <div class="cfg-mem-empty">No session history yet.</div>
+                    <div class="cfg-mem-empty">{t('memory.episodes.empty')}</div>
                 {:else}
                     <div class="cfg-mem-scroll" id="memory-episodes-list">
                         <table class="rv-table cfg-mem-table">
@@ -155,7 +227,8 @@
                                         </td>
                                         <td class="cfg-mem-acts">
                                             <button class="btn btn-secondary cfg-btn-tiny cfg-btn-danger memory-episode-del"
-                                                data-idx={i} onclick={() => onDeleteEpisode?.(i)}
+                                                data-idx={i} title={t('common.delete')}
+                                                onclick={() => onDeleteEpisode?.(i)}
                                             >{@html icon('trash', 12)}</button>
                                         </td>
                                     </tr>

@@ -14,6 +14,12 @@ import TemplatesTab from '../TemplatesTab.svelte';
 import SkillsTab from '../SkillsTab.svelte';
 import RagTab from '../RagTab.svelte';
 import MemoryTab from '../MemoryTab.svelte';
+// The copy in these tabs comes from the i18n catalogs now, and the default
+// locale is ja. Pin en so the assertions below read as the sentences they
+// are checking for rather than as opaque strings.
+import { __setLocaleForTest } from '../../../../i18n/index.js';
+
+__setLocaleForTest('en');
 
 afterEach(() => cleanup());
 
@@ -322,5 +328,81 @@ describe('MemoryTab', () => {
         el.querySelector('#btn-memory-facts-clear').click();
         el.querySelector('#btn-memory-episodes-clear').click();
         for (const [name, fn] of Object.entries(cbs)) expect(fn, name).toHaveBeenCalled();
+    });
+});
+
+// ── Experience cards (Step 2 of the memory plan) ─────────────────────────
+// The switch is the point: a wrong lesson the user cannot turn off is exactly
+// how a learned memory poisons an agent.
+describe('MemoryTab — experience cards', () => {
+    const lesson = {
+        id: 'L-1', type: 'lesson', signature: 'write_file|edit_mismatch|.svelte',
+        trigger: { tool: 'write_file', ext: '.svelte' }, symptom: 'anchor does not match',
+        fix: 'read_file → write_file', costSteps: 7, hits: 2,
+    };
+    const locator = {
+        id: 'I-2', type: 'insight', kind: 'locator', q: 'licenseState',
+        target: 'src/license.js', trigger: { tool: 'grep_search' }, hits: 1,
+    };
+
+    it('says what an empty store means, rather than showing nothing', () => {
+        const el = mount(MemoryTab, { facts: [], episodes: [], cards: [] });
+        expect(el.textContent).toContain('Nothing learned yet');
+    });
+
+    it('shows a lesson with its verified fix and what it cost', () => {
+        const el = mount(MemoryTab, { facts: [], episodes: [], cards: [lesson] });
+        expect(el.textContent).toContain('anchor does not match');
+        expect(el.textContent).toContain('Verified fix: read_file → write_file');
+        expect(el.querySelector('#memory-cards-list').textContent).toContain('7');
+    });
+
+    it('is honest about a lesson with no fix yet', () => {
+        const el = mount(MemoryTab, { facts: [], episodes: [], cards: [{ ...lesson, fix: null }] });
+        expect(el.textContent).toContain('No verified fix yet');
+    });
+
+    it('shows an insight about where something lives', () => {
+        const el = mount(MemoryTab, { facts: [], episodes: [], cards: [locator] });
+        expect(el.textContent).toContain('licenseState');
+        expect(el.textContent).toContain('Found in: src/license.js');
+    });
+
+    it('switches a card off by index — the poisoning escape hatch', () => {
+        const onToggleCard = vi.fn();
+        const el = mount(MemoryTab, { facts: [], episodes: [], cards: [lesson], onToggleCard });
+        const box = el.querySelector('.memory-card-toggle');
+        expect(box.checked).toBe(true);
+        box.checked = false;
+        box.dispatchEvent(new Event('change', { bubbles: true }));
+        expect(onToggleCard).toHaveBeenCalledWith(0, true); // (index, disabled)
+    });
+
+    it('marks a switched-off card as inert instead of hiding it', () => {
+        // Hiding it would make "why is this not firing?" unanswerable.
+        const el = mount(MemoryTab, { facts: [], episodes: [], cards: [{ ...lesson, disabled: true }] });
+        expect(el.querySelector('#memory-cards-list tr.is-off')).not.toBe(null);
+        expect(el.querySelector('.memory-card-toggle').checked).toBe(false);
+    });
+
+    it('reports deletion by index', () => {
+        const onDeleteCard = vi.fn();
+        const el = mount(MemoryTab, { facts: [], episodes: [], cards: [lesson], onDeleteCard });
+        el.querySelector('.memory-card-del').click();
+        expect(onDeleteCard).toHaveBeenCalledWith(0);
+    });
+
+    it('shows which memory layer a fact reached', () => {
+        const el = mount(MemoryTab, {
+            facts: [{ fact: 'seen once', type: 'episodic' }, { fact: 'established rule', type: 'semantic' }],
+            episodes: [],
+        });
+        const badges = [...el.querySelectorAll('#memory-facts-list .cfg-mem-badge')].map(b => b.textContent);
+        expect(badges).toEqual(['episodic', 'semantic']);
+    });
+
+    it('shows a legacy fact (no type) as semantic', () => {
+        const el = mount(MemoryTab, { facts: [{ fact: 'written before the layers existed' }], episodes: [] });
+        expect(el.querySelector('#memory-facts-list .cfg-mem-badge').textContent).toBe('semantic');
     });
 });

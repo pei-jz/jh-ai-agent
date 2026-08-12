@@ -5,7 +5,8 @@ export const CHAT_STYLES = `
                 .chat-view-layout {
                     display: flex;
                     flex-direction: column;
-                    height: calc(100vh - var(--titlebar-height) - 34px);
+                    /* 24px = .main-content's top+bottom padding (4 + 20). */
+                    height: calc(100vh - var(--titlebar-height) - 24px);
                     position: relative;
                 }
                 

@@ -13,6 +13,12 @@ import { tick } from 'svelte';
 import SettingsGeneral from '../SettingsGeneral.svelte';
 import SettingsMcp from '../SettingsMcp.svelte';
 import { MASKED } from '../../../views/config/configForm.js';
+// The copy in these tabs comes from the i18n catalogs now, and the default
+// locale is ja. Pin en so the assertions below read as the sentences they
+// are checking for rather than as opaque strings.
+import { __setLocaleForTest } from '../../../../i18n/index.js';
+
+__setLocaleForTest('en');
 
 afterEach(() => cleanup());
 
@@ -30,7 +36,7 @@ const cfg = (over = {}) => ({
 /** Every section open, so fields are reachable without clicking through. */
 const ALL_OPEN = {
     basic: true, behavior: true, safety: true, paths: true,
-    commands: true, logging: true, connection: true,
+    commands: true, logging: true, connection: true, updates: true, license: true,
 };
 
 const general = (props = {}) => render(SettingsGeneral, {
@@ -84,6 +90,22 @@ describe('SettingsGeneral — the fields report normalized patches', () => {
         expect(onChange).toHaveBeenCalledWith({ subagent_review: 'on' });
     });
 
+    it('reports the memory-recall arm, and defaults to on', () => {
+        // The A/B control group is only reachable if this select saves — the
+        // switch existed in the agent before it existed in the UI, which made it
+        // unusable outside tests.
+        const onChange = vi.fn();
+        const el = general({ onChange });
+        expect(el.querySelector('#cfg-memory-recall').value).toBe('on');
+        pick(el.querySelector('#cfg-memory-recall'), 'auto');
+        expect(onChange).toHaveBeenCalledWith({ memory_recall: 'auto' });
+    });
+
+    it('offers all three memory-recall arms', () => {
+        const opts = [...general().querySelector('#cfg-memory-recall').options].map(o => o.value);
+        expect(opts).toEqual(['on', 'auto', 'off']);
+    });
+
     it('lists the connections in both routing selects', () => {
         const el = general();
         for (const id of ['#cfg-fast-model', '#cfg-deep-model']) {
@@ -98,6 +120,68 @@ describe('SettingsGeneral — the fields report normalized patches', () => {
         const el = general({ config: cfg({ fast_model_id: 'inst_1:gpt-4o' }), onChange, openSections: ALL_OPEN });
         pick(el.querySelector('#cfg-fast-model'), '');
         expect(onChange).toHaveBeenCalledWith({ fast_model_id: '' });
+    });
+
+    // A select that shows "(not set)" while a tier IS stored looks exactly like
+    // a save that did not take, which is the complaint the "" sentinel exists to
+    // answer. Assert the displayed value, not just the option list.
+    it('shows the tier that is actually stored', () => {
+        const el = general({ config: cfg({ fast_model_id: 'inst_1:gpt-4o' }) });
+        expect(el.querySelector('#cfg-fast-model').value).toBe('inst_1:gpt-4o');
+        expect(el.querySelector('#cfg-deep-model').value).toBe('');
+    });
+});
+
+// Phase routing — see modules/ai/agent/ModelPhaseRouter.js. The control is a
+// promise about cost, so the UI has to be honest about when it can keep it.
+describe('SettingsGeneral — phase routing', () => {
+    const TWO_TIERS = {
+        fast_model_id: 'i1:flash', deep_model_id: 'i2:kimi',
+        llm_instances: [
+            { id: 'i1', name: 'Flash', model: 'flash', cost_per_1m_input: 0.3, cost_per_1m_output: 1.2 },
+            { id: 'i2', name: 'Kimi', model: 'kimi', cost_per_1m_input: 3, cost_per_1m_output: 15 },
+        ],
+    };
+
+    it('is disabled until BOTH tiers are set — one tier makes every phase identical', () => {
+        const el = general({ config: cfg({ fast_model_id: 'inst_1:gpt-4o', deep_model_id: '' }) });
+        expect(el.querySelector('#cfg-phase-routing').disabled).toBe(true);
+        expect(el.textContent).toContain('Set BOTH a Fast and a Deep tier');
+    });
+
+    it('enables and names the two tiers once both are set', () => {
+        const el = general({ config: cfg(TWO_TIERS) });
+        expect(el.querySelector('#cfg-phase-routing').disabled).toBe(false);
+        expect(el.textContent).toContain('Plan & review');
+        expect(el.textContent).toContain('Kimi (kimi)');
+        expect(el.textContent).toContain('Flash (flash)');
+    });
+
+    it('estimates the saving from the rates on the connections', () => {
+        const el = general({ config: cfg(TWO_TIERS) });
+        expect(el.textContent).toMatch(/Estimated\s+\d+% cheaper/);
+    });
+
+    // Better to say "I cannot price this" than to print a number with nothing
+    // behind it — a missing rate would otherwise read as a free model.
+    it('asks for rates instead of guessing when a connection has none', () => {
+        const el = general({ config: cfg({
+            ...TWO_TIERS,
+            llm_instances: TWO_TIERS.llm_instances.map(i => ({ ...i, cost_per_1m_input: undefined, cost_per_1m_output: undefined })),
+        }) });
+        expect(el.textContent).not.toMatch(/cheaper/);
+        expect(el.textContent).toContain('Enter the $/1M rates');
+    });
+
+    it('reports the choice as a patch', () => {
+        const onChange = vi.fn();
+        const el = general({ config: cfg(TWO_TIERS), onChange, openSections: ALL_OPEN });
+        pick(el.querySelector('#cfg-phase-routing'), 'on');
+        expect(onChange).toHaveBeenCalledWith({ phase_routing: 'on' });
+    });
+
+    it('defaults to off', () => {
+        expect(general({ config: cfg(TWO_TIERS) }).querySelector('#cfg-phase-routing').value).toBe('off');
     });
 
     it('renders all six safety limits from the shared field table', () => {
@@ -265,5 +349,64 @@ describe('SettingsMcp', () => {
         const el = render(SettingsMcp, { props: { text: '{}', onChange } }).container;
         type(el.querySelector('#cfg-mcp-servers'), '{"sqlite":{}}');
         expect(onChange).toHaveBeenCalledWith('{"sqlite":{}}');
+    });
+});
+
+
+describe('SettingsGeneral — unconfigured build shows only what it can do', () => {
+    // The product is pre-release: no signing key, no licence-issuing key, and
+    // ENFORCEMENT_ENABLED is false so nothing is gated. Settings must not advertise
+    // machinery that does not exist yet — and must never show developer paths.
+
+    it('shows the version even with no update channel', () => {
+        // Always useful: every support conversation starts with "which build?".
+        const el = general({ appVersion: '0.1.0', updatesConfigured: false });
+        expect(el.textContent).toContain('0.1.0');
+    });
+
+    it('offers no update check on a build that cannot verify one', () => {
+        const el = general({ appVersion: '0.1.0', updatesConfigured: false });
+        expect(el.textContent).not.toContain('Check for updates');
+        // …and does not explain WHY, which the user can do nothing about.
+        expect(el.textContent).not.toContain('signing key');
+    });
+
+    it('offers the check once a signing key is compiled in', () => {
+        // Nothing has to be remembered later: generating a key reveals the section.
+        const el = general({ appVersion: '0.2.0', updatesConfigured: true });
+        expect(el.textContent).toContain('Check for updates');
+    });
+
+    it('hides the licence section entirely when there is no issuing key', () => {
+        const el = general({ licensingConfigured: false });
+        expect(el.querySelector('[data-sec="license"]')).toBeNull();
+        expect(el.querySelector('#cfg-license-key')).toBeNull();
+    });
+
+    it('never names an edition on a build that gates nothing', () => {
+        // "Community エディション" advertises a paywall that does not exist and makes
+        // a free pre-release look deliberately limited.
+        const el = general({ licensingConfigured: false });
+        expect(el.textContent).not.toContain('Community');
+        expect(el.textContent).not.toContain('エディション');
+    });
+
+    it('shows the licence section once an issuing key exists', () => {
+        const el = general({ licensingConfigured: true });
+        expect(el.querySelector('[data-sec="license"]')).toBeTruthy();
+        expect(el.querySelector('#cfg-license-key')).toBeTruthy();
+    });
+
+    it('never leaks a repository path into the UI', () => {
+        // docs/ does not ship with the app, so these are meaningless to a user.
+        for (const props of [
+            { updatesConfigured: false, licensingConfigured: false },
+            { updatesConfigured: true, licensingConfigured: true },
+        ]) {
+            cleanup();
+            const el = general(props);
+            expect(el.textContent).not.toContain('docs/');
+            expect(el.textContent).not.toContain('.md');
+        }
     });
 });

@@ -10,7 +10,7 @@ import { promptTemplateManager } from '../../modules/ai/PromptTemplateManager.js
 import { skillManager } from '../../modules/ai/SkillManager.js';
 import { icon } from '../utils/icons.js';
 import llmService from '../../modules/ai/LLMService.js';
-import { TaskTimeline, buildTimeline, envelopeText, splitForPanes, chapters, withExchangeFolds, exchangeCount, collapsedIds } from './monitor/taskTimeline.js';
+import { TaskTimeline, buildTimeline, envelopeText, splitForPanes, chapters, withExchangeFolds, exchangeCount, collapsedIds, applyFileDescriptions } from './monitor/taskTimeline.js';
 // timelineRender.js is retired: Timeline.svelte's keyed {#each} does the keyed
 // DOM reuse it hand-rolled, and timelineItems.js now exports only pure vocabulary.
 import { hubApps } from './monitor/hubStrip.js';
@@ -608,7 +608,16 @@ export class MonitorView {
             case 'tool_call':       return fmtTool(log);
             case 'file_modified':   return fmtFile(log);
             case 'status':          return fmtStatus(log);
-            case 'complete':        return `<div class="mlog mlog-success log-success"><span class="mlog-icon">✅</span><span class="mlog-body"><strong>Complete:</strong> ${escapeHtml(normalizeLeakedEscapes(log.data.message || ''))}</span></div>`;
+            case 'complete': {
+                // A run stopped by a safety limit still arrives as `complete`, because
+                // the work so far is real and resumable. But it is NOT a clean finish,
+                // and a green tick was the whole reason "it just stopped" was a mystery.
+                const stopped = log.data?.stopReason;
+                const cls = stopped ? 'mlog-warn log-warn' : 'mlog-success log-success';
+                const ic = stopped ? '⚠️' : '✅';
+                const label = stopped ? '中断（上限到達）' : 'Complete';
+                return `<div class="mlog ${cls}"><span class="mlog-icon">${ic}</span><span class="mlog-body"><strong>${label}:</strong> ${escapeHtml(normalizeLeakedEscapes(log.data.message || ''))}</span></div>`;
+            }
             case 'finish_task':     return `<div class="mlog mlog-success log-success"><span class="mlog-icon">🏁</span><span class="mlog-body"><strong>Finished:</strong> ${escapeHtml(normalizeLeakedEscapes(log.data.summary || ''))}</span></div>`;
             case 'error':           return `<div class="mlog mlog-error log-error"><span class="mlog-icon">❌</span><span class="mlog-body"><strong>Error:</strong> ${escapeHtml(log.data.error || '')}</span></div>`;
             case 'log':
@@ -1077,8 +1086,14 @@ export class MonitorView {
                 // is built AFTER ask_user, and clearing here made the trailing
                 // `complete` wipe the question (the "the question is invisible" bug). The
                 // 'waiting' status handler re-sets it below in this same handler.
+                // `phase: 'teardown'` marks bookkeeping the loop emits AFTER it has
+                // already broken (long-term memory, learned cards). Those are not a
+                // new run progressing, and treating them as one wiped the question
+                // the run had just paused on — the same bug as above, through a
+                // different door.
                 if (packet.event === 'thought' || packet.event === 'tool_call'
-                    || (packet.event === 'status' && packet.data?.status === 'running')) {
+                    || (packet.event === 'status' && packet.data?.status === 'running'
+                        && packet.data?.phase !== 'teardown')) {
                     this._awaitingUser = false;
                 }
 
@@ -1109,6 +1124,14 @@ export class MonitorView {
                 // LIVE (replay is buffered above, so this never runs during flush).
                 if (packet.event === 'result' && packet.data?.envelope) {
                     this._showLiveDeliverable(packet.data.envelope);
+                }
+                // Per-file descriptions that landed AFTER completion (they are
+                // decoration, so they must never delay the result). The packet is
+                // already in `this.logs`, so the canonical rebuild picks it up and
+                // patches the run's file table in place — no second run bubble.
+                if (packet.event === 'result_update' && Array.isArray(packet.data?.files)) {
+                    this._rebuildResultSummaries();
+                    this._renderResultPanel();
                 }
                 // New LLM step → the next stream chunks belong to a NEW narration
                 // bubble. Done at top level (not inside the All Logs branch below)
@@ -1675,6 +1698,12 @@ export class MonitorView {
                     si.placeholder = (st === 'failed' || st === 'aborted')
                         ? '⚠ Stopped. Add a message to continue / retry (Ctrl+Enter, / for skills)'
                         : '✓ Done. Add a message to continue the task (Ctrl+Enter, / for skills)';
+                    // …but when the run ended PAUSED ON A QUESTION nobody answered,
+                    // the reply box is where that answer goes — the card in the story
+                    // ("回答する") leads here. Saying "Done. Continue…" instead hid
+                    // that, and the task could never be resumed from the question.
+                    const pendingQ = this._timeline.items.find(i => i.kind === 'ask' && i.unanswered);
+                    if (pendingQ) si.placeholder = `❓ ${pendingQ.text}`;
                 }
                 if (sb) sb.disabled = false;
                 if (sba) sba.disabled = false;
@@ -1710,6 +1739,14 @@ export class MonitorView {
         if (!text && !hasImages) return;
         // An image-only message still deserves a visible bubble.
         this._timeline.pushRequest(String(text || '(image)'), hasImages ? images : null);
+
+        // Acknowledge INSTANTLY. The agent's first status event is one LLM call
+        // away — tens of seconds on a long context — and until it arrived the
+        // story sat unchanged, so a sent message looked like a message that had
+        // not been sent. This line and the "⏳ Working…" strip are the receipt.
+        this._liveActivitySeen = true;
+        this._setWorkingLabel(true);
+        this._timeline.pushActivity('thought', '📨 リクエストを受け付けました — 処理を開始します…');
         this._renderResultPanel();
         this._scrollTaskToBottom();
     }
@@ -1898,6 +1935,14 @@ export class MonitorView {
         const seen = new Set();
         const out = [];
         for (const l of (this.logs || [])) {
+            // Per-file descriptions are generated AFTER completion (they must not
+            // delay the result), so they arrive as a patch on the run they belong
+            // to — the one most recently pushed at this point in the log.
+            if (l.event === 'result_update' && Array.isArray(l.data?.files)) {
+                const target = out[out.length - 1];
+                if (target) applyFileDescriptions(target.files, l.data.files);
+                continue;
+            }
             if (l.event !== 'complete' || !l.data?.resultSummary) continue;
             const rs = l.data.resultSummary;
             const key = `${l.timestamp || ''}|${String(rs.request || '').slice(0, 120)}`;
@@ -1946,6 +1991,7 @@ export class MonitorView {
             onToggleStory: (ex, what) => this._toggleExchange(ex, what),
             onToggleCollapse: (id) => this._toggleCard(id),
             onAnswer: (ans) => this._answerAsk(ans),
+            onReopenAsk: (item) => this._reopenAsk(item),
             onCopyDoc: (text) => this._copyDeliverable(text),
             onOpenFile: (path) => openPathInDefaultApp(path, this._workspaceOf()),
         });
@@ -2041,6 +2087,7 @@ export class MonitorView {
             files,
             perStep,
             rates: this._costRates,
+            costTable: this._costTable,
             chapters: chapters(items),
             activeChapter: this._activeChapter,
             onAction: (act) => this._inspectorAction(act),
@@ -2277,6 +2324,11 @@ export class MonitorView {
             const r = stats?.costRates;
             // Rates of all zero mean "not configured": showing $0.00 everywhere
             // would read as "this was free", so leave the cost column out.
+            // model → rates, so a run that escalated tiers is priced per model
+            // rather than re-priced wholesale at whatever model is active now.
+            if (stats?.costTable && typeof stats.costTable === 'object') {
+                this._costTable = stats.costTable;
+            }
             if (r && (r.input_per_1m || r.cache_read_per_1m || r.output_per_1m)) {
                 this._costRates = r;
                 if (!this._destroyed) this._renderInspector();
@@ -2331,6 +2383,25 @@ export class MonitorView {
         const input = document.getElementById('input-steering');
         if (input) input.value = text;
         document.getElementById('btn-send-steering')?.click();
+    }
+
+    /**
+     * Re-arm the reply box for a question that CLOSED UNANSWERED.
+     *
+     * A replay of a finished task shows the question as history ("未回答のまま
+     * 終了しました") — which is honest, but it was also a dead end: the card
+     * offered no way in, and the reply box below only said "Done. Continue…", so
+     * an answer sent from there read as a fresh instruction rather than the reply
+     * the run is still paused on. This puts the QUESTION back on the reply box,
+     * so what the user sends next is unmistakably the answer — sending it
+     * continues the task (the same path any message to a finished task takes).
+     */
+    _reopenAsk(item) {
+        const si = document.getElementById('input-steering');
+        if (!si) return;
+        si.disabled = false;
+        si.placeholder = `❓ ${item.text}`;
+        try { si.focus(); } catch (_) {}
     }
 
     /**
@@ -3116,11 +3187,21 @@ export class MonitorView {
             }
         };
         document.addEventListener('keydown', this._newTaskKeyHandler);
-        // Auto-open the modal when arriving from the Dashboard's "New Task" button.
+        // Auto-open the modal when arriving from the Dashboard's launcher.
+        //
+        // The handoff used to be a bare '1' flag. It now carries what the user
+        // already typed there — `{prompt, ws}` — so the modal opens filled in
+        // rather than making them retype it. The old '1' is still honoured:
+        // it is what a stale flag written by a previous build looks like.
         try {
-            if (localStorage.getItem('jh_open_new_task')) {
+            const raw = localStorage.getItem('jh_open_new_task');
+            if (raw) {
                 localStorage.removeItem('jh_open_new_task');
-                this._openNewTaskModal();
+                let preset = null;
+                if (raw !== '1') {
+                    try { preset = JSON.parse(raw); } catch (_) { /* treat as bare flag */ }
+                }
+                this._openNewTaskModal(preset?.ws || null, preset?.prompt || '');
             }
         } catch (_) {}
 
@@ -3619,7 +3700,15 @@ export class MonitorView {
         document.body.appendChild(z);
     }
 
-    async _openNewTaskModal(presetWs = null) {
+    /**
+     * @param {string|null} presetWs  workspace to preselect (WS group "+", or the
+     *        Dashboard launcher's choice)
+     * @param {string} presetPrompt   text the user already typed on the Dashboard.
+     *        Filled in here rather than re-collected: this modal owns workspace
+     *        validation, the mode picker, MCP selection, "/" templates and
+     *        attachments, so it stays the single task-creation path.
+     */
+    async _openNewTaskModal(presetWs = null, presetPrompt = '') {
         let config = {};
         try { config = (await invoke('get_ai_config')) || {}; } catch (_) {}
         const projects = Array.isArray(config.approved_projects) ? config.approved_projects : [];
@@ -3796,6 +3885,12 @@ export class MonitorView {
             else setDragHL(false);
         }).then(un => { dragUnlisten = un; }).catch(() => {});
 
+        // Carry over what the Dashboard launcher already collected, and put the
+        // caret at the END so continuing to type appends rather than overwrites.
+        if (presetPrompt) {
+            textarea.value = presetPrompt;
+            textarea.setSelectionRange(presetPrompt.length, presetPrompt.length);
+        }
         textarea.focus();
 
         overlay.querySelector('.nt-browse').onclick = async () => {

@@ -30,6 +30,14 @@ pub struct LlmInstance {
     #[serde(default)]
     pub temperature: Option<f32>,
 
+    /// Whether this connection's model accepts IMAGES.
+    /// None ⇒ infer from the provider/model name (the historical behaviour).
+    /// Set explicitly for models the name heuristic cannot know about: a local
+    /// or OpenAI-compatible vision model (LLaVA, Qwen-VL, Llama Vision) has no
+    /// "gpt" in its name and was silently treated as text-only.
+    #[serde(default)]
+    pub supports_vision: Option<bool>,
+
     // ── Per-model pricing (USD per 1M tokens) ─────────────────────────────
     // Used to estimate task cost with THIS model's real rates instead of a
     // single global placeholder. All optional; unset ⇒ falls back to the
@@ -155,6 +163,21 @@ pub struct AiConfig {
     /// None ⇒ frontend default ("off").
     #[serde(default)]
     pub subagent_review: Option<String>,
+
+    /// Whether learned memory (lessons / insights) is RECALLED into a run:
+    /// "on" | "off" | "auto". "auto" withholds recall from a small random share
+    /// of sessions to form a control group — learning continues either way, so a
+    /// control session still produces data. None ⇒ frontend default ("on").
+    /// See docs/design/agent-memory-layers.md §6.
+    #[serde(default)]
+    pub memory_recall: Option<String>,
+
+    /// Move the run between the Fast and Deep tiers as it passes through
+    /// plan -> execute -> review, instead of picking one tier for the whole
+    /// task: "off" | "on". None => frontend default ("off").
+    /// See src/modules/ai/agent/ModelPhaseRouter.js.
+    #[serde(default)]
+    pub phase_routing: Option<String>,
 }
 
 /// Turn the UI's explicit-clear sentinel back into "unset".
@@ -204,6 +227,8 @@ pub async fn get_ai_config<R: tauri::Runtime>(
             deep_model_id: None,
             prompt_templates: None,
             subagent_review: None,
+            memory_recall: None,
+            phase_routing: None,
         });
     }
 
@@ -341,6 +366,12 @@ pub async fn save_ai_config<R: tauri::Runtime>(
                 if final_config.subagent_review.is_none() {
                     final_config.subagent_review = old_config.subagent_review;
                 }
+                if final_config.phase_routing.is_none() {
+                    final_config.phase_routing = old_config.phase_routing.clone();
+                }
+                if final_config.memory_recall.is_none() {
+                    final_config.memory_recall = old_config.memory_recall;
+                }
             }
         }
     }
@@ -399,6 +430,8 @@ pub async fn set_rag_approval<R: tauri::Runtime>(
             deep_model_id: None,
             prompt_templates: None,
             subagent_review: None,
+            memory_recall: None,
+            phase_routing: None,
         }
     };
 

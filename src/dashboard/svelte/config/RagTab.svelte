@@ -57,7 +57,7 @@
         </div>
 
         <div class="input-group">
-            <label class="input-label">Directories to Include</label>
+            <span class="input-label">Directories to Include</span>
             <div id="rag-dir-list" class="cfg-rag-dirs">
                 {#if !dirs.length}
                     <div class="cfg-rag-hint">Enter a workspace path and click "Load Directories".</div>
@@ -77,7 +77,7 @@
         </div>
 
         <div class="input-group">
-            <label class="input-label">File Extensions</label>
+            <span class="input-label">File Extensions</span>
             <div class="cfg-rag-exts">
                 {#each RAG_EXTENSIONS as ext (ext)}
                     <label class="cfg-rag-ext">

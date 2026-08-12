@@ -7,9 +7,11 @@ describe('languageOf', () => {
             expect(languageOf(p)).toBe('js');
         }
     });
-    it('maps rust and python', () => {
+    it('maps rust, python and java', () => {
         expect(languageOf('lib.rs')).toBe('rust');
         expect(languageOf('main.py')).toBe('python');
+        expect(languageOf('Main.java')).toBe('java');
+        expect(languageOf('src/com/example/Service.JAVA')).toBe('java');
     });
     it('returns empty for unsupported / missing', () => {
         expect(languageOf('README.md')).toBe('');
@@ -259,5 +261,136 @@ describe('extractSymbols — template literals are DATA, not code', () => {
     it('an UNescaped backtick does open a template (guards the case above)', () => {
         const src = ['const s = `open', 'function ghost() {}'].join('\n');
         expect(extractSymbols('a.js', src).map(s => s.name)).toEqual([]);
+    });
+});
+
+
+describe('extractSymbols — Java', () => {
+    const src = [
+        'package com.example;',
+        '',
+        'import java.util.List;',
+        '',
+        '/** Doc comment. */',
+        'public abstract class Service extends Base implements Runnable {',
+        '    private final List<String> names = new ArrayList<>();',
+        '    private static int counter;',
+        '',
+        '    public Service(String name) {',
+        '        this.name = name;',
+        '    }',
+        '',
+        '    @Override',
+        '    public void run() {',
+        '        System.out.println("go");',
+        '    }',
+        '',
+        '    private static <T> List<T> wrap(T item) {',
+        '        return List.of(item);',
+        '    }',
+        '',
+        '    protected String[] names() {',
+        '        return new String[0];',
+        '    }',
+        '',
+        '    static void helper(int a) {',
+        '        if (a > 0) {',
+        '            return compute(a);',
+        '        }',
+        '        throw new IllegalStateException("bad");',
+        '    }',
+        '}',
+        '',
+        'interface Repo<T> {',
+        '    T findById(long id);',
+        '}',
+        '',
+        'public enum Color { RED, GREEN }',
+        '',
+        'public record Point(int x, int y) {}',
+        '',
+        'public @interface Marker {}',
+    ].join('\n');
+
+    const syms = extractSymbols('Service.java', src);
+    const byName = (n) => syms.find(s => s.name === n);
+
+    it('finds every kind of type declaration', () => {
+        expect(byName('Service').kind).toBe('class');
+        expect(byName('Repo').kind).toBe('interface');
+        expect(byName('Color').kind).toBe('enum');
+        expect(byName('Point').kind).toBe('record');
+        expect(byName('Marker').kind).toBe('annotation');
+    });
+
+    it('does not read `@interface` as an interface', () => {
+        // The interface pattern would match the tail of `@interface Marker`, which is
+        // why the annotation pattern is ordered first.
+        expect(byName('Marker').kind).not.toBe('interface');
+    });
+
+    it('finds methods regardless of modifiers, generics and array returns', () => {
+        expect(byName('run').kind).toBe('method');
+        expect(byName('wrap').kind).toBe('method');
+        expect(byName('names').kind).toBe('method');
+        expect(byName('helper').kind).toBe('method');
+        expect(byName('findById').kind).toBe('method');
+    });
+
+    it('tells a constructor from a method', () => {
+        // `public Service(...)` has no return type; `public void run()` does.
+        expect(byName('Service').kind).toBe('class');
+        expect(syms.filter(s => s.kind === 'constructor').map(s => s.name)).toEqual(['Service']);
+    });
+
+    it('NEVER indexes a call site as a definition', () => {
+        // The expensive failure mode: `return compute(a)` reported as the definition
+        // of `compute` sends the agent to the wrong file:line and it believes it.
+        expect(byName('compute')).toBeUndefined();
+        expect(byName('println')).toBeUndefined();
+        expect(byName('IllegalStateException')).toBeUndefined();
+        expect(byName('ArrayList')).toBeUndefined();
+    });
+
+    it('does not index fields', () => {
+        expect(byName('counter')).toBeUndefined();
+        // `names` exists only as the method, at its own line.
+        expect(syms.filter(s => s.name === 'names')).toHaveLength(1);
+    });
+
+    it('marks `public` as exported and package-private as not', () => {
+        expect(byName('Service').exported).toBe(true);
+        expect(byName('run').exported).toBe(true);      // @Override public void run()
+        expect(byName('wrap').exported).toBe(false);    // private
+        expect(byName('helper').exported).toBe(false);  // package-private
+        expect(byName('Repo').exported).toBe(false);
+    });
+
+    it('reports 1-based lines that point at the declaration', () => {
+        const lines = src.split('\n');
+        for (const sym of syms) {
+            expect(lines[sym.line - 1]).toContain(sym.name);
+        }
+    });
+
+    it('skips commented-out declarations', () => {
+        const commented = [
+            '// public class Ghost {}',
+            '/* public class Blocked {}',
+            '   public void alsoBlocked() {}',
+            '*/',
+            'public class Real {}',
+        ].join('\n');
+        expect(extractSymbols('A.java', commented).map(s => s.name)).toEqual(['Real']);
+    });
+
+    it('does not let Java visibility leak into JS/TS', () => {
+        // EXPORT_MARKER is per-language because `public` is also a TypeScript member
+        // modifier. Such members are not indexed at all today; the guarantee under
+        // test is that nothing in a TS file is ever marked exported merely for saying
+        // `public` — matchSymbols scores `exported` higher, so that would silently
+        // re-rank every TypeScript search.
+        const ts = ['class A {', '    public run() {}', '    hidden() {}', '}'].join('\n');
+        expect(extractSymbols('a.ts', ts).every(s => !s.exported)).toBe(true);
     });
 });

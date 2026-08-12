@@ -8,6 +8,7 @@
   command that can never be invoked.
 -->
 <script>
+    import { untrack } from 'svelte';
     import { icon } from '../../utils/icons.js';
     import { templateRefusal } from '../../views/config/lists.js';
 
@@ -24,12 +25,14 @@
     } = $props();
 
     const PREVIEW = 80;
-    let form = $state({
+    // Seeded once — see the note in ConnectionModal.svelte. untrack() says so to the
+    // compiler instead of tripping its "only the initial value" warning.
+    let form = $state(untrack(() => ({
         key: editing?.key || '',
         label: editing?.label || '',
         prompt: editing?.prompt || '',
         icon: editing?.icon || '📝',
-    });
+    })));
     let error = $state('');
     const isEdit = $derived(!!editing);
 

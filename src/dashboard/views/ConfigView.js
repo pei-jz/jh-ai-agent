@@ -4,6 +4,17 @@ import { promptTemplateManager } from '../../modules/ai/PromptTemplateManager.js
 import { skillManager } from '../../modules/ai/SkillManager.js';
 import { icon } from '../utils/icons.js';
 import { classifyCommand } from '../../modules/ai/tools/commandPolicy.js';
+// The stored-length cap for one fact. This tab is a WRITE path into facts.json,
+// so it has to respect the same limit the agent's own writes do.
+import { capFactText } from '../../modules/ai/memory/FactStore.js';
+// The `.agent/` reader/writer, shared with the Dashboard's memory panel. It used
+// to live here as four path strings and three parsers; a second copy in another
+// view is how cards.jsonl would have ended up written as a JSON array by one of
+// them and appended to by the agent as JSON Lines.
+import {
+    memoryPaths, readWorkspaceMemory, allowMemoryDir,
+    writeCards, writeFacts, writeEpisodes,
+} from '../../modules/ai/memory/workspaceMemory.js';
 import { CONFIG_SECTION_STYLES, CONFIG_MODAL_STYLES } from './ConfigView.styles.js';
 // MIGRATED regions (region 5 of docs/design/svelte-migration.md). The provider
 // table they share is views/config/providers.js.
@@ -63,6 +74,7 @@ export class ConfigView {
         this.memoryWorkspace = '';
         this.memoryFacts = null;
         this.memoryEpisodes = null;
+        this.memoryCards = null;
         this.showModal = false;
         this.editingInstance = null; // null if adding new
         // Test-connection result for the modal: {state, message} or null.
@@ -330,6 +342,7 @@ export class ConfigView {
                 projects,
                 facts: this.memoryFacts,
                 episodes: this.memoryEpisodes,
+                cards: this.memoryCards,
                 onWorkspaceChange: (v) => { this.memoryWorkspace = v.trim(); },
                 onBrowse: async () => {
                     try {
@@ -342,7 +355,7 @@ export class ConfigView {
                     await this.loadMemoryData();
                     this._syncListTabs();
                 },
-                onEditFact: (i, text) => this._mutateFacts(list => { list[i].fact = text; }),
+                onEditFact: (i, text) => this._mutateFacts(list => { list[i].fact = capFactText(text); }),
                 onDeleteFact: (i) => {
                     if (!confirm('Delete this fact?')) return;
                     this._mutateFacts(list => { list.splice(i, 1); });
@@ -354,6 +367,17 @@ export class ConfigView {
                 onDeleteEpisode: (i) => {
                     if (!confirm('Delete this episode?')) return;
                     this._mutateEpisodes(list => { list.splice(i, 1); });
+                },
+                // Switching a card off keeps it (it can come back) but takes it out
+                // of recall — CardStore scores a disabled card at zero.
+                onToggleCard: (i, disabled) => this._mutateCards(list => { list[i].disabled = disabled; }),
+                onDeleteCard: (i) => {
+                    if (!confirm('Delete this learned card?')) return;
+                    this._mutateCards(list => { list.splice(i, 1); });
+                },
+                onClearCards: () => {
+                    if (!confirm('Delete ALL learned cards?')) return;
+                    this._mutateCards(list => { list.length = 0; });
                 },
                 onClearEpisodes: () => {
                     if (!confirm('Delete ALL session history?')) return;
@@ -390,6 +414,20 @@ export class ConfigView {
             await this.saveMemoryFacts();
         } catch (e) {
             alert('Failed to save facts.json: ' + e);
+            await this.loadMemoryData();
+            this._syncListTabs();
+        }
+    }
+
+    /** Same contract as _mutateFacts, for the experience cards. */
+    async _mutateCards(fn) {
+        if (!Array.isArray(this.memoryCards)) return;
+        fn(this.memoryCards);
+        this._syncListTabs();
+        try {
+            await this.saveMemoryCards();
+        } catch (e) {
+            alert('Failed to save cards.jsonl: ' + e);
             await this.loadMemoryData();
             this._syncListTabs();
         }
@@ -576,8 +614,16 @@ export class ConfigView {
             history_compress_ratio:      (this.config.history_compress_ratio ?? null),
             plan_mode:                   (this.config.plan_mode || 'auto'),
             subagent_review:             (this.config.subagent_review || 'off'),
-            fast_model_id:               (this.config.fast_model_id || null),
-            deep_model_id:               (this.config.deep_model_id || null),
+            memory_recall:               (this.config.memory_recall || 'on'),
+            phase_routing:               (this.config.phase_routing || 'off'),
+            // `??`, NOT `||`. "(not set)" sends an EMPTY STRING as the explicit
+            // clear sentinel — `||` collapsed it to null, which the backend's
+            // field-wise merge reads as "the caller didn't mention this" and
+            // restores the previous model. That is the reported bug: choosing
+            // "(not set)" appeared to save and came back with the old model.
+            // See normalizeModelId + clear_blank_routing (ai_config.rs).
+            fast_model_id:               (this.config.fast_model_id ?? null),
+            deep_model_id:               (this.config.deep_model_id ?? null),
             prompt_templates:            promptTemplateManager.toConfigValue()
         };
 
@@ -813,7 +859,6 @@ export class ConfigView {
             `;
         } else if (this.activeTab === 'general') {
             tabContentHtml = `
-                <style>${CONFIG_SECTION_STYLES}</style>
                 <div class="card settings-card" style="height: 100%;">
                     <div class="card-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
                         <div>
@@ -848,6 +893,12 @@ export class ConfigView {
         const modalHtml = '<div id="cfg-conn-modal"></div>';
 
         return `
+            <!-- Both style blocks are emitted for EVERY tab. CONFIG_SECTION_STYLES
+                 used to live inside the General tab's branch, so .cfg-* (which the
+                 Memory / RAG / Templates / Skills tabs are built out of) only
+                 existed while General was the active tab — open Settings on Memory
+                 and the tab rendered with no CSS at all. -->
+            <style>${CONFIG_SECTION_STYLES}</style>
             <style>${CONFIG_MODAL_STYLES}</style>
 
             <div class="view-container">
@@ -1112,38 +1163,33 @@ export class ConfigView {
     // (episodic session summaries) live under <workspace>/.agent/. This tab makes
     // them visible so wrong or stale memories can be corrected by the user.
 
-    _memoryPaths(ws) {
-        const root = String(ws || '').replace(/[\\/]+$/, '');
-        return {
-            facts: `${root}/.agent/long_term/facts.json`,
-            episodes: `${root}/.agent/memory.json`,
-        };
+    // Thin wrappers over memory/workspaceMemory.js. Kept as methods because the
+    // tests drive them through the view, but the paths, parsing and path-guard
+    // grant all live in the shared module now.
+    _memoryPaths(ws) { return memoryPaths(ws); }
+
+    async _allowMemoryDir() {
+        await allowMemoryDir(this.memoryWorkspace, invoke);
     }
 
     async loadMemoryData() {
-        const ws = this.memoryWorkspace;
-        if (!ws) return;
-        const p = this._memoryPaths(ws);
-        try {
-            const raw = await invoke('read_file', { path: p.facts });
-            const parsed = raw ? JSON.parse(raw) : [];
-            this.memoryFacts = Array.isArray(parsed) ? parsed : [];
-        } catch (_) { this.memoryFacts = []; }
-        try {
-            const raw = await invoke('read_file', { path: p.episodes });
-            const parsed = raw ? JSON.parse(raw) : [];
-            this.memoryEpisodes = Array.isArray(parsed) ? parsed : [];
-        } catch (_) { this.memoryEpisodes = []; }
+        if (!this.memoryWorkspace) return;
+        const { facts, episodes, cards } = await readWorkspaceMemory(this.memoryWorkspace, invoke);
+        this.memoryFacts = facts;
+        this.memoryEpisodes = episodes;
+        this.memoryCards = cards;
     }
 
     async saveMemoryFacts() {
-        const p = this._memoryPaths(this.memoryWorkspace);
-        await invoke('write_file', { path: p.facts, content: JSON.stringify(this.memoryFacts || [], null, 2) });
+        await writeFacts(this.memoryWorkspace, this.memoryFacts, invoke);
     }
 
     async saveMemoryEpisodes() {
-        const p = this._memoryPaths(this.memoryWorkspace);
-        await invoke('write_file', { path: p.episodes, content: JSON.stringify(this.memoryEpisodes || [], null, 2) });
+        await writeEpisodes(this.memoryWorkspace, this.memoryEpisodes, invoke);
+    }
+
+    async saveMemoryCards() {
+        await writeCards(this.memoryWorkspace, this.memoryCards, invoke);
     }
 
     // NOTE: renderMemoryTabHtml / renderRagTabHtml / renderTemplatesTabHtml /

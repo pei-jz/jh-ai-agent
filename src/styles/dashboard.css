@@ -407,31 +407,17 @@ body {
   /* No transition — fixed width, no hover expand */
 }
 
-.sidebar-logo {
-  height: 56px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-}
-.sidebar-logo-icon {
-  font-size: var(--fs-2xl);
-  width: 32px;
-  text-align: center;
-  filter: drop-shadow(0 0 8px var(--accent-glow));
-}
-/* Logo text is hidden permanently — icon only */
-.sidebar-logo-text {
-  display: none;
-}
+/* The logo block is gone — see the note at the top of components/Sidebar.js.
+   Its rules are removed rather than left orphaned: dead selectors are how a
+   stylesheet ends up with three ways to size the same thing. */
 
 .sidebar-nav {
   flex: 1;
   display: flex;
   flex-direction: column;
-  padding: 8px 0;
+  /* A little more at the top than the bottom: without the old logo block, the
+     first item would otherwise sit hard against the title bar. */
+  padding: 12px 0 8px;
   gap: 2px;
 }
 
@@ -509,12 +495,17 @@ body {
   transform: translateY(-50%) translateX(0);
 }
 
+/* Below the rule: the app itself (Settings, the build), not the work. Settings
+   keeps the full .sidebar-item treatment — same hit area, same active rail —
+   because it is still a route; only its GROUPING changed. */
 .sidebar-footer {
-  padding: 12px 0;
+  padding: 6px 0 10px;
   border-top: 1px solid var(--border);
   flex-shrink: 0;
   display: flex;
-  justify-content: center;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
 }
 .sidebar-version {
   font-size: var(--fs-2xs);
@@ -528,9 +519,11 @@ body {
   overflow-y: auto;
   overflow-x: hidden;
   /* Tighter top/left — 32px all around wasted space next to the sidebar and
-     under the titlebar. Views that size themselves with
-     calc(100vh - titlebar - Npx) assume top+bottom = 34px total. */
-  padding: 14px 20px 20px 16px;
+     under the titlebar. The top is now 4px: this is the band directly under the
+     titlebar, where a gap reads as dead space rather than as breathing room.
+     Views that size themselves with calc(100vh - titlebar - Npx) assume
+     top+bottom = 24px total — change both together or they overflow. */
+  padding: 4px 20px 20px 16px;
   position: relative;
 }
 
@@ -1239,7 +1232,7 @@ tr:hover td {
 .split-pane {
   display: flex;
   gap: 20px;
-  height: calc(100vh - var(--titlebar-height) - 110px);
+  height: calc(100vh - var(--titlebar-height) - 100px);
 }
 .split-left {
   width: 340px;

@@ -76,7 +76,21 @@ Windows のユーザ名が非ASCII(日本語/韓国語等)を含む環境で `pr
 
 ## ライセンス
 
-MIT License — 詳細は [LICENSE](./LICENSE) を参照。
+**MIT OR Apache-2.0** のデュアルライセンスです。どちらか好きな方を選んでください
+（両方に従う必要はありません）。
+
+- [LICENSE-MIT](./LICENSE-MIT) — 短く単純。特許については何も述べていません
+- [LICENSE-APACHE](./LICENSE-APACHE) — **明示的な特許許諾**を含みます。企業の法務
+  レビューではこちらが求められることがあります
+
+`SPDX-License-Identifier: MIT OR Apache-2.0`
+
+同梱している第三者コンポーネント（`public/tree-sitter/` の WebAssembly、
+`.proto_include/` の Google 標準 proto）はそれぞれ独自のライセンスのままです。
+一覧と帰属表示は [THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md) にあります。
+
+貢献の条件（inbound = outbound、DCO サインオフ）は
+[CONTRIBUTING.md](./CONTRIBUTING.md) を参照してください。
 
 ---
 

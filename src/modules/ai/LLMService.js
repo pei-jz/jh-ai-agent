@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { tokenEstimator } from './TokenEstimator.js';
+import { inferVisionSupport } from './modelCapabilities.js';
 
 class LLMService {
     constructor() {
@@ -299,20 +300,18 @@ class LLMService {
     modelSupportsVision(modelId) {
         if (!modelId) return false;
         const meta = this._resolveModelMeta(modelId);
+        // The connection's OWN answer wins. The name heuristic below cannot know
+        // that a local `llava` or `qwen2-vl` takes images, and it wrongly claims
+        // every anthropic/gemini model does.
+        if (typeof meta?.supportsVision === 'boolean') return meta.supportsVision;
+
         let provider = (meta?.provider || '').toLowerCase();
         if (!provider) {
             provider = (modelId === this.currentModel)
                 ? (this.getCurrentProvider() || '').toLowerCase()
                 : (modelId.split(':')[0] || '').toLowerCase();
         }
-        const model = modelId.substring(modelId.indexOf(':') + 1).toLowerCase();
-        if (provider === 'gemini' || provider === 'anthropic') return true;
-        if (provider === 'openai' || provider === 'azure' || provider === 'generic') {
-            return model.includes('gpt') || model.includes('chatgpt')
-                || model.startsWith('o1') || model.startsWith('o3') || model.startsWith('o4')
-                || model.includes('-o1') || model.includes('-o3') || model.includes('-o4');
-        }
-        return false;
+        return inferVisionSupport(provider, modelId.substring(modelId.indexOf(':') + 1));
     }
 
     /**
@@ -328,6 +327,8 @@ class LLMService {
             contextWindow: Number(m.context_window) || 0,
             maxOutputTokens: Number(m.max_output_tokens) || null,
             temperature: (m.temperature ?? null),
+            // null/undefined ⇒ no explicit answer; fall back to the name heuristic.
+            supportsVision: (typeof m.supports_vision === 'boolean' ? m.supports_vision : null),
         };
     }
 
@@ -356,8 +357,16 @@ class LLMService {
         );
     }
 
-    async generate(prompt, systemPrompt, onStream, abortSignal) {
-        return await this.chat([{ role: 'user', content: prompt }], systemPrompt, onStream, abortSignal);
+    /**
+     * One-shot completion. `modelOverride` lets a caller route a cheap auxiliary
+     * call (result summaries, memory extraction) to the Fast tier instead of the
+     * active — usually expensive — model. Null keeps the active model.
+     */
+    async generate(prompt, systemPrompt, onStream, abortSignal, modelOverride = null) {
+        return await this.chat(
+            [{ role: 'user', content: prompt }], systemPrompt, onStream, abortSignal,
+            [], null, modelOverride
+        );
     }
 
     async chat(messages, systemPrompt, onStream, abortSignal, images = [], temperatureOverride = null, modelOverride = null) {

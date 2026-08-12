@@ -144,7 +144,12 @@ export async function handleRunCommand(ctx, args, onConfirm, onAgentStatus) {
     const commandPromise = invoke('run_command', {
         command: args.command,
         cwd: runCwd,
-        commandId: cmdId
+        commandId: cmdId,
+        // Give Rust the SAME deadline plus a small grace. Rust is the one that can
+        // actually kill the child; the race below only stops us waiting. Before this,
+        // a timed-out command was abandoned but left running — orphaned processes
+        // holding ports and locks, and blocked Tauri worker threads.
+        timeoutSecs: Math.ceil(timeoutMs / 1000) + 5,
     });
     const timeoutPromise = new Promise((_, reject) =>
         setTimeout(
@@ -158,9 +163,11 @@ export async function handleRunCommand(ctx, args, onConfirm, onAgentStatus) {
         result = await Promise.race([commandPromise, timeoutPromise]);
     } catch (e) {
         if (e.message?.includes('timed out')) {
-            return `Error: Command timed out after ${timeoutMs / 1000} seconds. ` +
-                `The process may still be running in the background. ` +
-                `If this command needs more time, retry with a larger timeout_ms value.`;
+            return `Error: Command timed out after ${timeoutMs / 1000} seconds and was killed. ` +
+                `Common causes: the command waited for input (stdin is closed, so prompts ` +
+                `see EOF), or it does not exit on its own (watch mode, a dev server). ` +
+                `Re-run it with a non-interactive / run-once flag, or pass a larger ` +
+                `timeout_ms if it is simply slow.`;
         }
         throw e;
     } finally {

@@ -1,21 +1,44 @@
-MIT License
+J.H AI Agent is licensed under EITHER of the following, at your option:
 
-Copyright (c) 2026 J.H AI Agent Contributors
+  * Apache License, Version 2.0 ......... see LICENSE-APACHE
+    (http://www.apache.org/licenses/LICENSE-2.0)
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+  * MIT License ......................... see LICENSE-MIT
+    (http://opensource.org/licenses/MIT)
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+SPDX-License-Identifier: MIT OR Apache-2.0
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+You may pick whichever you prefer. You do not need to comply with both, and you do
+not need to tell us which one you chose.
+
+
+WHY TWO
+-------
+
+Both are permissive: use, modify, redistribute, sell, or build something closed on
+top of this, without owing us anything. They differ in one respect that matters to
+some organisations:
+
+  * Apache-2.0 includes an EXPRESS PATENT GRANT. Contributors grant you a licence to
+    any of their patents that the software necessarily infringes, and that grant
+    terminates only if you initiate patent litigation over the software. Corporate
+    legal review often asks for this.
+
+  * MIT is shorter and simpler, and is silent on patents.
+
+Offering both means neither preference blocks adoption. This mirrors the convention
+of the Rust ecosystem, which J.H AI Agent depends on heavily.
+
+
+WHAT THIS COVERS
+----------------
+
+The above applies to the source code in this repository.
+
+Third-party components redistributed here — the tree-sitter WebAssembly binaries
+under public/tree-sitter/, and the Google protocol-buffer definitions under
+.proto_include/ — remain under their own licences and carry their own copyright
+notices. See THIRD-PARTY-NOTICES.md.
+
+Dependencies fetched at build time by npm and cargo are not covered by this file and
+remain under their own licences.

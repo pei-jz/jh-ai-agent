@@ -50,6 +50,8 @@ export function textStep(text) {
  *   config          object returned by the mocked `get_ai_config` invoke
  *   caller          e.g. 'NewTask' (plan-first only applies to interactive callers)
  *   nativeTools     whether the model claims native tool-calling (default true)
+ *   invokeResults   cmd → value | (args) => value, for the loop's OWN Tauri calls
+ *                   (memory files, artifacts) as opposed to tool results
  */
 export function makeHarness(opts = {}) {
     const {
@@ -60,6 +62,8 @@ export function makeHarness(opts = {}) {
         caller = 'Test',
         nativeTools = true,
         vision = false,
+        /** cmd → value | (args) => value, for the loop's own Tauri calls. */
+        invokeResults = {},
     } = opts;
 
     const state = {
@@ -67,12 +71,18 @@ export function makeHarness(opts = {}) {
         toolCalls: [],
         /** Every onAgentStatus event the loop emitted. */
         events: [],
+        /** Every Tauri `invoke` the loop made: { cmd, args }. */
+        invokeCalls: [],
         /** System prompts handed to the LLM, one per call. */
         prompts: [],
         /** The history array as seen by each LLM call. */
         histories: [],
         /** The `images` argument of each LLM call, one entry per call. */
         imagesPerCall: [],
+        /** The model OVERRIDE passed to each LLM call — null = the active model.
+            This is what tier / phase routing actually moves, so it is the only
+            way to assert that a run switched models mid-task. */
+        modelsPerCall: [],
         /** How many times the mock LLM was asked for a turn. */
         llmCalls: 0,
         /** Files the fake ToolExecutor recorded as modified. */
@@ -99,6 +109,17 @@ export function makeHarness(opts = {}) {
 
     const usage = { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
 
+    // ── mock conversationMemory ────────────────────────────────────────
+    // Exposed on the harness so a test can make `addEntry` hang: the run must
+    // finish without it, since long-term memory is recorded off the result path.
+    const conversationMemory = {
+        loadMemory: vi.fn(async () => {}),
+        addEntry: vi.fn(async () => {}),
+        setBudgetConfig: vi.fn(),
+        // Identity compaction — the loop's own compression still runs.
+        compactHistory: vi.fn(async (history) => history),
+    };
+
     // ── mock llmService ────────────────────────────────────────────────
     const llmService = {
         initFromConfig: vi.fn(async () => {}),
@@ -111,17 +132,19 @@ export function makeHarness(opts = {}) {
         currentMaxOutputTokens: 4096,
         generate: vi.fn(async () => 'generated'),
         // JSON-protocol path: returns the envelope as text.
-        chat: vi.fn(async (history, systemPrompt, _onStream, _signal, images = []) => {
+        chat: vi.fn(async (history, systemPrompt, _onStream, _signal, images = [], _temp = null, model = null) => {
             state.prompts.push(systemPrompt);
             state.histories.push(JSON.parse(JSON.stringify(history)));
             state.imagesPerCall.push([...(images || [])]);
+            state.modelsPerCall.push(model || null);
             return { content: renderTurn(nextTurn()), usage };
         }),
         // Native path: returns structured toolCalls.
-        chatWithTools: vi.fn(async (history, systemPrompt, _tools, _signal, images = []) => {
+        chatWithTools: vi.fn(async (history, systemPrompt, _tools, _signal, images = [], _temp = null, model = null) => {
             state.prompts.push(systemPrompt);
             state.histories.push(JSON.parse(JSON.stringify(history)));
             state.imagesPerCall.push([...(images || [])]);
+            state.modelsPerCall.push(model || null);
             const turn = nextTurn();
             if (turn && turn.__text !== undefined) {
                 return { content: turn.__text, toolCalls: null, usage };
@@ -207,8 +230,13 @@ export function makeHarness(opts = {}) {
         vi.resetModules();
 
         vi.doMock('@tauri-apps/api/core', () => ({
-            invoke: vi.fn(async (cmd) => {
+            invoke: vi.fn(async (cmd, args) => {
+                // Recorded so a test can assert on the loop's own side effects
+                // (e.g. the session failure trace) and not just on tool calls.
+                state.invokeCalls.push({ cmd, args });
                 if (cmd === 'get_ai_config') return config;
+                const canned = invokeResults[cmd];
+                if (canned !== undefined) return typeof canned === 'function' ? canned(args) : canned;
                 return null;
             }),
         }));
@@ -220,15 +248,7 @@ export function makeHarness(opts = {}) {
             },
             ContextBuilder: { getJsonModeProtocol: () => 'JSON PROTOCOL' },
         }));
-        vi.doMock('../ConversationMemory.js', () => ({
-            conversationMemory: {
-                loadMemory: vi.fn(async () => {}),
-                addEntry: vi.fn(async () => {}),
-                setBudgetConfig: vi.fn(),
-                // Identity compaction — the loop's own compression still runs.
-                compactHistory: vi.fn(async (history) => history),
-            },
-        }));
+        vi.doMock('../ConversationMemory.js', () => ({ conversationMemory }));
         vi.doMock('../TokenEstimator.js', () => ({
             tokenEstimator: {
                 estimateTokens: () => 100,
@@ -273,9 +293,13 @@ export function makeHarness(opts = {}) {
         build,
         state,
         llmService,
+        conversationMemory,
         toolExecutor,
         get toolCalls() { return state.toolCalls; },
         get events() { return state.events; },
+        get invokeCalls() { return state.invokeCalls; },
+        /** The model override used for each LLM call, in order. */
+        get modelsPerCall() { return state.modelsPerCall; },
         /** Status messages only — handy for asserting gates fired. */
         messages() { return state.events.map(e => e.message).filter(Boolean); },
         /** True if any status message matches. */

@@ -1,17 +1,65 @@
 These .wasm files are third-party software redistributed with J.H AI Agent.
+
 This file travels with them because a compiled .wasm carries no notice of its own,
-and MIT requires the notice to be included in copies. Full detail, including the
-outstanding item on the grammar binaries, is in THIRD-PARTY-NOTICES.md at the repo
-root.
+and MIT requires the copyright and permission notices to be included in all copies.
+Vite copies this directory verbatim into the build, so the notices ship with the app.
 
-────────────────────────────────────────────────────────────────────────
-tree-sitter.wasm — the tree-sitter runtime (web-tree-sitter)
-https://github.com/tree-sitter/tree-sitter
-────────────────────────────────────────────────────────────────────────
+Every notice below was transcribed verbatim from the published package's own LICENSE
+file (via `npm pack <name>@<version>`), not reconstructed. See THIRD-PARTY-NOTICES.md
+at the repo root for the audit and for how to re-verify.
 
-The MIT License (MIT)
+════════════════════════════════════════════════════════════════════════
+COPYRIGHT HOLDERS
+════════════════════════════════════════════════════════════════════════
 
-Copyright (c) 2018-2021 Max Brunsfeld
+tree-sitter.wasm — the tree-sitter runtime
+    from web-tree-sitter (https://github.com/tree-sitter/tree-sitter)
+    Copyright (c) 2018-2021 Max Brunsfeld
+    MIT
+
+tree-sitter-javascript.wasm
+    compiled from tree-sitter-javascript@0.20.3
+    (https://github.com/tree-sitter/tree-sitter-javascript)
+    Copyright (c) 2014 Max Brunsfeld
+    MIT
+
+tree-sitter-python.wasm
+    compiled from tree-sitter-python@0.21.0
+    (https://github.com/tree-sitter/tree-sitter-python)
+    Copyright (c) 2016 Max Brunsfeld
+    MIT
+
+tree-sitter-rust.wasm
+    compiled from tree-sitter-rust@0.20.4
+    (https://github.com/tree-sitter/tree-sitter-rust)
+    Copyright (c) 2017 Maxim Sokolov
+    MIT
+
+tree-sitter-java.wasm
+    compiled from tree-sitter-java@0.20.2
+    (https://github.com/tree-sitter/tree-sitter-java)
+    Copyright (c) 2017 Ayman Nadeem
+    MIT
+
+The four grammar binaries were compiled by tree-sitter-wasms@0.1.13
+(https://github.com/Gregoor/tree-sitter-wasms). That packaging layer is released
+into the public domain under the Unlicense and imposes no conditions of its own —
+but it cannot relicense the grammars it compiled, which is why their MIT notices
+appear above. The grammar versions are the ones that package pins for the build
+(`^0.20.3`, `^0.21.0`, `^0.20.4`, `^0.20.2`); the copyright lines do not change
+within those ranges.
+
+Note that all four grammars have DIFFERENT copyright holders. That is why none of
+these lines was written from memory.
+
+════════════════════════════════════════════════════════════════════════
+THE MIT LICENSE
+════════════════════════════════════════════════════════════════════════
+
+The permission and warranty text below is byte-identical in all five packages
+listed above (verified by hash), so it is reproduced once and applies to each of
+the copyright holders named above. Only their title lines differ — four say
+"The MIT License (MIT)" and tree-sitter-java says "MIT License".
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -30,16 +78,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
-────────────────────────────────────────────────────────────────────────
-tree-sitter-javascript.wasm, tree-sitter-python.wasm, tree-sitter-rust.wasm
-prebuilt by tree-sitter-wasms — https://github.com/Gregoor/tree-sitter-wasms
-────────────────────────────────────────────────────────────────────────
-
-The packaging is released into the public domain under the Unlicense and imposes
-no conditions.
-
-The grammars themselves come from tree-sitter/tree-sitter-javascript,
-tree-sitter/tree-sitter-python and tree-sitter/tree-sitter-rust, each MIT-licensed.
-Their verbatim notices are not reproduced here yet — see the open item in
-THIRD-PARTY-NOTICES.md §1. Do not ship a public release without resolving it.

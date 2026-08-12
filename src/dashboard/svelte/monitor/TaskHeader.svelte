@@ -72,10 +72,9 @@
                     title="Cache reads (~10% price = savings)">⚡{n(usage.cache_read_input_tokens)}</span> · <span
                     title="Output">↓{n(usage.completion_tokens)}</span>)</span>
             </div>
-            <div class="mdh-sub">
-                task <b>#{String(task.id || '').slice(0, 8)}</b>
-                {#if task.caller} · caller <b>{task.caller}</b>{/if}
-            </div>
+            <!-- The id / caller line is gone: the Inspector on the right already
+                 shows both, and a header line that only repeats what is visible
+                 beside it costs vertical space without adding anything. -->
         </div>
         <!-- Abort exists only while there is something to abort; it used to be
              REMOVED from the DOM by hand on completion. -->

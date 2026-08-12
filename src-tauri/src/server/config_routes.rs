@@ -30,7 +30,9 @@ pub(crate) async fn get_models(
                     "provider": inst.provider,
                     "context_window": inst.context_window,
                     "max_output_tokens": inst.max_output_tokens,
-                    "temperature": inst.temperature
+                    "temperature": inst.temperature,
+                    // null ⇒ the frontend infers from provider/model name.
+                    "supports_vision": inst.supports_vision
                 }));
             }
         }
@@ -179,6 +181,16 @@ pub(crate) async fn update_config(
                 }
                 if final_config.subagent_review.is_none() {
                     final_config.subagent_review = old_config.subagent_review;
+                }
+                // memory_recall was missing from this list while the Tauri
+                // command preserved it, so a save through the HTTP route reset
+                // it to the default. Same field-drop class as the routing-tier
+                // bug; fixed here rather than left next to its own fix.
+                if final_config.memory_recall.is_none() {
+                    final_config.memory_recall = old_config.memory_recall;
+                }
+                if final_config.phase_routing.is_none() {
+                    final_config.phase_routing = old_config.phase_routing;
                 }
             }
         }

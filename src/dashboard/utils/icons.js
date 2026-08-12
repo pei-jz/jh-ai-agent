@@ -12,13 +12,19 @@ const PATHS = {
     // MCP / connections — linked nodes
     mcp: `<circle cx="5" cy="5" r="2.2"/><circle cx="15" cy="15" r="2.2"/><circle cx="15" cy="5" r="2.2"/>
         <path d="M6.6 6.6l6.8 6.8M7.2 5h5.6"/>`,
-    // General / settings — 8-tooth cog (solid gear silhouette, not a thin sun)
-    gear: `<path d="M18.28 8.09 L18.28 11.91 L15.90 11.92 L15.52 12.81 L17.21 14.50 L14.50 17.21 L12.81 15.52 L11.92 15.90 L11.91 18.28 L8.09 18.28 L8.08 15.90 L7.19 15.52 L5.50 17.21 L2.79 14.50 L4.48 12.81 L4.10 11.92 L1.72 11.91 L1.72 8.09 L4.10 8.08 L4.48 7.19 L2.79 5.50 L5.50 2.79 L7.19 4.48 L8.08 4.10 L8.09 1.72 L11.91 1.72 L11.92 4.10 L12.81 4.48 L14.50 2.79 L17.21 5.50 L15.52 7.19 L15.90 8.08 Z"/>
-        <circle cx="10" cy="10" r="2.7"/>`,
+    // General / settings — 6-tooth cog. Machine-generated (tip r=8.3, root r=6.3)
+    // so the teeth are actually even; the 8-tooth polygon this replaces was
+    // plotted by hand and its unevenness was visible at 13px, where most of
+    // these are rendered. Six teeth, not eight: fewer and larger survives at
+    // small sizes. Same path as the sidebar's config glyph, deliberately.
+    gear: `<path d="M7.64 4.16 L7.85 1.98 L12.15 1.98 L12.36 4.16 L13.88 5.04 L15.87 4.13 L18.02 7.85 L16.24 9.12 L16.24 10.88 L18.02 12.15 L15.87 15.87 L13.88 14.96 L12.36 15.84 L12.15 18.02 L7.85 18.02 L7.64 15.84 L6.12 14.96 L4.13 15.87 L1.98 12.15 L3.76 10.88 L3.76 9.12 L1.98 7.85 L4.13 4.13 L6.12 5.04 Z"/>
+        <circle cx="10" cy="10" r="2.6"/>`,
     // Templates — document with lines
     template: `<rect x="4" y="2.5" width="12" height="15" rx="1.5"/><path d="M7 6.5h6M7 10h6M7 13.5h4"/>`,
-    // Skills — lightning bolt
-    bolt: `<path d="M11 2.5L4.5 11h4l-1 6.5L15 9h-4l0-6.5z"/>`,
+    // Skills — lightning bolt. Redrawn symmetric about the diagonal: the old
+    // path had a flat `l0 -6.5` right edge against a sloped left one, so the
+    // glyph leaned.
+    bolt: `<path d="M11.4 2.2L4.2 11.2h4.3l-.9 6.6 7.2-9h-4.3z"/>`,
     // RAG / search — magnifier
     search: `<circle cx="8.5" cy="8.5" r="5"/><line x1="12.2" y1="12.2" x2="17" y2="17"/>`,
     // Memory — stacked database (long-term store)
@@ -64,8 +70,11 @@ const PATHS = {
     clipboard: `<rect x="5" y="4" width="10" height="13.5" rx="1.5"/><path d="M7.5 4V3a1 1 0 011-1h3a1 1 0 011 1v1"/><path d="M7.5 8.5h5M7.5 11.5h5M7.5 14.5h3"/>`,
     // Stop — abort a run
     stop: `<rect x="5" y="5" width="10" height="10" rx="1.5"/>`,
-    // Save — floppy disk
-    save: `<path d="M4 3h10l3 3v11H4z" transform="translate(-0.5,0)"/><path d="M6.5 3v4.5h6V3M6.5 17v-6h7v6"/>`,
+    // Save — floppy disk. The body is now a real rounded rect with a clipped
+    // corner instead of a square path nudged sideways by a transform, which is
+    // why the old one sat half a pixel left of everything beside it.
+    save: `<path d="M4.5 3h8.2L16.5 6.8V16a1.5 1.5 0 01-1.5 1.5H4.5A1.5 1.5 0 013 16V4.5A1.5 1.5 0 014.5 3z"/>
+        <path d="M6.6 3v4.2h6V3"/><path d="M6.1 17.5v-5.6h7.8v5.6"/>`,
     // Edit — pencil
     edit: `<path d="M13.5 3.5l3 3L7 16l-3.8.8L4 13z"/><path d="M11.8 5.2l3 3"/>`,
     // Cloud — Azure / hosted
@@ -78,8 +87,11 @@ const PATHS = {
     paper: `<path d="M4.5 2.5h8L16 6v11.5a1 1 0 01-1 1H4.5a1 1 0 01-1-1v-14a1 1 0 011-1z"/>
         <path d="M12.2 2.6V6.2h3.7"/><path d="M6 9.5h7M6 12h7M6 14.5h4.5"/>`,
 
-    // Monitor / Task view — a chart on a baseline (same glyph the sidebar uses)
-    monitor: `<polyline points="2,14 6,9 9,12 13,6 18,10"/><line x1="2" y1="17" x2="18" y2="17"/>`,
+    // Monitor / Task view — a screen with a live pulse, matching the sidebar's
+    // monitor glyph. The chart-on-a-baseline it replaces filled only 9 of the
+    // 20 grid (every other glyph fills ~15) and duplicated the analytics idea.
+    monitor: `<rect x="2.3" y="3.6" width="15.4" height="12.8" rx="2.4"/>
+        <path d="M5.2 10h2.1l1.5-3.1 2.3 6.2 1.4-3.1h2.3"/>`,
 
     // ── Task-view content icons ────────────────────────────────────────────
     // These replace the emoji the Task view used to draw with. Emoji render in
@@ -106,8 +118,10 @@ const PATHS = {
     clock: `<circle cx="10" cy="10" r="7"/><path d="M10 6v4.2l2.8 1.7"/>`,
     /** Steps taken — a pin. */
     steps: `<path d="M10 17.5s5.2-5 5.2-8.4a5.2 5.2 0 10-10.4 0C4.8 12.5 10 17.5 10 17.5z"/><circle cx="10" cy="9.1" r="1.9"/>`,
-    /** Token / compute count. */
-    tokens: `<circle cx="10" cy="10" r="7"/><path d="M7 10h6M10 7v6"/>`,
+    /** Token / compute count — a coin (ring in a disc). Replaces a circle with a
+     *  plus in it, which is the universal "add" glyph and read as a button.
+     *  Not a side-on stack: that is already the `memory` cylinder. */
+    tokens: `<circle cx="10" cy="10" r="7"/><circle cx="10" cy="10" r="3.1"/>`,
 };
 
 /** Return an inline SVG string for `name`, sized `size` px (default 1em). */

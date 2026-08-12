@@ -3,6 +3,7 @@ import { tokenEstimator } from './TokenEstimator.js';
 import LLMService from './LLMService.js';
 import { sanitizeXmlTags, relevanceScore, scoreMessageImportance } from './memory/MemoryScoring.js';
 import { mergeFacts as mergeFactsInto, selectRelevantFacts, pruneFacts, applyConsolidation } from './memory/FactStore.js';
+import { buildSummaryPrompt, parseSummary } from './memory/FactExtraction.js';
 
 // Minimum relevance (hits / query-units, 0..1) for a past-session summary or a
 // durable fact to be injected into the prompt. Kept LOW because the score
@@ -55,6 +56,17 @@ class ConversationMemory {
         // via setBudgetConfig() for per-task tuning.
         this.fileCacheBudgetRatio = 0.30;   // share of historyBudget (tokens)
         this.fileCacheMaxChars    = 120_000; // hard ceiling (~30K tokens)
+
+        // ── Write serialization ─────────────────────────────────────────
+        // addEntry is called WITHOUT await (it is post-completion bookkeeping, so
+        // it must not delay the result), and the app runs several tasks at once.
+        // Its writes are read-modify-write — appendJournal re-reads journal.md,
+        // saveFacts/saveMemory serialize shared in-memory arrays — so two
+        // overlapping calls would silently drop one session's record. Every
+        // addEntry links onto this promise chain instead of racing.
+        this._writeQueue = Promise.resolve();
+        // A consolidation pass is a maintenance job; never run two at once.
+        this._consolidating = false;
     }
 
     /**
@@ -210,9 +222,11 @@ class ConversationMemory {
      * text. Existing matches get their hit count bumped (so frequently-reaffirmed
      * facts survive pruning); genuinely new facts are appended.
      */
-    mergeFacts(newFacts, sessionId) {
-        // Dedup/near-dup merge logic → ./memory/FactStore.js (unit-tested).
-        mergeFactsInto(this.facts, newFacts, sessionId);
+    mergeFacts(newFacts, sessionId, category = '') {
+        // Dedup/near-dup merge + the promotion matrix → ./memory/FactStore.js
+        // (unit-tested). `category` scopes an observation's repeat count to one
+        // area of the project, so three sightings mean three in the same area.
+        mergeFactsInto(this.facts, newFacts, sessionId, category);
     }
 
     /**
@@ -241,8 +255,23 @@ class ConversationMemory {
 
     /**
      * Add a conversation entry after an agent session completes.
+     *
+     * Callers do NOT await this — it runs after the run's result has already been
+     * delivered — so calls are queued rather than run concurrently (see
+     * `_writeQueue`). The returned promise still resolves when this particular
+     * entry has been persisted, which is what the tests wait on.
+     *
+     * @param {string|null} modelOverride model id for the summarisation call;
+     *   the Fast tier when the caller has one, since this is a JSON extraction.
      */
-    async addEntry(userQuery, agentResponse, sessionId = null, workspacePath = null, onLog = null) {
+    addEntry(userQuery, agentResponse, sessionId = null, workspacePath = null, onLog = null, modelOverride = null) {
+        const run = () => this._addEntryNow(userQuery, agentResponse, sessionId, workspacePath, onLog, modelOverride);
+        // A failed entry must not break the chain for the next one.
+        this._writeQueue = this._writeQueue.then(run, run);
+        return this._writeQueue;
+    }
+
+    async _addEntryNow(userQuery, agentResponse, sessionId, workspacePath, onLog, modelOverride = null) {
         if (!this.loaded) await this.loadMemory(workspacePath);
 
         const safeQuery = this._sanitizeXmlTags(String(userQuery || ''));
@@ -251,7 +280,7 @@ class ConversationMemory {
         let entry;
 
         try {
-            entry = await this._generateStructuredSummary(safeQuery, safeResponse, sessionId, onLog);
+            entry = await this._generateStructuredSummary(safeQuery, safeResponse, sessionId, onLog, modelOverride);
         } catch (e) {
             console.warn('AI Memory: LLM summarization failed, using fallback:', e);
             entry = {
@@ -277,15 +306,36 @@ class ConversationMemory {
             if (!this.factsLoaded) await this.loadFacts(workspacePath);
             await this.appendJournal(workspacePath, entry);
             if (entry.facts && entry.facts.length) {
-                this.mergeFacts(entry.facts, sessionId);
+                this.mergeFacts(entry.facts, sessionId, entry.category || '');
                 await this.saveFacts(workspacePath);
             }
-            // Consolidation pass (LLM): when the store nears its cap, merge
-            // duplicates and drop stale/contradicted facts. Best-effort.
-            await this.consolidateFacts(workspacePath, onLog);
         } catch (e) {
             console.warn('AI Memory: long-term persistence failed:', e);
         }
+
+        // Consolidation is a MAINTENANCE job, not part of recording this session:
+        // it rewrites the whole store with its own LLM call. Chaining it here made
+        // every Nth completed task pay for a store-wide cleanup. Detached, so the
+        // entry is durable the moment the lines above return.
+        this.maybeConsolidate(workspacePath, onLog, modelOverride);
+    }
+
+    /**
+     * Fire off a consolidation pass if the store warrants one. Detached by
+     * design — returns immediately, never throws, and is a no-op while another
+     * pass is in flight. `consolidateFacts` re-checks the threshold itself.
+     */
+    maybeConsolidate(workspacePath, onLog = null, modelOverride = null) {
+        if (this._consolidating) return;
+        if (!Array.isArray(this.facts) || this.facts.length < Math.floor(this.maxFacts * 0.8)) return;
+        this._consolidating = true;
+        // Onto the SAME queue as addEntry: consolidation rewrites `this.facts`
+        // wholesale from a snapshot, so an entry merging facts concurrently would
+        // have its facts erased by the write that follows.
+        const pass = () => this.consolidateFacts(workspacePath, onLog, modelOverride)
+            .catch(e => console.warn('AI Memory: background consolidation failed:', e))
+            .finally(() => { this._consolidating = false; });
+        this._writeQueue = this._writeQueue.then(pass, pass);
     }
 
     /**
@@ -295,7 +345,7 @@ class ConversationMemory {
      * threshold). Best-effort: any failure leaves the store untouched.
      * @returns {Promise<boolean>} true if a consolidation was applied
      */
-    async consolidateFacts(workspacePath, onLog = null) {
+    async consolidateFacts(workspacePath, onLog = null, modelOverride = null) {
         const threshold = Math.floor(this.maxFacts * 0.8);
         if (!Array.isArray(this.facts) || this.facts.length < threshold) return false;
         try {
@@ -315,7 +365,7 @@ ${list}`;
             let raw = '';
             const sys = 'You are a JSON generator. Output ONLY a valid JSON object, nothing else.';
             const _t0 = Date.now();
-            const gen = await LLMService.generate(prompt, sys, (chunk) => { raw += chunk; });
+            const gen = await LLMService.generate(prompt, sys, (chunk) => { raw += chunk; }, null, modelOverride);
             if (onLog) {
                 try {
                     onLog({
@@ -346,30 +396,17 @@ ${list}`;
     /**
      * Uses LLM to generate a structured summary of the session.
      */
-    async _generateStructuredSummary(query, response, sessionId, onLog = null) {
-        const prompt = `Analyze the following interaction with the AI assistant and output a JSON object summarizing it.
-Do not output any markdown code blocks or explanations, just the raw JSON object.
-
-[User Query]
-${query.substring(0, 500)}
-
-[AI Final Response]
-${response.substring(0, 1500)}
-
-JSON output format:
-{
-  "topic": "Topic of interaction within 40 characters",
-  "actions": ["Up to 3 short sentences of actions taken"],
-  "outcome": "success or partial or error",
-  "keyFiles": ["Up to 3 main file paths modified/referenced"],
-  "summary": "Summary of what was done and achieved within 120 characters",
-  "facts": ["Up to 3 DURABLE facts worth remembering long-term: project conventions, key decisions, architecture notes, or gotchas. Omit transient details. Empty array if none."]
-}`;
+    async _generateStructuredSummary(query, response, sessionId, onLog = null, modelOverride = null) {
+        // Prompt text and JSON parsing → ./memory/FactExtraction.js (pure, tested).
+        // What the summariser is ASKED for decides what can ever be remembered, so
+        // it is worth pinning by test rather than editing in place here.
+        const prompt = buildSummaryPrompt(query, response);
 
         let rawResult = '';
         const sumSys = 'You are a JSON generator. Output ONLY a valid JSON object, nothing else. No markdown, no explanation.';
         const _t0 = Date.now();
-        const gen = await LLMService.generate(prompt, sumSys, (chunk) => { rawResult += chunk; });
+        const gen = await LLMService.generate(prompt, sumSys, (chunk) => { rawResult += chunk; },
+            null, modelOverride);
         if (onLog) {
             try {
                 onLog({
@@ -382,25 +419,7 @@ JSON output format:
             } catch (_) {}
         }
 
-        let parsed;
-        const jsonMatch = rawResult.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-            parsed = JSON.parse(jsonMatch[0]);
-        } else {
-            throw new Error('LLM did not return valid JSON');
-        }
-
-        return {
-            timestamp: Date.now(),
-            date: new Date().toISOString().split('T')[0],
-            sessionId: sessionId || null,
-            topic: String(parsed.topic || '').substring(0, 80),
-            actions: Array.isArray(parsed.actions) ? parsed.actions.slice(0, 3).map(a => String(a).substring(0, 100)) : [],
-            outcome: ['success', 'partial', 'error'].includes(parsed.outcome) ? parsed.outcome : 'unknown',
-            keyFiles: Array.isArray(parsed.keyFiles) ? parsed.keyFiles.slice(0, 3).map(f => String(f).substring(0, 150)) : [],
-            summary: String(parsed.summary || '').substring(0, 200),
-            facts: Array.isArray(parsed.facts) ? parsed.facts.slice(0, 3).map(f => String(f).substring(0, 300)) : []
-        };
+        return parseSummary(rawResult, { sessionId });
     }
 
     /**

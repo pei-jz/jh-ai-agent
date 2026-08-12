@@ -46,7 +46,12 @@ export const AGENT_MODES = {
                 ['present_result', 'ask_user', 'create_artifact', 'update_artifact', 'write_docx'],
             ),
             persona_tier: 'general',
-            max_iterations: 40,
+            // 300, not 40. The old ceiling was low enough that ordinary work hit it —
+            // and hitting it looked like the agent had simply stopped for no reason.
+            // Steps are a poor proxy for cost anyway: the real safeguards are the token
+            // budget, the wall-clock timeout and the loop detectors, all configurable in
+            // Settings. This is a backstop against a runaway loop, not a work budget.
+            max_iterations: 300,
         }
     },
 
@@ -87,7 +92,7 @@ Rules:
             // included).
             enabled_tools: toolsOf(READ_TOOLS, WEB_TOOLS, OUTPUT_TOOLS, TASK_TOOLS, ['write_file', 'present_result', 'write_docx']),
             persona_tier: 'general',
-            max_iterations: 40
+            max_iterations: 300   // see the note on `general`
         }
     },
 
@@ -110,7 +115,7 @@ Rules:
 - Respond in Japanese unless asked otherwise.`,
             enabled_tools: toolsOf(READ_TOOLS, EDIT_TOOLS, OUTPUT_TOOLS, TASK_TOOLS, ['run_command']),
             persona_tier: 'develop',
-            max_iterations: 50
+            max_iterations: 300   // see the note on `general`
         }
     }
 };
