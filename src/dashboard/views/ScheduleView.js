@@ -120,7 +120,7 @@ export class ScheduleView {
     render() {
         return `
             <style>
-                .sch-layout { display: flex; gap: 16px; height: calc(100vh - var(--titlebar-height) - 70px); }
+                .sch-layout { display: flex; gap: 16px; height: calc(100vh - var(--titlebar-height) - 60px); }
                 .sch-list-panel {
                     width: 280px;
                     min-width: 220px;

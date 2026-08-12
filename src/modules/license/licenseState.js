@@ -4,7 +4,7 @@
 // sign this?". This module answers the part that is easy to get wrong and easy to
 // get cruel: is it still valid, what happens when it is not, and what do we say.
 //
-// The rules, from docs/design/licensing.md §4:
+// The rules, from docs/design/licensing.md §6:
 //   • an expired licence DEGRADES to community — it never locks the app or the
 //     user's own data;
 //   • there is a real grace period, because a renewal held up by an invoice cycle

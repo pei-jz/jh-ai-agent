@@ -2,7 +2,7 @@
 import { describe as suite, it, expect } from 'vitest';
 import {
     EDITIONS, ENFORCEMENT_ENABLED, FEATURE_MINIMUM, NEVER_GATED,
-    editionRank, atLeast, hasFeature, featuresOf, editionLabel,
+    editionRank, atLeast, hasFeature, featureAllowed, featuresOf, editionLabel,
 } from '../editions.js';
 
 suite('editionRank / atLeast', () => {
@@ -71,6 +71,41 @@ suite('hasFeature', () => {
     it('fails open for an unlisted feature', () => {
         // Forgetting a table entry must never accidentally lock something.
         expect(hasFeature('community', 'some_new_thing')).toBe(true);
+    });
+});
+
+suite('featureAllowed — what enforcement WOULD do', () => {
+    // Tested separately from hasFeature so flipping ENFORCEMENT_ENABLED is not the
+    // first time these rules ever execute.
+    it('closes paid features to the free tier', () => {
+        expect(featureAllowed('community', 'office_write')).toBe(false);
+        expect(featureAllowed('community', 'scheduled_tasks')).toBe(false);
+        expect(featureAllowed('community', 'audit_export')).toBe(false);
+    });
+
+    it('opens Pro features to Pro and above', () => {
+        expect(featureAllowed('pro', 'office_write')).toBe(true);
+        expect(featureAllowed('enterprise', 'office_write')).toBe(true);
+    });
+
+    it('keeps Enterprise features out of Pro', () => {
+        expect(featureAllowed('pro', 'audit_export')).toBe(false);
+        expect(featureAllowed('enterprise', 'audit_export')).toBe(true);
+    });
+
+    it('still fails open for an unlisted feature', () => {
+        expect(featureAllowed('community', 'not_in_the_table')).toBe(true);
+    });
+
+    it('never closes anything on the never-gated list', () => {
+        for (const feature of NEVER_GATED) {
+            expect(featureAllowed('community', feature), feature).toBe(true);
+        }
+    });
+
+    it('treats an unrecognised edition as the free tier', () => {
+        expect(featureAllowed('ultimate', 'office_write')).toBe(false);
+        expect(featureAllowed('', 'office_write')).toBe(false);
     });
 });
 

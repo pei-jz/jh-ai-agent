@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { mergeFacts, selectRelevantFacts, retentionScore, pruneFacts, applyConsolidation } from '../FactStore.js';
+import { mergeFacts, selectRelevantFacts, retentionScore, pruneFacts, applyConsolidation, capFactText, FACT_MAX_CHARS, factType } from '../FactStore.js';
 
 describe('mergeFacts', () => {
     it('adds new facts and skips too-short ones', () => {
@@ -160,5 +160,137 @@ describe('selectRelevantFacts', () => {
     it('empty query is unaffected by minScore (0.5 baseline clears the floor)', () => {
         const facts = [{ fact: 'anything', timestamp: 1 }];
         expect(selectRelevantFacts(facts, '', 5, 0.1)).toHaveLength(1);
+    });
+});
+
+// ── capFactText ──────────────────────────────────────────────────────────
+// Every write path into facts.json goes through this. The Memory tab's manual
+// edit used to assign the raw input, so a hand-edited fact could be unbounded
+// while an agent-written one was capped — the store's own invariant depended on
+// which door the text came in through.
+describe('capFactText', () => {
+    it('caps at FACT_MAX_CHARS', () => {
+        expect(capFactText('x'.repeat(400))).toHaveLength(FACT_MAX_CHARS);
+    });
+
+    it('leaves shorter text untouched', () => {
+        expect(capFactText('short fact')).toBe('short fact');
+    });
+
+    it('treats null/undefined as empty rather than "null"', () => {
+        expect(capFactText(null)).toBe('');
+        expect(capFactText(undefined)).toBe('');
+    });
+
+    it('is applied by mergeFacts on insert', () => {
+        const facts = [];
+        mergeFacts(facts, ['y'.repeat(500)]);
+        expect(facts[0].fact).toHaveLength(FACT_MAX_CHARS);
+    });
+
+    it('is applied by applyConsolidation when a merge rewrites the text', () => {
+        const facts = [
+            { fact: 'alpha fact here', hits: 1, timestamp: 1 },
+            { fact: 'beta fact here', hits: 1, timestamp: 2 },
+        ];
+        const next = applyConsolidation(facts, { merge: [{ into: 0, from: [1], text: 'z'.repeat(500) }] });
+        expect(next[0].fact).toHaveLength(FACT_MAX_CHARS);
+    });
+});
+
+// ── The promotion matrix (memory layers) ─────────────────────────────────
+// Frequency alone is the wrong test for what becomes durable knowledge: a
+// project rule is worth keeping the first time it is stated, while "edited
+// ConfigView.js" is a diary entry however often it recurs.
+describe('promotion', () => {
+    it('promotes a NORM on first sighting, but at low confidence', () => {
+        const facts = [];
+        mergeFacts(facts, [{ text: 'Always run npm test before committing', kind: 'norm' }], 's1');
+        expect(facts[0].type).toBe('semantic');
+        expect(facts[0].confidence).toBeCloseTo(0.5);
+    });
+
+    it('raises a norm\'s confidence each time it is restated', () => {
+        const facts = [];
+        const f = [{ text: 'Always run npm test before committing', kind: 'norm' }];
+        mergeFacts(facts, f, 's1');
+        mergeFacts(facts, f, 's2');
+        expect(facts[0].hits).toBe(2);
+        expect(facts[0].confidence).toBeCloseTo(0.65);
+    });
+
+    it('holds an OBSERVATION in episodic memory until the third sighting', () => {
+        const facts = [];
+        const f = [{ text: 'The dashboard mounts Svelte islands', kind: 'observation' }];
+        mergeFacts(facts, f, 's1', 'dashboard');
+        expect(facts[0].type).toBe('episodic');
+        mergeFacts(facts, f, 's2', 'dashboard');
+        expect(facts[0].type).toBe('episodic');
+        mergeFacts(facts, f, 's3', 'dashboard');
+        expect(facts[0].type).toBe('semantic');
+        expect(facts[0].confidence).toBeCloseTo(0.7);
+    });
+
+    it('counts an observation\'s sightings WITHIN one category', () => {
+        // The same sentence noticed once each in three unrelated areas is weaker
+        // evidence, not stronger — so those stay separate facts.
+        const facts = [];
+        const f = [{ text: 'The dashboard mounts Svelte islands', kind: 'observation' }];
+        mergeFacts(facts, f, 's1', 'dashboard');
+        mergeFacts(facts, f, 's2', 'billing');
+        expect(facts).toHaveLength(2);
+        expect(facts.every(x => x.type === 'episodic')).toBe(true);
+    });
+
+    it('discards a self-declared work log entirely', () => {
+        const facts = [];
+        mergeFacts(facts, [{ text: 'Edited ConfigView.js and fixed the tab', kind: 'worklog' }], 's1');
+        expect(facts).toHaveLength(0);
+    });
+
+    it('upgrades an observation that is later restated as a rule', () => {
+        const facts = [];
+        mergeFacts(facts, [{ text: 'Use npm run build:prod for releases', kind: 'observation' }], 's1');
+        expect(facts[0].type).toBe('episodic');
+        mergeFacts(facts, [{ text: 'Use npm run build:prod for releases', kind: 'norm' }], 's2');
+        expect(facts[0].kind).toBe('norm');
+        expect(facts[0].type).toBe('semantic');
+    });
+
+    it('still accepts the legacy bare-string form', () => {
+        const facts = [];
+        mergeFacts(facts, ['The project uses Vite for bundling'], 's1');
+        expect(facts[0].fact).toContain('Vite');
+        expect(facts[0].kind).toBe('observation');
+    });
+
+    it('reads a fact with no type as semantic — nothing has to be migrated', () => {
+        expect(factType({ fact: 'written before the layers existed' })).toBe('semantic');
+        expect(factType({ fact: 'x', type: 'episodic' })).toBe('episodic');
+    });
+
+    it('records the session as evidence', () => {
+        const facts = [];
+        mergeFacts(facts, [{ text: 'Always run npm test before committing', kind: 'norm' }], 's1');
+        expect(facts[0].evidence).toEqual(['session:s1']);
+    });
+});
+
+describe('retention with layers', () => {
+    it('drops a probationary episodic fact before an established one', () => {
+        const now = Date.now();
+        const episodic = { fact: 'a', hits: 1, timestamp: now, type: 'episodic' };
+        const semantic = { fact: 'b', hits: 1, timestamp: now, type: 'semantic' };
+        expect(retentionScore(semantic, now)).toBeGreaterThan(retentionScore(episodic, now));
+
+        const facts = [episodic, semantic];
+        pruneFacts(facts, 1, now);
+        expect(facts[0].fact).toBe('b');
+    });
+
+    it('leaves legacy (type-less) facts at full weight', () => {
+        const now = Date.now();
+        expect(retentionScore({ hits: 1, timestamp: now }, now))
+            .toBe(retentionScore({ hits: 1, timestamp: now, type: 'semantic' }, now));
     });
 });

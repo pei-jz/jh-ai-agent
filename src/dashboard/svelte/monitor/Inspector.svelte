@@ -15,7 +15,7 @@
 <script>
     import { icon } from '../../utils/icons.js';
     import {
-        cacheInsideInput, freshInput, costOf, fmtCost, fmtTokens, buildFileTree,
+        cacheInsideInput, freshInput, costOf, costOfModels, fmtCost, fmtTokens, buildFileTree,
     } from '../../views/monitor/inspector.js';
     import FileTree from './FileTree.svelte';
     import Sparkline from './Sparkline.svelte';
@@ -27,6 +27,8 @@
         files = [],
         perStep = [],
         rates = null,
+        /** model → rates. Lets a run that changed models be priced per model. */
+        costTable = null,
         chapters = [],
         activeChapter = '',
         /** 'workspace' | 'instructions' | 'copy' */
@@ -43,7 +45,12 @@
     const ws = $derived(task?.workspace_path || '');
     const cached = $derived(usage.cache_read_input_tokens || 0);
     const inclusive = $derived(cacheInsideInput(usage));
-    const cost = $derived(costOf(usage, rates));
+    // Price each model's own slice when the run used more than one; only fall
+    // back to a single rate set for a task recorded before per-model attribution
+    // existed. Otherwise a finished run's cost moved every time the active model
+    // changed, because its whole volume was re-priced at the new model's rates.
+    const cost = $derived(costOfModels(task?.model_usage, costTable, rates) || costOf(usage, rates));
+    const mixedModels = $derived(Object.keys(task?.model_usage || {}).length > 1);
 
     const elapsed = $derived(stats.durationMs ? `${Math.round(stats.durationMs / 1000)}s` : '');
     const started = $derived(String(task?.started_at || '').replace('T', ' ').slice(0, 19));
@@ -123,6 +130,14 @@
             {#if cost}<span class="insp-cost">{fmtCost(cost.total)}</span>{/if}
             <span class="insp-v">{fmtTokens(usage.total_tokens || 0)}</span>
         </div>
+        {#if mixedModels}
+            <!-- Say so: a mixed-model total is a SUM of differently-priced slices,
+                 not one volume at one rate, and that is worth knowing before
+                 comparing it against another run. -->
+            <div class="insp-note">
+                {Object.keys(task.model_usage).length} モデル分を個別単価で合算
+            </div>
+        {/if}
     </div>
 
     {#if fileList.length}

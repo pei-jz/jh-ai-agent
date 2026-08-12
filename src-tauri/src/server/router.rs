@@ -709,7 +709,17 @@ async fn get_stats(State(state): State<AppState>) -> Json<serde_json::Value> {
         // How much of the volume was priced with a MODEL-SPECIFIC rate (the rest
         // used the fallback) — so the UI can say how trustworthy the figure is.
         "attributedTokens": attributed_tokens,
-        "costRates": { "input_per_1m": rate_in, "cache_read_per_1m": rate_cache, "output_per_1m": rate_out }
+        "costRates": { "input_per_1m": rate_in, "cache_read_per_1m": rate_cache, "output_per_1m": rate_out },
+        // MODEL → rates. The per-task panel needs this to price a run that
+        // switched models (tier escalation) with each model's own rates; with
+        // only the flat `costRates` above it re-priced the whole task at
+        // whatever model happened to be active, so the figure moved when the
+        // model did.
+        "costTable": table.iter().map(|(model, (i, c, o))| {
+            (model.clone(), serde_json::json!({
+                "input_per_1m": i, "cache_read_per_1m": c, "output_per_1m": o
+            }))
+        }).collect::<serde_json::Map<String, serde_json::Value>>()
     }))
 }
 

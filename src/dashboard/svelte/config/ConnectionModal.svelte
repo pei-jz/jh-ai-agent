@@ -12,10 +12,12 @@
   once — the old flow refused to save with no explanation of which field was wrong.
 -->
 <script>
+    import { untrack } from 'svelte';
     import { icon } from '../../utils/icons.js';
     import {
         allProviders, providerInfo, defaultBaseUrl, validateInstance, suggestForProvider,
     } from '../../views/config/providers.js';
+    import { inferVisionSupport, instanceSupportsVision } from '../../../modules/ai/modelCapabilities.js';
 
     let {
         /** null = adding; otherwise the instance being edited. */
@@ -31,11 +33,16 @@
     const providers = allProviders();
 
     /**
-     * The form's own copy. Seeded once from the prop: a $derived would throw away
-     * what the user is typing every time the parent re-pushed props (which happens
-     * on every test-connection status update).
+     * The form's own copy. Seeded ONCE from the prop: a $derived would throw away what
+     * the user is typing every time the parent re-pushed props, which happens on every
+     * test-connection status update.
+     *
+     * `untrack` is what makes that intent explicit. Reading a prop directly inside
+     * $state(...) does the same thing but has the compiler warn that only the initial
+     * value is captured — which was 12 warnings on this file alone, drowning out real
+     * ones. Here capturing the initial value IS the requirement.
      */
-    let form = $state({
+    let form = $state(untrack(() => ({
         provider: instance?.provider || 'openai',
         name: instance?.name || '',
         model: instance?.model || '',
@@ -48,9 +55,14 @@
         cost_per_1m_input: instance?.cost_per_1m_input ?? '',
         cost_per_1m_cache_read: instance?.cost_per_1m_cache_read ?? '',
         cost_per_1m_output: instance?.cost_per_1m_output ?? '',
-    });
+        // Seeded from the guess for a NEW connection; an existing one keeps what
+        // it was saved with, so re-opening the dialog never silently flips it.
+        supports_vision: instanceSupportsVision(instance || {}),
+    })));
 
     const info = $derived(providerInfo(form.provider));
+    /** What the name-based rule would say for the form as it stands right now. */
+    const inferredVision = $derived(inferVisionSupport(form.provider, form.model));
     let showKey = $state(false);
     let errors = $state([]);
 
@@ -89,6 +101,9 @@
         cost_per_1m_input: num(form.cost_per_1m_input),
         cost_per_1m_cache_read: num(form.cost_per_1m_cache_read),
         cost_per_1m_output: num(form.cost_per_1m_output),
+        // Always written explicitly: once a connection has been through this
+        // dialog, the guess no longer decides whether it gets images.
+        supports_vision: !!form.supports_vision,
     });
 
     const submit = () => {
@@ -187,6 +202,26 @@
                 <small class="cfg-hint">Caps the model's reply length. Leave blank for the provider default.</small>
             </div>
 
+            <!-- Vision is a per-connection FACT, not something a model name can be
+                 trusted to reveal: a local llava / qwen2-vl takes images and has no
+                 "gpt" in its name, and not every anthropic/gemini model takes them
+                 at all. The box starts from the guess and the user overrides it. -->
+            <div class="input-group">
+                <label class="cfg-check" for="modal-inst-vision">
+                    <input id="modal-inst-vision" type="checkbox" bind:checked={form.supports_vision}>
+                    <span>This model accepts images (vision)</span>
+                </label>
+                <small class="cfg-hint">
+                    {#if inferredVision === form.supports_vision}
+                        Inferred from the provider and model name. Correct it here if it is wrong —
+                        images are only sent to a connection that accepts them.
+                    {:else}
+                        Set by you (the name-based guess would say
+                        <b>{inferredVision ? 'yes' : 'no'}</b>).
+                    {/if}
+                </small>
+            </div>
+
             <div class="input-group">
                 <label class="input-label" for="modal-inst-temp">Temperature (optional, 0.0–2.0)</label>
                 <input id="modal-inst-temp" class="input" type="number" min="0" max="2" step="0.1"
@@ -197,7 +232,7 @@
             </div>
 
             <div class="input-group">
-                <label class="input-label">Pricing — USD per 1M tokens (optional)</label>
+                <span class="input-label">Pricing — USD per 1M tokens (optional)</span>
                 <div class="cfg-price-row">
                     <input id="modal-inst-cost-in" class="input" type="number" min="0" step="0.01"
                         bind:value={form.cost_per_1m_input} placeholder="Input ↑">

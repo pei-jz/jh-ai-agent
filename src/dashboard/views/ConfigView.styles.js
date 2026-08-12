@@ -101,6 +101,24 @@ export const CONFIG_SECTION_STYLES = `
                     .cfg-export-title { font-size: var(--fs-sm); color: var(--text-primary); }
                     .cfg-export-status { margin-top: 8px; font-size: var(--fs-xs); }
 
+                    /* ── Phase routing: the tier map + savings estimate ──────
+                       Boxed and accent-tinted so the number reads as a RESULT of
+                       the two tier selects above it, not as another field. */
+                    .cfg-phase-box {
+                        margin-top: 10px; padding: 10px 12px;
+                        background: var(--accent-glow); border: 1px solid var(--accent-dim);
+                        border-radius: var(--radius-sm);
+                    }
+                    .cfg-phase-map {
+                        margin: 0; font-size: var(--fs-xs); color: var(--text-secondary);
+                        line-height: 1.6;
+                    }
+                    .cfg-phase-save {
+                        margin: 6px 0 0; font-size: var(--fs-xs); color: var(--text-primary);
+                        line-height: 1.6;
+                    }
+                    .cfg-phase-warn { color: var(--warning, #f59e0b); margin-top: 6px; }
+
                     /* ── Templates / Skills / RAG / Memory tabs (migrated) ──── */
                     .cfg-tab-card { height: 100%; display: flex; flex-direction: column; }
                     .cfg-tab-head {
@@ -186,10 +204,23 @@ export const CONFIG_SECTION_STYLES = `
                         text-transform: uppercase; letter-spacing: 0.06em;
                     }
                     .cfg-mem-empty { color: var(--text-tertiary); font-size: var(--fs-xs); }
-                    .cfg-mem-scroll { max-height: 320px; overflow-y: auto; }
+                    .cfg-mem-scroll { max-height: 320px; overflow: auto; }
+                    /* The cell borders/padding used to be inherited from .rv-table,
+                       whose stylesheet is injected lazily by the Chat/Monitor views —
+                       so the table was unstyled until one of those had rendered. */
                     .cfg-mem-table { width: 100%; border-collapse: collapse; font-size: var(--fs-xs); }
+                    .cfg-mem-table th, .cfg-mem-table td {
+                        border: 1px solid var(--border); padding: 6px 8px;
+                        text-align: left; vertical-align: top;
+                    }
+                    .cfg-mem-table th {
+                        background: var(--bg-tertiary); color: var(--text-secondary); font-weight: 600;
+                    }
                     .cfg-mem-th { text-align: left; padding: 4px 8px; }
-                    .cfg-mem-fact { font-size: var(--fs-xs); line-height: 1.5; }
+                    .cfg-mem-fact {
+                        font-size: var(--fs-xs); line-height: 1.5;
+                        overflow-wrap: anywhere; word-break: break-word;
+                    }
                     .cfg-mem-meta {
                         white-space: nowrap; font-size: var(--fs-2xs); color: var(--text-tertiary);
                     }
@@ -199,6 +230,21 @@ export const CONFIG_SECTION_STYLES = `
                         color: var(--text-secondary); font-size: var(--fs-2xs); margin-top: 2px;
                     }
                     .cfg-mem-edit { font-size: var(--fs-xs); }
+                    /* Experience cards: which layer / polarity a row is. */
+                    .cfg-mem-badge {
+                        display: inline-block; margin-right: 6px; padding: 0 6px;
+                        border-radius: 999px; font-size: var(--fs-2xs); font-weight: 600;
+                        border: 1px solid var(--border); color: var(--text-secondary);
+                        text-transform: uppercase; letter-spacing: 0.04em;
+                    }
+                    .cfg-mem-badge.is-lesson { color: var(--warning, #f59e0b); border-color: currentColor; }
+                    .cfg-mem-badge.is-insight,
+                    .cfg-mem-badge.is-where { color: var(--success, #22c55e); border-color: currentColor; }
+                    .cfg-mem-badge.is-episodic { color: var(--text-tertiary); }
+                    .cfg-mem-badge.is-semantic { color: var(--accent); border-color: currentColor; }
+                    /* A switched-off card is kept (it may be re-enabled) but reads as inert. */
+                    tr.is-off { opacity: 0.45; }
+                    .cfg-mem-toggle { display: inline-flex; align-items: center; cursor: pointer; }
                 `;
 
 export const CONFIG_MODAL_STYLES = `
@@ -227,6 +273,11 @@ export const CONFIG_MODAL_STYLES = `
                 .cfg-provider-ic { margin-right: 8px; }
                 /* An unknown provider id: a typo used to look like a real provider. */
                 .cfg-provider.is-unknown { color: var(--warning); }
+                /* Checkbox + label on one line, both clickable. */
+                .cfg-check {
+                    display: flex; align-items: center; gap: 8px;
+                    cursor: pointer; font-size: var(--fs-sm); color: var(--text-primary);
+                }
                 .cfg-inst-name { font-weight: 600; }
                 .cfg-active-tag {
                     color: var(--accent); font-size: 10px; font-weight: 600; margin-left: 6px;

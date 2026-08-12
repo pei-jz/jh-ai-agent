@@ -248,6 +248,11 @@ export const TIMELINE_STYLES = `
         font-size: var(--fs-2xs); font-variant-numeric: tabular-nums;
     }
     .insp-row:last-child .insp-cost { color: var(--warning); }
+    /* Footnote under the totals: how the figure was arrived at. */
+    .insp-note {
+        margin-top: 2px; color: var(--text-tertiary); font-size: var(--fs-2xs);
+        text-align: right;
+    }
     .insp-file, .insp-act, .insp-chap {
         display: flex; align-items: center; gap: var(--space-2);
         width: 100%; text-align: left; padding: 3px var(--space-1);
@@ -328,7 +333,7 @@ export const TIMELINE_STYLES = `
        pair, not between them — the context bar is a header field, not a section. */
     .mdetail-header {
         display: flex; align-items: flex-start; gap: var(--space-2);
-        padding: 6px 12px 4px;
+        padding: 3px 12px 2px;
         background: var(--bg-tertiary);
         border-bottom: none;
         flex-shrink: 0; min-width: 0;
@@ -350,15 +355,9 @@ export const TIMELINE_STYLES = `
         line-height: 1.3;
         white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
-    /* Provenance is now the LAST line, not the second: the ids are what you read
-       least, and putting them between the title and the numbers separated the two
-       things that are actually read together. */
-    .mdh-sub {
-        font-family: var(--font-mono); font-size: var(--fs-2xs);
-        color: var(--text-tertiary); margin-top: 1px;
-        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-    }
-    .mdh-sub b { color: var(--accent); font-weight: 600; }
+    /* .mdh-sub (task id · caller) was REMOVED from the header — the inspector on
+       the right carries both, so the line only repeated what was already on
+       screen while costing a row of the panel's fixed furniture. */
     .mdh-meta {
         display: flex; align-items: center; gap: var(--space-2);
         margin-top: 2px; flex-wrap: wrap;

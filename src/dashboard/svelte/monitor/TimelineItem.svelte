@@ -48,6 +48,8 @@
         /** (itemId) => void — fold/unfold THIS card. The model owns the flag. */
         onToggleCollapse = null,
         onAnswer = null,
+        /** (item) => void — re-arm the reply box for a question left unanswered. */
+        onReopenAsk = null,
         onCopyDoc = null,
         onOpenFile = null,
     } = $props();
@@ -257,7 +259,23 @@
     {#if item.answered}
         <div class="mask-box is-answered">
             <div class="mask-q">{@html icon('question')} {item.text}</div>
-            <div class="mask-answered">↩ {item.answer || '(answered)'}</div>
+            {#if item.unanswered}
+                <!-- Closed by replay because the run ended, not because anyone
+                     replied. Saying "answered" here would be a small lie about the
+                     user's own history. -->
+                <div class="mask-answered is-none">— 未回答のまま終了しました</div>
+                <!-- …but the question is still the only thing the run is paused on,
+                     so reopening the task must offer a way INTO answering it: the
+                     reply goes through the ordinary reply box (which continues the
+                     task), with the question as its placeholder. Without this the
+                     card was a dead end and the task could never be resumed. -->
+                <div class="mask-actions">
+                    <button type="button" class="btn btn-primary btn-sm mask-reopen"
+                        onclick={() => onReopenAsk?.(item)}>この質問に答えてタスクを続ける</button>
+                </div>
+            {:else}
+                <div class="mask-answered">↩ {item.answer || '(answered)'}</div>
+            {/if}
         </div>
     {:else}
         {@const opts = item.options || []}

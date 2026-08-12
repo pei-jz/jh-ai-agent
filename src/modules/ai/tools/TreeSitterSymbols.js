@@ -23,6 +23,7 @@ const GRAMMARS = {
     js: 'tree-sitter-javascript',
     rust: 'tree-sitter-rust',
     python: 'tree-sitter-python',
+    java: 'tree-sitter-java',
 };
 
 /**
@@ -53,6 +54,15 @@ const DECLS = {
     python: {
         function_definition: { kind: 'function' },
         class_definition: { kind: 'class', scope: true },
+    },
+    java: {
+        class_declaration: { kind: 'class', scope: true },
+        interface_declaration: { kind: 'interface', scope: true },
+        enum_declaration: { kind: 'enum', scope: true },
+        record_declaration: { kind: 'record', scope: true },
+        annotation_type_declaration: { kind: 'annotation', scope: true },
+        method_declaration: { kind: 'method' },
+        constructor_declaration: { kind: 'constructor' },
     },
 };
 
@@ -158,7 +168,7 @@ function declSignature(node, source) {
  * Parse definitions out of source text.
  * @param {string} path used for the returned location (language comes from `lang`)
  * @param {string} content source text
- * @param {string} lang SymbolIndex language id ('js' | 'rust' | 'python')
+ * @param {string} lang SymbolIndex language id ('js' | 'rust' | 'python' | 'java')
  * @returns {Promise<Array|null>} symbols, or null when the backend is unavailable
  */
 export async function parseSymbols(path, content, lang) {
@@ -224,6 +234,12 @@ function isExported(node, source, lang) {
             p = p.parent;
         }
         return false;
+    }
+    if (lang === 'java') {
+        // `public` is a modifier on the declaration itself. Annotations can come
+        // first (`@Override public void run()`), so allow them before it.
+        const head = source.slice(node.startIndex, node.startIndex + 160);
+        return /^\s*(?:@\w+(?:\([^)]*\))?\s+)*public\b/.test(head);
     }
     return false;   // Python has no export marker
 }

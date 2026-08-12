@@ -11,9 +11,11 @@ const BASE_STYLES = `
                 /* ── Layout ────────────────────────────────────── */
                 .monitor-layout {
                     display: flex;
-                    height: calc(100vh - var(--titlebar-height) - 50px);
+                    /* 24px = .main-content's top+bottom padding (4 + 20), plus
+                       this element's own 4px top. Both move together. */
+                    height: calc(100vh - var(--titlebar-height) - 28px);
                     gap: 12px;
-                    padding: 12px 0 0 0;
+                    padding: 4px 0 0 0;
                 }
 
                 /* ── Left Panel ────────────────────────────────── */
@@ -836,6 +838,9 @@ const BASE_STYLES = `
                 .mlog-write .mlog-icon { color: hsl(340,100%,65%); }
                 .mlog-cmd .mlog-icon { color: var(--success); }
                 .mlog-success { color: var(--success); }
+                /* A run cut short by a safety limit. Not an error — the work is real
+                   and resumable — but it must not read as a clean finish. */
+                .mlog-warn { color: var(--warning, #f59e0b); }
                 .mlog-error { color: var(--error); }
                 .mlog-status { color: var(--text-tertiary); }
 
@@ -1054,6 +1059,9 @@ const BASE_STYLES = `
                 .mtl-group.collapsed .mtask-feed-chev { transform: rotate(-90deg); }
                 .mask-box.is-answered { opacity: .72; }
                 .mask-answered { margin-top: 4px; font-size: var(--fs-sm); color: var(--text-secondary); }
+                /* Closed without a reply — quieter than a real answer, so history
+                   does not read as a conversation that happened. */
+                .mask-answered.is-none { color: var(--text-tertiary); font-style: italic; }
                 .mresult-earlier { text-align: center; padding: 6px 0; }
                 .mresult-earlier .btn { font-size: var(--fs-sm); }
                 .mresult-earlier-note { margin-top: var(--space-1); font-size: var(--fs-xs); color: var(--text-tertiary); }

@@ -15,6 +15,6 @@
     "README.md"
   ],
   "author": "J.H AI Agent Contributors",
-  "license": "MIT",
+  "license": "MIT OR Apache-2.0",
   "private": true
 }

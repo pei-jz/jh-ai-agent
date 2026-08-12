@@ -40,6 +40,7 @@
         onToggleStory = null,
         onToggleCollapse = null,
         onAnswer = null,
+        onReopenAsk = null,
         onCopyDoc = null,
         onOpenFile = null,
     } = $props();
@@ -59,6 +60,7 @@
         {onToggleStory}
         {onToggleCollapse}
         {onAnswer}
+        {onReopenAsk}
         {onCopyDoc}
         {onOpenFile}
     />

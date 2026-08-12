@@ -87,6 +87,39 @@ export function costOf(usage = {}, rates = null) {
 }
 
 /**
+ * What this run cost when it used MORE THAN ONE MODEL.
+ *
+ * A run escalates tiers (fast → deep) or resumes under a different connection,
+ * so its tokens were not all bought at the same price. Pricing the task's totals
+ * with one rate set — the model that happens to be active when the panel renders
+ * — made the cost of a finished run change whenever the model did, which is the
+ * reported symptom: switching models "reset" the numbers.
+ *
+ * Each model's slice is priced with its own rates, and the slices are summed.
+ * Falls back to `fallback` rates for a model with no table entry, so an
+ * unpriced connection contributes an estimate rather than nothing.
+ *
+ * @param {Object<string, object>} modelUsage  model → token usage (TaskInfo.model_usage)
+ * @param {Object<string, object>} table       model → {input_per_1m, cache_read_per_1m, output_per_1m}
+ * @param {object} fallback                    rates for models missing from the table
+ * @returns {{in:number, cache:number, out:number, total:number, models:number}|null}
+ */
+export function costOfModels(modelUsage, table = null, fallback = null) {
+    const entries = Object.entries(modelUsage || {}).filter(([, u]) => u && typeof u === 'object');
+    if (entries.length === 0) return null;
+
+    const acc = { in: 0, cache: 0, out: 0, total: 0, models: 0 };
+    for (const [model, usage] of entries) {
+        const rates = (table && table[model]) || fallback;
+        const c = costOf(usage, rates);
+        if (!c) continue;
+        acc.in += c.in; acc.cache += c.cache; acc.out += c.out; acc.total += c.total;
+        acc.models++;
+    }
+    return acc.models ? acc : null;
+}
+
+/**
  * Group a flat list of touched paths into a directory TREE.
  *
  * The flat list of basenames it replaced could not answer the question you

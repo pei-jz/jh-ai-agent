@@ -8,7 +8,7 @@
 
 import { describe, it, expect } from 'vitest';
 import {
-    cacheInsideInput, freshInput, costOf, fmtCost, fmtTokens, buildFileTree,
+    cacheInsideInput, freshInput, costOf, costOfModels, fmtCost, fmtTokens, buildFileTree,
 } from '../inspector.js';
 
 describe('buildFileTree', () => {
@@ -122,6 +122,47 @@ describe('costOf', () => {
     it('says nothing when pricing is not configured', () => {
         expect(costOf({ prompt_tokens: 100 }, null)).toBe(null);
         expect(costOf({ prompt_tokens: 100 }, { input_per_1m: 0, cache_read_per_1m: 0, output_per_1m: 0 })).toBe(null);
+    });
+});
+
+// Reported: switching models "reset" a task's token/cost figures. The volume was
+// fine; the COST was being recomputed for the whole run at whichever model was
+// active at render time, so a finished run got cheaper or dearer retroactively.
+describe('costOfModels', () => {
+    const cheap = { input_per_1m: 1, cache_read_per_1m: 0.1, output_per_1m: 2 };
+    const dear = { input_per_1m: 10, cache_read_per_1m: 1, output_per_1m: 20 };
+    const table = { 'fast-model': cheap, 'deep-model': dear };
+    const usage = (p, o) => ({ prompt_tokens: p, completion_tokens: o, total_tokens: p + o });
+
+    it('prices each model\'s own slice and sums them', () => {
+        const c = costOfModels({
+            'fast-model': usage(1_000_000, 0),   // $1
+            'deep-model': usage(0, 1_000_000),   // $20
+        }, table, cheap);
+        expect(c.total).toBeCloseTo(21, 5);
+        expect(c.models).toBe(2);
+    });
+
+    it('does NOT re-price the whole run at one model\'s rates', () => {
+        const split = { 'fast-model': usage(1_000_000, 0), 'deep-model': usage(0, 1_000_000) };
+        // The bug: everything at the dear model's rates would be 10 + 20 = 30.
+        expect(costOfModels(split, table, cheap).total).not.toBeCloseTo(30, 5);
+        // …and the answer must not move when the *fallback* changes, because
+        // every model in the run has rates of its own.
+        expect(costOfModels(split, table, dear).total).toBeCloseTo(21, 5);
+    });
+
+    it('uses the fallback for a model with no configured pricing', () => {
+        const c = costOfModels({ unknown: usage(1_000_000, 0) }, table, dear);
+        expect(c.total).toBeCloseTo(10, 5);
+    });
+
+    it('says nothing when there is no attribution to work from', () => {
+        // Tasks recorded before per-model attribution existed — the caller falls
+        // back to the flat costOf for those.
+        expect(costOfModels({}, table, cheap)).toBe(null);
+        expect(costOfModels(null, table, cheap)).toBe(null);
+        expect(costOfModels({ 'fast-model': usage(100, 0) }, null, null)).toBe(null);
     });
 });
 

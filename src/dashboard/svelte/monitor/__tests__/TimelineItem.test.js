@@ -213,6 +213,38 @@ describe('TimelineItem — ask', () => {
         expect(el.textContent).toContain('Answer in the box below');
     });
 
+    it('a CLOSED question is history, not a prompt', () => {
+        // Reopening a finished task used to re-render the question as a live
+        // "answer me" card, every time. It must show as history instead.
+        const el = mountItem({ ...ask, answered: true, answer: '', unanswered: true });
+        expect(el.querySelectorAll('.mask-opt')).toHaveLength(0);
+        expect(el.querySelector('.mask-box').classList.contains('is-open')).toBe(false);
+        expect(el.textContent).toContain('Which approach?');
+    });
+
+    it('does not claim an answer the user never gave', () => {
+        const el = mountItem({ ...ask, answered: true, answer: '', unanswered: true });
+        expect(el.textContent).toContain('未回答');
+        expect(el.textContent).not.toContain('(answered)');
+    });
+
+    it('an unanswered question still offers a way IN — the run is paused on it', () => {
+        // The fix for "a completed task never resumes": the closed card was a
+        // dead end, so the question it carried could never be answered at all.
+        const onReopenAsk = vi.fn();
+        const el = mountItem({ ...ask, answered: true, answer: '', unanswered: true }, { onReopenAsk });
+        const btn = el.querySelector('.mask-reopen');
+        expect(btn).not.toBe(null);
+        btn.click();
+        expect(onReopenAsk).toHaveBeenCalledTimes(1);
+        expect(onReopenAsk.mock.calls[0][0].text).toBe('Which approach?');
+    });
+
+    it('an ANSWERED question gets no reopen button — there is nothing left to do', () => {
+        const el = mountItem({ ...ask, answered: true, answer: 'A' }, { onReopenAsk: vi.fn() });
+        expect(el.querySelector('.mask-reopen')).toBe(null);
+    });
+
     it('shows the answer once answered, and stops offering choices', () => {
         const el = mountItem({ ...ask, answered: true, answer: 'A' });
         expect(el.querySelector('.mask-box').classList.contains('is-answered')).toBe(true);

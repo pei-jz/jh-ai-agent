@@ -192,6 +192,34 @@ describe('ConnectionModal — saving', () => {
         expect(sent.model).toBe('gpt-4o');
     });
 
+    // Vision cannot be read off a model name: a local llava takes images and has
+    // no "gpt" in it, and not every anthropic model takes them at all. The box
+    // starts from the guess so nothing changes for existing setups, and the
+    // user's answer is what actually gets saved.
+    it('seeds the vision box from the name-based guess', () => {
+        expect(field(modal({ instance: inst({ provider: 'openai', model: 'gpt-4o' }) }), 'modal-inst-vision').checked).toBe(true);
+        cleanup();
+        expect(field(modal({ instance: inst({ provider: 'generic', model: 'llava:13b' }) }), 'modal-inst-vision').checked).toBe(false);
+    });
+
+    it('keeps what an existing connection was saved with, over the guess', () => {
+        const el = modal({ instance: inst({ provider: 'generic', model: 'llava:13b', supports_vision: true }) });
+        expect(field(el, 'modal-inst-vision').checked).toBe(true);
+    });
+
+    it('saves the vision answer explicitly, so the guess stops deciding', () => {
+        // Default instance is openai/gpt-4o, which the guess calls vision-capable.
+        // Unticking it has to survive the save, or the override is cosmetic.
+        const onSave = vi.fn();
+        const el = modal({ instance: inst(), onSave });
+        const box = field(el, 'modal-inst-vision');
+        expect(box.checked).toBe(true);
+        box.checked = false;
+        box.dispatchEvent(new Event('change', { bubbles: true }));
+        el.querySelector('#btn-modal-save').click();
+        expect(onSave.mock.calls[0][0].supports_vision).toBe(false);
+    });
+
     it('turns a blank number into null — "provider default", not zero', () => {
         const onSave = vi.fn();
         modal({ instance: inst(), onSave }).querySelector('#btn-modal-save').click();

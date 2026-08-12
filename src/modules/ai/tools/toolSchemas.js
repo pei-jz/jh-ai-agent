@@ -155,12 +155,12 @@ export const TOOL_DEFINITIONS = [
     {
         name: 'symbol_search',
         isSafe: true,
-        description: 'Find where a symbol is DEFINED (function / class / method / struct / enum / trait) by name, across the workspace. Returns file:line + the declaration line. Prefer this over grep_search when you want the DEFINITION — grep returns every call site too. Supports JS/TS, Rust and Python.',
+        description: 'Find where a symbol is DEFINED (function / class / method / struct / enum / trait) by name, across the workspace. Returns file:line + the declaration line. Prefer this over grep_search when you want the DEFINITION — grep returns every call site too. Supports JS/TS, Rust, Python and Java.',
         parameters: {
             type: 'object',
             properties: {
                 query: { type: 'string', description: 'Symbol name (or part of it) to find, e.g. "runTask" or "Config".' },
-                kind: { type: ['string', 'null'], description: 'Optional. Restrict to one kind: function | method | class | struct | enum | trait | impl | type.' },
+                kind: { type: ['string', 'null'], description: 'Optional. Restrict to one kind: function | method | class | struct | enum | trait | impl | type | interface | record | annotation | constructor.' },
                 path: { type: ['string', 'null'], description: 'Optional. Subdirectory to search (defaults to the workspace root).' },
                 include_glob: { type: ['string', 'null'], description: 'Optional. Override the file glob (default: all supported source types).' },
                 max_results: { type: ['integer', 'null'], description: 'Optional. Max definitions to return (default 50, max 200).' }

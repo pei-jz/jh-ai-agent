@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { normalizeSafetyLimits, SAFETY_DEFAULTS } from '../SafetyLimits.js';
+import { normalizeSafetyLimits, SAFETY_DEFAULTS, resolveRecallArm, CONTROL_GROUP_SHARE } from '../SafetyLimits.js';
 
 describe('normalizeSafetyLimits', () => {
     it('returns defaults for empty/missing config', () => {
@@ -53,5 +53,47 @@ describe('normalizeSafetyLimits', () => {
         expect(normalizeSafetyLimits({ agent_temperature: 1.3 }).agentTemperature).toBe(1.3);
         expect(normalizeSafetyLimits({ agent_temperature: 3 }).agentTemperature).toBe(SAFETY_DEFAULTS.agentTemperature);
         expect(normalizeSafetyLimits({ agent_temperature: -1 }).agentTemperature).toBe(SAFETY_DEFAULTS.agentTemperature);
+    });
+
+    it('validates memory_recall (on/off/auto), defaulting on bad input', () => {
+        expect(normalizeSafetyLimits({ memory_recall: 'off' }).memoryRecall).toBe('off');
+        expect(normalizeSafetyLimits({ memory_recall: 'auto' }).memoryRecall).toBe('auto');
+        expect(normalizeSafetyLimits({ memory_recall: 'sometimes' }).memoryRecall).toBe('on');
+        expect(normalizeSafetyLimits({}).memoryRecall).toBe('on');
+    });
+
+    // Phase routing changes WHICH MODEL answers, mid-task. That is not a change
+    // to make on someone's behalf, so anything but an explicit "on" is off.
+    it('validates phase_routing (on/off), defaulting OFF on anything unclear', () => {
+        expect(normalizeSafetyLimits({ phase_routing: 'on' }).phaseRouting).toBe('on');
+        expect(normalizeSafetyLimits({ phase_routing: 'off' }).phaseRouting).toBe('off');
+        expect(normalizeSafetyLimits({ phase_routing: 'yes' }).phaseRouting).toBe('off');
+        expect(normalizeSafetyLimits({ phase_routing: true }).phaseRouting).toBe('off');
+        expect(normalizeSafetyLimits({}).phaseRouting).toBe('off');
+        expect(SAFETY_DEFAULTS.phaseRouting).toBe('off');
+    });
+});
+
+// The A/B arm this run belongs to. Assigned by the system rather than by the
+// user, because a human toggling the switch would toggle it by mood or by task
+// type — and the arms would then differ in the work they were given, not in the
+// thing being tested.
+describe('resolveRecallArm', () => {
+    it('recalls by default and never in the off arm', () => {
+        expect(resolveRecallArm('on')).toBe(true);
+        expect(resolveRecallArm(undefined)).toBe(true);
+        expect(resolveRecallArm('off')).toBe(false);
+    });
+
+    it('holds back roughly the control share under auto', () => {
+        expect(resolveRecallArm('auto', () => 0)).toBe(false);                       // in the control slice
+        expect(resolveRecallArm('auto', () => CONTROL_GROUP_SHARE - 0.001)).toBe(false);
+        expect(resolveRecallArm('auto', () => CONTROL_GROUP_SHARE)).toBe(true);      // boundary belongs to recall
+        expect(resolveRecallArm('auto', () => 0.99)).toBe(true);
+    });
+
+    it('keeps the control group a MINORITY — it costs real runs', () => {
+        expect(CONTROL_GROUP_SHARE).toBeGreaterThan(0);
+        expect(CONTROL_GROUP_SHARE).toBeLessThanOrEqual(0.2);
     });
 });

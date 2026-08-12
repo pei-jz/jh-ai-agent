@@ -15,10 +15,41 @@ export const SAFETY_DEFAULTS = {
     agentTemperature: 0.2,       // low temp → fewer transcription typos
     planMode: 'auto',            // 'off' | 'auto' (plan-gate complex tasks) | 'always'
     subagentReview: 'off',       // 'off' | 'on' — pre-finish independent sub-agent review of file changes
+    // 'on' | 'off' | 'auto' — whether learned cards are RECALLED into the run.
+    // Learning continues either way, so a run without recall is a control
+    // session, not a wasted one (docs/design/agent-memory-layers.md §6).
+    memoryRecall: 'on',
+    // 'off' | 'on' — move the run between the Fast and Deep tiers as it passes
+    // through plan → execute → review, instead of picking one tier up front.
+    // Off by default: it changes which model answers, and that is not a change
+    // to make behind someone's back. See agent/ModelPhaseRouter.js.
+    phaseRouting: 'off',
 };
 
 const PLAN_MODES = new Set(['off', 'auto', 'always']);
 const SUBAGENT_REVIEW_MODES = new Set(['off', 'on']);
+const MEMORY_RECALL_MODES = new Set(['off', 'on', 'auto']);
+const PHASE_ROUTING_MODES = new Set(['off', 'on']);
+
+/** Share of sessions held back as the control group under 'auto'. */
+export const CONTROL_GROUP_SHARE = 0.1;
+
+/**
+ * Decide whether THIS run recalls memory.
+ *
+ * 'auto' assigns the arm at random rather than leaving it to the user to toggle.
+ * That is not just convenience: a human flipping the switch would flip it by
+ * mood or by task type, so the two arms would differ in what they were asked to
+ * do — and the comparison would measure the tasks, not the memory.
+ *
+ * @param {string} mode  normalized memoryRecall
+ * @param {() => number} rand  injectable for tests
+ */
+export function resolveRecallArm(mode, rand = Math.random) {
+    if (mode === 'off') return false;
+    if (mode === 'auto') return rand() >= CONTROL_GROUP_SHARE;
+    return true;
+}
 
 /**
  * Normalize a raw ai_config object into sanitized numeric safety limits.
@@ -64,5 +95,7 @@ export function normalizeSafetyLimits(cfg = {}) {
         agentTemperature,
         planMode,
         subagentReview,
+        memoryRecall: MEMORY_RECALL_MODES.has(cfg.memory_recall) ? cfg.memory_recall : d.memoryRecall,
+        phaseRouting: PHASE_ROUTING_MODES.has(cfg.phase_routing) ? cfg.phase_routing : d.phaseRouting,
     };
 }

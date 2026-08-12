@@ -301,7 +301,7 @@ export async function handleSymbolSearch(ctx, args, onAgentStatus) {
     const kind = String(args?.kind || '').trim();
     const limit = Number.isFinite(args?.max_results) ? Math.max(1, Math.min(200, args.max_results)) : 50;
     // Default to the source types SymbolIndex understands.
-    const pattern = args?.include_glob || '**/*.{js,jsx,mjs,cjs,ts,tsx,rs,py}';
+    const pattern = args?.include_glob || '**/*.{js,jsx,mjs,cjs,ts,tsx,rs,py,java}';
 
     onAgentStatus?.(`Searching symbols: ${query} in ${searchRoot}...`);
     try {

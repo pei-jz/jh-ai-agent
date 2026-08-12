@@ -1,221 +1,961 @@
+import { invoke } from '@tauri-apps/api/core';
 import { icon } from '../utils/icons.js';
-import { AnalyticsView } from './AnalyticsView.js';
+import { OVERVIEW_STYLES } from './OverviewView.styles.js';
+import { modelRates } from '../../modules/ai/agent/ModelPhaseRouter.js';
+import { promptTemplateManager } from '../../modules/ai/PromptTemplateManager.js';
+import { readWorkspaceMemory, writeCards } from '../../modules/ai/memory/workspaceMemory.js';
+import {
+    memoryLayers, memoryHealth, recentlyLearned, searchMemory,
+    toggleCardDisabled, HALF_LIFE_DAYS,
+} from './overview/memoryPanel.js';
+import { rankRecipes, readUseCounts, recordUse } from './overview/recipes.js';
+import { reduceRun, phaseRail, runCost } from './overview/runFeed.js';
 
-// Action-centric dashboard: surfaces what needs attention (approvals, failures),
-// what's running, and recent activity — plus a one-click "new task" and the
-// usage analytics. Fits the viewport with NO page scroll (panels scroll
-// internally). Lifetime vanity metrics (Total Tasks / Total Tokens) were dropped
-// in favor of time-scoped, actionable numbers.
+// Dashboard — a cockpit whose second half is the agent's memory.
+//
+// The shape came out of nine competing proposals (docs/design/dashboard-*,
+// plus three of my own). The reasoning, in short:
+//
+//   • The page used to be a fixed grid of panels, most of them empty most days.
+//     At ~3 tasks a day that taught you within a week that its contents did not
+//     depend on anything, which is why it went unread for months.
+//   • A pure cockpit fixes the running case and makes the idle case worse: a
+//     large live pane is blank six days in seven.
+//   • So the right pane is STATEFUL. It shows the run when there is one and what
+//     the agent has learned when there is not. Neither half is ever empty in its
+//     own state, and the two are joined — a run names the memories it recalled.
+//
+// The left column never changes: start something, see the queue, see the bill.
+// Task creation is still delegated to Monitor's modal (it owns agent mode, MCP
+// selection, "/" templates and attachments); this collects the two fields you
+// always fill in and hands them over.
+
+/** Failures older than this stop being "attention" and become history. */
+export const ATTENTION_WINDOW_H = 48;
+/** localStorage: when the Memory tab was last opened, for the "new" badge. */
+const MEM_SEEN_KEY = 'jhai_memory_seen_at';
+/** localStorage: the last workspace used, shared with the launcher. */
+const LAST_WS_KEY = 'jhai_last_ws';
 
 export class OverviewView {
     constructor() {
         this.stats = { totalTokens: 0, estimatedCost: 0.0 };
         this.tasks = [];
-        this.analytics = new AnalyticsView({ embed: true });
+        this.config = {};
+        /** { facts, episodes, cards } for the workspace the panel is showing. */
+        this.memory = null;
+        this.memoryWs = '';
+        this.memoryError = '';
+        /** 'run' | 'memory'. Resolved per render unless the user has picked. */
+        this.tab = null;
+        this.memSeenAt = 0;
+        this.memQuery = '';
+        this._destroyed = false;
+        /** Live run state: the reduction of the watched task's log stream. */
+        this.run = null;
+        this._runLogs = [];
+        this._watchedId = null;
+        this._socket = null;
+        /** Coalesces bursty socket traffic into one repaint per frame-ish. */
+        this._repaintTimer = null;
     }
+
+    // ── Data ─────────────────────────────────────────────────────────────
 
     async loadData() {
         try {
             if (!window.apiClient) return;
-            const [stats, tasks] = await Promise.all([
-                window.apiClient.getStats(),
-                window.apiClient.listTasks(),
+            const [stats, tasks, config] = await Promise.all([
+                window.apiClient.getStats().catch(() => null),
+                window.apiClient.listTasks().catch(() => null),
+                window.apiClient.getConfig().catch(() => null),
             ]);
             this.stats = stats || this.stats;
             this.tasks = Array.isArray(tasks) ? tasks : [];
+            this.config = config || {};
         } catch (e) {
             console.error('Failed to load overview data:', e);
         }
+        try { promptTemplateManager.loadFromConfig(this.config); } catch (_) {}
+        try { this.memSeenAt = Number(localStorage.getItem(MEM_SEEN_KEY)) || 0; } catch (_) {}
     }
 
-    // ── Derived metrics ──────────────────────────────────────────────────
-    _metrics() {
-        const tasks = this.tasks;
-        const startOfDay = new Date(); startOfDay.setHours(0, 0, 0, 0);
-        const dayMs = startOfDay.getTime();
-        const weekMs = Date.now() - 7 * 86400000;
-        const at = (s) => s ? new Date(s).getTime() : 0;
+    /**
+     * Which workspace's memory to show.
+     *
+     * The one the most recent task ran in, falling back to what the launcher
+     * last used and then to the first approved project. Memory is per-workspace,
+     * so guessing wrong shows an empty panel for a project that has plenty —
+     * following the work is the guess most likely to be right.
+     */
+    _memoryWorkspace() {
+        const withWs = this.tasks.find(t => t.workspace_path);
+        if (withWs) return withWs.workspace_path;
+        try {
+            const last = localStorage.getItem(LAST_WS_KEY);
+            if (last) return last;
+        } catch (_) {}
+        const projects = this.config.approved_projects;
+        return (Array.isArray(projects) && projects[0]) || '';
+    }
 
-        const running = tasks.filter(t => t.status === 'running');
-        const paused  = tasks.filter(t => t.status === 'paused');
-        const completedToday = tasks.filter(t => t.status === 'completed' && at(t.completed_at) >= dayMs);
-        const recent7 = tasks.filter(t => at(t.started_at) >= weekMs);
+    async loadMemory() {
+        const ws = this._memoryWorkspace();
+        this.memoryWs = ws;
+        this.memoryError = '';
+        if (!ws) { this.memory = { facts: [], episodes: [], cards: [] }; return; }
+        try {
+            this.memory = await readWorkspaceMemory(ws, invoke);
+        } catch (e) {
+            this.memory = { facts: [], episodes: [], cards: [] };
+            this.memoryError = String(e?.message || e);
+        }
+    }
+
+    // ── Derived ──────────────────────────────────────────────────────────
+
+    _metrics() {
+        const now = Date.now();
+        const at = (s) => (s ? new Date(s).getTime() : 0);
+        const endOf = (t) => at(t.completed_at || t.started_at);
+        const attentionMs = now - ATTENTION_WINDOW_H * 3600000;
+        const weekMs = now - 7 * 86400000;
+
+        const running = this.tasks.filter(t => t.status === 'running');
+        const paused = this.tasks.filter(t => t.status === 'paused');
+
+        // Recent failures only. An old failure is history, and history lives in
+        // Monitor — a red row you cannot clear is one you stop seeing.
+        const failures = this.tasks.filter(t => t.status === 'failed').sort((a, b) => endOf(b) - endOf(a));
+        const freshFailures = failures.filter(t => endOf(t) >= attentionMs);
+
+        const recent7 = this.tasks.filter(t => at(t.started_at) >= weekMs);
         const done7 = recent7.filter(t => t.status === 'completed').length;
         const fail7 = recent7.filter(t => t.status === 'failed').length;
         const successRate = (done7 + fail7) > 0 ? Math.round(done7 / (done7 + fail7) * 100) : null;
 
-        const rate = this.stats.totalTokens > 0 ? (this.stats.estimatedCost / this.stats.totalTokens) : 0;
-        const weekTokens = recent7.reduce((s, t) => s + ((t.token_usage && t.token_usage.total_tokens) || 0), 0);
-        const weekCost = weekTokens * rate;
+        const shown = new Set([...running, ...paused, ...freshFailures].map(t => t.id));
+        const recent = [...this.tasks]
+            .sort((a, b) => at(b.started_at) - at(a.started_at))
+            .filter(t => !shown.has(t.id))
+            .slice(0, 6);
 
-        const failures = tasks.filter(t => t.status === 'failed')
-            .sort((a, b) => at(b.completed_at || b.started_at) - at(a.completed_at || a.started_at));
-        const recent = [...tasks].sort((a, b) => at(b.started_at) - at(a.started_at));
-
-        return { running, paused, completedToday, successRate, weekCost, failures, recent };
+        return {
+            running, paused, freshFailures,
+            staleFailures: failures.length - freshFailures.length,
+            recent, successRate, done7,
+            spend: this._spend(recent7),
+        };
     }
 
+    /**
+     * Cost for a set of tasks, attributed per model.
+     *
+     * Prices each model's tokens at that model's own rates — the same
+     * attribution the backend does, kept per-model here because the breakdown
+     * IS the point: it is the input to the Fast/Deep tier decision. Falls back
+     * to the flat rate for anything unpriced rather than pretending it was free.
+     */
+    _spend(tasks) {
+        const rates = modelRates(this.config.llm_instances);
+        // model_usage keys are whatever the run sent: an `id:model` composite
+        // under tier routing, a bare model name otherwise. Index both.
+        const byBare = {};
+        for (const [key, r] of Object.entries(rates)) byBare[key.slice(key.indexOf(':') + 1)] = r;
+        const rateFor = (m) => rates[m] || byBare[m] || null;
+
+        const flat = this.stats.totalTokens > 0 ? (this.stats.estimatedCost / this.stats.totalTokens) : 0;
+        const byModel = new Map();
+        let total = 0, unpriced = 0;
+
+        for (const t of tasks) {
+            const usage = (t.model_usage && Object.keys(t.model_usage).length)
+                ? Object.entries(t.model_usage)
+                : [['(unattributed)', t.token_usage || {}]];
+            for (const [model, u] of usage) {
+                const tokens = (u.prompt_tokens || 0) + (u.completion_tokens || 0);
+                if (!tokens) continue;
+                const r = rateFor(model);
+                let cost;
+                if (r) {
+                    cost = ((u.prompt_tokens || 0) - (u.cache_read_input_tokens || 0)) / 1e6 * r.input
+                        + (u.cache_read_input_tokens || 0) / 1e6 * r.cacheRead
+                        + (u.completion_tokens || 0) / 1e6 * r.output;
+                } else {
+                    cost = tokens * flat;
+                    unpriced += tokens;
+                }
+                const label = r ? r.label : shortModel(model);
+                const row = byModel.get(label) || { label, tokens: 0, cost: 0, priced: !!r };
+                row.tokens += tokens; row.cost += cost;
+                byModel.set(label, row);
+                total += cost;
+            }
+        }
+        const rows = [...byModel.values()].sort((a, b) => b.cost - a.cost);
+        return { total, rows, unpriced, tokens: rows.reduce((s, r) => s + r.tokens, 0) };
+    }
+
+    /** Which tab to show: the user's pick, else the run when there is one. */
+    _activeTab(m) {
+        if (this.tab) return this.tab;
+        return m.running.length ? 'run' : 'memory';
+    }
+
+    _newCards() {
+        return recentlyLearned(this.memory?.cards, this.memSeenAt);
+    }
+
+    // ── Render ───────────────────────────────────────────────────────────
+
     render() {
-        // Skeleton — data is fetched and patched in init() (instant paint).
+        // Skeleton only — data is fetched in init() so the view paints at once
+        // instead of waiting on three API calls plus three file reads.
         return `
-            <style>
-                .dash { display:flex; flex-direction:column; gap:14px;
-                    height: calc(100vh - var(--titlebar-height) - 34px); }
-                .dash-head { display:flex; justify-content:space-between; align-items:center; flex-shrink:0; }
-                .dash-stats { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; flex-shrink:0; }
-                .dstat { background:var(--bg-secondary); border:1px solid var(--border); border-radius:var(--radius-lg);
-                    padding:12px 16px; display:flex; flex-direction:column; gap:2px; }
-                .dstat.alert { border-color:var(--accent); background:var(--accent-glow-lg); }
-                .dstat-label { font-size:11px; color:var(--text-tertiary); text-transform:uppercase; letter-spacing:0.04em; font-weight:600; }
-                .dstat-val { font-size:26px; font-weight:700; color:var(--text-primary); font-variant-numeric:tabular-nums; line-height:1.1; }
-                .dstat-sub { font-size:11px; color:var(--text-secondary); }
-                .dash-main { display:flex; flex-direction:column; gap:14px; flex:1; min-height:0; }
-                .dash-lists { display:flex; gap:14px; flex:0.8 1 0; min-height:0; }
-                .dash-lists > .dash-panel { flex:1; min-width:0; }
-                .dash-analytics { flex:1.2 1 0; min-height:0; overflow-y:auto;
-                    background:var(--bg-secondary); border:1px solid var(--border); border-radius:var(--radius-lg); padding:12px 14px; }
-                .dash-panel { background:var(--bg-secondary); border:1px solid var(--border); border-radius:var(--radius-lg);
-                    display:flex; flex-direction:column; min-height:0; overflow:hidden; }
-                .dash-panel-h { padding:9px 14px; border-bottom:1px solid var(--border); font-size:12px; font-weight:700;
-                    color:var(--text-secondary); display:flex; align-items:center; gap:7px; flex-shrink:0; background:var(--bg-tertiary); }
-                .dash-panel-h .cnt { margin-left:auto; opacity:0.6; font-weight:500; }
-                .dash-panel-b { flex:1; overflow-y:auto; padding:8px; display:flex; flex-direction:column; gap:6px; }
-                .drow { display:block; text-decoration:none; color:inherit; padding:8px 10px; border-radius:8px;
-                    border:1px solid var(--border); background:var(--bg-tertiary); cursor:pointer; transition:border-color .12s,background .12s; }
-                .drow:hover { border-color:var(--accent); background:var(--bg-hover); }
-                .drow-top { display:flex; align-items:center; gap:7px; margin-bottom:3px; }
-                .drow-dot { width:7px; height:7px; border-radius:50%; flex-shrink:0; }
-                .dot-running{background:var(--accent);box-shadow:0 0 5px var(--accent);animation:dpulse 1s infinite}
-                .dot-paused{background:hsl(40,90%,55%)} .dot-failed{background:var(--error)}
-                .dot-completed{background:var(--success)} .dot-aborted{background:var(--text-tertiary)}
-                @keyframes dpulse{0%,100%{opacity:1}50%{opacity:.4}}
-                .drow-id { font-family:var(--font-mono); font-size:10.5px; color:var(--text-tertiary); }
-                .drow-caller { font-size:9px; font-weight:700; color:var(--accent); background:var(--accent-glow); padding:1px 5px; border-radius:3px; }
-                .drow-time { margin-left:auto; font-size:10.5px; color:var(--text-tertiary); }
-                .drow-prompt { font-size:12.5px; color:var(--text-primary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-                .dprog { height:4px; background:var(--bg-primary); border-radius:3px; overflow:hidden; margin-top:6px; }
-                .dprog > div { height:100%; background:linear-gradient(90deg,var(--accent-dim),var(--accent)); }
-                .dash-empty { color:var(--text-tertiary); font-size:12px; text-align:center; padding:18px; }
-            </style>
+            <style>${OVERVIEW_STYLES}</style>
             <div class="view-container">
                 <div class="dash">
                     <div class="dash-head">
-                        <div>
-                            <h1 style="margin:0;">Dashboard</h1>
-                            <p class="subtitle" style="margin:2px 0 0;">What needs attention, what's running, and recent tasks</p>
-                        </div>
-                        <button id="dash-new-task" class="btn btn-primary" style="display:flex;align-items:center;gap:6px;">
-                            <span style="display:inline-flex">${icon('bolt')}</span> New Task
-                        </button>
+                        <h1 class="dash-title">Now</h1>
+                        <span class="dash-status" id="dash-status">&nbsp;</span>
+                        <a class="dash-head-link" href="#monitor">${icon('monitor', 12)} All tasks</a>
                     </div>
-
-                    <div class="dash-stats" id="dash-stats"></div>
-
-                    <div class="dash-main">
-                        <div class="dash-lists">
-                            <div class="dash-panel">
-                                <div class="dash-panel-h">🔴 Needs Attention <span class="cnt" id="cnt-attention"></span></div>
-                                <div class="dash-panel-b" id="dash-attention"><div class="dash-empty">Loading…</div></div>
-                            </div>
-                            <div class="dash-panel">
-                                <div class="dash-panel-h">🟢 Running <span class="cnt" id="cnt-running"></span></div>
-                                <div class="dash-panel-b" id="dash-running"><div class="dash-empty">Loading…</div></div>
-                            </div>
-                            <div class="dash-panel">
-                                <div class="dash-panel-h">🕒 Recent Tasks <span class="cnt" id="cnt-recent"></span></div>
-                                <div class="dash-panel-b" id="dash-recent"><div class="dash-empty">Loading…</div></div>
-                            </div>
-                        </div>
-                        <div class="dash-analytics" id="dash-analytics">
-                            <div class="dash-empty">Loading analytics…</div>
+                    <div class="dash-cols">
+                        <div class="dash-left" id="dash-left"></div>
+                        <div class="dash-right">
+                            <div class="dt-bar" id="dash-tabs"></div>
+                            <div class="dt-pane" id="dash-pane"></div>
                         </div>
                     </div>
                 </div>
-            </div>
-        `;
-    }
-
-    _statsHtml(m) {
-        const card = (label, val, sub, alert) => `
-            <div class="dstat ${alert ? 'alert' : ''}">
-                <span class="dstat-label">${label}</span>
-                <span class="dstat-val">${val}</span>
-                <span class="dstat-sub">${sub || '&nbsp;'}</span>
             </div>`;
-        return [
-            card('Running', m.running.length, m.running.length ? 'In progress' : 'None'),
-            card('Awaiting Approval', m.paused.length, m.paused.length ? '👈 Action needed' : 'None', m.paused.length > 0),
-            card('Completed Today', m.completedToday.length, m.successRate !== null ? `${m.successRate}% success (7d)` : ''),
-            card('Cost This Week', '$' + m.weekCost.toFixed(4), 'Estimated (7d)'),
-        ].join('');
     }
 
-    _rowHtml(t, opts = {}) {
-        const status = t.status || 'pending';
-        const date = t.started_at ? new Date(t.started_at).toLocaleString([], { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
-        const pct = Math.round((t.progress || 0) * 100);
+    _leftHtml(m) {
+        const projects = Array.isArray(this.config.approved_projects) ? this.config.approved_projects : [];
+        let lastWs = '';
+        try { lastWs = localStorage.getItem(LAST_WS_KEY) || ''; } catch (_) {}
+        const ws = lastWs || projects[0] || '';
+
+        const recipes = rankRecipes(safeTemplates(), readUseCounts());
+        const recipeHtml = recipes.length
+            ? recipes.map(r => `
+                <button type="button" class="dr-chip" data-recipe="${esc(r.key)}"
+                    title="${esc(clip(r.prompt, 120))}">${esc(clip(r.label, 22))}${
+                        r.uses ? `<span class="n">×${r.uses}</span>` : ''}</button>`).join('')
+              + `<a class="dr-chip is-add" href="#config?tab=templates">${icon('plus', 10)} Add</a>`
+            : `<a class="dr-chip is-add" href="#config?tab=templates">${icon('plus', 10)} Add a template to get one-click starts</a>`;
+
+        const group = (label, tasks, opts = {}) => {
+            if (!tasks.length) return '';
+            return `<span class="a-lab dq-lab">${label}</span>`
+                + tasks.map(t => this._queueRow(t, opts)).join('');
+        };
+
         return `
-            <a class="drow" href="#monitor?id=${t.id}">
-                <div class="drow-top">
-                    <span class="drow-dot dot-${status}"></span>
-                    <span class="drow-id">#${(t.id || '').slice(0, 6)}</span>
-                    ${t.caller ? `<span class="drow-caller">${esc(t.caller)}</span>` : ''}
-                    <span class="drow-time">${date}</span>
+            <form class="dl" id="dash-launch" autocomplete="off">
+                <textarea id="dash-prompt" class="dl-input" rows="1"
+                    placeholder="${m.running.length ? 'Queue another task…' : 'What should the agent do?'}"></textarea>
+                <div class="dl-row">
+                    <input id="dash-ws" class="dl-ws" type="text" list="dash-ws-list"
+                        value="${esc(ws)}" placeholder="(no workspace)" aria-label="Workspace">
+                    <datalist id="dash-ws-list">${projects.map(p => `<option value="${esc(p)}"></option>`).join('')}</datalist>
+                    <button type="button" class="btn btn-secondary dl-browse" id="dash-ws-browse"
+                        title="Browse for a workspace folder" aria-label="Browse for a workspace folder">${icon('folder', 12)}</button>
+                    <button type="submit" class="btn btn-primary dl-go">${icon('bolt', 12)} Start</button>
                 </div>
-                <div class="drow-prompt">${esc(t.prompt || '(no prompt)')}</div>
-                ${opts.progress && status === 'running' ? `<div class="dprog"><div style="width:${pct}%"></div></div>` : ''}
-                ${opts.error && t.error ? `<div style="font-size:11px;color:var(--error);margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(t.error)}</div>` : ''}
+            </form>
+
+            <div class="dr">
+                <span class="a-lab dr-lab">Recipes</span>
+                <div class="dr-chips">${recipeHtml}</div>
+            </div>
+
+            <div class="dq">
+                ${group('Waiting for you', m.paused)}
+                ${group('Running', m.running, { sel: true })}
+                ${group(`Failed · last ${ATTENTION_WINDOW_H}h`, m.freshFailures.slice(0, 3))}
+                ${group('Recent', m.recent)}
+                ${(m.paused.length + m.running.length + m.freshFailures.length + m.recent.length) === 0
+                    ? '<div class="dq-empty">No tasks yet. Describe one above.</div>' : ''}
+                ${m.staleFailures ? `<a class="dq-more" href="#monitor">${m.staleFailures} older failures in Monitor →</a>` : ''}
+            </div>
+
+            ${this._spendHtml(m)}`;
+    }
+
+    _queueRow(t, opts = {}) {
+        const cls = { running: 'dot-running', paused: 'dot-paused', failed: 'dot-failed',
+            completed: 'dot-completed' }[t.status] || 'dot-aborted';
+        return `
+            <a class="dqi ${opts.sel ? 'is-sel' : ''}" href="#monitor?id=${encodeURIComponent(t.id)}">
+                <span class="drow-dot ${cls}"></span>
+                <span class="grow">${esc(t.prompt || '(no prompt)')}</span>
+                <span class="t">${ago(t.completed_at || t.started_at)}</span>
             </a>`;
     }
 
+    _spendHtml(m) {
+        const s = m.spend;
+        if (!s.rows.length) return '';
+        const shades = ['var(--accent)', 'var(--accent-dim)', 'var(--text-tertiary)'];
+        const pctOf = (r) => (s.total > 0 ? r.cost / s.total * 100 : 0);
+        // A model that rounds to 0% is a rounding artefact, not information —
+        // it was making the legend read "…· (unattributed) 0%".
+        const top = s.rows.slice(0, 3).filter(r => Math.round(pctOf(r)) > 0);
+        const bar = top.map((r, i) =>
+            `<i style="width:${Math.max(1, pctOf(r))}%;background:${shades[i]}"></i>`).join('');
+        const lg = top.map((r, i) =>
+            `<span><i class="ds-sw" style="background:${shades[i]}"></i>${esc(clip(r.label, 18))} ${Math.round(pctOf(r))}%</span>`).join('');
+
+        // Only worth saying when there IS somewhere cheaper to move the work to.
+        const share = s.total > 0 ? Math.round(s.rows[0].cost / s.total * 100) : 0;
+        const tip = (s.rows.length > 1 && share >= 60 && s.rows[0].priced)
+            ? `<p class="ds-tip">${esc(clip(s.rows[0].label, 24))} is ${share}% of it —
+                 <a class="cfg-link" href="#config">switch models within one task</a> moves the
+                 implementation phase onto the cheaper tier.</p>`
+            : (s.unpriced > 0
+                ? `<p class="ds-tip">${fmt(s.unpriced)} tokens were estimated —
+                     <a class="cfg-link" href="#config">set $/1M rates</a> per connection.</p>`
+                : '');
+
+        return `
+            <div class="ds">
+                <div class="ds-top">
+                    <span class="ds-v">${money(s.total)}</span>
+                    <span class="ds-k">7 days · ${m.done7} done${m.successRate !== null ? ` · ${m.successRate}%` : ''}</span>
+                </div>
+                <div class="ds-bar">${bar}</div>
+                <div class="ds-lg">${lg}</div>
+                ${tip}
+            </div>`;
+    }
+
+    _tabsHtml(m) {
+        const active = this._activeTab(m);
+        const running = m.running.length;
+        const newCount = this._newCards().length;
+        const projects = Array.isArray(this.config.approved_projects) ? this.config.approved_projects : [];
+        // Preserve the user's in-progress edit across repaints.
+        const memWsInput = document.getElementById('dash-mem-ws');
+        const memWsValue = memWsInput ? memWsInput.value : (this.memoryWs || '');
+        return `
+            <button type="button" class="dt-tab ${active === 'run' ? 'is-on' : ''}"
+                data-tab="run" ${running ? '' : 'disabled'}>
+                ${running ? '<span class="drow-dot dot-running"></span>' : ''} Run
+            </button>
+            <button type="button" class="dt-tab ${active === 'memory' ? 'is-on' : ''}" data-tab="memory">
+                ${icon('memory', 13)} Memory
+                ${newCount ? `<span class="dt-cnt">${newCount} new</span>` : ''}
+            </button>
+            <span class="dt-ws">
+                <input id="dash-mem-ws" class="dt-ws-input" type="text" list="dash-mem-ws-list"
+                    value="${esc(memWsValue)}" placeholder="(no workspace)" aria-label="Memory workspace">
+                <datalist id="dash-mem-ws-list">${projects.map(p => `<option value="${esc(p)}"></option>`).join('')}</datalist>
+                <button type="button" class="dt-ws-browse" id="dash-mem-ws-browse"
+                    title="Browse for a memory workspace folder" aria-label="Browse for a memory workspace folder">${icon('folder', 11)}</button>
+            </span>`;
+    }
+
+    _paneHtml(m) {
+        if (this._activeTab(m) === 'run') return this._runHtml(m);
+        return this._memoryHtml();
+    }
+
+    /**
+     * The Run tab — what is happening right now.
+     *
+     * The step lines come from Monitor's own formatters via runFeed.js; only the
+     * compact shape is this view's. The full grouped timeline stays in Monitor,
+     * one click away, and this never tries to be it.
+     */
+    _runHtml(m) {
+        const t = m.running[0];
+        if (!t) return `<div class="dash-empty"><p>Nothing is running.</p></div>`;
+
+        const run = this.run || reduceRun([]);
+        const rail = phaseRail(run);
+        const cost = runCost(run, modelRates(this.config.llm_instances));
+        const tokens = run.tokens.prompt + run.tokens.completion;
+        const pct = Math.round((t.progress || 0) * 100);
+
+        return `
+            <div class="dm">
+                <div class="dm-h" style="border-radius:var(--radius-sm);border:1px solid var(--border-light)">
+                    <span class="drow-dot dot-running"></span>
+                    <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(clip(t.prompt || '', 96))}</span>
+                    <a class="more" href="#monitor?id=${encodeURIComponent(t.id)}">Open in Monitor →</a>
+                </div>
+
+                <div class="dm-layers" style="grid-template-columns:repeat(4,1fr)">
+                    <div><span class="k">STEP</span><span class="v">${run.step || '—'}</span>
+                        <span class="s">${pct}% of plan</span></div>
+                    <div><span class="k">ELAPSED</span><span class="v">${elapsed(t.started_at)}</span>
+                        <span class="s">since ${ago(t.started_at)}</span></div>
+                    <div><span class="k">TOKENS</span><span class="v">${short(tokens)}</span>
+                        <span class="s">${short(run.tokens.cacheRead)} cached</span></div>
+                    <div><span class="k">COST SO FAR</span><span class="v">${cost === null ? '—' : money(cost)}</span>
+                        <span class="s">${cost === null ? 'no $/1M rates set' : 'at your rates'}</span></div>
+                </div>
+
+                ${rail.length ? `<div class="dp-rail">${rail.map(p => `
+                    <div class="dp-ph is-${p.state}">
+                        <span class="n">${p.phase.toUpperCase()}${p.state === 'now' ? ' · now' : ''}</span>
+                        <span class="m">${p.model ? esc(shortModel(p.model)) : '—'}${
+                            p.tokens ? ` · ${short(p.tokens)}` : ''}</span>
+                    </div>`).join('')}</div>
+                    ${run.escalated ? `<p class="dm-note" style="padding:0 2px">Execution was promoted to the
+                        deep tier — this run was long enough that the cheap model was struggling.</p>` : ''}
+                ` : ''}
+
+                ${this._inPlayHtml(run)}
+
+                <div class="dm-box">
+                    <div class="dm-h">Live steps</div>
+                    <div class="dp-steps">
+                        ${run.steps.length
+                            ? run.steps.map((s, i) => `
+                                <div class="dp-step is-${esc(s.kind)} ${i === run.steps.length - 1 ? 'is-live' : ''}">
+                                    <span class="n">${s.n || ''}</span>
+                                    <span class="tx">${esc(s.text)}</span>
+                                </div>`).join('')
+                            : `<p class="dm-note">Waiting for the first step…</p>`}
+                    </div>
+                </div>
+
+                ${run.files.size ? `<p class="dm-note" style="padding:0 2px">${
+                    run.files.size} file${run.files.size === 1 ? '' : 's'} changed so far.</p>` : ''}
+            </div>`;
+    }
+
+    /**
+     * "Memory in play" — the join between the two halves of this page.
+     *
+     * Neither half had this alone: the cockpit showed work without memory, the
+     * memory hub showed memory without work. Seeing a lesson fire at step 12 and
+     * the same failure at step 13 is what makes a useless card visible at the
+     * moment it is being useless — which is when you would actually switch it off.
+     */
+    _inPlayHtml(run) {
+        if (!run.recalls.length) return '';
+        return `
+            <div class="dp-inplay">
+                <div class="dp-inplay-h">
+                    ${icon('memory', 12)} Memory in play · ${run.recalls.length}
+                    <button type="button" class="more dash-go-memory">Manage in Memory →</button>
+                </div>
+                ${run.recalls.map(c => `
+                    <div class="dp-inplay-l">
+                        <span class="at">${c.source === 'brief' ? 'brief' : `step ${c.at}`}</span>
+                        <span><b>${esc(c.type || 'card')}</b> ${esc(clip(c.recipe || c.headline || '', 90))}</span>
+                    </div>`).join('')}
+            </div>`;
+    }
+
+    _memoryHtml() {
+        const mem = this.memory;
+        if (!mem) return `<div class="dash-empty"><p>Loading memory…</p></div>`;
+        if (!this.memoryWs) {
+            return `<div class="dash-empty">
+                <div class="dash-empty-ico">${icon('memory', 28)}</div>
+                <h3>No workspace yet</h3>
+                <p>Memory is stored per workspace, under <code>.agent/</code>. Run a task in one and
+                   what it learns will show up here.</p></div>`;
+        }
+        if (this.memoryError) {
+            return `<div class="dash-empty"><h3>Could not read memory</h3>
+                <p>${esc(this.memoryError)}</p></div>`;
+        }
+
+        const L = memoryLayers(mem);
+        const H = memoryHealth(mem.cards);
+        const results = this.memQuery ? searchMemory(mem, this.memQuery) : [];
+
+        if (!L.totalCards && !L.totalFacts && !L.episodes) {
+            return `<div class="dash-empty">
+                <div class="dash-empty-ico">${icon('memory', 28)}</div>
+                <h3>Nothing learned yet</h3>
+                <p>Cards appear after runs that hit a problem, or that found something worth
+                   reusing. Facts appear when a run states a rule about this project.</p></div>`;
+        }
+
+        return `
+            <div class="dm">
+                <div class="dm-layers">
+                    <div><span class="k">DURABLE</span><span class="v">${L.durable}</span><span class="s">facts</span></div>
+                    <div><span class="k">EPISODIC</span><span class="v">${L.episodic}</span><span class="s">on probation</span></div>
+                    <div><span class="k">LESSONS</span><span class="v">${L.lessons}</span><span class="s">what failed</span></div>
+                    <div><span class="k">INSIGHTS</span><span class="v">${L.insights}</span><span class="s">what worked</span></div>
+                    <div><span class="k">EPISODES</span><span class="v">${L.episodes}</span><span class="s">sessions kept</span></div>
+                </div>
+
+                ${this._healthHtml(H)}
+                ${this._learnedHtml()}
+
+                <div class="dm-search">
+                    ${icon('search', 13)}
+                    <input id="dash-mem-q" type="text" value="${esc(this.memQuery)}"
+                        placeholder="Search what it knows" aria-label="Search memory">
+                    <span class="sc">${L.totalCards} cards · ${L.totalFacts} facts</span>
+                </div>
+                ${this.memQuery ? `<div class="dm-box dm-results">${
+                    results.length
+                        ? results.map(r => this._memRowHtml(r, { plain: true })).join('')
+                        : `<p class="dm-note">Nothing matches “${esc(this.memQuery)}”.</p>`
+                }</div>` : ''}
+            </div>`;
+    }
+
+    /**
+     * "Is it working?" — the panel's headline.
+     *
+     * Deliberately NOT the cards' own `confidence`: that is the agent's estimate
+     * of itself and a useless lesson is just as confident as a good one. This is
+     * measured after the fact — of the times a card was shown, how often the
+     * failure came back anyway — so it is the only figure here that can tell you
+     * to switch something off.
+     */
+    _healthHtml(H) {
+        if (!H.total) return '';
+        if (!H.shown) {
+            return `<div class="dm-box">
+                <div class="dm-h">${icon('shield', 13)} Is it working?</div>
+                <p class="dm-note">${H.total} card${H.total === 1 ? '' : 's'} stored,
+                   none surfaced to a run yet — so there is nothing to judge yet.
+                   This fills in as they get used.</p>
+            </div>`;
+        }
+        const pctOf = (n) => (n / H.shown * 100);
+        const failing = H.failingCards.map(f => `
+            <div class="dm-frow">
+                <span class="drow-dot dot-failed"></span>
+                <span class="grow" title="${esc(f.detail)}">${esc(f.headline)}</span>
+                <span class="dm-rate">${f.rate.toFixed(2)}</span>
+                <label class="dm-toggle" title="Switch this card off">
+                    <input type="checkbox" class="dash-card-toggle" data-card="${esc(f.card.id)}" checked>
+                    <i></i>
+                </label>
+            </div>`).join('');
+
+        return `
+            <div class="dm-box">
+                <div class="dm-h">
+                    ${icon('shield', 13)} Is it working?
+                    <span class="more">${H.shown} of ${H.total} used · half-life ${HALF_LIFE_DAYS}d</span>
+                </div>
+                <div class="dm-bar">
+                    <i style="width:${pctOf(H.held)}%;background:var(--success)"></i>
+                    <i style="width:${pctOf(H.partial)}%;background:var(--warning)"></i>
+                    <i style="width:${pctOf(H.failing)}%;background:var(--error)"></i>
+                </div>
+                <div class="dm-lg">
+                    <span><i class="dm-sw" style="background:var(--success)"></i><b>${H.held}</b> held — failure stopped</span>
+                    ${H.partial ? `<span><i class="dm-sw" style="background:var(--warning)"></i>${H.partial} partial</span>` : ''}
+                    ${H.failing ? `<span><i class="dm-sw" style="background:var(--error)"></i>${H.failing} still recurring</span>` : ''}
+                </div>
+                ${failing ? `<div class="dm-fail">
+                    <div class="dm-fail-t">Not earning their place</div>${failing}</div>` : ''}
+            </div>`;
+    }
+
+    _learnedHtml() {
+        const rows = this._newCards();
+        if (!rows.length) return '';
+        return `
+            <div class="dm-box">
+                <div class="dm-h">
+                    ${icon('sparkle', 13)} Learned since you last looked
+                    <span class="badge">${rows.length} new</span>
+                    <a class="more" href="#config?tab=memory">Settings → Memory →</a>
+                </div>
+                ${rows.map(r => this._memRowHtml(r)).join('')}
+            </div>`;
+    }
+
+    _memRowHtml(r, { plain = false } = {}) {
+        const card = r.card;
+        const badge = r.badge || 'note';
+        const meta = card
+            ? [card.costSteps ? `cost ${card.costSteps} steps` : '',
+               card.hits > 1 ? `seen ${card.hits}×` : '',
+               card.last_recurrence || card.first_seen || ''].filter(Boolean).join(' · ')
+            : (r.detail || '');
+        return `
+            <div class="dm-row ${card?.disabled ? 'is-off' : ''}">
+                <span class="dm-badge is-${esc(badge)}">${esc(badge)}</span>
+                <span class="body">
+                    <span class="hl">${esc(r.headline || '')}</span>
+                    <span class="dt">${esc(r.detail || '')}</span>
+                    ${card && !plain ? `<span class="mt">${esc(meta)}</span>` : ''}
+                </span>
+                ${card ? `<label class="dm-toggle" title="${card.disabled ? 'Switch back on' : 'Switch off'}">
+                    <input type="checkbox" class="dash-card-toggle" data-card="${esc(card.id)}"
+                        ${card.disabled ? '' : 'checked'}>
+                    <i></i>
+                </label>` : ''}
+            </div>`;
+    }
+
+    // ── Wiring ───────────────────────────────────────────────────────────
+
     async init() {
-        // New-task button → open the Monitor creation modal (flag consumed there).
-        const newBtn = document.getElementById('dash-new-task');
-        if (newBtn) newBtn.addEventListener('click', () => {
-            try { localStorage.setItem('jh_open_new_task', '1'); } catch (_) {}
-            window.location.hash = '#monitor';
+        await this.loadData();
+        if (this._destroyed) return;
+        this._paint();
+        // Memory is three file reads; the page is already usable without it.
+        this.loadMemory().then(() => { if (!this._destroyed) this._paint(); });
+        this._watchRunning();
+    }
+
+    // ── Live run ─────────────────────────────────────────────────────────
+
+    /**
+     * Follow the running task, if there is one.
+     *
+     * READ-ONLY, deliberately. Monitor's socket handler steers, approves,
+     * continues and manages replay cutoffs across its whole DOM; this one only
+     * accumulates logs and repaints. Sharing that handler would mean coupling
+     * this view to Monitor's markup, and forking it would mean two sockets
+     * fighting over one task's control messages.
+     */
+    _watchRunning() {
+        const t = this.tasks.find(x => x.status === 'running');
+        if (!t) { this._closeSocket(); return; }
+        if (this._watchedId === t.id && this._socket) return;
+
+        this._closeSocket();
+        this._watchedId = t.id;
+        this._runLogs = [];
+        this.run = null;
+
+        if (!window.apiClient) return;
+        let socket;
+        try {
+            socket = new WebSocket(
+                `ws://localhost:${window.apiClient.port}/ws/tasks/${t.id}?token=${window.apiClient.token}`);
+        } catch (e) {
+            console.warn('Dashboard: could not open the task socket:', e);
+            return;
+        }
+        this._socket = socket;
+
+        socket.onmessage = (ev) => {
+            // A socket that outlives a navigation must not touch the DOM.
+            if (this._destroyed || this._socket !== socket) return;
+            let packet;
+            try { packet = JSON.parse(ev.data); } catch (_) { return; }
+            // The server replays the whole task on connect and then streams.
+            // Both are just logs here — there is no live/replay split to get
+            // wrong because this view holds no DOM state between repaints.
+            this._runLogs.push(packet);
+            this.run = reduceRun(this._runLogs);
+            if (this.run.finished) {
+                // The run ended: reload so the queue and spend catch up, which
+                // also flips the pane back to Memory.
+                this._closeSocket();
+                this.loadData().then(() => { if (!this._destroyed) { this.tab = null; this._paint(); } });
+                return;
+            }
+            this._schedulePaint();
+        };
+        socket.onerror = () => { /* onclose follows; nothing useful to add */ };
+        socket.onclose = () => { if (this._socket === socket) this._socket = null; };
+    }
+
+    /**
+     * Coalesce repaints. A busy run emits several events per second and each
+     * repaint rebuilds three innerHTML regions; without this the page would
+     * spend its time in layout instead of showing the run.
+     */
+    _schedulePaint() {
+        if (this._repaintTimer) return;
+        this._repaintTimer = setTimeout(() => {
+            this._repaintTimer = null;
+            if (!this._destroyed) this._paint();
+        }, 250);
+    }
+
+    _closeSocket() {
+        if (this._socket) {
+            try { this._socket.close(); } catch (_) {}
+            this._socket = null;
+        }
+        this._watchedId = null;
+    }
+
+    /** Re-render the three dynamic regions and rebind. Cheap; called on any change. */
+    _paint() {
+        const m = this._metrics();
+        const set = (id, html) => { const el = document.getElementById(id); if (el) el.innerHTML = html; };
+
+        const bits = [];
+        if (m.running.length) bits.push(`<b>${m.running.length}</b> running`);
+        if (m.paused.length) bits.push(`<b>${m.paused.length}</b> waiting for you`);
+        if (m.freshFailures.length) bits.push(`<b>${m.freshFailures.length}</b> failed recently`);
+        if (m.spend.total > 0) bits.push(`<b>${money(m.spend.total)}</b> this week`);
+        set('dash-status', bits.length ? bits.join(' · ') : 'Nothing needs you right now');
+
+        set('dash-left', this._leftHtml(m));
+        set('dash-tabs', this._tabsHtml(m));
+        set('dash-pane', this._paneHtml(m));
+
+        // Opening the Memory tab is what clears the "new" badge: it means "you
+        // have seen these", so it must be marked when they are actually shown,
+        // not when the page loads.
+        if (this._activeTab(m) === 'memory' && this.memory) {
+            try { localStorage.setItem(MEM_SEEN_KEY, String(Date.now())); } catch (_) {}
+        }
+
+        this._bind(m);
+    }
+
+    /**
+     * Switch the memory pane to another workspace and reload its stores.
+     *
+     * Memory is per-workspace (under `<ws>/.agent/`), so this is what makes the
+     * right pane useful for more than the workspace the agent happens to work in
+     * — the guess in `_memoryWorkspace()` stays the default, but the user's pick
+     * wins from then on.
+     */
+    async _setMemoryWorkspace(ws) {
+        const next = String(ws || '').trim();
+        this.memoryWs = next;
+        this.memoryError = '';
+        this.memQuery = '';
+        // Update the input directly so _paint doesn't restore the old value.
+        const input = document.getElementById('dash-mem-ws');
+        if (input) input.value = next;
+        this._paint();
+        if (!next) { this.memory = { facts: [], episodes: [], cards: [] }; return; }
+        try {
+            this.memory = await readWorkspaceMemory(next, invoke);
+        } catch (e) {
+            this.memory = { facts: [], episodes: [], cards: [] };
+            this.memoryError = String(e?.message || e);
+        }
+        if (!this._destroyed) this._paint();
+    }
+
+    _bind(m) {
+        this._bindLauncher(m);
+
+        const wsBrowse = document.getElementById('dash-ws-browse');
+        if (wsBrowse) {
+            wsBrowse.addEventListener('click', async () => {
+                try {
+                    const sel = await invoke('select_folder');
+                    if (sel) {
+                        const input = document.getElementById('dash-ws');
+                        if (input) { input.value = sel; input.focus(); }
+                    }
+                } catch (_) { /* dialog cancelled */ }
+            });
+        }
+
+        const memWs = document.getElementById('dash-mem-ws');
+        if (memWs) {
+            memWs.addEventListener('change', () => {
+                if (memWs.value.trim() !== this.memoryWs) this._setMemoryWorkspace(memWs.value);
+            });
+            memWs.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' && !e.isComposing) {
+                    e.preventDefault();
+                    memWs.blur();
+                    if (memWs.value.trim() !== this.memoryWs) this._setMemoryWorkspace(memWs.value);
+                }
+            });
+        }
+        const memBrowse = document.getElementById('dash-mem-ws-browse');
+        if (memBrowse) {
+            memBrowse.addEventListener('click', async () => {
+                try {
+                    const sel = await invoke('select_folder');
+                    if (sel) this._setMemoryWorkspace(sel);
+                } catch (_) { /* dialog cancelled */ }
+            });
+        }
+
+        document.querySelectorAll('.dr-chip[data-recipe]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const key = btn.getAttribute('data-recipe');
+                const tpl = safeTemplates().find(t => t.key === key);
+                if (!tpl) return;
+                recordUse(key);
+                const ta = document.getElementById('dash-prompt');
+                if (ta) { ta.value = tpl.prompt; ta.focus(); autoGrow(ta); }
+            });
         });
 
-        await this.loadData();
-        const m = this._metrics();
+        document.querySelectorAll('.dt-tab[data-tab]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                if (btn.disabled) return;
+                this.tab = btn.getAttribute('data-tab');
+                this._paint();
+            });
+        });
 
-        const set = (id, html) => { const el = document.getElementById(id); if (el) el.innerHTML = html; };
-        const setText = (id, txt) => { const el = document.getElementById(id); if (el) el.textContent = txt; };
+        document.querySelectorAll('.dash-card-toggle').forEach(cb => {
+            cb.addEventListener('change', () => this._toggleCard(cb.getAttribute('data-card'), !cb.checked));
+        });
 
-        set('dash-stats', this._statsHtml(m));
+        // Crossing from a card firing in a run to the switch that turns it off
+        // is the point of having both halves on one page. Make it one click.
+        document.querySelectorAll('.dash-go-memory').forEach(btn => {
+            btn.addEventListener('click', () => { this.tab = 'memory'; this._paint(); });
+        });
 
-        // Needs attention = paused/awaiting-approval (first) + recent failures (5).
-        const attention = [
-            ...m.paused.map(t => this._rowHtml(t)),
-            ...m.failures.slice(0, 5).map(t => this._rowHtml(t, { error: true })),
-        ];
-        set('dash-attention', attention.length ? attention.join('') : `<div class="dash-empty">Nothing needs attention 🎉</div>`);
-        setText('cnt-attention', String(m.paused.length + Math.min(m.failures.length, 5)));
-
-        set('dash-running', m.running.length
-            ? m.running.map(t => this._rowHtml(t, { progress: true })).join('')
-            : `<div class="dash-empty">No running tasks</div>`);
-        setText('cnt-running', String(m.running.length));
-
-        const recent = m.recent.slice(0, 12);
-        set('dash-recent', recent.length
-            ? recent.map(t => this._rowHtml(t, { progress: true })).join('')
-            : `<div class="dash-empty">No tasks yet</div>`);
-        setText('cnt-recent', String(m.recent.length));
-
-        // Usage analytics — reuse the SAME task list (no extra fetch).
-        const anEl = document.getElementById('dash-analytics');
-        if (anEl) {
-            try {
-                this.analytics.setTasks(this.tasks);
-                anEl.innerHTML = await this.analytics.render();
-                this.analytics.init();
-            } catch (e) { console.error('Analytics render failed:', e); }
+        const q = document.getElementById('dash-mem-q');
+        if (q) {
+            q.addEventListener('input', debounce(() => {
+                this.memQuery = q.value;
+                this._paint();
+                // Re-focus and restore the caret: _paint replaces the input.
+                const next = document.getElementById('dash-mem-q');
+                if (next) { next.focus(); next.setSelectionRange(next.value.length, next.value.length); }
+            }, 180));
         }
+    }
+
+    /**
+     * Switch a card off (or back on) and persist it.
+     *
+     * Optimistic: the row flips at once and reverts if the write fails, because
+     * a toggle that waits on three file operations feels broken. Writes the
+     * whole store back — cards.jsonl is a few hundred lines and a partial
+     * rewrite would have to reproduce the agent's own append format.
+     */
+    async _toggleCard(id, disabled) {
+        if (!id || !this.memory) return;
+        const before = this.memory.cards;
+        this.memory = { ...this.memory, cards: toggleCardDisabled(before, id, disabled) };
+        this._paint();
+        try {
+            await writeCards(this.memoryWs, this.memory.cards, invoke);
+        } catch (e) {
+            this.memory = { ...this.memory, cards: before };
+            this.memoryError = '';
+            this._paint();
+            alert('Could not save the change to cards.jsonl: ' + (e?.message || e));
+        }
+    }
+
+    /**
+     * The launcher hands off to Monitor's new-task modal rather than creating
+     * the task itself. That modal owns workspace validation, the agent-mode
+     * picker, MCP selection, "/" template expansion and attachments — a second
+     * creation path here would be the weaker of the two and would drift.
+     */
+    _bindLauncher() {
+        const form = document.getElementById('dash-launch');
+        const ta = document.getElementById('dash-prompt');
+        if (!form || !ta) return;
+
+        autoGrow(ta);
+        ta.addEventListener('input', () => autoGrow(ta));
+        ta.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+                e.preventDefault();
+                form.requestSubmit();
+            }
+        });
+
+        form.addEventListener('submit', (e) => {
+            e.preventDefault();
+            const prompt = ta.value.trim();
+            const ws = (document.getElementById('dash-ws')?.value || '').trim();
+            if (!prompt) { ta.focus(); return; }
+            try {
+                localStorage.setItem(LAST_WS_KEY, ws);
+                localStorage.setItem('jh_open_new_task', JSON.stringify({ prompt, ws }));
+            } catch (_) {}
+            window.location.hash = '#monitor';
+        });
+    }
+
+    destroy() {
+        this._destroyed = true;
+        this._closeSocket();
+        clearTimeout(this._repaintTimer);
+        this._repaintTimer = null;
     }
 }
 
+// ── helpers ──────────────────────────────────────────────────────────────
+
+function safeTemplates() {
+    try { return promptTemplateManager.getAll() || []; } catch (_) { return []; }
+}
+
 function esc(str) {
+    if (str === 0) return '0';
     if (!str) return '';
-    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    return String(str)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function clip(s, n) {
+    const v = String(s || '').replace(/\s+/g, ' ').trim();
+    return v.length > n ? v.slice(0, n - 1) + '…' : v;
+}
+
+function fmt(n) { return Number(n || 0).toLocaleString(); }
+
+function short(n) {
+    const v = Number(n) || 0;
+    if (v >= 1e6) return (v / 1e6).toFixed(1) + 'M';
+    if (v >= 1e3) return Math.round(v / 1e3) + 'k';
+    return String(v);
+}
+
+/** Costs are often fractions of a cent; two decimals would print "$0.00". */
+function money(n) {
+    const v = Number(n) || 0;
+    if (v === 0) return '$0';
+    if (v < 0.01) return '<$0.01';
+    return '$' + (v < 10 ? v.toFixed(2) : v.toFixed(0));
+}
+
+function baseName(p) {
+    return String(p || '').split(/[\\/]/).filter(Boolean).pop() || '';
+}
+
+/** `inst_17…:deepseek-v4-flash` -> `deepseek-v4-flash`. Used when a model has
+ *  no configured rates, so there is no connection name to show instead. */
+function shortModel(m) {
+    const s = String(m || '');
+    const i = s.indexOf(':');
+    return i >= 0 ? s.slice(i + 1) : (s || '(unknown)');
+}
+
+/** Relative time — an absolute timestamp needs arithmetic to be useful here. */
+function ago(iso) {
+    const t = iso ? new Date(iso).getTime() : 0;
+    if (!t) return '';
+    const s = Math.max(0, (Date.now() - t) / 1000);
+    if (s < 60) return 'now';
+    if (s < 3600) return `${Math.floor(s / 60)}m`;
+    if (s < 86400) return `${Math.floor(s / 3600)}h`;
+    const d = Math.floor(s / 86400);
+    if (d < 30) return `${d}d`;
+    return new Date(t).toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
+
+/** Wall-clock since a start time, as m:ss / h:mm. */
+function elapsed(iso) {
+    const t = iso ? new Date(iso).getTime() : 0;
+    if (!t) return '—';
+    const s = Math.max(0, Math.floor((Date.now() - t) / 1000));
+    if (s < 3600) return `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
+    return `${Math.floor(s / 3600)}h ${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}m`;
+}
+
+function autoGrow(ta) {
+    ta.style.height = 'auto';
+    ta.style.height = Math.min(150, Math.max(40, ta.scrollHeight)) + 'px';
+}
+
+function debounce(fn, ms) {
+    let h = null;
+    return (...a) => { clearTimeout(h); h = setTimeout(() => fn(...a), ms); };
 }

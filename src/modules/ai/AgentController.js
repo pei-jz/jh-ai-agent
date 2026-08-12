@@ -14,13 +14,23 @@ import { CompressionMetrics, fetchKey, hashContent, factRetention } from './agen
 import { shouldPlanFirst } from './agent/TaskComplexity.js';
 import { intentRegistry, resolveIntent } from './agent/IntentRegistry.js';
 import { classifyCommand } from './tools/commandPolicy.js';
-import { normalizeSafetyLimits } from './agent/SafetyLimits.js';
+import { normalizeSafetyLimits, resolveRecallArm } from './agent/SafetyLimits.js';
+import { initialPhase, advancePhase, modelForPhase, phaseLabel } from './agent/ModelPhaseRouter.js';
 import { buildRecoveryHint } from './agent/RecoveryHints.js';
 import {
     resolveRole, composeSubtaskPrompt, buildReviewBrief, parseReviewVerdict, clipText, childTokenBudget,
     scopesOverlap, WRITE_ENFORCED_TOOLS, TESTER_WRITE_PATTERNS,
     SUBTASK_MAX_PARALLEL, SUBTASK_MAX_PER_RUN, SUBTASK_REPORT_MAX_CHARS, SUBTASK_MAX_STEPS_CAP
 } from './agent/SubagentRoles.js';
+import { stopReason, stopNotice, stopStatusMessage } from './agent/stopReason.js';
+// Step 0 of the memory plan: record what each tool call did, with a normalized
+// failure signature. Recording only — nothing here changes what the agent does.
+import { TraceRecorder } from './memory/TraceRecorder.js';
+// Step 1: lessons (what went wrong) and insights (what worked / where things
+// are), minted from the trace and recalled at the moment they apply.
+import { CardStore, renderBrief, renderCard, cardSummary, summarizeMinted } from './memory/CardStore.js';
+import { targetOf } from './memory/FailureSignature.js';
+import { sessionMetrics, appendSessionMetrics } from './memory/SessionMetrics.js';
 
 // Tools blocked by the Plan-First gate until the user approves the plan —
 // anything that mutates the workspace or runs shell commands. Investigation
@@ -35,6 +45,29 @@ import {
  * used by both.
  */
 const DELIVERABLE_MIN_CHARS = 400;
+
+/**
+ * Fold `[{path, description}]` from the description generator onto the result's
+ * file rows, mutating them in place. Path matching tolerates separator and
+ * absolute/relative differences — the model echoes back whatever form it likes.
+ * @returns {boolean} true when at least one description was applied
+ */
+function applyDescriptions(files, items) {
+    if (!Array.isArray(items)) return false;
+    let applied = false;
+    for (const item of items) {
+        if (!item || !item.path || !item.description) continue;
+        const norm = String(item.path).replace(/\\/g, '/');
+        const match = files.find(f =>
+            f.path === item.path ||
+            f.path.replace(/\\/g, '/') === norm ||
+            f.path.replace(/\\/g, '/').endsWith(norm));
+        if (!match) continue;
+        match.description = String(item.description).substring(0, 200);
+        applied = true;
+    }
+    return applied;
+}
 
 const PLAN_GATED_TOOLS = new Set([
     'write_file', 'multi_replace_file_content', 'replace_lines',
@@ -202,6 +235,11 @@ export class AgentController {
         this._intentTier = null;   // reset per run (controller may be reused)
         this._modelOverride = null;
         this._deepModelId = null;
+        // ── Phase routing state (agent/ModelPhaseRouter.js) ──
+        this._phase = 'execute';        // plan → execute → review
+        this._phaseRouting = false;     // config gate; off ⇒ nothing below applies
+        this._phaseEscalated = false;   // long-run escalation promoted EXECUTE to deep
+        this._phaseTokens = { plan: 0, execute: 0, review: 0 };  // for the cost report
         this._applyIntent();
 
         // ── Load all Agent Safety Limits from config ─────────────────
@@ -278,8 +316,45 @@ export class AgentController {
             : await this._resolveTierModels();
         this._deepModelId = tierModels.deep;
         this._modelOverride = tierModels.initial || null;
+        // Kept for the run's AUXILIARY calls (result summary, file descriptions,
+        // memory extraction). Those are JSON/boilerplate generators — running them
+        // on the active deep model costs seconds of post-run latency for nothing.
+        this._fastModelId = tierModels.fast || null;
         this._escalateAtStep = Math.max(6, Math.ceil((safety.maxIterations || 30) * 0.5));
-        if (this._modelOverride) {
+
+        // ── Phase routing ────────────────────────────────────────────────
+        // Same tier ids, but re-decided as the run moves plan → execute →
+        // review instead of once at the start. Requires BOTH tiers: with only
+        // one configured every phase resolves to the same model, so the run
+        // would pay the switching complexity for no saving.
+        this._phaseRouting = safety.phaseRouting === 'on'
+            && !userPicksModel
+            && !this._isSubagent          // a sub-agent is ONE phase of the parent
+            && !!tierModels.fast && !!tierModels.deep;
+        if (this._phaseRouting) {
+            this._phase = initialPhase({
+                enabled: true,
+                freshTurn: isFreshTurn,
+                planFirst: this._planFirstActive,
+                complex: this._looksComplex(prompt),
+            });
+            const m = modelForPhase(this._phase, tierModels, { enabled: true });
+            if (m) this._modelOverride = m;
+            // The opening phase, structured — without this the Dashboard's rail
+            // would not know which phase a run is in until the FIRST switch.
+            onAgentStatus?.({
+                event: 'phase',
+                phase: this._phase,
+                model: this._modelOverride,
+                from: null,
+                escalated: false,
+                tokens: { ...this._phaseTokens },
+            });
+            onAgentStatus?.({
+                event: 'status', status: 'running',
+                message: `🧭 フェーズ別ルーティング ON — ${phaseLabel(this._phase)}: ${this._modelOverride}`,
+            });
+        } else if (this._modelOverride) {
             onAgentStatus?.({ event: 'status', status: 'running', message: `🧭 モデル: ${this._modelOverride}` });
         }
 
@@ -334,6 +409,10 @@ export class AgentController {
         let cumulativeTokens = 0;
         let tokenBudgetWarned = false;
         let wallClockWarned = false;
+        // Non-null when a LIMIT ended the run rather than the agent deciding it was
+        // done. Returned to the caller so a capped run cannot masquerade as a clean
+        // completion — see agent/stopReason.js.
+        let stoppedBy = null;
         let identicalWarned = false;
         let cycleWarned = false;
         let noProgressWarned = false;
@@ -353,6 +432,26 @@ export class AgentController {
         ]);
 
         await this.toolExecutor.startSession(workspacePath);
+
+        // Failure trace for this session. Created after startSession because the
+        // session id names the file. Disables itself when there is no workspace.
+        this._trace = new TraceRecorder({
+            workspacePath,
+            sessionId: this.toolExecutor.getCurrentSessionId(),
+            invoke,
+        });
+
+        // What earlier sessions in this workspace learned. Loaded once; recall is
+        // then in-memory, so a hit costs no I/O and no LLM call.
+        this._cards = new CardStore({ workspacePath, invoke });
+        await this._cards.load();
+        // Which arm this run belongs to. Under 'auto' it is drawn at random, so
+        // the control group forms itself instead of depending on someone
+        // remembering to flip a switch. Learning runs in both arms.
+        this._recallOn = resolveRecallArm(safety.memoryRecall);
+        /** [{ id, at, recipe }] — what was surfaced, and when. Feeds followThrough. */
+        this._cardsShownLog = [];
+        this._memoryChars = 0;
 
         // Invalidate ContextBuilder's static cache so the new session gets a
         // fresh build (picks up any persona/config changes since last run).
@@ -490,9 +589,9 @@ export class AgentController {
                 const elapsedMs = Date.now() - taskStartMs;
                 const budgetMs = safety.wallClockMinutes * 60 * 1000;
                 if (elapsedMs >= budgetMs) {
-                    onAgentStatus?.({ event: 'status', status: 'running', message: `Wall-clock budget (${safety.wallClockMinutes} min) reached — auto-stopping.` });
-                    finalResponse = (finalResponse || '') +
-                        `\n\n(注意: 実行時間が予算 ${safety.wallClockMinutes} 分に到達したため、自動停止しました。Settings → General → Wall-clock Timeout で調整できます。)`;
+                    stoppedBy = stopReason('wall_clock', { limit: safety.wallClockMinutes });
+                    onAgentStatus?.({ event: 'status', status: 'running', message: stopStatusMessage(stoppedBy) });
+                    finalResponse = (finalResponse || '') + stopNotice(stoppedBy);
                     break;
                 }
                 if (elapsedMs >= budgetMs * 0.8 && !wallClockWarned) {
@@ -504,8 +603,28 @@ export class AgentController {
                 }
             }
 
+            // ── Phase routing: the plan phase releases the deep model on its
+            //    step cap (ModelPhaseRouter.PLAN_PHASE_MAX_STEPS) ──
+            this._phaseEvent('step', {
+                iteration,
+                planFirstPending: this._planFirstActive && !this._planApproved,
+            }, onAgentStatus);
+
             // ── Auto-escalate fast→deep tier for long-running tasks ──
-            if (this._deepModelId && this._modelOverride !== this._deepModelId
+            //
+            // Under phase routing this is not a one-way pin to deep: it records
+            // that the cheap tier is struggling on THIS run, which promotes the
+            // EXECUTE phase only. Plan and review are deep already, and the run
+            // must still be able to fall back to fast if it re-enters execute —
+            // otherwise one long task silently spends the rest of itself on the
+            // expensive model, which is the cost leak this feature exists to close.
+            if (this._phaseRouting) {
+                if (!this._phaseEscalated && iteration >= this._escalateAtStep) {
+                    this._phaseEscalated = true;
+                    onAgentStatus?.({ event: 'status', status: 'running', message: `🧠 実装フェーズを上位モデル(deep)に昇格 — step ${iteration} 到達` });
+                    this._phaseEvent('step', { iteration }, onAgentStatus);
+                }
+            } else if (this._deepModelId && this._modelOverride !== this._deepModelId
                 && iteration >= this._escalateAtStep) {
                 this._modelOverride = this._deepModelId;
                 onAgentStatus?.({ event: 'status', status: 'running', message: `🧠 上位モデル(deep)に切替 — step ${iteration} 到達` });
@@ -517,9 +636,9 @@ export class AgentController {
             if (safety.tokenBudget > 0) {
                 const spent = cumulativeTokens + this._subtaskTokens;
                 if (spent >= safety.tokenBudget) {
-                    onAgentStatus?.({ event: 'status', status: 'running', message: `Token budget (${safety.tokenBudget.toLocaleString()}) reached — auto-stopping.` });
-                    finalResponse = (finalResponse || '') +
-                        `\n\n(注意: 累積トークン数（サブエージェント分含む）が予算 ${safety.tokenBudget.toLocaleString()} に到達したため、自動停止しました。Settings → General → Token Budget で調整できます。)`;
+                    stoppedBy = stopReason('token_budget', { limit: safety.tokenBudget, used: spent });
+                    onAgentStatus?.({ event: 'status', status: 'running', message: stopStatusMessage(stoppedBy) });
+                    finalResponse = (finalResponse || '') + stopNotice(stoppedBy);
                     break;
                 }
                 if (spent >= safety.tokenBudget * 0.8 && !tokenBudgetWarned) {
@@ -549,22 +668,40 @@ export class AgentController {
                     }
                 }
                 
-                if (allImages.length > 0) {
-                    steeringMsg.content = [
-                        { type: "text", text: steeringMsg.content },
-                        ...allImages.map(img => ({
-                            type: "image_url",
-                            image_url: { url: img }
-                        }))
-                    ];
-                }
-
                 history.push(steeringMsg);
+
+                // Images ride the SAME channel as the run's own attachments —
+                // `_pendingToolImages`, drained into the next call's `stepImages`.
+                //
+                // They used to be hand-built into the message as OpenAI-shaped
+                // `image_url` parts, which (a) is the wrong wire shape for the
+                // other providers and (b) skipped the vision check entirely, so on
+                // a model that cannot read images the picture was dropped in
+                // silence and the user was told nothing. Symptom reported: an
+                // image attached to a follow-up, and the agent answering
+                // "画像は確認できませんが…".
+                if (allImages.length > 0) this._attachUserImages(allImages, onAgentStatus);
                 
                 // Emit a dedicated event so the UI can show a visible acknowledgment.
                 const preview = steeringText.split('\n')[0].substring(0, 80);
                 onAgentStatus?.({ event: 'steering_received', message: `📌 Steering received: "${preview}"` });
                 onAgentStatus?.({ event: 'status', status: 'running', message: `📌 Steering applied: "${preview}"` });
+            }
+
+            // Opening brief: the highest-scoring lessons AND insights this
+            // workspace has produced. Recall BEFORE acting is the whole point — a
+            // memory consulted only after the mistake is a log, not a memory.
+            // Deliberately outside the planning if/else below: it is orthogonal
+            // to which planning mode the run is in.
+            if (iteration === 1 && this._recallOn) {
+                const cards = this._cards?.recallBrief(3) || [];
+                const brief = renderBrief(cards);
+                if (brief) {
+                    history.push({ role: 'user', content: brief });
+                    this._noteCardsShown(cards, iteration, brief);
+                    this._emitRecall(onAgentStatus, cards, iteration, 'brief');
+                    onAgentStatus?.({ event: 'status', status: 'running', message: '🧠 過去セッションの学習を参照' });
+                }
             }
 
             // First-iteration planning injection.
@@ -816,6 +953,7 @@ export class AgentController {
             this._spentTokens = cumulativeTokens;
             this._efficiency.promptTokens += (genResult.usage?.prompt_tokens || 0);
             this._efficiency.completionTokens += (genResult.usage?.completion_tokens || 0);
+            this._recordPhaseTokens(genResult.usage);
 
             onAgentStatus?.({
                 event: 'token_usage',
@@ -1117,6 +1255,9 @@ export class AgentController {
                     const errorMsg = `Error: Execution blocked by user permission settings (Deny).`;
                     results.push({ tool_call_name: call.name, result: errorMsg, id: callIdOf.get(call) });
                     hasErrors = true;
+                    // Recorded, but flagged: a user refusal is not a defect to learn
+                    // a fix for. Step 1 excludes `denied` rows from card minting.
+                    this._trace?.record({ iteration, tool: call.name, args: call.args, result: errorMsg, isError: true, ms: 0, denied: true });
                     onAgentStatus?.({ event: 'tool_call', name: call.name, args: call.args, status: 'denied' });
                 }
 
@@ -1136,8 +1277,9 @@ export class AgentController {
                         const isError = typeof result === 'string' && result.startsWith('Error');
                         if (isError) hasErrors = true;
                         this._trackReadEfficiency(call, result, isError);
+                        this._trace?.record({ iteration, tool: call.name, args: call.args, result, isError, ms: duration });
                         if (onLog) this._logToolTelemetry(onLog, iteration, call, result, duration, isError);
-                        results.push({ tool_call_name: call.name, result, id: callIdOf.get(call) });
+                        results.push({ tool_call_name: call.name, result: this._recallMemory(call, result, onAgentStatus, iteration), id: callIdOf.get(call) });
                     }
                 }
 
@@ -1152,8 +1294,9 @@ export class AgentController {
                     const isError = typeof result === 'string' && result.startsWith('Error');
 
                     this._trackReadEfficiency(call, result, isError);
+                    this._trace?.record({ iteration, tool: call.name, args: call.args, result, isError, ms: toolDuration });
                     if (onLog) this._logToolTelemetry(onLog, iteration, call, result, toolDuration, isError);
-                    results.push({ tool_call_name: call.name, result, id: callIdOf.get(call) });
+                    results.push({ tool_call_name: call.name, result: this._recallMemory(call, result, onAgentStatus, iteration), id: callIdOf.get(call) });
 
                     if (isError) {
                         hasErrors = true;
@@ -1171,6 +1314,25 @@ export class AgentController {
                     consecutiveErrorCount++;
                 } else {
                     consecutiveErrorCount = 0;
+                }
+
+                // ── Phase routing: planning is over once the run acts ──
+                // Registering the subtask list (task_progress) or touching a file
+                // both mean the same thing regardless of what the model called it,
+                // so the deep tier is released here rather than waiting for the
+                // step cap. `planFirstPending` keeps a BLOCKED edit from counting:
+                // under the plan-first gate that call never ran.
+                if (this._phaseRouting && this._phase === 'plan') {
+                    const names = toolCall.tool_calls.map(tc => tc.name);
+                    if (names.some(n => PLAN_GATED_TOOLS.has(n))) {
+                        this._phaseEvent('mutation', {
+                            planFirstPending: this._planFirstActive && !this._planApproved,
+                        }, onAgentStatus);
+                    } else if (names.includes('task_progress')) {
+                        this._phaseEvent('plan-done', {
+                            planFirstPending: this._planFirstActive && !this._planApproved,
+                        }, onAgentStatus);
+                    }
                 }
 
                 // Collect any images the tools produced. They cannot travel inside
@@ -1305,6 +1467,14 @@ export class AgentController {
                     const ftCall = toolCall.tool_calls.find(c => c.name === 'finish_task');
                     const ftSummaryArg = String(ftCall?.args?.summary || '').trim();
 
+                    // ── Phase routing: everything from here is verification ──
+                    // The review gate below, the deliverable nudge and the fixes
+                    // they send back are the steps that decide whether the run was
+                    // actually correct, so they get the deep tier even though the
+                    // bulk of the work ran cheap. This is the half of the trade
+                    // that makes the cheap execution safe to accept.
+                    this._phaseEvent('finish', {}, onAgentStatus);
+
                     // ── Deliverable nudge (SOFT, one-time) ─────────────────────
                     // A common weak-model failure is finishing to ANNOUNCE completion
                     // ("I completed the analysis") without ever producing the thing
@@ -1370,6 +1540,10 @@ export class AgentController {
                         if (verdict === 'fail') {
                             this.toolExecutor.resetTaskCompleted?.();
                             onAgentStatus?.({ event: 'status', status: 'running', message: '🔎 レビュー指摘あり — 修正のため差し戻し / Review FAIL — sent back for fixes' });
+                            // Applying the reviewer's findings is execution, not
+                            // review: back to the fast tier so a bounced task does
+                            // not finish the rest of its run on the deep model.
+                            this._phaseEvent('reopen', {}, onAgentStatus);
                             this._pushAssistantToolTurn(history, response, toolCall, genResult, callIdOf);
                             if (callIdOf.size > 0) this._pushToolResultsTurn(history, results, true, null);
                             history.push({
@@ -1512,13 +1686,83 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
         }
 
         if (!isUnlimited && iteration >= this.maxIterations) {
-            finalResponse = (finalResponse || '') + "\n\n(注意: 最大ステップ数に達したため、処理を中断しました。)";
+            // Previously this appended a one-line parenthetical and completed
+            // silently — no status event at all — so the run simply appeared to halt.
+            stoppedBy = stopReason('step_limit', { limit: this.maxIterations, used: iteration });
+            onAgentStatus?.({ event: 'status', status: 'running', message: stopStatusMessage(stoppedBy) });
+            finalResponse = (finalResponse || '') + stopNotice(stoppedBy);
         }
+
+        // Flush the failure trace. Best-effort by construction (flush never
+        // throws) — the trace is diagnostics, not part of the task's result.
+        await this._trace?.flush();
 
         // Capture session artifacts BEFORE endSession (which nulls workspacePath).
         const modifiedFiles = this.toolExecutor.getModifiedFiles();
         const sessionId = this.toolExecutor.getCurrentSessionId();
         const wsPath = workspacePath || this.toolExecutor.workspacePath;
+
+        // Learn from this run: lessons from what failed, insights from what
+        // verifiably worked. Derived from the trace, so nothing is written on the
+        // strength of the model's own account of the session.
+        try {
+            if (this._cards?.enabled && this._trace?.events.length) {
+                const failures = this._trace.summary();
+                const minted = this._cards.learn({
+                    rows: failures,
+                    events: this._trace.events,
+                    sessionId,
+                    date: new Date().toISOString().split('T')[0],
+                });
+                if (minted.length) {
+                    await this._cards.save();
+                    // `phase: 'teardown'` — this fires AFTER the loop has broken, so
+                    // the UI must not read it as "a new run is progressing" (that
+                    // closed the ask_user question the run had just paused on).
+                    onAgentStatus?.({
+                        event: 'status', status: 'running', phase: 'teardown',
+                        message: `🧠 学習を記録: ${minted.length} 件 — ${summarizeMinted(minted)}`,
+                    });
+                    // The full list goes to the log channel, where it renders as an
+                    // expandable block: "7 件" alone says nothing about WHAT was
+                    // learned, and an unreviewable memory is one nobody can correct.
+                    onLog?.({
+                        method: 'METRICS', status: 200,
+                        stepLabel: '🧠 Learned this run',
+                        response: {
+                            count: minted.length,
+                            cards: minted.map(c => {
+                                const s = cardSummary(c);
+                                return {
+                                    kind: s.badge,
+                                    what: s.headline,
+                                    detail: s.detail,
+                                    cost_steps: c.costSteps ?? null,
+                                    id: c.id,
+                                };
+                            }),
+                        },
+                    });
+                }
+
+                // One measurement row per run. Written for BOTH arms — a
+                // recall-off session is the control, not a wasted session.
+                await appendSessionMetrics({
+                    workspacePath: wsPath, invoke,
+                    row: sessionMetrics({
+                        events: this._trace.events,
+                        shownLog: this._cardsShownLog,
+                        failures,
+                        iterations: iteration,
+                        recall: this._recallOn ? 'on' : 'off',
+                        memoryChars: this._memoryChars,
+                        sessionId,
+                    }),
+                });
+            }
+        } catch (e) {
+            console.warn('AgentController: card learning failed:', e);
+        }
 
         // Build the structured result summary (markdown + file table) consumed by
         // the "Result" tab (MonitorView) and the chat file list (ChatView), and
@@ -1532,16 +1776,21 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
             durationMs: Date.now() - taskStartMs,
             tokens: cumulativeTokens,
             presentedAnswer: this._extractEnvelopeAnswer(this._lastResultEnvelope),
-        });
+        }, onAgentStatus);
 
         // Long-term memory: record this completed session to the durable journal +
         // facts store. (Previously addEntry existed but was never called — LTM was
-        // effectively dormant.) Best-effort; never block completion on it.
-        try {
-            await conversationMemory.addEntry(prompt, finalResponse, sessionId, wsPath, onLog);
-        } catch (e) {
-            console.warn('AgentController: LTM addEntry failed:', e);
-        }
+        // effectively dormant.)
+        //
+        // DELIBERATELY NOT AWAITED. addEntry runs an LLM summarisation (and, when
+        // the facts store is near its cap, a second consolidation call) — several
+        // seconds that contribute NOTHING to `resultSummary`. Awaiting it here is
+        // what made the app sit silent after finish_task had already succeeded:
+        // the caller only emits `complete` once run() returns. Memory is
+        // bookkeeping, so it settles in the background; ConversationMemory
+        // serialises its own writes, so overlapping runs cannot interleave.
+        conversationMemory.addEntry(prompt, finalResponse, sessionId, wsPath, onLog, this._auxModel())
+            .catch(e => console.warn('AgentController: LTM addEntry failed:', e));
 
         this.toolExecutor.endSession();
 
@@ -1551,7 +1800,9 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
         return {
             response: finalResponse,
             modifiedFiles,
-            resultSummary
+            resultSummary,
+            // null on a normal finish_task; a stopReason when a limit cut the run short.
+            stopReason: stoppedBy,
         };
     }
 
@@ -1561,7 +1812,7 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
      * @param {Array}  modifiedFiles - [{ path, original, current }] from ToolExecutor
      * @returns {Promise<{summary:string, files:Array<{path,action,description}>}>}
      */
-    async _buildResultSummary(finalResponse, modifiedFiles, onLog = null, meta = {}) {
+    async _buildResultSummary(finalResponse, modifiedFiles, onLog = null, meta = {}, onAgentStatus = null) {
         // action is derived deterministically: a null/empty `original` means the
         // file did not exist before this session → "created"; otherwise "modified".
         const files = (modifiedFiles || []).map(f => ({
@@ -1571,50 +1822,18 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
             description: ''
         }));
 
-        // Best-effort one-line description per file via a single cheap LLM call.
-        // Wrapped so a failure (or no LLM) just leaves descriptions blank.
-        if (files.length > 0 && files.length <= 30) {
-            try {
-                const list = files.map(f => `- ${f.path} (${f.action})`).join('\n');
-                const prompt =
-                    `Given the agent's final summary and the list of files it created/modified, ` +
-                    `write a concise one-line description (max 80 chars, same language as the summary) ` +
-                    `of each file's role/purpose. Output ONLY a raw JSON array of {"path","description"} — no markdown.\n\n` +
-                    `[Final Summary]\n${String(finalResponse || '').substring(0, 1200)}\n\n[Files]\n${list}`;
-                let raw = '';
-                const sumSys = 'You are a JSON generator. Output ONLY a valid JSON array, nothing else.';
-                const _t0 = Date.now();
-                const gen = await llmService.generate(prompt, sumSys, (chunk) => { raw += chunk; });
-                if (onLog) {
-                    try {
-                        onLog({
-                            method: 'CHAT', status: 200, duration: Date.now() - _t0,
-                            stepLabel: '📋 Result File Descriptions',
-                            usage: gen?.usage,
-                            request: { purpose: 'result-file-descriptions', system_prompt: sumSys, prompt },
-                            response: raw
-                        });
-                    } catch (_) {}
-                }
-                const m = raw.match(/\[[\s\S]*\]/);
-                if (m) {
-                    const arr = JSON.parse(m[0]);
-                    for (const item of (Array.isArray(arr) ? arr : [])) {
-                        if (!item || !item.path) continue;
-                        const norm = String(item.path).replace(/\\/g, '/');
-                        const match = files.find(f =>
-                            f.path === item.path ||
-                            f.path.replace(/\\/g, '/') === norm ||
-                            f.path.replace(/\\/g, '/').endsWith(norm));
-                        if (match && item.description) {
-                            match.description = String(item.description).substring(0, 200);
-                        }
-                    }
-                }
-            } catch (e) {
-                console.warn('AgentController: file description generation failed:', e);
-            }
-        }
+        // Per-file descriptions are DECORATION on the file table — the answer does
+        // not depend on them. So the call is STARTED here and never awaited on the
+        // critical path: it either lands while the report below is generating (free),
+        // or it arrives after completion as a `result_update` patch. It used to be
+        // awaited first, which meant every run with a modified file paid an LLM
+        // round-trip before the user could see anything.
+        let descriptions = null;
+        let descriptionsDone = false;
+        const descriptionsPromise = (files.length > 0 && files.length <= 30)
+            ? this._describeFiles(files, finalResponse, onLog)
+                .then((d) => { descriptions = d; descriptionsDone = true; return d; })
+            : null;
 
         // ── Result "answer" priority: DELIVERABLE first ──────────────────
         // The headline must be the agent's actual deliverable when it produced
@@ -1647,6 +1866,31 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
             answer = llmReport || fr || deterministic;
             summary = llmReport || deterministic;
         }
+        // Descriptions may already have landed — the report branch above awaits an
+        // LLM call, which is plenty of time, and `_readReportDeliverable` reads
+        // files. Applying them here keeps the common case a SINGLE `complete` with
+        // a fully-populated table; only a genuinely slow description call falls
+        // through to the patch path below.
+        if (descriptionsPromise && descriptionsDone) {
+            applyDescriptions(files, descriptions);
+        } else if (descriptionsPromise) {
+            descriptionsPromise.then((d) => {
+                if (!applyDescriptions(files, d)) return;
+                // The run already completed; patch the table in place rather than
+                // emitting a second completion (which would duplicate the run).
+                //
+                // setTimeout, not a bare call: `complete` is emitted by the caller
+                // resuming from `await run()`, i.e. on the MICROTASK queue. If the
+                // descriptions happened to resolve in the same tick that run()
+                // returned, emitting synchronously here would put the patch AHEAD
+                // of the completion it patches — and a patch with no run to attach
+                // to is silently dropped. A macrotask is always behind them.
+                setTimeout(() => {
+                    try { onAgentStatus?.({ event: 'result_update', files }); } catch (_) { /* decoration only */ }
+                }, 0);
+            }).catch(() => { /* decoration only */ });
+        }
+
         const stats = {
             steps: meta.iterations || 0,
             tools: meta.toolCounts || {},
@@ -1662,6 +1906,53 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
             plan: String(meta.approvedPlan || ''),
             files,
         };
+    }
+
+    /**
+     * One cheap LLM call producing a one-line description per modified file.
+     * Resolves to the raw [{path, description}] array, or null on any failure —
+     * descriptions are decoration, so nothing here is allowed to throw.
+     */
+    async _describeFiles(files, finalResponse, onLog = null) {
+        try {
+            const list = files.map(f => `- ${f.path} (${f.action})`).join('\n');
+            const prompt =
+                `Given the agent's final summary and the list of files it created/modified, ` +
+                `write a concise one-line description (max 80 chars, same language as the summary) ` +
+                `of each file's role/purpose. Output ONLY a raw JSON array of {"path","description"} — no markdown.\n\n` +
+                `[Final Summary]\n${String(finalResponse || '').substring(0, 1200)}\n\n[Files]\n${list}`;
+            let raw = '';
+            const sumSys = 'You are a JSON generator. Output ONLY a valid JSON array, nothing else.';
+            const _t0 = Date.now();
+            const gen = await llmService.generate(prompt, sumSys, (chunk) => { raw += chunk; },
+                null, this._auxModel());
+            if (onLog) {
+                try {
+                    onLog({
+                        method: 'CHAT', status: 200, duration: Date.now() - _t0,
+                        stepLabel: '📋 Result File Descriptions',
+                        usage: gen?.usage,
+                        request: { purpose: 'result-file-descriptions', system_prompt: sumSys, prompt },
+                        response: raw
+                    });
+                } catch (_) {}
+            }
+            const m = String(raw || '').match(/\[[\s\S]*\]/);
+            if (!m) return null;
+            const arr = JSON.parse(m[0]);
+            return Array.isArray(arr) ? arr : null;
+        } catch (e) {
+            console.warn('AgentController: file description generation failed:', e);
+            return null;
+        }
+    }
+
+    /**
+     * Model id for the run's auxiliary (non-reasoning) calls. The Fast tier when
+     * one is configured, else null = keep the active model.
+     */
+    _auxModel() {
+        return this._fastModelId || null;
     }
 
     /**
@@ -1702,7 +1993,8 @@ ${String(presentedAnswer || '').slice(0, 2000) || '（なし）'}
 ${String(finalResponse || '').slice(0, 2000)}`;
             let raw = '';
             const t0 = Date.now();
-            const gen = await llmService.generate(reportPrompt, sys, (c) => { raw += c; });
+            const gen = await llmService.generate(reportPrompt, sys, (c) => { raw += c; },
+                null, this._auxModel());
             if (onLog) {
                 try {
                     onLog({
@@ -1966,6 +2258,95 @@ ${String(finalResponse || '').slice(0, 2000)}`;
 
     // ─── Telemetry ───
 
+    /**
+     * Prepend the matching lesson / insight to a tool result, so the agent reads
+     * what this workspace already knows about this call at the moment it is
+     * judging the outcome.
+     *
+     * The card goes BEFORE the result, and the raw `result` is left untouched for
+     * every other consumer (error detection, telemetry, the trace) — recall must
+     * not be able to change what was recorded as having happened.
+     *
+     * At most one card per call, and never the same card twice in a run
+     * (CardStore tracks that), so this cannot grow into a wall of reminders.
+     */
+    /**
+     * Queue images the user attached MID-RUN (a steering message / a follow-up)
+     * for the next LLM call, and say what happened.
+     *
+     * Deliberately does NOT switch models the way the run-start routing does: a
+     * model change mid-run discards the prompt cache for every remaining step,
+     * which is a worse trade than telling the user their image cannot be read.
+     * @returns {boolean} whether the images will actually be sent
+     */
+    _attachUserImages(images, onAgentStatus) {
+        const list = Array.isArray(images) ? images.filter(Boolean) : [];
+        if (list.length === 0) return false;
+        const model = this._modelOverride || llmService.getCurrentModel();
+        if (!llmService.modelSupportsVision?.(model)) {
+            onAgentStatus?.({
+                event: 'status', status: 'running',
+                message: `⚠️ 画像${list.length}枚を受け取りましたが、モデル(${model || '未設定'})はビジョン非対応のため送信できません。`
+                    + ' Settings → LLM Connections の接続設定で「This model accepts images」を確認してください。',
+            });
+            return false;
+        }
+        for (const data of list) this._pendingToolImages.push({ data, source: 'ユーザー添付' });
+        onAgentStatus?.({ event: 'status', status: 'running', message: `🖼 画像${list.length}枚を次のステップでLLMに添付します。` });
+        return true;
+    }
+
+    _recallMemory(call, result, onAgentStatus, iteration = 0) {
+        if (typeof result !== 'string' || !this._recallOn) return result;
+        try {
+            const card = this._cards?.recallForTool(call.name, targetOf(call.args));
+            if (!card) return result;
+            const note = renderCard(card);
+            this._noteCardsShown([card], iteration, note);
+            // Structured, so the Dashboard can show WHICH memory fired and WHEN.
+            // That is the pairing that makes a useless lesson visible: you see it
+            // fire at step 12 and the same failure happen at step 13.
+            this._emitRecall(onAgentStatus, [card], iteration, 'tool');
+            onAgentStatus?.({ event: 'status', status: 'running', message: `🧠 ${note.substring(0, 90)}` });
+            return `${note}\n${result}`;
+        } catch (_) {
+            return result; // recall is an optimisation; never fail a tool over it
+        }
+    }
+
+    /**
+     * Record what was surfaced and when, so the run can be scored afterwards:
+     * did the agent actually do what the card recommended? The recipe is the
+     * card's own claim (`fix` for a lesson, `what` for an insight); a card that
+     * makes no tool-order claim is logged but not counted against follow-through.
+     */
+    _noteCardsShown(cards, iteration, text = '') {
+        this._memoryChars = (this._memoryChars || 0) + String(text || '').length;
+        for (const c of cards || []) {
+            this._cardsShownLog.push({ id: c.id, at: iteration, recipe: c.fix || c.what || '' });
+        }
+    }
+
+    /**
+     * Announce that memory was surfaced into the run.
+     *
+     * A `memory_recall` event rather than a parsed status line: the Dashboard's
+     * "memory in play" strip needs the card ID to line the entry up with the
+     * memory panel's toggle, and an id cannot be recovered from "🧠 <text>".
+     * `source` distinguishes the opening brief from a mid-run tool nudge.
+     */
+    _emitRecall(onAgentStatus, cards, iteration, source) {
+        if (typeof onAgentStatus !== 'function') return;
+        const list = (cards || []).filter(Boolean).map(c => ({
+            id: c.id,
+            type: c.type || 'insight',
+            headline: cardSummary(c).headline,
+            recipe: c.fix || c.what || '',
+        }));
+        if (!list.length) return;
+        onAgentStatus({ event: 'memory_recall', at: iteration, source, cards: list });
+    }
+
     _logToolTelemetry(onLog, iteration, call, result, toolDuration, isError) {
         try {
             let logResponse = result;
@@ -2146,6 +2527,21 @@ ${String(finalResponse || '').slice(0, 2000)}`;
                     // "saving" the agent had to pay back by re-reading. A negative
                     // net_chars_saved means compression is counter-productive.
                     compression_quality: this._compressionMetrics.report(),
+                    // Where the tokens went when phase routing was on. The feature
+                    // claims the token MASS sits in the cheap phase; this is how
+                    // that claim is checked on a real run instead of assumed.
+                    phase_routing: this._phaseRouting ? {
+                        tokens_by_phase: { ...this._phaseTokens },
+                        fast_model: this._fastModelId,
+                        deep_model: this._deepModelId,
+                        execute_escalated: this._phaseEscalated,
+                        cheap_share_pct: (() => {
+                            const t = this._phaseTokens;
+                            const total = t.plan + t.execute + t.review;
+                            if (!total) return null;
+                            return Math.round((this._phaseEscalated ? 0 : t.execute) / total * 100);
+                        })(),
+                    } : 'off',
                 },
             });
         } catch (_) { /* logging only */ }
@@ -2556,6 +2952,63 @@ ${String(finalResponse || '').slice(0, 2000)}`;
         }
     }
 
+    /**
+     * Feed a phase event to the router and, if it moved the run to a different
+     * tier, swap the model for the calls that follow.
+     *
+     * Cheap and idempotent — call it freely from the loop. When phase routing is
+     * off it returns immediately, so no caller needs to guard.
+     *
+     * @param {'step'|'mutation'|'plan-done'|'finish'|'reopen'} event
+     * @param {{iteration?: number, planFirstPending?: boolean}} [ctx]
+     * @param {Function} [onAgentStatus]
+     */
+    _phaseEvent(event, ctx = {}, onAgentStatus = null) {
+        if (!this._phaseRouting) return;
+        const next = advancePhase(this._phase, event, ctx);
+        const tiers = { fast: this._fastModelId, deep: this._deepModelId };
+        const model = modelForPhase(next, tiers, {
+            enabled: true,
+            escalated: this._phaseEscalated,
+        });
+        const moved = next !== this._phase;
+        const swapped = !!model && model !== this._modelOverride;
+        this._phase = next;
+        if (!swapped) return;
+        const from = this._modelOverride;
+        this._modelOverride = model;
+        // A STRUCTURED event as well as the human line. The Dashboard draws a
+        // phase rail from this; parsing it back out of a Japanese status string
+        // would break the first time anyone reworded the message.
+        onAgentStatus?.({
+            event: 'phase',
+            phase: next,
+            model,
+            from: from || null,
+            escalated: this._phaseEscalated,
+            tokens: { ...this._phaseTokens },
+        });
+        // Announce only a real model change: the phase names alone would be noise
+        // in the status feed, and what the user is paying for is the model.
+        onAgentStatus?.({
+            event: 'status', status: 'running',
+            message: moved
+                ? `🧭 ${phaseLabel(next)} へ — モデル切替: ${from || '(active)'} → ${model}`
+                : `🧭 モデル切替: ${from || '(active)'} → ${model}`,
+        });
+    }
+
+    /**
+     * Attribute one call's tokens to the phase that spent them, so the end-of-run
+     * report can show WHERE the money went rather than one blended total. The
+     * point of phase routing is a cost claim, and a cost claim needs evidence.
+     */
+    _recordPhaseTokens(usage) {
+        if (!this._phaseRouting || !usage) return;
+        const n = (usage.prompt_tokens || 0) + (usage.completion_tokens || 0);
+        if (n > 0) this._phaseTokens[this._phase] = (this._phaseTokens[this._phase] || 0) + n;
+    }
+
     _applyIntent() {
         const b = this.behaviorOverrides;
         if (!b || !b.intent) return;
@@ -2653,7 +3106,14 @@ ${String(finalResponse || '').slice(0, 2000)}`;
 
         const maxSteps = Math.max(1, Math.min(SUBTASK_MAX_STEPS_CAP,
             Number(args?.max_steps) > 0 ? Number(args.max_steps) : roleDef.maxIterations));
-        const tier = (args?.model === 'deep' || args?.model === 'fast') ? args.model : roleDef.tier;
+        // Tier: an explicit args.model wins, then the role preset. EXCEPT the
+        // reviewer under phase routing — the independent review IS the review
+        // phase, and the whole trade is "cheap execution, expensive checking".
+        // Reviewing a cheap model's work with the same cheap model would give up
+        // the safety half of the bargain while keeping all of its risk.
+        const tier = (args?.model === 'deep' || args?.model === 'fast')
+            ? args.model
+            : ((this._phaseRouting && roleDef.id === 'reviewer') ? 'deep' : roleDef.tier);
 
         // ── Write scope + ownership claim (Step 3) ─────────────────────────
         // Effective scope: explicit args.write_scope > tester's test-file default

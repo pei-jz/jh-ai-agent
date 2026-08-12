@@ -1,11 +1,12 @@
 // license — verify a licence key's signature.
 //
 // This is the only part of licensing that has to be cryptography, and the only part
-// that must not live in JavaScript: the frontend is shipped as readable source, so a
-// check written there is self-evidently editable. (Being honest: this repository is
-// MIT, so the whole gate is removable by recompiling — see docs/design/licensing.md §0.
-// Doing the verification properly here is still worth it, because it makes an
-// *accidentally* accepted forged key impossible, which is the realistic failure.)
+// that must not live in JavaScript: the frontend ships as readable source, so a check
+// written there is self-evidently editable. (Being honest: this repository ships under
+// MIT OR Apache-2.0, so the whole gate is removable by recompiling — see
+// docs/design/licensing.md §2. Doing the verification properly here is still worth it,
+// because it makes an *accidentally* accepted forged key impossible, which is the
+// realistic failure.)
 //
 // Key format:  JHAI1.<base64url(payload)>.<base64url(ed25519 signature)>
 //
@@ -14,7 +15,7 @@
 // ordering or whitespace difference can make a genuine key fail to verify.
 //
 // Verification is fully OFFLINE: no request, no telemetry, works on an air-gapped
-// machine. See licensing.md §3 for why that constraint is not negotiable.
+// machine. See licensing.md §5 for why that constraint is not negotiable.
 
 use base64::Engine;
 use ed25519_dalek::Signature;

@@ -137,3 +137,103 @@ describe('getPromptContext', () => {
         expect(typeof conversationMemory.getPromptContext('anything')).toBe('string');
     });
 });
+
+// addEntry is called WITHOUT await now (it runs after the run's result has been
+// delivered), so two tasks finishing close together can overlap. Its writes are
+// read-modify-write, which makes that a data-loss bug rather than a race that
+// merely reorders lines.
+describe('addEntry write serialization', () => {
+    beforeEach(() => {
+        conversationMemory.loaded = true;
+        conversationMemory.factsLoaded = true;
+        conversationMemory.entries = [];
+        conversationMemory.facts = [];
+        conversationMemory._writeQueue = Promise.resolve();
+        conversationMemory._consolidating = false;
+    });
+
+    it('runs overlapping calls one at a time', async () => {
+        let active = 0;
+        let overlapped = false;
+        const spy = vi.spyOn(conversationMemory, '_generateStructuredSummary')
+            .mockImplementation(async () => {
+                active += 1;
+                if (active > 1) overlapped = true;
+                await new Promise(r => setTimeout(r, 10));
+                active -= 1;
+                return { timestamp: Date.now(), date: '2026-08-11', topic: 't', summary: 's', facts: [] };
+            });
+
+        await Promise.all([
+            conversationMemory.addEntry('q1', 'a1', 's1', '/ws'),
+            conversationMemory.addEntry('q2', 'a2', 's2', '/ws'),
+            conversationMemory.addEntry('q3', 'a3', 's3', '/ws'),
+        ]);
+
+        expect(overlapped).toBe(false);
+        expect(conversationMemory.entries).toHaveLength(3);
+        spy.mockRestore();
+    });
+
+    it('a failed entry does not block the next one', async () => {
+        const spy = vi.spyOn(conversationMemory, '_generateStructuredSummary')
+            .mockRejectedValueOnce(new Error('provider down'))
+            .mockResolvedValue({ timestamp: Date.now(), date: '2026-08-11', topic: 'ok', summary: 's', facts: [] });
+
+        // The first falls back to a synthesized entry rather than throwing.
+        await conversationMemory.addEntry('q1', 'a1', 's1', '/ws');
+        await conversationMemory.addEntry('q2', 'a2', 's2', '/ws');
+
+        expect(conversationMemory.entries).toHaveLength(2);
+        expect(conversationMemory.entries[1].topic).toBe('ok');
+        spy.mockRestore();
+    });
+});
+
+// Consolidation rewrites the whole facts store with its own LLM call. Chaining
+// it onto addEntry made every Nth completed task pay for a store-wide cleanup.
+describe('maybeConsolidate', () => {
+    beforeEach(() => {
+        conversationMemory.facts = [];
+        conversationMemory._writeQueue = Promise.resolve();
+        conversationMemory._consolidating = false;
+    });
+
+    const fill = (n) => Array.from({ length: n }, (_, i) => ({ fact: `f${i}`, hits: 1 }));
+
+    it('does nothing while the store is below the threshold', () => {
+        conversationMemory.facts = fill(10);
+        const spy = vi.spyOn(conversationMemory, 'consolidateFacts');
+        conversationMemory.maybeConsolidate('/ws');
+        expect(spy).not.toHaveBeenCalled();
+        spy.mockRestore();
+    });
+
+    it('returns before the pass runs — it must not block the caller', async () => {
+        conversationMemory.facts = fill(conversationMemory.maxFacts);
+        let ran = false;
+        const spy = vi.spyOn(conversationMemory, 'consolidateFacts')
+            .mockImplementation(async () => { ran = true; return false; });
+
+        conversationMemory.maybeConsolidate('/ws');
+        expect(ran).toBe(false);          // detached, not awaited
+
+        await conversationMemory._writeQueue;
+        expect(ran).toBe(true);
+        spy.mockRestore();
+    });
+
+    it('never starts a second pass while one is in flight', async () => {
+        conversationMemory.facts = fill(conversationMemory.maxFacts);
+        const spy = vi.spyOn(conversationMemory, 'consolidateFacts')
+            .mockImplementation(async () => { await new Promise(r => setTimeout(r, 10)); return false; });
+
+        conversationMemory.maybeConsolidate('/ws');
+        conversationMemory.maybeConsolidate('/ws');
+        conversationMemory.maybeConsolidate('/ws');
+        await conversationMemory._writeQueue;
+
+        expect(spy).toHaveBeenCalledTimes(1);
+        spy.mockRestore();
+    });
+});

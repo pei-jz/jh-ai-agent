@@ -1,9 +1,60 @@
 use serde::Serialize;
 use std::io::{BufRead, BufReader, Read};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::thread;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Runtime};
+
+/// How long a command may run before it is killed.
+///
+/// There was no limit at all, and nothing redirected stdin. A command that waits for
+/// input it can never receive — an npm prompt, a pager, a confirmation, a watch-mode
+/// test runner — blocked the agent loop forever. From the outside that is exactly the
+/// reported symptom: the run sits on one step and never advances, with no error.
+///
+/// Ten minutes is chosen to be longer than a real build or test suite and shorter than
+/// a human's patience. A caller that genuinely needs longer passes `timeout_secs`.
+const DEFAULT_TIMEOUT_SECS: u64 = 600;
+
+/// Wait for `child`, killing it if `limit` elapses first.
+///
+/// Polling with `try_wait` rather than blocking on `wait`, because the whole point is
+/// to be able to give up. 50ms keeps a fast command feeling instant while costing
+/// nothing measurable on a long one.
+fn wait_with_timeout(child: &mut Child, limit: Duration) -> Result<ExitStatus, String> {
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) => {}
+            Err(e) => return Err(format!("Failed to wait for command: {}", e)),
+        }
+        if started.elapsed() >= limit {
+            // Kill, then reap: leaving a zombie would hold the pipes open and the
+            // line pumps would never see EOF.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(String::from("__TIMEOUT__"));
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// The error text a timeout produces.
+///
+/// Written for the agent as much as the user: it says what to do next, because a
+/// model that only learns "it failed" will retry the identical hanging command.
+fn timeout_error(command: &str, secs: u64, stdout: &str, stderr: &str) -> String {
+    format!(
+        "Command timed out after {secs}s and was killed: {command}\n\
+         The most likely cause is that it waited for input (stdin is closed, so any \
+         prompt sees EOF) or that it does not terminate on its own (a watch mode, a \
+         dev server, an interactive tool). Re-run it with a non-interactive / \
+         run-once flag, or split it into something that finishes.\n\
+         Partial stdout:\n{stdout}\nPartial stderr:\n{stderr}"
+    )
+}
 
 /// One chunk of streamed command output. Emitted as "command-chunk" while a
 /// streamed run_command is executing. Listeners filter by `command_id` to
@@ -81,6 +132,9 @@ pub async fn run_command<R: Runtime>(
     command: String,
     cwd: Option<String>,
     command_id: Option<String>,
+    // timeout_secs overrides DEFAULT_TIMEOUT_SECS. 0 is rejected rather than taken as
+    // "no limit": an unbounded command is the bug this parameter exists to fix.
+    timeout_secs: Option<u64>,
     app: AppHandle<R>,
     guard: tauri::State<'_, crate::path_guard::PathGuard>,
 ) -> Result<String, String> {
@@ -94,6 +148,31 @@ pub async fn run_command<R: Runtime>(
             guard.ensure_allowed(dir)?;
         }
     }
+
+    let limit = Duration::from_secs(
+        timeout_secs.filter(|s| *s > 0).unwrap_or(DEFAULT_TIMEOUT_SECS),
+    );
+
+    // Everything below BLOCKS: spawning, polling the child, draining pipes. An
+    // `async fn` command runs on Tauri's Tokio runtime, so doing that work inline
+    // parks a runtime worker for the whole duration of the command. A few slow or
+    // hung commands were therefore enough to starve the worker pool — and once that
+    // happens EVERY other Tauri command stops being serviced, which looks from the
+    // outside like the entire agent freezing mid-run rather than like one slow shell
+    // call. spawn_blocking puts it on the blocking pool, where waiting is the point.
+    tokio::task::spawn_blocking(move || run_command_blocking(command, cwd, command_id, limit, app))
+        .await
+        .map_err(|e| format!("Command task failed to run: {}", e))?
+}
+
+/// The blocking body of `run_command`. See the spawn_blocking note above.
+fn run_command_blocking<R: Runtime>(
+    command: String,
+    cwd: Option<String>,
+    command_id: Option<String>,
+    limit: Duration,
+    app: AppHandle<R>,
+) -> Result<String, String> {
     // Same spec the description is generated from — see shell_spec().
     #[allow(unused_mut)]
     let mut cmd = {
@@ -101,6 +180,12 @@ pub async fn run_command<R: Runtime>(
         let mut c = Command::new(program);
         c.args(args);
         c.arg(&command);
+        // Close stdin. Inherited, a child that prompts blocks on a terminal that
+        // does not exist and hangs the agent forever; with a null stdin it reads EOF
+        // and either takes its default or fails with something the agent can react
+        // to. (PowerShell gets -NonInteractive, but that does not cover processes it
+        // launches, and `sh -c` has no equivalent flag at all.)
+        c.stdin(Stdio::null());
         c
     };
 
@@ -122,20 +207,31 @@ pub async fn run_command<R: Runtime>(
 
     // ── Buffered (non-streaming) fast path ──────────────────────────────
     if !streaming {
-        let output = cmd
-            .output()
+        // Piped rather than inherited so a timeout can still report what was
+        // produced before the kill — partial output is often the whole diagnosis.
+        let mut child = cmd
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .map_err(|e| format!("Failed to execute command: {}", e))?;
-        let stdout = String::from_utf8(output.stdout.clone())
-            .unwrap_or_else(|_| String::from_utf8_lossy(&output.stdout).to_string());
-        let stderr = String::from_utf8(output.stderr.clone())
-            .unwrap_or_else(|_| String::from_utf8_lossy(&output.stderr).to_string());
-        return if output.status.success() {
-            Ok(stdout)
-        } else {
-            Err(format!(
+
+        let out_handle = child.stdout.take().map(|p| thread::spawn(move || read_all(p)));
+        let err_handle = child.stderr.take().map(|p| thread::spawn(move || read_all(p)));
+
+        let status = wait_with_timeout(&mut child, limit);
+        let stdout = out_handle.and_then(|h| h.join().ok()).unwrap_or_default();
+        let stderr = err_handle.and_then(|h| h.join().ok()).unwrap_or_default();
+
+        return match status {
+            Ok(st) if st.success() => Ok(stdout),
+            Ok(_) => Err(format!(
                 "Command failed:\nStdout: {}\nStderr: {}",
                 stdout, stderr
-            ))
+            )),
+            Err(e) if e == "__TIMEOUT__" => {
+                Err(timeout_error(&command, limit.as_secs(), &stdout, &stderr))
+            }
+            Err(e) => Err(e),
         };
     }
 
@@ -164,7 +260,33 @@ pub async fn run_command<R: Runtime>(
 
     let mut stdout_buf = String::new();
     let mut stderr_buf = String::new();
-    for (stream, line) in rx.iter() {
+    let started = Instant::now();
+    // recv_timeout rather than an unbounded iterator: a command that hangs without
+    // producing output would otherwise park here for good.
+    loop {
+        let remaining = limit.checked_sub(started.elapsed()).unwrap_or_default();
+        let received = if remaining.is_zero() {
+            Err(mpsc::RecvTimeoutError::Timeout)
+        } else {
+            rx.recv_timeout(remaining)
+        };
+
+        let (stream, line) = match received {
+            Ok(v) => v,
+            // Both pumps hit EOF: the process closed its pipes and we are done reading.
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(timeout_error(
+                    &command,
+                    limit.as_secs(),
+                    &stdout_buf,
+                    &stderr_buf,
+                ));
+            }
+        };
+
         // Emit to the UI as it arrives.
         let _ = app.emit(
             "command-chunk",
@@ -184,9 +306,14 @@ pub async fn run_command<R: Runtime>(
         }
     }
 
-    let status = child
-        .wait()
-        .map_err(|e| format!("Failed to wait for command: {}", e))?;
+    // The pipes are closed, but the process may still be finishing; bound this too.
+    let status = match wait_with_timeout(&mut child, limit.saturating_sub(started.elapsed())) {
+        Ok(st) => st,
+        Err(e) if e == "__TIMEOUT__" => {
+            return Err(timeout_error(&command, limit.as_secs(), &stdout_buf, &stderr_buf));
+        }
+        Err(e) => return Err(e),
+    };
 
     if status.success() {
         Ok(stdout_buf)
@@ -196,6 +323,14 @@ pub async fn run_command<R: Runtime>(
             stdout_buf, stderr_buf
         ))
     }
+}
+
+/// Drain a pipe to a String, lossily. On its own thread so a child that fills its
+/// pipe buffer cannot deadlock against our wait.
+fn read_all<R: Read>(mut reader: R) -> String {
+    let mut buf: Vec<u8> = Vec::new();
+    let _ = reader.read_to_end(&mut buf);
+    String::from_utf8_lossy(&buf).into_owned()
 }
 
 /// Spawn a background thread that reads `reader` line-by-line and forwards each

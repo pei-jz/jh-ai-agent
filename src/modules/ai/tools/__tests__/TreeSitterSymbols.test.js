@@ -156,3 +156,63 @@ describe('extractSymbolsBest — backend selection', () => {
         expect(backend).toBe('regex');
     });
 });
+
+
+describe('Java — what only a real parse can do', () => {
+    const JAVA = [
+        'class Alpha {',
+        '    public void run() {}',
+        '}',
+        'class Beta {',
+        '    public void run() {}',
+        '}',
+    ].join('\n');
+
+    it('tells Alpha.run apart from Beta.run', async () => {
+        useRealParser();
+        const syms = await parseSymbols('S.java', JAVA, 'java');
+        expect(syms).not.toBe(null);
+        const runs = syms.filter(s => s.name === 'run');
+        expect(runs).toHaveLength(2);
+        // The regex backend cannot supply `parent` — this is the accuracy the
+        // grammar binary is shipped for.
+        expect(runs.map(s => s.parent).sort()).toEqual(['Alpha', 'Beta']);
+    });
+
+    it('reads `public` as exported, annotations and all', async () => {
+        useRealParser();
+        const src = ['class A {', '    @Override', '    public void go() {}', '    void hidden() {}', '}'].join('\n');
+        const syms = await parseSymbols('A.java', src, 'java');
+        expect(syms.find(s => s.name === 'go').exported).toBe(true);
+        expect(syms.find(s => s.name === 'hidden').exported).toBe(false);
+    });
+
+    it('does not index code inside a text block', async () => {
+        useRealParser();
+        const src = [
+            'class A {',
+            '    String sql = """',
+            '        class Ghost { void phantom() {} }',
+            '        """;',
+            '}',
+        ].join('\n');
+        const syms = await parseSymbols('A.java', src, 'java');
+        const names = syms.map(s => s.name);
+        expect(names).not.toContain('Ghost');
+        expect(names).not.toContain('phantom');
+    });
+
+    it('routes .java through the grammar via extractSymbolsBest', async () => {
+        useRealParser();
+        const { backend, symbols } = await extractSymbolsBest('S.java', JAVA);
+        expect(backend).toBe('tree-sitter');
+        expect(symbols.map(s => s.name)).toContain('Alpha');
+    });
+
+    it('still finds Java definitions when the grammar cannot load', async () => {
+        configureTreeSitter({ wasmBase: null, loadRuntime: null });
+        const { backend, symbols } = await extractSymbolsBest('S.java', JAVA);
+        expect(backend).toBe('regex');
+        expect(symbols.map(s => s.name)).toEqual(['Alpha', 'run', 'Beta', 'run']);
+    });
+});
