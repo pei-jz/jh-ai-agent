@@ -162,6 +162,27 @@ Read the `license` field of each package in the `cargo metadata` output; grep it
 
 ---
 
+## 2b. What ships inside the installer
+
+Rust crates are COMPILED INTO the shipped binary, so a built installer *is* a
+redistribution of them — and MIT / BSD / Apache-2.0 all require the copyright
+notice to travel with it. Source-tree files alone do not satisfy that: the person
+who receives the `.msi` never sees this repository.
+
+`bundle.resources` in `src-tauri/tauri.conf.json` therefore ships four files
+alongside the executable, in the app's resource directory:
+
+| File | Why it must be there |
+|---|---|
+| `LICENSE`, `LICENSE-MIT`, `LICENSE-APACHE` | Our own terms — the recipient's grant |
+| `THIRD-PARTY-NOTICES.md` | This audit, i.e. the dependencies' required notices |
+
+(`public/tree-sitter/LICENSE` reaches the installer by a different route: it is a
+static asset, so Vite copies it into `dist/`, which is bundled as the frontend.)
+
+**If you add a dependency, re-run the audit in §2 — the obligation travels with
+the binary, not with the repo.**
+
 ## 3. What is *not* redistributed
 
 - Node and Rust dependencies resolved at build time — the user's own toolchain
