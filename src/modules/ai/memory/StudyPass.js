@@ -35,6 +35,7 @@
 
 import { extractSymbols } from '../tools/SymbolIndex.js';
 import { fingerprint, extOf } from './FailureSignature.js';
+import { CodeIndexClient, contentHash, langOf, importEdges } from './CodeIndex.js';
 
 /**
  * The file part of a `path:line` target.
@@ -53,6 +54,18 @@ export const STUDY_FILE_CAP = 400;
 export const SYMBOLS_PER_FILE = 12;
 /** Source types SymbolIndex can actually parse. */
 export const STUDY_GLOB = '**/*.{js,jsx,mjs,cjs,ts,tsx,rs,py,java}';
+/**
+ * Workbooks, indexed for their formula graph.
+ *
+ * A cross-sheet formula is an explicit dependency — `=SUM(Sheet2!B:B)` states
+ * outright that this sheet reads that one — so it belongs in the same edge table
+ * as an import. In a lot of enterprise work the real system knowledge lives in
+ * the workbook rather than the code, and indexing only source leaves the agent
+ * blind to the half that decides the answer.
+ */
+export const STUDY_SHEET_GLOB = '**/*.{xlsx,xlsm}';
+/** Workbooks opened per pass. Lower than the source cap: each one is a zip read. */
+export const SHEET_FILE_CAP = 60;
 
 /**
  * Is this symbol worth remembering as "where X lives"?
@@ -157,6 +170,23 @@ export function applyStudy(existing, minted, livePaths) {
     return [...byKey.values()];
 }
 
+/**
+ * Drop cards the first study pass wrote into cards.jsonl.
+ *
+ * A migration, run once by the next study. Those rows recorded where a symbol
+ * was — which now lives in the index, where it can be queried instead of listed
+ * — so leaving them would keep 700-odd unreadable entries in a panel whose whole
+ * purpose is being reviewable. Experience cards are untouched: they record what
+ * happened, which nothing else holds.
+ *
+ * @returns {{kept: Array, dropped: number}}
+ */
+export function dropStudyCards(cards) {
+    const all = Array.isArray(cards) ? cards : [];
+    const kept = all.filter(c => c?.origin !== 'study');
+    return { kept, dropped: all.length - kept.length };
+}
+
 /** Per-directory counts, for the coverage read-out (Step 3.9). */
 export function coverageByDir(cards, depth = 2) {
     const counts = new Map();
@@ -174,9 +204,14 @@ export function coverageByDir(cards, depth = 2) {
 /**
  * Run a study pass over a workspace.
  *
- * I/O only — every decision it makes lives in the pure functions above. Reports
- * progress so a long pass is not a frozen dialog, and stops at STUDY_FILE_CAP so
- * pointing it at a monorepo cannot hang the app.
+ * Writes to the SQLite index, not to cards. The first version of this pass wrote
+ * one card per symbol and produced 716 rows of `setSel → NewFileModal.js:307` in
+ * a list the user was expected to read: symbols are a lookup, not advice, and a
+ * lookup belongs behind a query.
+ *
+ * Incremental by content hash — a second pass over an unchanged tree parses
+ * nothing. Returns the digest the overview step summarises, so the caller does
+ * not have to read the index back out.
  *
  * @param {{workspacePath:string, invoke:Function, onProgress?:Function,
  *          fileCap?:number, commit?:string}} opts
@@ -185,9 +220,8 @@ export async function runStudyPass({
     workspacePath, invoke, onProgress = null, fileCap = STUDY_FILE_CAP, commit = '',
 } = {}) {
     if (!workspacePath || typeof invoke !== 'function') {
-        return { cards: [], files: 0, symbols: 0, paths: [] };
+        return { files: 0, parsed: 0, symbols: 0, edges: 0, paths: [], areas: [] };
     }
-    const date = new Date().toISOString().split('T')[0];
 
     let paths = [];
     try {
@@ -196,27 +230,117 @@ export async function runStudyPass({
         });
         paths = Array.isArray(res?.files) ? res.files : (Array.isArray(res) ? res : []);
     } catch (e) {
-        return { cards: [], files: 0, symbols: 0, paths: [], error: String(e?.message || e) };
+        return { files: 0, parsed: 0, symbols: 0, edges: 0, paths: [], areas: [], error: String(e?.message || e) };
     }
     paths = paths.slice(0, fileCap);
 
-    const symbols = [];
-    let read = 0;
+    const index = new CodeIndexClient({ workspacePath, invoke });
+    // Built once. `changedFiles` rebuilds this map per call, so asking it inside
+    // the loop would be O(files x indexed) for no reason.
+    const known = new Map(await index.knownHashes());
+
+    // Read every file once: the hash needs the content anyway, and a second read
+    // for the changed ones would double the I/O to save nothing.
+    const seen = [];
+    const areas = [];
+    let read = 0, symbolCount = 0, edgeCount = 0;
+    const batch = [];
+
     for (const path of paths) {
-        try {
-            const content = await invoke('read_file', { path });
-            const found = extractSymbols(path, String(content || ''));
-            // Exported names first: they are what another task will search for.
-            found.sort((a, b) => (b.exported === true) - (a.exported === true));
-            symbols.push(...found.slice(0, SYMBOLS_PER_FILE));
-        } catch (_) {
-            // An unreadable file is not a failure of the pass.
-        }
+        let content = '';
+        try { content = String(await invoke('read_file', { path }) || ''); }
+        catch (_) { read++; continue; }
+
+        const hash = contentHash(content);
+        seen.push({ path, hash });
         read++;
+
         if (onProgress && (read % 20 === 0 || read === paths.length)) {
-            onProgress({ read, total: paths.length, symbols: symbols.length });
+            onProgress({ read, total: paths.length, symbols: symbolCount });
         }
+        // Unchanged since the last pass ⇒ nothing to re-parse.
+        if (known.get(path) !== hash) {
+            const found = extractSymbols(path, content).filter(isLandmark);
+            found.sort((a, b) => (b.exported === true) - (a.exported === true));
+            const symbols = found.slice(0, SYMBOLS_PER_FILE).map(s => ({
+                name: s.name, kind: s.kind || '', line: s.line || 0, exported: !!s.exported,
+            }));
+            const deps = importEdges(path, content).map(dst => [dst, 'imports']);
+
+            symbolCount += symbols.length;
+            edgeCount += deps.length;
+            batch.push({ path, hash, lang: langOf(path), symbols, deps });
+            areas.push({ path, names: symbols.map(s => s.name) });
+        }
+
+        // Flush in chunks so a huge tree does not build one enormous IPC payload.
+        if (batch.length >= 100) { await index.putFiles(batch.splice(0)); }
+    }
+    if (batch.length) await index.putFiles(batch);
+
+    // Workbooks: same edge table, different extractor.
+    const sheets = await indexSpreadsheets({ workspacePath, invoke, index, onProgress });
+    edgeCount += sheets.edges;
+    for (const p of sheets.paths) seen.push({ path: p, hash: '' });
+
+    // Retire files the tree no longer has.
+    const gone = await index.prune(seen.map(f => f.path));
+
+    return {
+        files: read + sheets.files,
+        parsed: areas.length,
+        symbols: symbolCount,
+        edges: edgeCount,
+        sheets: sheets.files,
+        pruned: gone,
+        paths: seen.map(f => f.path),
+        areas,
+    };
+}
+
+/**
+ * Index the formula graph of the workbooks in a workspace.
+ *
+ * Nodes are `workbook.xlsx#SheetName`, so a sheet is addressable the way a file
+ * is and `code_deps` answers the same question over both. Entirely best-effort:
+ * a workbook that will not open is skipped, never fatal — the source index is
+ * the expensive part and must not be lost to a corrupt spreadsheet.
+ */
+export async function indexSpreadsheets({ workspacePath, invoke, index, onProgress = null }) {
+    let books = [];
+    try {
+        const res = await invoke('glob_files', {
+            pattern: STUDY_SHEET_GLOB, path: workspacePath, maxResults: SHEET_FILE_CAP,
+        });
+        books = (Array.isArray(res?.files) ? res.files : []).slice(0, SHEET_FILE_CAP);
+    } catch (_) {
+        return { files: 0, edges: 0, paths: [] };
     }
 
-    return { cards: symbolCards(symbols, { date, commit }), files: read, symbols: symbols.length, paths };
+    const batch = [];
+    let edges = 0;
+    let done = 0;
+    for (const path of books) {
+        let refs = [];
+        try { refs = await invoke('spreadsheet_refs', { path }) || []; }
+        catch (_) { done++; continue; }
+        done++;
+        onProgress?.({ read: done, total: books.length, symbols: 0, phase: 'sheets' });
+        if (!refs.length) continue;
+
+        // One index entry per SHEET, carrying its outgoing references.
+        const bySheet = new Map();
+        for (const r of refs) {
+            const from = `${path}#${r.from_sheet}`;
+            const list = bySheet.get(from) || [];
+            list.push([`${path}#${r.to_sheet}`, 'references']);
+            bySheet.set(from, list);
+        }
+        for (const [node, deps] of bySheet) {
+            edges += deps.length;
+            batch.push({ path: node, hash: '', lang: 'excel', symbols: [], deps });
+        }
+    }
+    if (batch.length) await index.putFiles(batch);
+    return { files: done, edges, paths: batch.map(b => b.path) };
 }

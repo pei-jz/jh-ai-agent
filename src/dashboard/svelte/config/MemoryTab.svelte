@@ -30,6 +30,11 @@
         onStudy = null,
         studying = false,
         studyStatus = '',
+        /** { files, symbols, edges, coverage[] } from the structural index. */
+        indexStats = null,
+        /** { text, generatedAt } — the generated orientation note. */
+        overview = null,
+        onSaveOverview = null,
         onEditFact = null,
         onDeleteFact = null,
         onClearFacts = null,
@@ -51,9 +56,29 @@
     const OUTCOME = { success: '✅', error: '❌' };
     const outcomeIcon = (o) => OUTCOME[o] || '⚠️';
 
+    /** The orientation note, editable because it is the one memory that is a GUESS. */
+    let editingOverview = $state(false);
+    let overviewDraft = $state('');
+    const startOverviewEdit = () => {
+        overviewDraft = String(overview?.text || '');
+        editingOverview = true;
+    };
+    const commitOverview = () => {
+        onSaveOverview?.(overviewDraft);
+        editingOverview = false;
+    };
+
     /** Which row is being edited, and its draft. In-place, not a window.prompt(). */
     let editingIdx = $state(-1);
     let draft = $state('');
+
+    /**
+     * Collapsible sections. Open by default, so the change is a refinement
+     * rather than a regression: a closed card hides its table, an empty card
+     * hides its "nothing here" line.
+     */
+    let openSections = $state({ facts: true, cards: true, episodes: true });
+    const toggleSection = (key) => { openSections[key] = !openSections[key]; };
 
     const startEdit = (i, fact) => { editingIdx = i; draft = String(fact || ''); };
     const commitEdit = () => {
@@ -95,20 +120,74 @@
                 </button>
                 <span class="cfg-hint">{studyStatus || t('memory.study.hint')}</span>
             </div>
+            <!-- What the index HAS, and by omission what it has not. An area with
+                 no rows is one where every answer the agent gives is a guess, and
+                 that is worth seeing before trusting one. -->
+            {#if indexStats?.files}
+                <div class="cfg-mem-cov">
+                    <div class="cfg-mem-cov-h">
+                        {t('memory.index.summary', {
+                            files: indexStats.files, symbols: indexStats.symbols, edges: indexStats.edges,
+                        })}
+                    </div>
+                    {#each indexStats.coverage || [] as c (c.dir)}
+                        <div class="cfg-mem-cov-row">
+                            <span class="d">{c.dir}</span>
+                            <span class="b"><i style={`width:${Math.max(3, Math.round(c.files / indexStats.coverage[0].files * 100))}%`}></i></span>
+                            <span class="n">{c.files}</span>
+                        </div>
+                    {/each}
+                </div>
+            {/if}
+
+            <!-- The orientation note. Shown and editable because it is the ONLY
+                 memory here that is inferred rather than observed: it rides in
+                 every prompt, so a wrong sentence in it is repeated on every
+                 step until someone corrects it. -->
+            {#if overview?.text || editingOverview}
+                <div class="cfg-mem-box cfg-mem-ov">
+                    <div class="cfg-mem-head">
+                        <div class="cfg-mem-title">
+                            {@html icon('brain', 13)} {t('memory.overview')}
+                        </div>
+                        {#if editingOverview}
+                            <button class="btn btn-primary cfg-btn-tiny" id="btn-memory-ov-save"
+                                onclick={commitOverview}>{t('memory.overview.save')}</button>
+                        {:else}
+                            <button class="btn btn-secondary cfg-btn-tiny" id="btn-memory-ov-edit"
+                                onclick={startOverviewEdit}>{@html icon('edit', 12)} {t('memory.edit')}</button>
+                        {/if}
+                    </div>
+                    {#if editingOverview}
+                        <textarea class="input cfg-mem-ov-edit" rows="8" bind:value={overviewDraft}></textarea>
+                    {:else}
+                        <pre class="cfg-mem-ov-text">{overview.text}</pre>
+                        {#if overview.generatedAt}
+                            <div class="cfg-mem-summary">
+                                {t('memory.overview.generated', { at: String(overview.generatedAt).slice(0, 10) })}
+                            </div>
+                        {/if}
+                    {/if}
+                </div>
+            {/if}
         </div>
 
         {#if !loaded}
             <div class="cfg-mem-hint">{t('memory.selectHint')}</div>
         {:else}
             <div class="cfg-mem-box">
-                <div class="cfg-mem-head">
+                <div class="cfg-mem-head cfg-mem-collapsible" role="button" tabindex="0"
+                    onclick={() => toggleSection('facts')}
+                    onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSection('facts'); } }}>
                     <div class="cfg-mem-title">
+                        <span class="cfg-mem-chevron">{openSections.facts ? '▾' : '▸'}</span>
                         {@html icon('memory', 13)} {t('memory.facts', { count: factList.length })}
                     </div>
                     <button class="btn btn-secondary cfg-btn-tiny cfg-btn-danger"
-                        id="btn-memory-facts-clear" onclick={() => onClearFacts?.()}>
+                        id="btn-memory-facts-clear" onclick={(e) => { e.stopPropagation(); onClearFacts?.(); }}>
                         {@html icon('trash', 12)} {t('memory.clearAll')}</button>
                 </div>
+                {#if openSections.facts}
                 {#if !factList.length}
                     <div class="cfg-mem-empty">{t('memory.facts.empty')}</div>
                 {:else}
@@ -162,19 +241,24 @@
                         </table>
                     </div>
                 {/if}
+                {/if}
             </div>
 
             <!-- Experience cards. The switch is the point: a wrong lesson that the
                  user cannot turn off is exactly how a memory poisons an agent. -->
             <div class="cfg-mem-box">
-                <div class="cfg-mem-head">
+                <div class="cfg-mem-head cfg-mem-collapsible" role="button" tabindex="0"
+                    onclick={() => toggleSection('cards')}
+                    onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSection('cards'); } }}>
                     <div class="cfg-mem-title">
+                        <span class="cfg-mem-chevron">{openSections.cards ? '▾' : '▸'}</span>
                         {@html icon('brain', 13)} {t('memory.cards', { count: cardList.length })}
                     </div>
                     <button class="btn btn-secondary cfg-btn-tiny cfg-btn-danger"
-                        id="btn-memory-cards-clear" onclick={() => onClearCards?.()}>
+                        id="btn-memory-cards-clear" onclick={(e) => { e.stopPropagation(); onClearCards?.(); }}>
                         {@html icon('trash', 12)} {t('memory.clearAll')}</button>
                 </div>
+                {#if openSections.cards}
                 {#if !cardList.length}
                     <div class="cfg-mem-empty">{t('memory.cards.empty')}</div>
                 {:else}
@@ -215,17 +299,22 @@
                         </table>
                     </div>
                 {/if}
+                {/if}
             </div>
 
             <div class="cfg-mem-box">
-                <div class="cfg-mem-head">
+                <div class="cfg-mem-head cfg-mem-collapsible" role="button" tabindex="0"
+                    onclick={() => toggleSection('episodes')}
+                    onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSection('episodes'); } }}>
                     <div class="cfg-mem-title">
+                        <span class="cfg-mem-chevron">{openSections.episodes ? '▾' : '▸'}</span>
                         {@html icon('history', 13)} {t('memory.episodes', { count: episodeList.length })}
                     </div>
                     <button class="btn btn-secondary cfg-btn-tiny cfg-btn-danger"
-                        id="btn-memory-episodes-clear" onclick={() => onClearEpisodes?.()}>
+                        id="btn-memory-episodes-clear" onclick={(e) => { e.stopPropagation(); onClearEpisodes?.(); }}>
                         {@html icon('trash', 12)} {t('memory.clearAll')}</button>
                 </div>
+                {#if openSections.episodes}
                 {#if !episodeList.length}
                     <div class="cfg-mem-empty">{t('memory.episodes.empty')}</div>
                 {:else}
@@ -250,6 +339,7 @@
                             </tbody>
                         </table>
                     </div>
+                {/if}
                 {/if}
             </div>
         {/if}

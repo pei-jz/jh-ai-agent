@@ -20,6 +20,8 @@ export const READ_TOOLS = [
     'grep_search',
     'glob',
     'symbol_search',
+    // "What depends on this file" — reads the studied index, changes nothing.
+    'code_deps',
     // Office documents are unreadable via read_file (binary), so an agent
     // without this one has no choice but to shell out.
     'read_office',

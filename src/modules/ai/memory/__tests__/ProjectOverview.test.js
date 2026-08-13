@@ -129,3 +129,14 @@ describe('isOverviewStale', () => {
         expect(isOverviewStale({ generatedAt: '2026-06-01T00:00:00Z' }, { now })).toBe(true);
     });
 });
+
+describe('structureDigest accepts either input shape', () => {
+    it('folds the study pass output ({path, names})', () => {
+        const areas = structureDigest([
+            { path: 'src/modules/ai/x.js', names: ['alpha', 'beta'] },
+            { path: 'src/modules/ai/y.js', names: ['gamma'] },
+        ]);
+        expect(areas[0]).toMatchObject({ dir: 'src/modules/ai', files: 2 });
+        expect(areas[0].names).toEqual(['alpha', 'beta', 'gamma']);
+    });
+});

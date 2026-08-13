@@ -170,6 +170,21 @@ export const TOOL_DEFINITIONS = [
         }
     },
     {
+        name: 'code_deps',
+        isSafe: true,
+        description: 'Which files DEPEND ON a file (direction "in"), or which files it depends on ("out"). Answers "what breaks if I change this" — a question grep cannot answer, because it needs every other file to have been read. Requires the workspace to have been studied (Settings → Memory → Study).',
+        parameters: {
+            type: 'object',
+            properties: {
+                path: { type: 'string', description: 'File to examine, e.g. "src/modules/ai/memory/CardStore.js".' },
+                direction: { type: ['string', 'null'], description: '"in" = what depends on this (default). "out" = what this depends on.' },
+                max_results: { type: ['integer', 'null'], description: 'Optional. Default 60, max 500.' }
+            },
+            required: ['path', 'direction', 'max_results'],
+            additionalProperties: false
+        }
+    },
+    {
         name: 'grep_search',
         isSafe: true,
         description: 'Recursively search for a regex pattern across files (respects .gitignore). Returns matching lines with file path and line number. Use this INSTEAD of read_file when you want to find where something is defined/used — it is dramatically cheaper than reading every file.',

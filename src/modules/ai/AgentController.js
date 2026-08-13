@@ -15,7 +15,7 @@ import { shouldPlanFirst } from './agent/TaskComplexity.js';
 import { intentRegistry, resolveIntent } from './agent/IntentRegistry.js';
 import { classifyCommand } from './tools/commandPolicy.js';
 import { normalizeSafetyLimits, resolveRecallArm } from './agent/SafetyLimits.js';
-import { initialPhase, advancePhase, modelForPhase, phaseLabel } from './agent/ModelPhaseRouter.js';
+import { initialPhase, advancePhase, modelForPhase, phaseLabel, PLAN_PHASE_MAX_STEPS } from './agent/ModelPhaseRouter.js';
 import { buildRecoveryHint } from './agent/RecoveryHints.js';
 import {
     resolveRole, composeSubtaskPrompt, buildReviewBrief, parseReviewVerdict, clipText, childTokenBudget,
@@ -358,6 +358,13 @@ export class AgentController {
                 model: this._modelOverride,
                 from: null,
                 escalated: false,
+                reason: this._phase === 'plan'
+                    ? (this._planFirstActive
+                        ? 'plan-first 承認ゲート → 計画は deep で実施'
+                        : 'タスクが複雑と判定 → 計画は deep で実施')
+                    : (isFreshTurn
+                        ? '単発タスク → 実行フェーズを fast で開始'
+                        : '継続ターン(計画済み) → 実行フェーズで開始'),
                 tokens: { ...this._phaseTokens },
             });
             onAgentStatus?.({
@@ -442,6 +449,17 @@ export class AgentController {
         ]);
 
         await this.toolExecutor.startSession(workspacePath);
+
+        // RE-APPLY the external-app (WS) MCP exclusion AFTER startSession. The
+        // session reset wipes every per-run flag (ToolExecutor.startSession resets
+        // _excludeExternalAppMcpTools to false), and the call above at the top of
+        // run() is therefore clobbered — leaving JHAI's OWN tasks (NewTask /
+        // Schedule / DirectChat) offering the connected external app's WS MCP
+        // tools (JHEditor read_workspace_file / list_workspace_files / …) to the
+        // LLM every run. Re-applying here, alongside the other per-run MCP
+        // settings (server filter / context / relevance query), keeps the flag in
+        // step with the session that is actually about to run.
+        this.toolExecutor.setExcludeExternalAppMcpTools(!isExternalCaller);
 
         // Failure trace for this session. Created after startSession because the
         // session id names the file. Disables itself when there is no workspace.
@@ -2996,6 +3014,20 @@ ${String(finalResponse || '').slice(0, 2000)}`;
         if (!swapped) return;
         const from = this._modelOverride;
         this._modelOverride = model;
+        // WHY this switch happened. The event names alone say nothing a person
+        // can act on; these strings are the trigger spelled out. `step` is
+        // overloaded: it both releases the deep model at the plan cap and (when
+        // escalation is on) promotes a struggling execute to deep, so the reason
+        // has to distinguish the two.
+        const reason = this._phaseEscalated && next === 'execute'
+            ? `step ${ctx.iteration ?? 0} 到達 — 長い実行で fast が苦戦、execute を deep に昇格`
+            : {
+                step: `plan の step 上限 (${PLAN_PHASE_MAX_STEPS}+) を超過 → execute へ`,
+                mutation: 'ファイル変更ツールが実行された → execute へ',
+                'plan-done': '計画が登録/承認された → execute へ',
+                finish: 'finish_task — 検収(review)に入るため deep へ',
+                reopen: 'レビュー差し戻し — 修正は実行フェーズ(実行は fast)へ',
+            }[event] || String(event);
         // A STRUCTURED event as well as the human line. The Dashboard draws a
         // phase rail from this; parsing it back out of a Japanese status string
         // would break the first time anyone reworded the message.
@@ -3005,6 +3037,7 @@ ${String(finalResponse || '').slice(0, 2000)}`;
             model,
             from: from || null,
             escalated: this._phaseEscalated,
+            reason,
             tokens: { ...this._phaseTokens },
         });
         // Announce only a real model change: the phase names alone would be noise

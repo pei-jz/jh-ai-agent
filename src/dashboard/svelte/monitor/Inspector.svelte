@@ -52,6 +52,28 @@
     const cost = $derived(costOfModels(task?.model_usage, costTable, rates) || costOf(usage, rates));
     const mixedModels = $derived(Object.keys(task?.model_usage || {}).length > 1);
 
+    // Per-model token + cost rows for the inspector's Token usage section. Each
+    // model that actually consumed tokens gets a row, priced at its own rates
+    // (falling back to the task's rate set, then to "no price").
+    const modelRows = $derived((() => {
+        const mu = task?.model_usage || {};
+        const entries = Object.entries(mu).filter(([, u]) => u && typeof u === 'object');
+        if (!entries.length) return [];
+        return entries.map(([model, u]) => {
+            const tokens = (Number(u.prompt_tokens) || 0) + (Number(u.completion_tokens) || 0)
+                + (Number(u.cache_read_input_tokens) || 0);
+            const c = costOf(u, (costTable && costTable[model]) || rates);
+            return {
+                model,
+                tokens,
+                in: fmtTokens(u.prompt_tokens || 0),
+                out: fmtTokens(u.completion_tokens || 0),
+                cache: fmtTokens(u.cache_read_input_tokens || 0),
+                cost: c ? fmtCost(c.total) : null,
+            };
+        }).filter(r => r.tokens > 0);
+    })());
+
     const elapsed = $derived(stats.durationMs ? `${Math.round(stats.durationMs / 1000)}s` : '');
     const started = $derived(String(task?.started_at || '').replace('T', ' ').slice(0, 19));
     const shortId = $derived(task?.id ? `#${String(task.id).slice(0, 8)}` : '');
@@ -130,6 +152,20 @@
             {#if cost}<span class="insp-cost">{fmtCost(cost.total)}</span>{/if}
             <span class="insp-v">{fmtTokens(usage.total_tokens || 0)}</span>
         </div>
+        <!-- When the run touched more than one model, the totals above are a SUM
+             of differently-priced slices. The per-model rows below are the actual
+             usage, so "which model cost me what" has an answer instead of a blend. -->
+        {#if modelRows.length > 1}
+            <div class="insp-models">
+                {#each modelRows as r (r.model)}
+                    <div class="insp-row">
+                        <span class="insp-k" title={r.model}>{r.model}</span>
+                        {#if r.cost}<span class="insp-cost">{r.cost}</span>{/if}
+                        <span class="insp-v">{r.in} ↑ · {r.cache} ⚡ · {r.out} ↓</span>
+                    </div>
+                {/each}
+            </div>
+        {/if}
         {#if mixedModels}
             <!-- Say so: a mixed-model total is a SUM of differently-priced slices,
                  not one volume at one rate, and that is worth knowing before

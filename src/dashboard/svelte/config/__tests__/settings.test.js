@@ -90,20 +90,20 @@ describe('SettingsGeneral — the fields report normalized patches', () => {
         expect(onChange).toHaveBeenCalledWith({ subagent_review: 'on' });
     });
 
-    it('reports the memory-recall arm, and defaults to on', () => {
+    it('reports the memory-recall arm, and defaults to measuring', () => {
         // The A/B control group is only reachable if this select saves — the
         // switch existed in the agent before it existed in the UI, which made it
         // unusable outside tests.
         const onChange = vi.fn();
         const el = general({ onChange });
-        expect(el.querySelector('#cfg-memory-recall').value).toBe('on');
-        pick(el.querySelector('#cfg-memory-recall'), 'auto');
-        expect(onChange).toHaveBeenCalledWith({ memory_recall: 'auto' });
+        expect(el.querySelector('#cfg-memory-recall').value).toBe('auto');
+        pick(el.querySelector('#cfg-memory-recall'), 'on');
+        expect(onChange).toHaveBeenCalledWith({ memory_recall: 'on' });
     });
 
     it('offers all three memory-recall arms', () => {
         const opts = [...general().querySelector('#cfg-memory-recall').options].map(o => o.value);
-        expect(opts).toEqual(['on', 'auto', 'off']);
+        expect(opts).toEqual(['auto', 'on', 'off']);
     });
 
     it('lists the connections in both routing selects', () => {

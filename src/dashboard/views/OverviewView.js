@@ -9,7 +9,7 @@ import {
     toggleCardDisabled, HALF_LIFE_DAYS,
 } from './overview/memoryPanel.js';
 import { rankRecipes, readUseCounts, recordUse } from './overview/recipes.js';
-import { reduceRun, phaseRail, runCost } from './overview/runFeed.js';
+import { reduceRun, phaseRail, runCost, runCostBreakdown } from './overview/runFeed.js';
 // Cache accounting is provider-dependent and easy to get wrong in both
 // directions. There is exactly one implementation of it — the Monitor
 // inspector's — and every cost figure in the app now goes through it.
@@ -55,6 +55,12 @@ export class OverviewView {
         this.tab = null;
         this.memSeenAt = 0;
         this.memQuery = '';
+        /** Spend window: '1d' | '7d' | '30d'. Persisted so the pick survives a reload. */
+        this.spendRange = '7d';
+        try { this.spendRange = localStorage.getItem('jhai_dash_spend_range') || '7d'; } catch (_) {}
+        /** Stats cut: 'month' | 'week' | 'day' | 'model' | 'ws'. */
+        this.statsCut = 'month';
+        try { this.statsCut = localStorage.getItem('jhai_dash_stats_cut') || 'month'; } catch (_) {}
         this._destroyed = false;
         /** Live run state: the reduction of the watched task's log stream. */
         this.run = null;
@@ -124,7 +130,10 @@ export class OverviewView {
         const at = (s) => (s ? new Date(s).getTime() : 0);
         const endOf = (t) => at(t.completed_at || t.started_at);
         const attentionMs = now - ATTENTION_WINDOW_H * 3600000;
-        const weekMs = now - 7 * 86400000;
+        // The spend window is user-selectable (today / 7 days / 30 days), not a
+        // fixed "this week": the dash is for the bill, and the bill varies.
+        const rangeDays = { '1d': 1, '7d': 7, '30d': 30 }[this.spendRange] || 7;
+        const rangeMs = now - rangeDays * 86400000;
 
         const running = this.tasks.filter(t => t.status === 'running');
         const paused = this.tasks.filter(t => t.status === 'paused');
@@ -134,7 +143,7 @@ export class OverviewView {
         const failures = this.tasks.filter(t => t.status === 'failed').sort((a, b) => endOf(b) - endOf(a));
         const freshFailures = failures.filter(t => endOf(t) >= attentionMs);
 
-        const recent7 = this.tasks.filter(t => at(t.started_at) >= weekMs);
+        const recent7 = this.tasks.filter(t => at(t.started_at) >= rangeMs);
         const done7 = recent7.filter(t => t.status === 'completed').length;
         const fail7 = recent7.filter(t => t.status === 'failed').length;
         const successRate = (done7 + fail7) > 0 ? Math.round(done7 / (done7 + fail7) * 100) : null;
@@ -149,6 +158,7 @@ export class OverviewView {
             running, paused, freshFailures,
             staleFailures: failures.length - freshFailures.length,
             recent, successRate, done7,
+            rangeDays,
             spend: this._spend(recent7),
         };
     }
@@ -214,6 +224,28 @@ export class OverviewView {
 
     _newCards() {
         return recentlyLearned(this.memory?.cards, this.memSeenAt);
+    }
+
+    /**
+     * Workspaces the agent has actually run in, newest first, plus the approved
+     * projects and the one currently shown. This is what the memory tab offers:
+     * memory lives per workspace, so picking one it already knows is the common
+     * action and should take a single click, not a typed path.
+     */
+    _knownWorkspaces() {
+        const seen = [];
+        const add = (p) => {
+            const v = String(p || '').trim();
+            if (v && !seen.includes(v)) seen.push(v);
+        };
+        // Newest-run-first is the order a person expects: the workspace they
+        // were just working in is the one they most likely want to look at.
+        [...this.tasks]
+            .sort((a, b) => (b.started_at || '').localeCompare(a.started_at || ''))
+            .forEach(t => add(t.workspace_path));
+        (Array.isArray(this.config.approved_projects) ? this.config.approved_projects : []).forEach(add);
+        add(this.memoryWs);
+        return seen;
     }
 
     // ── Render ───────────────────────────────────────────────────────────
@@ -333,8 +365,13 @@ export class OverviewView {
             <div class="ds">
                 <div class="ds-top">
                     <span class="ds-v">${money(s.total)}</span>
-                    <span class="ds-k">7 days · ${m.done7} done${m.successRate !== null ? ` · ${m.successRate}%` : ''}</span>
+                    <span class="ds-range" role="group" aria-label="Spend window">
+                        ${['1d', '7d', '30d'].map(r => `
+                            <button type="button" class="ds-range-btn ${this.spendRange === r ? 'is-on' : ''}"
+                                data-range="${r}">${r === '1d' ? 'Today' : r}</button>`).join('')}
+                    </span>
                 </div>
+                <div class="ds-k">${m.rangeDays}d · ${m.done7} done${m.successRate !== null ? ` · ${m.successRate}%` : ''}</div>
                 <div class="ds-bar">${bar}</div>
                 <div class="ds-lg">${lg}</div>
                 ${this._spendRowsHtml(s)}
@@ -384,17 +421,24 @@ export class OverviewView {
                 ${icon('memory', 13)} Memory
                 ${newCount ? `<span class="dt-cnt">${newCount} new</span>` : ''}
             </button>
+            <button type="button" class="dt-tab ${active === 'stats' ? 'is-on' : ''}" data-tab="stats">
+                ${icon('report', 13)} Stats
+            </button>
             <span class="dt-ws">
                 <input id="dash-mem-ws" class="dt-ws-input" type="text" list="dash-mem-ws-list"
                     value="${esc(memWsValue)}" placeholder="(no workspace)" aria-label="Memory workspace">
-                <datalist id="dash-mem-ws-list">${projects.map(p => `<option value="${esc(p)}"></option>`).join('')}</datalist>
+                <datalist id="dash-mem-ws-list">
+                    ${[...new Set([...projects, ...this._knownWorkspaces()])].map(p => `<option value="${esc(p)}"></option>`).join('')}
+                </datalist>
                 <button type="button" class="dt-ws-browse" id="dash-mem-ws-browse"
                     title="Browse for a memory workspace folder" aria-label="Browse for a memory workspace folder">${icon('folder', 11)}</button>
             </span>`;
     }
 
     _paneHtml(m) {
-        if (this._activeTab(m) === 'run') return this._runHtml(m);
+        const active = this._activeTab(m);
+        if (active === 'run') return this._runHtml(m);
+        if (active === 'stats') return this._statsHtml(m);
         return this._memoryHtml();
     }
 
@@ -412,6 +456,7 @@ export class OverviewView {
         const run = this.run || reduceRun([]);
         const rail = phaseRail(run);
         const cost = runCost(run, modelRates(this.config.llm_instances));
+        const breakdown = runCostBreakdown(run, modelRates(this.config.llm_instances));
         const tokens = run.tokens.prompt + run.tokens.completion;
         const pct = Math.round((t.progress || 0) * 100);
 
@@ -444,6 +489,9 @@ export class OverviewView {
                         deep tier — this run was long enough that the cheap model was struggling.</p>` : ''}
                 ` : ''}
 
+                ${this._modelBreakdownHtml(run, breakdown)}
+                ${this._switchLogHtml(run)}
+
                 ${this._inPlayHtml(run)}
 
                 <div class="dm-box">
@@ -461,6 +509,51 @@ export class OverviewView {
 
                 ${run.files.size ? `<p class="dm-note" style="padding:0 2px">${
                     run.files.size} file${run.files.size === 1 ? '' : 's'} changed so far.</p>` : ''}
+            </div>`;
+    }
+
+    /**
+     * Model-by-model token + cost table for the live run.
+     *
+     * The four stat cells total the run; this breaks it apart per model, which
+     * is what "why did the model switch" and "what is that switch saving me"
+     * both need. Rows with no configured rate still show their token count —
+     * hiding them would make a cheap tier invisible exactly when it matters.
+     */
+    _modelBreakdownHtml(run, breakdown) {
+        if (!breakdown?.rows?.length) return '';
+        return `
+            <div class="dm-box">
+                <div class="dm-h">Model usage</div>
+                <table class="ds-tbl">
+                    <thead><tr><th>Model</th><th>Tokens</th><th>Cost</th></tr></thead>
+                    <tbody>
+                        ${breakdown.rows.map(r => `
+                            <tr${r.priced ? '' : ' class="is-est"'}>
+                                <td title="${esc(r.model)}">${esc(clip(r.label, 28))}</td>
+                                <td title="${fmt(r.tokens)} total · ${fmt(r.prompt)} in · ${fmt(r.completion)} out">${short(r.tokens)}</td>
+                                <td>${r.cost === null ? '—' : money(r.cost)}${r.priced ? '' : '<span class="ds-est">≈</span>'}</td>
+                            </tr>`).join('')}
+                    </tbody>
+                </table>
+            </div>`;
+    }
+
+    /**
+     * Why the run is on the model it is on — every pick and every switch, with
+     * its trigger, newest first.
+     */
+    _switchLogHtml(run) {
+        if (!run?.switches?.length) return '';
+        return `
+            <div class="dm-box">
+                <div class="dm-h">Model switches · why</div>
+                ${run.switches.slice().reverse().map(s => `
+                    <div class="dp-switch">
+                        <span class="dp-switch-m">${esc(shortModel(s.model))}</span>
+                        ${s.from ? `<span class="dp-switch-from">← ${esc(shortModel(s.from))}</span>` : ''}
+                        <span class="dp-switch-r">${esc(s.reason)}</span>
+                    </div>`).join('')}
             </div>`;
     }
 
@@ -506,6 +599,16 @@ export class OverviewView {
         const L = memoryLayers(mem);
         const H = memoryHealth(mem.cards);
         const results = this.memQuery ? searchMemory(mem, this.memQuery) : [];
+        // One-click switches to a workspace the agent already knows. A list of
+        // paths is reference material, not a form: chips are easier to scan and
+        // click than a datalist, and the current one is visibly marked.
+        const known = this._knownWorkspaces();
+        const chips = known.length > 1
+            ? `<div class="dm-wschips">${known.map(ws => `
+                <button type="button" class="dm-wschip ${ws === this.memoryWs ? 'is-on' : ''}"
+                    data-ws="${esc(ws)}" title="${esc(ws)}">${esc(baseName(ws))}</button>`).join('')}
+            </div>`
+            : '';
 
         if (!L.totalCards && !L.totalFacts && !L.episodes) {
             return `<div class="dash-empty">
@@ -534,6 +637,7 @@ export class OverviewView {
                         aria-label="${esc(t('dash.mem.searchHint'))}">
                     <span class="sc">${L.totalCards} cards · ${L.totalFacts} facts</span>
                 </div>
+                ${chips}
                 ${this.memQuery ? `<div class="dm-box dm-results">${
                     results.length
                         ? results.map(r => this._memRowHtml(r, { plain: true })).join('')
@@ -653,6 +757,134 @@ export class OverviewView {
                         ${card.disabled ? '' : 'checked'}>
                     <i></i>
                 </label>` : ''}
+            </div>`;
+    }
+
+    // ── Stats tab ────────────────────────────────────────────────────────
+
+    /**
+     * Aggregate every task's tokens and cost into a per-bucket table.
+     *
+     * Each task contributes its `model_usage` slices (falling back to
+     * `token_usage`), priced per model. Buckets are the date-group label
+     * (`month` / `week` / `day`), the model, or the workspace.
+     *
+     * @param {Array} tasks the tasks to aggregate
+     * @param {string} by 'month' | 'week' | 'day' | 'model' | 'ws'
+     * @returns {Array<{label:string, tokens:number, cost:number, priced:boolean}>}
+     */
+    _aggregate(tasks, by) {
+        const rates = modelRates(this.config.llm_instances);
+        const byBare = {};
+        for (const [key, r] of Object.entries(rates)) byBare[key.slice(key.indexOf(':') + 1)] = r;
+        const rateFor = (m) => rates[m] || byBare[m] || null;
+        const flat = this.stats.totalTokens > 0 ? (this.stats.estimatedCost / this.stats.totalTokens) : 0;
+
+        const bucketOf = (t) => {
+            const at = (s) => (s ? new Date(s).getTime() : 0);
+            const ts = at(t.completed_at || t.started_at);
+            const d = ts ? new Date(ts) : new Date();
+            if (by === 'month') return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+            if (by === 'day') return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+            if (by === 'week') {
+                // ISO-ish week: the Monday of the week containing the task.
+                const day = (d.getDay() + 6) % 7; // 0 = Monday
+                const mon = new Date(d);
+                mon.setDate(d.getDate() - day);
+                return `${mon.getFullYear()}-W${String(Math.ceil((mon.getDate() + 1 - mon.getDay()) / 7) || 1).padStart(2, '0')}`;
+            }
+            if (by === 'ws') {
+                const p = String(t.workspace_path || '').replace(/\\/g, '/').replace(/\/+$/, '');
+                return p.split('/').filter(Boolean).pop() || '(no workspace)';
+            }
+            return '';
+        };
+
+        const rows = new Map();
+        let totalCost = 0, unpriced = 0;
+        for (const t of tasks) {
+            const usage = (t.model_usage && Object.keys(t.model_usage).length)
+                ? Object.entries(t.model_usage)
+                : [['(unattributed)', t.token_usage || {}]];
+            for (const [model, u] of usage) {
+                const tokens = (u.prompt_tokens || 0) + (u.completion_tokens || 0);
+                if (!tokens) continue;
+                const r = rateFor(model);
+                const cost = r ? (costOf(u, per1m(r))?.total || 0) : (tokens * flat);
+                if (!r) unpriced += tokens;
+                const key = by === 'model'
+                    ? (r ? r.label : shortModel(model))
+                    : bucketOf(t);
+                const row = rows.get(key) || { label: key, tokens: 0, cost: 0, priced: !!r };
+                row.tokens += tokens; row.cost += cost;
+                if (r) row.priced = true;
+                rows.set(key, row);
+                totalCost += cost;
+            }
+        }
+        return {
+            rows: [...rows.values()].sort((a, b) => b.cost - a.cost),
+            total: totalCost, unpriced,
+        };
+    }
+
+    /**
+     * The Stats tab body: token spend and cost, cut by date (month/week/day),
+     * by model, and by workspace. One segmented control switches the cut.
+     */
+    _statsHtml(m) {
+        const totalTasks = this.tasks.length;
+        if (!totalTasks) {
+            return `<div class="dash-empty"><p>No tasks yet — run something and the usage breakdown will appear here.</p></div>`;
+        }
+
+        const cuts = [
+            ['month', t('dash.stats.month')],
+            ['week', t('dash.stats.week')],
+            ['day', t('dash.stats.day')],
+            ['model', t('dash.stats.model')],
+            ['ws', t('dash.stats.ws')],
+        ];
+        const cut = this.statsCut || 'month';
+        const agg = this._aggregate(this.tasks, cut);
+
+        const maxCost = Math.max(1, ...agg.rows.map(r => r.cost));
+        const barRows = agg.rows.map(r => {
+            const pct = Math.round(r.cost / maxCost * 100);
+            const bar = `<i style="width:${Math.max(1, pct)}%"></i>`;
+            return `
+                <div class="ds-st-row">
+                    <span class="ds-st-label" title="${esc(r.label)}">${esc(clip(r.label, 26))}</span>
+                    <span class="ds-st-bar">${bar}</span>
+                    <span class="ds-st-tok">${short(r.tokens)} tok</span>
+                    <span class="ds-st-cost">${money(r.cost)}${r.priced ? '' : '<span class="ds-est">≈</span>'}</span>
+                </div>`;
+        }).join('');
+
+        return `
+            <div class="dm">
+                <div class="dm-layers">
+                    <div><span class="k">TASKS</span><span class="v">${totalTasks}</span><span class="s">total</span></div>
+                    <div><span class="k">COST</span><span class="v">${money(agg.total)}</span><span class="s">${agg.unpriced ? 'some estimated' : 'at your rates'}</span></div>
+                    <div><span class="k">TOKENS</span><span class="v">${short(agg.rows.reduce((s, r) => s + r.tokens, 0))}</span><span class="s">across all tasks</span></div>
+                    <div><span class="k">MODELS</span><span class="v">${this._aggregate(this.tasks, 'model').rows.length}</span><span class="s">in use</span></div>
+                    <div><span class="k">WORKSPACES</span><span class="v">${this._aggregate(this.tasks, 'ws').rows.length}</span><span class="s">in use</span></div>
+                </div>
+
+                <div class="ds-st-toolbar">
+                    ${cuts.map(([key, label]) => `
+                        <button type="button" class="ds-st-cut ${cut === key ? 'is-on' : ''}" data-cut="${key}">${esc(label)}</button>
+                    `).join('')}
+                </div>
+
+                <div class="dm-box">
+                    <div class="dm-h">${esc(t('dash.stats.by', { cut: cuts.find(c => c[0] === cut)?.[1] || cut }))}
+                        <span class="more">${esc(t('dash.stats.sortHint'))}</span>
+                    </div>
+                    ${agg.rows.length
+                        ? `<div class="ds-st-list">${barRows}</div>`
+                        : `<p class="dm-note">${esc(t('dash.stats.empty'))}</p>`}
+                </div>
             </div>`;
     }
 
@@ -854,6 +1086,25 @@ export class OverviewView {
             });
         });
 
+        // Spend window: the pick is persisted so the next visit starts where
+        // this one ended.
+        document.querySelectorAll('.ds-range-btn[data-range]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                this.spendRange = btn.getAttribute('data-range');
+                try { localStorage.setItem('jhai_dash_spend_range', this.spendRange); } catch (_) {}
+                this._paint();
+            });
+        });
+
+        // Stats cut: same persistence pattern.
+        document.querySelectorAll('.ds-st-cut[data-cut]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                this.statsCut = btn.getAttribute('data-cut');
+                try { localStorage.setItem('jhai_dash_stats_cut', this.statsCut); } catch (_) {}
+                this._paint();
+            });
+        });
+
         document.querySelectorAll('.dash-card-toggle').forEach(cb => {
             cb.addEventListener('change', () => this._toggleCard(cb.getAttribute('data-card'), !cb.checked));
         });
@@ -862,6 +1113,15 @@ export class OverviewView {
         // is the point of having both halves on one page. Make it one click.
         document.querySelectorAll('.dash-go-memory').forEach(btn => {
             btn.addEventListener('click', () => { this.tab = 'memory'; this._paint(); });
+        });
+
+        // One-click workspace switch in the memory pane — the chip carries the
+        // full path, so clicking it is the same as typing it and pressing Enter.
+        document.querySelectorAll('.dm-wschip[data-ws]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const ws = btn.getAttribute('data-ws');
+                if (ws && ws !== this.memoryWs) this._setMemoryWorkspace(ws);
+            });
         });
 
         const q = document.getElementById('dash-mem-q');

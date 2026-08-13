@@ -197,6 +197,34 @@ export const CONFIG_SECTION_STYLES = `
                         display: flex; align-items: center; gap: 10px; margin-top: 8px;
                     }
                     .cfg-mem-study .cfg-hint { margin: 0; font-size: var(--fs-xs); }
+                    /* Index coverage: which areas are known, and by omission
+                       which are not. */
+                    /* The orientation note reads as prose, not as a table row:
+                       it is the one memory written for a person. */
+                    .cfg-mem-ov-text {
+                        margin: 0; white-space: pre-wrap; font-family: inherit;
+                        font-size: var(--fs-xs); line-height: 1.7; color: var(--text-secondary);
+                    }
+                    .cfg-mem-ov-edit {
+                        width: 100%; font-family: var(--font-mono); font-size: var(--fs-xs);
+                        line-height: 1.6; resize: vertical;
+                    }
+                    .cfg-mem-cov { margin-top: 10px; }
+                    .cfg-mem-cov-h {
+                        font-size: var(--fs-xs); color: var(--text-secondary); margin-bottom: 6px;
+                        font-family: var(--font-mono);
+                    }
+                    .cfg-mem-cov-row {
+                        display: flex; align-items: center; gap: 8px;
+                        font-size: var(--fs-2xs); color: var(--text-tertiary); padding: 1px 0;
+                    }
+                    .cfg-mem-cov-row .d { width: 230px; flex-shrink: 0; overflow: hidden;
+                        text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); }
+                    .cfg-mem-cov-row .b { flex: 1; height: 5px; background: var(--bg-tertiary);
+                        border-radius: 3px; overflow: hidden; }
+                    .cfg-mem-cov-row .b > i { display: block; height: 100%; background: var(--accent); }
+                    .cfg-mem-cov-row .n { width: 40px; text-align: right;
+                        font-variant-numeric: tabular-nums; font-family: var(--font-mono); }
                     .cfg-mem-box {
                         margin-top: 8px; padding: 14px 16px;
                         border: 1px solid var(--border); border-radius: var(--radius-md);
@@ -209,6 +237,16 @@ export const CONFIG_SECTION_STYLES = `
                     .cfg-mem-title {
                         font-size: var(--fs-xs); font-weight: 600; color: var(--accent);
                         text-transform: uppercase; letter-spacing: 0.06em;
+                    }
+                    /* The three lists are collapsible now — a long memory is easier
+                       to skim when the tables can be folded away. The whole header
+                       row is the hit target; the clear button stops propagation. */
+                    .cfg-mem-collapsible { cursor: pointer; user-select: none; }
+                    .cfg-mem-collapsible:hover { color: var(--text-primary); }
+                    .cfg-mem-collapsible .cfg-mem-title { display: inline-flex; align-items: center; gap: 6px; }
+                    .cfg-mem-chevron {
+                        display: inline-block; width: 12px; text-align: center;
+                        color: var(--text-tertiary); font-size: 10px;
                     }
                     .cfg-mem-empty { color: var(--text-tertiary); font-size: var(--fs-xs); }
                     .cfg-mem-scroll { max-height: 320px; overflow: auto; }

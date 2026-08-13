@@ -13,7 +13,7 @@ import { capFactText } from '../../modules/ai/memory/FactStore.js';
 // them and appended to by the agent as JSON Lines.
 import {
     memoryPaths, readWorkspaceMemory, allowMemoryDir,
-    writeCards, writeFacts, writeEpisodes,
+    writeCards, writeFacts, writeEpisodes, readOverview, writeOverview,
 } from '../../modules/ai/memory/workspaceMemory.js';
 import { CONFIG_SECTION_STYLES, CONFIG_MODAL_STYLES } from './ConfigView.styles.js';
 // MIGRATED regions (region 5 of docs/design/svelte-migration.md). The provider
@@ -353,8 +353,12 @@ export class ConfigView {
                 onLoad: async () => {
                     if (!this.memoryWorkspace) { alert('Please enter a workspace path.'); return; }
                     await this.loadMemoryData();
+                    await this._loadIndexStats();
                     this._syncListTabs();
                 },
+                indexStats: this.indexStats || null,
+                overview: this.memoryOverview || null,
+                onSaveOverview: (text) => this._saveOverview(text),
                 studying: !!this._studying,
                 studyStatus: this._studyStatus || '',
                 onStudy: () => this._runStudy(),
@@ -618,7 +622,7 @@ export class ConfigView {
             history_compress_ratio:      (this.config.history_compress_ratio ?? null),
             plan_mode:                   (this.config.plan_mode || 'auto'),
             subagent_review:             (this.config.subagent_review || 'off'),
-            memory_recall:               (this.config.memory_recall || 'on'),
+            memory_recall:               (this.config.memory_recall || 'auto'),
             phase_routing:               (this.config.phase_routing || 'off'),
             // `??`, NOT `||`. "(not set)" sends an EMPTY STRING as the explicit
             // clear sentinel — `||` collapsed it to null, which the backend's
@@ -1189,11 +1193,13 @@ export class ConfigView {
         this._studyStatus = '';
         this._syncListTabs();
         try {
-            const { runStudyPass, applyStudy } = await import('../../modules/ai/memory/StudyPass.js');
-            const commit = await this._headCommit();
+            const { runStudyPass, dropStudyCards } = await import('../../modules/ai/memory/StudyPass.js');
+            // The index is written inside `.agent/memory`, so the guard has to
+            // know about the directory before the pass starts, not after.
+            await this._allowMemoryDir();
 
             const res = await runStudyPass({
-                workspacePath: this.memoryWorkspace, invoke, commit,
+                workspacePath: this.memoryWorkspace, invoke,
                 onProgress: ({ read, total }) => {
                     this._studyStatus = `${read} / ${total}`;
                     this._syncListTabs();
@@ -1204,28 +1210,55 @@ export class ConfigView {
                 return;
             }
 
-            const before = (this.memoryCards || []).length;
-            const live = new Set(res.paths);
-            this.memoryCards = applyStudy(this.memoryCards || [], res.cards, live);
-            await this._allowMemoryDir();
-            await this.saveMemoryCards();
-
-            const dropped = Math.max(0, before + res.cards.length - this.memoryCards.length);
-            this._studyStatus = t('memory.study.done', { files: res.files, cards: res.cards.length })
-                + (dropped ? t('memory.study.dropped', { count: dropped }) : '');
+            // Symbols live in the INDEX now, not in cards.jsonl — they are a
+            // lookup, and a lookup belongs behind a query rather than in a list
+            // the user is expected to read.
+            this._studyStatus = t('memory.study.indexed', {
+                files: res.files, symbols: res.symbols, edges: res.edges,
+            }) + (res.pruned ? t('memory.study.dropped', { count: res.pruned }) : '');
             this._syncListTabs();
 
-            // Phase 2 — the ORIENTATION note. The index above says where every
-            // symbol is; it does not say what the project is, and without that a
-            // symbol query is a guess. This is the one memory writer that uses a
-            // model, because "what is this area for" cannot be parsed out of an
-            // AST. It reads the STRUCTURE the pass just produced, never the source.
-            await this._writeOverview(res.cards);
+            // One-time migration: the first version of this pass wrote a card per
+            // symbol. They live in the index now, so the rows left in cards.jsonl
+            // are residue in a panel whose whole purpose is being reviewable.
+            const { kept, dropped } = dropStudyCards(this.memoryCards || []);
+            if (dropped) {
+                this.memoryCards = kept;
+                await this.saveMemoryCards();
+                this._studyStatus += ' · ' + t('memory.study.migrated', { count: dropped });
+            }
+            await this._loadIndexStats();
+            this._syncListTabs();
+
+            // Phase 2 — the ORIENTATION note. The index says where every symbol
+            // is; it does not say what the project IS, and without that a symbol
+            // query is a guess. This is the one memory writer that uses a model,
+            // because "what is this area for" cannot be parsed out of an AST. It
+            // reads the STRUCTURE the pass just produced, never the source.
+            await this._writeOverview(res.areas);
         } catch (e) {
             this._studyStatus = t('memory.study.failed', { error: String(e?.message || e) });
         } finally {
             this._studying = false;
             this._syncListTabs();
+        }
+    }
+
+    /**
+     * Read the index's size and per-area coverage for the Memory tab.
+     *
+     * Coverage is the part worth showing: it says which areas the agent knows
+     * NOTHING about, and therefore where its answers are guesses.
+     */
+    async _loadIndexStats() {
+        try {
+            const { CodeIndexClient, coverage } = await import('../../modules/ai/memory/CodeIndex.js');
+            const idx = new CodeIndexClient({ workspacePath: this.memoryWorkspace, invoke });
+            const stats = await idx.stats();
+            const paths = (await idx.knownHashes()).map(([p]) => p);
+            this.indexStats = { ...stats, coverage: coverage(paths, { root: this.memoryWorkspace }) };
+        } catch (_) {
+            this.indexStats = null;
         }
     }
 
@@ -1247,6 +1280,9 @@ export class ConfigView {
             const areas = structureDigest(cards, { root: this.memoryWorkspace });
             if (!areas.length) return;
 
+            // While the LLM call runs, the status must say "creating…"; once it
+            // lands it must say "created". The two must not stack, so the finished
+            // message REPLACES the "creating…" text instead of appending to it.
             this._studyStatus = t('memory.study.overview');
             this._syncListTabs();
 
@@ -1258,11 +1294,41 @@ export class ConfigView {
 
             const text = normalizeOverview(raw);
             if (!text) return;
-            await writeOverview(this.memoryWorkspace, text, invoke);
-            this._studyStatus += ' · ' + t('memory.study.overviewDone');
+            const generatedAt = new Date().toISOString();
+            await writeOverview(this.memoryWorkspace, text, invoke, generatedAt);
+            // Show it. Writing the file without refreshing what the panel holds
+            // left the note invisible until someone pressed Load again — which
+            // for a panel whose whole job is "read this and correct it" is the
+            // same as not having written it.
+            this.memoryOverview = { text, generatedAt };
+            // Replaces the "creating…" row — a finished action must not keep
+            // reading as an in-flight one.
+            this._studyStatus = t('memory.study.overviewDone');
         } catch (e) {
             console.warn('ConfigView: overview generation failed:', e);
-            this._studyStatus += ' · ' + t('memory.study.overviewFailed');
+            this._studyStatus = t('memory.study.overviewFailed');
+        }
+    }
+
+    /**
+     * Persist the user's manual edit of the orientation note.
+     *
+     * `onSaveOverview` was wired to this method but the method did not exist —
+     * the Memory tab's Save button threw (undefined method) and the edit was
+     * silently dropped. The write is the same one the study pass uses; the only
+     * difference is that the user's edit is authoritative, so the timestamp is
+     * refreshed here and the panel shows the saved text immediately.
+     */
+    async _saveOverview(text) {
+        if (!this.memoryWorkspace) return;
+        try {
+            const generatedAt = new Date().toISOString();
+            await writeOverview(this.memoryWorkspace, String(text || ''), invoke, generatedAt);
+            this.memoryOverview = { text: String(text || '').trim(), generatedAt };
+            this._syncListTabs();
+        } catch (e) {
+            console.warn('ConfigView: overview save failed:', e);
+            alert('Failed to save the overview note: ' + (e?.message || e));
         }
     }
 

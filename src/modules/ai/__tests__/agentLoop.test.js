@@ -166,6 +166,51 @@ describe('agent loop — plan-first gate', () => {
     });
 });
 
+describe('agent loop — external-app (WS) MCP tool exclusion', () => {
+    it('re-applies the WS exclusion AFTER startSession for JHAI-OWNED tasks', async () => {
+        // Regression: run() set `setExcludeExternalAppMcpTools(true)` for a
+        // NewTask, but ToolExecutor.startSession() RESET the flag to false and
+        // nothing re-set it — so every task offered the connected external
+        // app's WS MCP tools (JHEditor read_workspace_file / …) to the LLM.
+        const h = makeHarness({
+            caller: 'NewTask',
+            script: [finishStep('done')],
+        });
+        await h.run('do the thing');
+        const calls = h.toolExecutor.setExcludeExternalAppMcpTools.mock.calls;
+        expect(calls.length).toBeGreaterThanOrEqual(2);  // pre + post startSession
+        // The LAST call (post-startSession, the one that wins) must exclude.
+        expect(calls[calls.length - 1][0]).toBe(true);
+    });
+
+    it('leaves the flag OFF for external callers (they need their own tools)', async () => {
+        const h = makeHarness({
+            caller: 'JHEditor',
+            script: [finishStep('done')],
+        });
+        await h.run('do the thing');
+        const calls = h.toolExecutor.setExcludeExternalAppMcpTools.mock.calls;
+        expect(calls.length).toBeGreaterThanOrEqual(1);
+        // External callers keep app tools — the last (winning) call must be false.
+        expect(calls[calls.length - 1][0]).toBe(false);
+    });
+
+    it('calls the exclusion AFTER startSession so the session reset cannot clobber it', async () => {
+        const h = makeHarness({
+            caller: 'NewTask',
+            script: [finishStep('done')],
+        });
+        await h.run('do the thing');
+        const startSessionCalls = h.toolExecutor.startSession.mock.invocationCallOrder;
+        const exclCalls = h.toolExecutor.setExcludeExternalAppMcpTools.mock.invocationCallOrder;
+        expect(startSessionCalls.length).toBe(1);
+        // Every setExclude call happens BEFORE startSession in code, but the
+        // RE-APPLY must come AFTER it — assert the last one does.
+        const lastExcl = exclCalls[exclCalls.length - 1];
+        expect(lastExcl).toBeGreaterThan(startSessionCalls[0]);
+    });
+});
+
 describe('agent loop — ask_user pause', () => {
     it('pauses the run when the agent asks the user a question', async () => {
         const h = makeHarness({

@@ -704,6 +704,17 @@ pub fn run() {
             commands::license::license_configured,
             commands::search::grep_search,
             commands::search::glob_files,
+            // Structural index: symbol lookup and dependency edges, QUERIED
+            // by the agent rather than injected into its prompt.
+            commands::code_index::index_hashes,
+            commands::code_index::index_put_files,
+            commands::code_index::index_prune,
+            commands::code_index::index_find_symbol,
+            commands::code_index::index_deps,
+            commands::code_index::index_stats,
+            // Cross-sheet formula references, fed into the same edge table
+            // as code imports: a formula IS an explicit dependency.
+            commands::office::spreadsheet_refs,
             commands::search::delete_file,
             commands::search::move_file,
             // Git tools (dedicated, permission-aware)

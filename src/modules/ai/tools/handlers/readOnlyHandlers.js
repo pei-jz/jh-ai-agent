@@ -11,6 +11,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { extractSymbolsBest, matchSymbols, formatSymbols, languageOf } from '../SymbolIndex.js';
 import { configureTreeSitter } from '../TreeSitterSymbols.js';
+import { CodeIndexClient, renderSymbolHits, renderDeps } from '../../memory/CodeIndex.js';
 
 // Enable the tree-sitter backend once, lazily: the grammars are ~2MB of wasm
 // served from the app bundle, so they load only if symbol_search is used. If
@@ -299,6 +300,25 @@ export async function handleSymbolSearch(ctx, args, onAgentStatus) {
     if (!query) return 'Error: symbol_search requires a non-empty "query" (the symbol name to find).';
     const searchRoot = args?.path ? ctx.resolvePath(args.path) : ctx.workspacePath;
     const kind = String(args?.kind || '').trim();
+
+    // Ask the INDEX first. When the workspace has been studied this is a single
+    // index seek instead of globbing and re-parsing thousands of files, which is
+    // where the order-of-magnitude token and time saving comes from. Nothing
+    // indexed (or no study yet) falls through to the scan below, so the tool
+    // never depends on the index existing.
+    if (!args?.path && !args?.include_glob) {
+        try {
+            const idx = new CodeIndexClient({ workspacePath: ctx.workspacePath, invoke });
+            const hits = await idx.findSymbol(query, {
+                kind,
+                limit: Number.isFinite(args?.max_results) ? args.max_results : 40,
+            });
+            if (hits.length) {
+                onAgentStatus?.(`Symbol index: ${query} (${hits.length} hit(s))`);
+                return renderSymbolHits(hits, query);
+            }
+        } catch (_) { /* index unavailable — scan instead */ }
+    }
     const limit = Number.isFinite(args?.max_results) ? Math.max(1, Math.min(200, args.max_results)) : 50;
     // Default to the source types SymbolIndex understands.
     const pattern = args?.include_glob || '**/*.{js,jsx,mjs,cjs,ts,tsx,rs,py,java}';
@@ -336,5 +356,36 @@ export async function handleSymbolSearch(ctx, args, onAgentStatus) {
 (searched ${files.length} files via ${backend}; definitions only — use grep_search for call sites)`;
     } catch (e) {
         return `Error: symbol_search failed — ${e?.message || e}`;
+    }
+}
+
+
+/**
+ * code_deps — what a file depends on, or what depends on it.
+ *
+ * The reverse direction is the capability that did not exist before: "what
+ * breaks if I change this" cannot be answered by reading the file, only by
+ * having read every other one. The study pass does that once; this reads the
+ * result.
+ */
+export async function handleCodeDeps(ctx, args, onAgentStatus) {
+    const target = String(args?.path || '').trim();
+    if (!target) return 'Error: code_deps requires "path" (the file to examine).';
+    const direction = String(args?.direction || 'in').toLowerCase() === 'out' ? 'out' : 'in';
+    const limit = Number.isFinite(args?.max_results) ? Math.max(1, Math.min(500, args.max_results)) : 60;
+
+    const idx = new CodeIndexClient({ workspacePath: ctx.workspacePath, invoke });
+    if (!idx.enabled) return 'Error: code_deps needs a workspace.';
+
+    onAgentStatus?.(`Dependencies (${direction}): ${target}`);
+    try {
+        const resolved = ctx.resolvePath(target);
+        // The index stores whatever path the study pass globbed. Try the resolved
+        // form first, then the literal argument, so both spellings work.
+        let hits = await idx.deps(resolved, { direction, limit });
+        if (!hits.length && resolved !== target) hits = await idx.deps(target, { direction, limit });
+        return renderDeps(hits, target, direction);
+    } catch (e) {
+        return `Error: code_deps failed — ${e?.message || e}`;
     }
 }
