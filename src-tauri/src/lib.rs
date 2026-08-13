@@ -1,7 +1,7 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::path::PathBuf;
 use tauri::{Manager, Listener, Emitter};
 use tauri::tray::{TrayIconBuilder, MouseButton, MouseButtonState, TrayIconEvent};
@@ -159,16 +159,46 @@ fn task_logs_dir(history_path: &std::path::Path) -> PathBuf {
         .join("task_logs")
 }
 
+/// Serialize ALL writes to task_history.json.
+///
+/// `save_task_to_history` is a read-modify-write over one shared file and is
+/// called from `std::thread::spawn` per terminal/checkpoint event. With two
+/// tasks finishing close together (or one task's periodic checkpoint racing
+/// another's completion), both threads read the file, each appends/updates its
+/// own task, then each writes back — the second write CLOBBERS the first task's
+/// entry (lost update). Worse, when the racing write catches the file mid-write
+/// (partial bytes), `serde_json::from_str` fails and the code fell back to an
+/// EMPTY vec — a single race then wiped the ENTIRE history file, exactly the
+/// "all history gone after a forced quit" report. This global mutex makes the
+/// read-modify-write atomic across all writers (any config dir, so process-wide).
+static HISTORY_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
 /// Persist a task to disk: the metadata goes into the big `task_history.json`
 /// (kept lean — logs stripped), while the full logs array is written to a
 /// per-task sidecar `task_logs/<task_id>.json` so we don't blow up the main
 /// history file (500 entries × thousands of log lines each = unreadable).
 fn save_task_to_history(path: &std::path::Path, task: &TaskInfo) {
+    // The whole read-modify-write must be atomic w.r.t. every other writer or
+    // concurrent saves drop each other's entries (and a torn read wipes the
+    // file). See HISTORY_WRITE_LOCK above.
+    let _guard = HISTORY_WRITE_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|p| p.into_inner());
+
+    // Read the existing history. A parse failure here used to fall back to an
+    // EMPTY vec, which the write below then persisted — a single torn/corrupt
+    // read permanently wiped every task. Now a corrupt file is backed up (best
+    // effort) and the save proceeds with what parsed; the backup keeps the old
+    // bytes recoverable instead of letting one race destroy 1.3 GB of history.
     let mut history: Vec<serde_json::Value> = if path.exists() {
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|c| serde_json::from_str(&c).ok())
-            .unwrap_or_default()
+        let raw = std::fs::read_to_string(path).unwrap_or_default();
+        match serde_json::from_str::<Vec<serde_json::Value>>(&raw) {
+            Ok(v) => v,
+            Err(_) if !raw.trim().is_empty() => {
+                let backup = path.with_extension("json.corrupt.bak");
+                let _ = std::fs::write(&backup, &raw);
+                vec![]
+            }
+            Err(_) => vec![], // genuinely empty/whitespace file — fine
+        }
     } else {
         vec![]
     };
@@ -752,4 +782,113 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod history_persistence_tests {
+    use super::*;
+
+    fn sample_task(id: &str, status: &str) -> TaskInfo {
+        TaskInfo {
+            id: id.to_string(),
+            prompt: format!("prompt {}", id),
+            status: status.to_string(),
+            progress: if status == "completed" { 1.0 } else { 0.0 },
+            token_usage: crate::server::router::TokenUsage::default(),
+            model_usage: HashMap::new(),
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            completed_at: if status == "completed" { Some("2026-01-01T00:01:00Z".to_string()) } else { None },
+            workspace_path: Some("C:/ws".to_string()),
+            caller: Some("NewTask".to_string()),
+            result_summary: None,
+            logs: vec![],
+        }
+    }
+
+    fn temp_history_path(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("jhai_test_{}_{}", name, std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        dir.join("task_history.json")
+    }
+
+    #[test]
+    fn concurrent_saves_do_not_lose_entries() {
+        // THE BUG: two tasks finishing close together each did a read-modify-
+        // write of the shared file from separate threads. Both read the empty/
+        // old file, each appended its own entry, then each wrote back — the
+        // second write CLOBBERED the first task's entry (lost update). With the
+        // global HISTORY_WRITE_LOCK the two saves are serialized, so both entries
+        // must survive.
+        let path = temp_history_path("concurrent");
+        let _ = std::fs::remove_file(&path);
+
+        let path1 = path.clone();
+        let path2 = path.clone();
+        let t1 = sample_task("task-a", "completed");
+        let t2 = sample_task("task-b", "completed");
+
+        let h1 = std::thread::spawn(move || save_task_to_history(&path1, &t1));
+        let h2 = std::thread::spawn(move || save_task_to_history(&path2, &t2));
+        h1.join().unwrap();
+        h2.join().unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap_or_default();
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&content).unwrap_or_default();
+        let ids: std::collections::HashSet<String> = parsed
+            .iter()
+            .filter_map(|e| e.get("id").and_then(|id| id.as_str()).map(String::from))
+            .collect();
+        assert!(ids.contains("task-a"), "task-a lost: {:?}", ids);
+        assert!(ids.contains("task-b"), "task-b lost: {:?}", ids);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn update_after_append_preserves_both_entries() {
+        // A checkpoint save of task-a, then a terminal save of task-a again,
+        // must UPDATE rather than duplicate, and a third task must still land.
+        let path = temp_history_path("update");
+        let _ = std::fs::remove_file(&path);
+
+        save_task_to_history(&path, &sample_task("task-a", "running"));
+        save_task_to_history(&path, &sample_task("task-c", "completed"));
+        save_task_to_history(&path, &sample_task("task-a", "completed"));
+
+        let content = std::fs::read_to_string(&path).unwrap_or_default();
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&content).unwrap_or_default();
+        let ids: Vec<&str> = parsed
+            .iter()
+            .filter_map(|e| e.get("id").and_then(|id| id.as_str()))
+            .collect();
+        assert_eq!(ids, vec!["task-a", "task-c"]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn corrupt_history_is_backed_up_not_silently_wiped() {
+        // A torn/corrupt history file (what a racing writer left behind) must
+        // NOT be replaced with an empty array — that is how 1.3 GB of task
+        // history "disappeared". The corrupt bytes are preserved as a .bak so
+        // the user (or a repair tool) can recover them.
+        let path = temp_history_path("corrupt");
+        let backup = path.with_extension("json.corrupt.bak");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&backup);
+        std::fs::write(&path, "{\"truncated\": true, \"no\":").unwrap();
+
+        save_task_to_history(&path, &sample_task("task-new", "completed"));
+
+        // The corrupt original was preserved.
+        assert!(backup.exists(), "corrupt backup missing");
+        let saved_bak = std::fs::read_to_string(&backup).unwrap_or_default();
+        assert!(saved_bak.contains("truncated"));
+        // The live file now holds the new task (recoverable, not empty-wiped
+        // into a state where the UI shows NOTHING at all).
+        let content = std::fs::read_to_string(&path).unwrap_or_default();
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&content).unwrap_or_default();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0]["id"], "task-new");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&backup);
+    }
 }
