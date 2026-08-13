@@ -655,6 +655,48 @@ async fn continue_task(
     Ok(Json(serde_json::json!({ "task_id": id, "ws_url": ws_url, "status": "continuing" })))
 }
 
+/// Do the reported prompt tokens ALREADY include the cache reads?
+///
+/// Providers disagree. OpenAI-compatible endpoints (DeepSeek, Kimi/Moonshot,
+/// Gemini) report `prompt_tokens` INCLUSIVE of the cached part, so
+/// total = prompt + completion. Anthropic reports the two as separate buckets.
+/// Guessing by vendor would be wrong the first time a new endpoint appeared, so
+/// ask the data: which accounting reproduces the total the provider itself
+/// reported?
+///
+/// This is the Rust twin of `cacheInsideInput` in
+/// dashboard/views/monitor/inspector.js — keep the two in step.
+fn cache_inside_input(u: &TokenUsage) -> bool {
+    if u.cache_read_input_tokens == 0 { return false; }
+    let inn = u.prompt_tokens as i64;
+    let cache = u.cache_read_input_tokens as i64;
+    let out = u.completion_tokens as i64;
+    let total = u.total_tokens as i64;
+    // No total to check against: the relative sizes are the only evidence.
+    if total == 0 { return inn > cache; }
+    (total - (inn + out)).abs() <= (total - (inn + out + cache)).abs()
+}
+
+/// USD for one model's slice of a task.
+///
+/// Prices ONLY the input tokens that missed the cache. Charging the whole
+/// `prompt_tokens` at the input rate and then ADDING the cache reads at the
+/// cache rate — which this did until 2026-08-13 — bills the cached tokens
+/// twice. On a run with a 98% hit rate that overstated the input cost by
+/// roughly 50x, and it is why /stats disagreed with the per-task figures the
+/// Monitor inspector showed (the inspector always did this correctly).
+fn cost_of(u: &TokenUsage, (rate_in, rate_cache, rate_out): (f64, f64, f64)) -> f64 {
+    let cache = u.cache_read_input_tokens as f64;
+    let fresh = if cache_inside_input(u) {
+        (u.prompt_tokens as f64 - cache).max(0.0)
+    } else {
+        u.prompt_tokens as f64
+    };
+    fresh / 1_000_000.0 * rate_in
+        + cache / 1_000_000.0 * rate_cache
+        + (u.completion_tokens as f64) / 1_000_000.0 * rate_out
+}
+
 async fn get_stats(State(state): State<AppState>) -> Json<serde_json::Value> {
     let tasks = state.tasks.lock().unwrap();
     let mut total_tasks = 0;
@@ -685,16 +727,11 @@ async fn get_stats(State(state): State<AppState>) -> Json<serde_json::Value> {
     for task in tasks.values() {
         if task.model_usage.is_empty() {
             // Legacy task: no attribution → price the whole task at fallback rates.
-            estimated_cost += (task.token_usage.prompt_tokens as f64 / 1_000_000.0) * rate_in
-                + (task.token_usage.cache_read_input_tokens as f64 / 1_000_000.0) * rate_cache
-                + (task.token_usage.completion_tokens as f64 / 1_000_000.0) * rate_out;
+            estimated_cost += cost_of(&task.token_usage, fallback);
             continue;
         }
         for (model, u) in &task.model_usage {
-            let (i, c, o) = table.get(model.as_str()).copied().unwrap_or(fallback);
-            estimated_cost += (u.prompt_tokens as f64 / 1_000_000.0) * i
-                + (u.cache_read_input_tokens as f64 / 1_000_000.0) * c
-                + (u.completion_tokens as f64 / 1_000_000.0) * o;
+            estimated_cost += cost_of(u, table.get(model.as_str()).copied().unwrap_or(fallback));
             attributed_tokens += u.total_tokens as u64;
         }
     }
@@ -954,5 +991,79 @@ mod cost_table_tests {
         let (_t, fb) = read_cost_table(&p);
         assert_rates(fb, (7.0, 0.7, 9.0));
         let _ = std::fs::remove_file(p);
+    }
+}
+
+#[cfg(test)]
+mod cost_tests {
+    use super::*;
+
+    fn usage(prompt: u32, completion: u32, cache: u32, total: u32) -> TokenUsage {
+        TokenUsage {
+            prompt_tokens: prompt,
+            completion_tokens: completion,
+            total_tokens: total,
+            cache_read_input_tokens: cache,
+            cache_creation_input_tokens: 0,
+        }
+    }
+
+    /// $3 / $0.30 / $15 per 1M — the shape of a premium model with a 10% cache rate.
+    const RATES: (f64, f64, f64) = (3.0, 0.3, 15.0);
+
+    /// A real Kimi step: 137,506 prompt of which 135,680 cached, 211 out.
+    /// total == prompt + completion, so the cache is a SUBSET of the prompt.
+    #[test]
+    fn an_openai_compatible_provider_reports_cache_inside_the_prompt_count() {
+        assert!(cache_inside_input(&usage(137_506, 211, 135_680, 137_717)));
+    }
+
+    /// Anthropic: input and cache are separate buckets and the total holds both.
+    #[test]
+    fn anthropic_reports_cache_beside_the_prompt_count() {
+        assert!(!cache_inside_input(&usage(1_000, 500, 50_000, 51_500)));
+    }
+
+    #[test]
+    fn no_cache_reads_means_nothing_to_decide() {
+        assert!(!cache_inside_input(&usage(1_000, 500, 0, 1_500)));
+    }
+
+    /// THE BUG THIS REPLACED: the old sum charged `prompt_tokens` at the full
+    /// input rate AND added the cache reads at the cache rate, so every cached
+    /// token was billed twice. At a 98.7% hit rate that is a ~50x overstatement
+    /// of the input line.
+    #[test]
+    fn a_cached_token_is_billed_once_not_twice() {
+        let u = usage(137_506, 211, 135_680, 137_717);
+        let fresh = 137_506.0 - 135_680.0;
+        let expected = fresh / 1e6 * 3.0 + 135_680.0 / 1e6 * 0.3 + 211.0 / 1e6 * 15.0;
+        assert!((cost_of(&u, RATES) - expected).abs() < 1e-9);
+
+        let double_charged = 137_506.0 / 1e6 * 3.0 + 135_680.0 / 1e6 * 0.3 + 211.0 / 1e6 * 15.0;
+        assert!(cost_of(&u, RATES) < double_charged / 5.0,
+            "the old accounting was more than 5x this figure; the fix must be far below it");
+    }
+
+    /// The mirror-image error: subtracting a cache that was never inside the
+    /// prompt count drives the input line negative.
+    #[test]
+    fn an_additive_cache_is_not_subtracted() {
+        let u = usage(1_000, 500, 50_000, 51_500);
+        let expected = 1_000.0 / 1e6 * 3.0 + 50_000.0 / 1e6 * 0.3 + 500.0 / 1e6 * 15.0;
+        assert!((cost_of(&u, RATES) - expected).abs() < 1e-9);
+        assert!(cost_of(&u, RATES) > 0.0);
+    }
+
+    #[test]
+    fn a_run_with_no_cache_prices_the_whole_prompt() {
+        let u = usage(10_000, 1_000, 0, 11_000);
+        let expected = 10_000.0 / 1e6 * 3.0 + 1_000.0 / 1e6 * 15.0;
+        assert!((cost_of(&u, RATES) - expected).abs() < 1e-9);
+    }
+
+    #[test]
+    fn zero_usage_costs_nothing() {
+        assert_eq!(cost_of(&usage(0, 0, 0, 0), RATES), 0.0);
     }
 }

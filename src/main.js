@@ -874,7 +874,11 @@ async function askAI(query) {
     const apiMessages = [{ role: 'user', content: processedText }];
 
     await _toolExecutor.startSession('.');
-    _toolExecutor.setToolAllowlist(['web_search', 'fetch_url']);
+    // NO agent-control tools — same rule as Simple Chat (ChatView). The quick
+    // search box is a conversation, not a task: offering finish_task made the
+    // model spend its turn "finishing" and the user got a tool trace instead of
+    // an answer. The reply itself IS the deliverable.
+    _toolExecutor.setToolAllowlist(['web_search', 'fetch_url'], { agentControl: false });
     _toolExecutor._mcpBypassesAllowlist = true;
     _toolExecutor.setMcpRelevanceQuery(processedText);
     _toolExecutor.setMcpPruneOptions({ minScore: 0.12, top: 5 });
@@ -913,9 +917,9 @@ Example:
 }
 \`\`\`
 
-If no tool execution is needed, or if you have finished all tasks, you can reply normally in plain text.
+If no tool execution is needed, you can reply normally in plain text.
 Always write your thoughts and tool calls in the JSON structure if you use tools.
-When you finish a task, call the \`finish_task\` tool.
+This is a conversation, not a task: there is no \`finish_task\` to call, and a tool call is never a substitute for the answer itself.
 Your final responses and messages to the user MUST be in ${outputLanguage}.
 </instructions>
 `;

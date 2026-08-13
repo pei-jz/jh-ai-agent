@@ -25,7 +25,7 @@ import {
     licenseState, hasStoredKey, activateLicense, clearLicense,
     licensingConfigured, refreshLicense,
 } from '../license.js';
-import { getLocale, setLocale } from '../../i18n/index.js';
+import { getLocale, setLocale, t } from '../../i18n/index.js';
 import SettingsMcp from '../svelte/config/SettingsMcp.svelte';
 import TemplatesTab from '../svelte/config/TemplatesTab.svelte';
 import SkillsTab from '../svelte/config/SkillsTab.svelte';
@@ -355,6 +355,9 @@ export class ConfigView {
                     await this.loadMemoryData();
                     this._syncListTabs();
                 },
+                studying: !!this._studying,
+                studyStatus: this._studyStatus || '',
+                onStudy: () => this._runStudy(),
                 onEditFact: (i, text) => this._mutateFacts(list => { list[i].fact = capFactText(text); }),
                 onDeleteFact: (i) => {
                     if (!confirm('Delete this fact?')) return;
@@ -610,6 +613,7 @@ export class ConfigView {
             no_progress_window:          limit(this.config.no_progress_window),
             identical_call_threshold:    limit(this.config.identical_call_threshold),
             cycle_detection_min_repeats: limit(this.config.cycle_detection_min_repeats),
+            escalate_at_step:            limit(this.config.escalate_at_step),
             agent_temperature:           (this.config.agent_temperature ?? null),
             history_compress_ratio:      (this.config.history_compress_ratio ?? null),
             plan_mode:                   (this.config.plan_mode || 'auto'),
@@ -1167,6 +1171,115 @@ export class ConfigView {
     // tests drive them through the view, but the paths, parsing and path-guard
     // grant all live in the shared module now.
     _memoryPaths(ws) { return memoryPaths(ws); }
+
+    /**
+     * Learn the workspace's structure up front (docs/design/agent-memory-learning.plan.md
+     * Step 3.8), and retire what the tree no longer has (Step 5a) in the same pass.
+     *
+     * Experience only records where the agent happened to walk, so a project it
+     * has never run in has a memory of nothing. This fills that in from facts —
+     * a symbol IS declared at this file and line — which is why the cards it
+     * writes need no confidence discount against learned ones.
+     */
+    async _runStudy() {
+        if (this._studying) return;
+        if (!this.memoryWorkspace) { alert('Please enter a workspace path.'); return; }
+
+        this._studying = true;
+        this._studyStatus = '';
+        this._syncListTabs();
+        try {
+            const { runStudyPass, applyStudy } = await import('../../modules/ai/memory/StudyPass.js');
+            const commit = await this._headCommit();
+
+            const res = await runStudyPass({
+                workspacePath: this.memoryWorkspace, invoke, commit,
+                onProgress: ({ read, total }) => {
+                    this._studyStatus = `${read} / ${total}`;
+                    this._syncListTabs();
+                },
+            });
+            if (res.error) {
+                this._studyStatus = t('memory.study.failed', { error: res.error });
+                return;
+            }
+
+            const before = (this.memoryCards || []).length;
+            const live = new Set(res.paths);
+            this.memoryCards = applyStudy(this.memoryCards || [], res.cards, live);
+            await this._allowMemoryDir();
+            await this.saveMemoryCards();
+
+            const dropped = Math.max(0, before + res.cards.length - this.memoryCards.length);
+            this._studyStatus = t('memory.study.done', { files: res.files, cards: res.cards.length })
+                + (dropped ? t('memory.study.dropped', { count: dropped }) : '');
+            this._syncListTabs();
+
+            // Phase 2 — the ORIENTATION note. The index above says where every
+            // symbol is; it does not say what the project is, and without that a
+            // symbol query is a guess. This is the one memory writer that uses a
+            // model, because "what is this area for" cannot be parsed out of an
+            // AST. It reads the STRUCTURE the pass just produced, never the source.
+            await this._writeOverview(res.cards);
+        } catch (e) {
+            this._studyStatus = t('memory.study.failed', { error: String(e?.message || e) });
+        } finally {
+            this._studying = false;
+            this._syncListTabs();
+        }
+    }
+
+    /**
+     * Summarise the structure the study pass just mapped, and store it as the
+     * standing orientation note (`.agent/memory/overview.md`).
+     *
+     * Best-effort: a failure here leaves the index — which is the expensive part
+     * — intact. The note is markdown on disk precisely so the user can correct
+     * it, since it is the only generated memory that is not verified.
+     */
+    async _writeOverview(cards) {
+        try {
+            const { structureDigest, buildOverviewPrompt, normalizeOverview } =
+                await import('../../modules/ai/memory/ProjectOverview.js');
+            const { writeOverview } = await import('../../modules/ai/memory/workspaceMemory.js');
+            const llmService = (await import('../../modules/ai/LLMService.js')).default;
+
+            const areas = structureDigest(cards, { root: this.memoryWorkspace });
+            if (!areas.length) return;
+
+            this._studyStatus = t('memory.study.overview');
+            this._syncListTabs();
+
+            const name = String(this.memoryWorkspace).replace(/[\\/]+$/, '').split(/[\\/]/).pop();
+            const prompt = buildOverviewPrompt(areas, { projectName: name });
+            let raw = '';
+            await llmService.generate(prompt, 'You write concise, factual orientation notes. Output bullets only.',
+                (chunk) => { raw += chunk; });
+
+            const text = normalizeOverview(raw);
+            if (!text) return;
+            await writeOverview(this.memoryWorkspace, text, invoke);
+            this._studyStatus += ' · ' + t('memory.study.overviewDone');
+        } catch (e) {
+            console.warn('ConfigView: overview generation failed:', e);
+            this._studyStatus += ' · ' + t('memory.study.overviewFailed');
+        }
+    }
+
+    /**
+     * HEAD of the workspace, recorded on every studied card so a later pass can
+     * tell how old the reading is. Absent (not a repo, no git) is fine — the
+     * path check is what actually retires a card.
+     */
+    async _headCommit() {
+        try {
+            const out = await invoke('git_log', { cwd: this.memoryWorkspace, limit: 1 });
+            const m = String(out || '').match(/\b[0-9a-f]{7,40}\b/);
+            return m ? m[0] : '';
+        } catch (_) {
+            return '';
+        }
+    }
 
     async _allowMemoryDir() {
         await allowMemoryDir(this.memoryWorkspace, invoke);

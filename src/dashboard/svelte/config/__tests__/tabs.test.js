@@ -406,3 +406,33 @@ describe('MemoryTab — experience cards', () => {
         expect(el.querySelector('#memory-facts-list .cfg-mem-badge').textContent).toBe('semantic');
     });
 });
+
+// Study is how the agent learns a project it has not worked in yet: experience
+// only records where it happened to walk, so a fresh workspace has a memory of
+// nothing at all.
+describe('MemoryTab — study pass', () => {
+    it('offers the study control beside the workspace it acts on', () => {
+        const el = mount(MemoryTab, { workspace: 'C:/ws' });
+        expect(el.querySelector('#btn-memory-study')).not.toBe(null);
+    });
+
+    it('reports it, and blocks a second start, while running', () => {
+        const onStudy = vi.fn();
+        const el = mount(MemoryTab, { workspace: 'C:/ws', studying: true, onStudy });
+        const btn = el.querySelector('#btn-memory-study');
+        expect(btn.disabled).toBe(true);
+        btn.click();
+        expect(onStudy).not.toHaveBeenCalled();
+    });
+
+    it('starts a study when asked', () => {
+        const onStudy = vi.fn();
+        mount(MemoryTab, { workspace: 'C:/ws', onStudy }).querySelector('#btn-memory-study').click();
+        expect(onStudy).toHaveBeenCalled();
+    });
+
+    it('shows progress in place of the explanation once it is under way', () => {
+        const el = mount(MemoryTab, { workspace: 'C:/ws', studyStatus: '120 / 400' });
+        expect(el.textContent).toContain('120 / 400');
+    });
+});

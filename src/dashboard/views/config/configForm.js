@@ -45,6 +45,12 @@ export const SAFETY_FIELDS = [
         half: true,
     },
     {
+        key: 'escalate_at_step', label: 'Promote to Deep model at step', fallback: 0, min: 0, max: 1000,
+        placeholder: '0 = never',
+        hint: 'Switch a Fast-tier run to the Deep model once it reaches this step. <strong>0 disables (default).</strong> A mid-run model change <strong>discards the prompt cache for the whole remainder</strong>, so enable it only if cheap-tier runs are visibly stalling. (Until now this fired at step 15 on every run regardless of your step limit — that was a bug.)',
+        half: true,
+    },
+    {
         key: 'cycle_detection_min_repeats', label: 'Cycle Detection Min Repeats', fallback: 3, min: 0, max: 20,
         placeholder: '3',
         hint: 'Soft warning when an ABAB or ABCABC oscillation repeats this many times. Higher = more permissive. <strong>0 disables.</strong>',

@@ -397,7 +397,7 @@ class LLMService {
         const payload = {
             provider: providerName,
             model: modelName,
-            messages: messages.map(m => this._wireMessage(m)),
+            messages: this._sanitizeMessagesForWire(messages),
             system_prompt: systemPrompt || null,
             images: images.length > 0 ? images : null,
             base_url: providerName === 'azure' ? config.azure_endpoint : (providerName === 'ollama' ? 'http://localhost:11434' : null),
@@ -472,6 +472,103 @@ class LLMService {
         return o;
     }
 
+    /**
+     * Sanitize the whole message list right before it is serialized for the
+     * wire. After a history compaction (compactHistory) the conversation can
+     * contain entries that a strict provider (notably Azure OpenAI) rejects:
+     *   • a message whose role is missing / empty (compaction fallback, legacy
+     *     restored history) → Azure 400 "role is required"
+     *   • a role:"tool" result whose paired assistant(tool_calls) turn was
+     *     summarized away → orphaned tool result → Azure 400
+     *   • an assistant turn with tool_calls followed by NO tool results
+     *     (its results were dropped) → Azure 400 on the dangling call
+     *
+     * The Rust layer already re-checks each message, but fixing here keeps the
+     * invariant in ONE place and guarantees every message has a valid role
+     * regardless of which compaction/restore path produced the history.
+     *
+     * Rules (lossy only where the alternative is a rejected request):
+     *   1. Any message with a missing/empty/unknown role → role 'user', with a
+     *      short "[Prior note]" prefix so the content still reads as context.
+     *   2. role:"tool" WITHOUT a tool_call_id, or whose assistant(tool_calls)
+     *      turn is not present earlier in the kept window → downgrade to a
+     *      user note ("[Tool result — name]") instead of sending role:"tool".
+     *   3. assistant + tool_calls: keep only the calls that have a matching
+     *      role:"tool" reply later; if none survive, emit the assistant as
+     *      plain text (drop tool_calls).
+     *
+     * @param {Array} messages raw history (may contain mixed protocols)
+     * @returns {Array} sanitized history safe for OpenAI-family / Azure
+     */
+    _sanitizeMessagesForWire(messages) {
+        if (!Array.isArray(messages)) return [];
+        const out = [];
+        for (const raw of messages) {
+            if (!raw || typeof raw !== 'object') continue;
+            const m = raw;
+            const role = typeof m.role === 'string' ? m.role.trim() : '';
+            const valid = role === 'user' || role === 'assistant' || role === 'tool' || role === 'system';
+            const content = (typeof m.content === 'string') ? m.content
+                : (m.content == null ? '' : String(m.content));
+
+            if (!valid) {
+                // Rule 1 — missing/empty/unknown role. Keep the content as
+                // context instead of dropping it (dropping the ORIGINAL goal
+                // message would be far worse than relabeling it).
+                out.push({ role: 'user', content: content ? `[Prior note]\n${content}` : '[Prior note]' });
+                continue;
+            }
+
+            if (role === 'tool') {
+                // Rule 2 — a tool result is only valid if an assistant with
+                // tool_calls carrying the SAME id appears earlier in the kept
+                // window. Otherwise it is an orphan → downgrade to user text.
+                const id = m.tool_call_id;
+                const hasPair = !!id && out.some(p =>
+                    p.role === 'assistant' && Array.isArray(p.tool_calls) &&
+                    p.tool_calls.some(tc => tc && (tc.id === id))
+                );
+                if (!hasPair) {
+                    const label = m.name ? ` — ${m.name}` : '';
+                    out.push({ role: 'user', content: `[Tool result${label}]\n${content}` });
+                } else {
+                    const o = { role: 'tool', tool_call_id: id, content };
+                    if (m.name) o.name = m.name;
+                    out.push(o);
+                }
+                continue;
+            }
+
+            if (role === 'assistant') {
+                const tcs = Array.isArray(m.tool_calls) ? m.tool_calls : null;
+                if (tcs && tcs.length > 0) {
+                    // Rule 3 — keep only the calls that have a matching tool
+                    // reply LATER in the raw stream; drop dangling calls.
+                    const laterIds = new Set();
+                    let seenSelf = false;
+                    for (const nxt of messages) {
+                        if (!seenSelf) { if (nxt === m) seenSelf = true; continue; }
+                        if (nxt && nxt.role === 'tool' && nxt.tool_call_id) laterIds.add(nxt.tool_call_id);
+                    }
+                    const kept = tcs.filter(tc => tc && tc.id && laterIds.has(tc.id));
+                    if (kept.length > 0) {
+                        out.push({ role: 'assistant', content: content || null, tool_calls: kept });
+                    } else if (content) {
+                        out.push({ role: 'assistant', content });
+                    }
+                    // content empty AND no surviving tool_calls → skip the turn.
+                } else if (content) {
+                    out.push({ role: 'assistant', content });
+                }
+                continue;
+            }
+
+            // user / system pass through (content already coerced to string).
+            out.push({ role, content });
+        }
+        return out;
+    }
+
     async chatWithTools(messages, systemPrompt, tools, abortSignal, images = [], temperatureOverride = null, modelOverride = null) {
         // If no model is set yet (e.g. agent started before initFromConfig finished),
         // try to load it on-demand. Fail with a clear message if there's still none.
@@ -511,7 +608,7 @@ class LLMService {
         const payload = {
             provider: providerName,
             model: modelName,
-            messages: messages.map(m => this._wireMessage(m)),
+            messages: this._sanitizeMessagesForWire(messages),
             system_prompt: systemPrompt || null,
             images: images.length > 0 ? images : null,
             base_url: providerName === 'azure' ? config.azure_endpoint : (providerName === 'ollama' ? 'http://localhost:11434' : null),

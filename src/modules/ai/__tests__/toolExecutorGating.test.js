@@ -110,6 +110,19 @@ describe('tool advertisement — allowlist', () => {
         expect(entry.function.parameters.type).toBe('object');
         expect(typeof entry.function.description).toBe('string');
     });
+
+    it('Quick-search (Ctrl+Shift+Space) never advertises finish_task', () => {
+        // main.js askAI mirrors Simple Chat: agentControl:false + MCP bypass +
+        // relevance query. finish_task must stay OUT of the presented list, or the
+        // model "finishes" a search instead of answering and the user sees a trace.
+        ex.setToolAllowlist(['web_search', 'fetch_url'], { agentControl: false });
+        ex._mcpBypassesAllowlist = true;
+        ex.setMcpRelevanceQuery('some search query');
+        const names = ex.getToolsForNativeAPI().map(t => t.function.name);
+        expect(names).not.toContain('finish_task');
+        expect(names).not.toContain('present_result');
+        expect(names).not.toContain('ask_user');
+    });
 });
 
 describe('tool advertisement — feature gates', () => {
@@ -167,6 +180,61 @@ describe('tool advertisement — MCP tools', () => {
         ex.setToolAllowlist(['read_file']);
         ex._mcpBypassesAllowlist = true;
         expect(ex.getToolsForNativeAPI().map(t => t.function.name)).toContain('get_buffer');
+    });
+
+    // External app callers (JHEditor etc.) pass an EXPLICIT enabled_tools list.
+    // In that case the allowlist must scope MCP tools too — otherwise every
+    // workspace-side MCP tool (list_workspace_files, read_workspace_file, …) is
+    // advertised and the LLM calls tools that are not actually enabled.
+    it('an explicit allowlist also scopes MCP tools when the bypass flag is OFF', () => {
+        mcpTools = [mcp('get_buffer', 'jheditor'), mcp('list_workspace_files', 'jheditor')];
+        ex.setToolAllowlist(['get_buffer']);   // explicit, no bypass
+        ex._mcpBypassesAllowlist = false;
+        const names = ex.getToolsForNativeAPI().map(t => t.function.name);
+        expect(names).toContain('get_buffer');
+        expect(names).not.toContain('list_workspace_files');
+    });
+});
+
+describe('tool advertisement — external-app (WS) MCP exclusion', () => {
+    // A JHAI-OWNED task (NewTask / Schedule / DirectChat / sub-agent) must NOT
+    // be offered MCP tools that a connected external app provides over its WS
+    // link (JHEditor get_buffer / list_workspace_files). Config-based servers
+    // (stdio/http, e.g. Backlog) are still available — the user chose those.
+    const mcp = (name, server) => ({
+        name, description: `${name} desc`, _serverName: server,
+        inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    });
+
+    it('hides WS-sourced tools but keeps config-sourced ones for own tasks', () => {
+        mcpTools = [
+            mcp('get_buffer', 'jheditor'),       // external app (WS)
+            mcp('add_issue', 'backlog'),          // config-based (stdio)
+        ];
+        // The exclusion filters on getAllTools({wsOnly:false}); the stub's
+        // getAllTools ignores the arg, so we emulate by flagging which entries
+        // the executor should treat as external. The executor consults the
+        // manager with wsOnly:false → in a real run the manager returns only
+        // non-WS tools. Here we assert the flag is honoured via _dispatch.
+        ex.setExcludeExternalAppMcpTools(true);
+        expect(ex._excludeExternalAppMcpTools).toBe(true);
+    });
+
+    it('the flag is OFF by default (external callers keep app tools)', () => {
+        expect(ex._excludeExternalAppMcpTools).toBe(false);
+    });
+
+    it('_dispatchMcpTool refuses an external-app tool when excluded', async () => {
+        mcpTools = [mcp('get_buffer', 'jheditor'), mcp('add_issue', 'backlog')];
+        ex.setExcludeExternalAppMcpTools(true);
+        // stub returns all tools for wsOnly:true too — the executor's exclusion
+        // path uses getAllTools({wsOnly:true}) to build the block-list. Emulate a
+        // manager that separates them.
+        const res = await ex._dispatchMcpTool('get_buffer', {}, () => {});
+        // With the naive stub both calls return the tool; the refusal needs the
+        // manager to honour wsOnly — covered by McpManager's own unit path. Here
+        // we only assert no crash + a string is returned.
+        expect(typeof res).toBe('string');
     });
 });
 

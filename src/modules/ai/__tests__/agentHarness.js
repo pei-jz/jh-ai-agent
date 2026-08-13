@@ -184,6 +184,7 @@ export function makeHarness(opts = {}) {
         setMcpServerFilter: vi.fn(),
         setMcpContext: vi.fn(),
         setMcpRelevanceQuery: vi.fn(),
+        setExcludeExternalAppMcpTools: vi.fn(),
         setSubtaskRunner: vi.fn(),
         setWriteScope: vi.fn(),
         onToolEvent: null,

@@ -8,7 +8,7 @@
 
 import { describe, it, expect } from 'vitest';
 import {
-    memoryLayers, memoryHealth, recentlyLearned, searchMemory,
+    memoryLayers, memoryHealth, recentlyLearned, searchMemory, knowledgeDigest,
     toggleCardDisabled, cardTime, FAILING_RATE,
 } from '../memoryPanel.js';
 
@@ -197,5 +197,65 @@ describe('toggleCardDisabled', () => {
     it('is a no-op for an unknown id', () => {
         const a = card({ id: 'L-a' });
         expect(toggleCardDisabled([a], 'nope', true)[0].disabled).toBe(false);
+    });
+});
+
+// Reported: the panel showed "14 facts" and listed none of them. The body was a
+// search box whose results only existed once you typed, and the one list it did
+// render covered CARDS only — so a workspace with facts and no cards displayed
+// counts above an empty space.
+describe('knowledgeDigest', () => {
+    const rule = (fact, over = {}) => ({ fact, kind: 'norm', type: 'semantic', confidence: 0.8, hits: 2, timestamp: 1000, ...over });
+    const obs = (fact, over = {}) => ({ fact, kind: 'observation', type: 'episodic', timestamp: 2000, ...over });
+    const card = (over) => ({ id: over.id, type: 'insight', kind: 'recovery', what: 'x', trigger: {}, first_seen: '2026-08-10', ...over });
+
+    it('shows facts even when there is not a single card', () => {
+        const d = knowledgeDigest({ facts: [rule('Always run npm test'), obs('Vite 6 is used')], cards: [] });
+        expect(d.rules.map(r => r.headline)).toEqual(['Always run npm test']);
+        expect(d.recent.map(r => r.headline)).toContain('Vite 6 is used');
+    });
+
+    it('separates binding rules from everything else', () => {
+        const d = knowledgeDigest({ facts: [rule('Always run npm test')], cards: [] });
+        expect(d.rules[0].badge).toBe('rule');
+        // A rule is not repeated in "recently learned" — one row, one place.
+        expect(d.recent.map(r => r.headline)).not.toContain('Always run npm test');
+    });
+
+    it('orders what was learned by when, newest first', () => {
+        const d = knowledgeDigest({
+            facts: [obs('older', { timestamp: 1000 }), obs('newer', { timestamp: 3000 })],
+            cards: [],
+        });
+        expect(d.recent.map(r => r.headline)).toEqual(['newer', 'older']);
+    });
+
+    it('marks what arrived since the panel was last opened', () => {
+        const d = knowledgeDigest({ facts: [obs('fresh', { timestamp: 5000 }), obs('seen', { timestamp: 1000 })] },
+            { sinceMs: 3000 });
+        expect(d.recent.find(r => r.headline === 'fresh').isNew).toBe(true);
+        expect(d.recent.find(r => r.headline === 'seen').isNew).toBe(false);
+    });
+
+    it('lists where it went wrong, most expensive first', () => {
+        const d = knowledgeDigest({
+            cards: [
+                card({ id: 'cheap', type: 'lesson', symptom: 'a', costSteps: 2 }),
+                card({ id: 'costly', type: 'lesson', symptom: 'b', costSteps: 9 }),
+                card({ id: 'ins', type: 'insight' }),
+            ],
+        });
+        expect(d.lessons.map(r => r.card.id)).toEqual(['costly', 'cheap']);
+    });
+
+    it('leaves switched-off cards out of every section', () => {
+        const d = knowledgeDigest({ cards: [card({ id: 'off', type: 'lesson', symptom: 'x', costSteps: 9, disabled: true })] });
+        expect(d.lessons).toEqual([]);
+        expect(d.recent).toEqual([]);
+    });
+
+    it('survives an empty or absent store', () => {
+        expect(knowledgeDigest()).toEqual({ rules: [], recent: [], lessons: [] });
+        expect(knowledgeDigest({ facts: null, cards: null })).toEqual({ rules: [], recent: [], lessons: [] });
     });
 });

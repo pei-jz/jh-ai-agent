@@ -2,7 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { tokenEstimator } from './TokenEstimator.js';
 import LLMService from './LLMService.js';
 import { sanitizeXmlTags, relevanceScore, scoreMessageImportance } from './memory/MemoryScoring.js';
-import { mergeFacts as mergeFactsInto, selectRelevantFacts, pruneFacts, applyConsolidation } from './memory/FactStore.js';
+import { mergeFacts as mergeFactsInto, selectRelevantFacts, selectNormFacts, pruneFacts, applyConsolidation } from './memory/FactStore.js';
 import { buildSummaryPrompt, parseSummary } from './memory/FactExtraction.js';
 
 // Minimum relevance (hits / query-units, 0..1) for a past-session summary or a
@@ -12,6 +12,13 @@ import { buildSummaryPrompt, parseSummary } from './memory/FactExtraction.js';
 // overlap. Without this floor, top-K selection injected the most-recent/loosely-
 // related sessions even for an unrelated task (same-workspace cross-task bleed).
 const MEMORY_MIN_RELEVANCE = 0.08;
+
+/**
+ * Standing budget for project RULES. Small on purpose: these are injected on
+ * every step of every task regardless of relevance, so the cap is what keeps a
+ * growing rulebook from crowding out the task-specific half.
+ */
+const NORM_FACT_LIMIT = 3;
 
 class ConversationMemory {
     constructor() {
@@ -762,14 +769,33 @@ ${list}`;
      * the next addEntry).
      */
     _getFactsContext(currentQuery = '', limit = 5) {
-        // Selection/ranking → ./memory/FactStore.js (unit-tested); formatting stays here.
-        // Apply the relevance floor only when there's a query to judge against, so
-        // facts unrelated to the current task aren't pulled in.
-        const top = selectRelevantFacts(this.facts, currentQuery, limit,
+        // TWO budgets, not one ranked list (plan §4.5).
+        //
+        //   RULES     — norms, always injected, no relevance floor. "Run npm test
+        //               before committing" shares no words with "fix the header
+        //               alignment" and would never clear a keyword floor, yet it
+        //               is precisely what must not be forgotten.
+        //   RELEVANT  — observations about the area being worked on, filtered by
+        //               relevance as before.
+        //
+        // Ranked against each other, a rule that cost nothing to learn always
+        // loses to whatever was most recently painful. Separate budgets make that
+        // eviction impossible rather than unlikely.
+        const norms = selectNormFacts(this.facts, NORM_FACT_LIMIT);
+        const normIds = new Set(norms);
+        const rest = this.facts.filter(f => !normIds.has(f));
+        const relevant = selectRelevantFacts(rest, currentQuery, limit,
             currentQuery ? MEMORY_MIN_RELEVANCE : 0);
-        if (top.length === 0) return '';
-        const lines = top.map(f => `  • ${sanitizeXmlTags(f.fact)}`).join('\n');
-        return `\n[Durable Project Facts (long-term memory)]\n${lines}\n`;
+
+        const bullet = (f) => `  • ${sanitizeXmlTags(f.fact)}`;
+        let out = '';
+        if (norms.length) {
+            out += `\n[Project Rules — these always apply]\n${norms.map(bullet).join('\n')}\n`;
+        }
+        if (relevant.length) {
+            out += `\n[Durable Project Facts (long-term memory)]\n${relevant.map(bullet).join('\n')}\n`;
+        }
+        return out;
     }
 }
 

@@ -161,6 +161,65 @@ export function searchMemory({ cards, facts } = {}, query, limit = 8) {
     return out.sort((a, b) => b.score - a.score).slice(0, limit);
 }
 
+/** When a fact was last reaffirmed, as ms. */
+function factTime(f) {
+    return Number(f?.timestamp) || Date.parse(f?.date || '') || 0;
+}
+
+/** A fact as a display row, in the same shape searchMemory returns. */
+function factRow(f) {
+    const isRule = f?.kind === 'norm' && factType(f) === 'semantic';
+    return {
+        kind: 'fact', fact: f,
+        badge: isRule ? 'rule' : factType(f),
+        headline: String(f?.fact || ''),
+        detail: [f?.hits > 1 ? `${f.hits}× 裏付け` : '', f?.category || '', f?.date || '']
+            .filter(Boolean).join(' · '),
+        at: factTime(f),
+    };
+}
+
+/**
+ * What to show when nobody has typed a search — i.e. almost always.
+ *
+ * The panel used to render counts, then nothing: the body was a search box whose
+ * results only existed once you typed, and "Learned since you last looked" only
+ * covered CARDS. A workspace with 14 facts and 0 cards therefore displayed the
+ * number 14 and not one of them. You cannot review knowledge you cannot see, and
+ * reviewing it is the entire reason a human opens this panel.
+ *
+ * Three sections, because they answer three different questions:
+ *   rules   — what does it consider binding here?      (facts marked `norm`)
+ *   recent  — what has it picked up lately?            (cards + facts, newest)
+ *   lessons — where has it gone wrong?                 (worst-costing first)
+ */
+export function knowledgeDigest({ cards, facts } = {}, { sinceMs = 0, limit = 6 } = {}) {
+    const live = arr(cards).filter(c => !c.disabled);
+
+    const rules = arr(facts)
+        .filter(f => f?.kind === 'norm' && factType(f) === 'semantic')
+        .sort((a, b) => (b.confidence ?? 0.5) - (a.confidence ?? 0.5) || factTime(b) - factTime(a))
+        .slice(0, limit)
+        .map(factRow);
+
+    const ruleSet = new Set(rules.map(r => r.fact));
+    const recent = [
+        ...live.map(c => ({ kind: 'card', card: c, ...cardSummary(c), at: cardTime(c) })),
+        ...arr(facts).filter(f => !ruleSet.has(f)).map(factRow),
+    ]
+        .sort((a, b) => b.at - a.at)
+        .slice(0, limit)
+        .map(r => ({ ...r, isNew: r.at > sinceMs }));
+
+    const lessons = live
+        .filter(c => c.type === 'lesson')
+        .sort((a, b) => (b.costSteps || 0) - (a.costSteps || 0))
+        .slice(0, limit)
+        .map(c => ({ kind: 'card', card: c, ...cardSummary(c), at: cardTime(c) }));
+
+    return { rules, recent, lessons };
+}
+
 /** Flip one card's `disabled` flag, by id. Returns a NEW array. */
 export function toggleCardDisabled(cards, id, disabled) {
     return arr(cards).map(c => (c.id === id ? { ...c, disabled: !!disabled } : c));

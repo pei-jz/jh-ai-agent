@@ -26,6 +26,10 @@
         onWorkspaceChange = null,
         onBrowse = null,
         onLoad = null,
+        /** Kick off a structural study of the workspace. */
+        onStudy = null,
+        studying = false,
+        studyStatus = '',
         onEditFact = null,
         onDeleteFact = null,
         onClearFacts = null,
@@ -80,6 +84,16 @@
                     onclick={() => onBrowse?.()}>{@html icon('folder', 13)}</button>
                 <button class="btn btn-primary" id="btn-memory-load" type="button"
                     onclick={() => onLoad?.()}>{t('memory.load')}</button>
+            </div>
+            <!-- Study is how the agent learns a project it has not worked in yet.
+                 Experience only records where it happened to walk, so a workspace
+                 it has never run in has a memory of nothing at all. -->
+            <div class="cfg-mem-study">
+                <button class="btn btn-secondary cfg-btn-sm" id="btn-memory-study" type="button"
+                    disabled={studying} onclick={() => onStudy?.()}>
+                    {@html icon('brain', 13)} {studying ? t('memory.study.running') : t('memory.study')}
+                </button>
+                <span class="cfg-hint">{studyStatus || t('memory.study.hint')}</span>
             </div>
         </div>
 

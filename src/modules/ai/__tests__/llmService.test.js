@@ -151,3 +151,98 @@ describe('_resolveUsage', () => {
         expect(() => llmService._resolveUsage(null, [], '', '')).not.toThrow();
     });
 });
+
+// ── _sanitizeMessagesForWire ─────────────────────────────────────────────
+// After a history compaction the conversation can contain entries a strict
+// provider (Azure OpenAI) rejects: a missing/empty role, an orphaned
+// role:"tool" result (its assistant turn was summarized away), or an
+// assistant tool_call whose result was dropped. The sanitizer must repair or
+// safely downgrade each of these BEFORE the request is serialized.
+describe('_sanitizeMessagesForWire', () => {
+    it('passes a well-formed user/assistant exchange through unchanged', () => {
+        const h = [
+            { role: 'user', content: 'goal' },
+            { role: 'assistant', content: 'working' },
+            { role: 'user', content: 'next' },
+        ];
+        const out = llmService._sanitizeMessagesForWire(h);
+        expect(out).toEqual(h);
+    });
+
+    it('keeps a valid assistant(tool_calls) + role:"tool" pair', () => {
+        const h = [
+            { role: 'assistant', content: 'reading', tool_calls: [{ id: 'c1', type: 'function', function: { name: 'read_file', arguments: '{}' } }] },
+            { role: 'tool', tool_call_id: 'c1', name: 'read_file', content: 'file body' },
+        ];
+        const out = llmService._sanitizeMessagesForWire(h);
+        expect(out[0].role).toBe('assistant');
+        expect(out[0].tool_calls).toHaveLength(1);
+        expect(out[1].role).toBe('tool');
+        expect(out[1].tool_call_id).toBe('c1');
+    });
+
+    it('downgrades an ORPHAN role:"tool" (no paired assistant call) to user text', () => {
+        // compactHistory dropped the assistant(tool_calls) turn but kept the
+        // tool result → Azure 400s on role:"tool" with no preceding call.
+        const h = [
+            { role: 'user', content: 'goal' },
+            { role: 'tool', tool_call_id: 'cX', name: 'grep_search', content: 'results' },
+        ];
+        const out = llmService._sanitizeMessagesForWire(h);
+        expect(out[1].role).toBe('user');
+        expect(out[1].content).toContain('grep_search');
+        expect(out[1].content).toContain('results');
+        expect(out.some(m => m.role === 'tool')).toBe(false);
+    });
+
+    it('downgrades a role:"tool" with NO tool_call_id to user text', () => {
+        const h = [{ role: 'tool', name: 'read_file', content: 'x' }];
+        const out = llmService._sanitizeMessagesForWire(h);
+        expect(out[0].role).toBe('user');
+    });
+
+    it('assigns role "user" to a message with a missing/empty role (Azure role-required 400)', () => {
+        const h = [
+            { role: 'user', content: 'goal' },
+            { content: 'leftover note with no role' },
+            { role: '', content: 'empty role' },
+        ];
+        const out = llmService._sanitizeMessagesForWire(h);
+        expect(out).toHaveLength(3);
+        expect(out.every(m => typeof m.role === 'string' && m.role.length > 0)).toBe(true);
+        expect(out[1].role).toBe('user');
+        expect(out[1].content).toContain('leftover note with no role');
+        expect(out[2].role).toBe('user');
+    });
+
+    it('drops an assistant tool_call whose result was summarized away (dangling call)', () => {
+        const h = [
+            { role: 'assistant', content: 'calling tool', tool_calls: [{ id: 'c9', type: 'function', function: { name: 'run_command', arguments: '{}' } }] },
+            { role: 'user', content: 'next step' },   // no role:"tool" reply for c9
+        ];
+        const out = llmService._sanitizeMessagesForWire(h);
+        expect(out[0].role).toBe('assistant');
+        expect(out[0].tool_calls).toBeUndefined();
+        expect(out[0].content).toBe('calling tool');
+    });
+
+    it('keeps only the tool_calls that still have a matching result', () => {
+        const h = [
+            { role: 'assistant', content: '', tool_calls: [
+                { id: 'keep', type: 'function', function: { name: 'read_file', arguments: '{}' } },
+                { id: 'drop', type: 'function', function: { name: 'write_file', arguments: '{}' } },
+            ]},
+            { role: 'tool', tool_call_id: 'keep', name: 'read_file', content: 'ok' },
+        ];
+        const out = llmService._sanitizeMessagesForWire(h);
+        expect(out[0].tool_calls.map(c => c.id)).toEqual(['keep']);
+        expect(out[1].role).toBe('tool');
+    });
+
+    it('returns an empty array for non-array input and skips malformed entries', () => {
+        expect(llmService._sanitizeMessagesForWire(null)).toEqual([]);
+        expect(llmService._sanitizeMessagesForWire(undefined)).toEqual([]);
+        const out = llmService._sanitizeMessagesForWire([null, 'x', { role: 'user', content: 'ok' }]);
+        expect(out).toEqual([{ role: 'user', content: 'ok' }]);
+    });
+});
