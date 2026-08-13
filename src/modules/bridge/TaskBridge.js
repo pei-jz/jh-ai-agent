@@ -204,12 +204,18 @@ class TaskBridge {
 
         this.activeAgents.set(taskId, { controller, abortController });
 
-        // Scan project context first
-        try {
-            await projectContext.scanProject(workspacePath);
-        } catch (e) {
+        // Scan project context — WITHOUT blocking the task start. The scanner is a
+        // process-wide singleton (ProjectContext): with two tasks starting close
+        // together, the first scan sets `isScanning` and the second call returns
+        // immediately (skipped), so awaiting it delays nothing anyway — but it DID
+        // serialize the two starts (task B waited for task A's scan on the same
+        // thread and, under a slow disk, looked frozen). Kicking it off without
+        // await lets every task start immediately; the scan result is best-effort
+        // context for the system prompt, and ContextBuilder reads it per-step, so
+        // a task that starts before the scan lands simply gets the last good state.
+        projectContext.scanProject(workspacePath).catch(e => {
             console.error("TaskBridge: Project scan failed:", e);
-        }
+        });
 
         // Run the agent loop
         try {

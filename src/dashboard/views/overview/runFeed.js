@@ -52,6 +52,8 @@ export function reduceRun(logs) {
         recalls: [],
         tokens: { prompt: 0, completion: 0, cacheRead: 0 },
         byModel: {},
+        /** Every phase event that carried a reason: { phase, model, from, reason, at }. */
+        switches: [],
         files: new Set(),
         awaiting: false,
         question: '',
@@ -98,12 +100,25 @@ export function reduceRun(logs) {
                     out.phaseSeen[d.phase] = {
                         model: d.model || '',
                         tokens: (d.tokens && d.tokens[d.phase]) || 0,
+                        reason: d.reason || '',
                     };
                 }
                 // Carry the token split for the phases already finished, so the
                 // rail can price them without a second event per phase.
                 for (const [p, tok] of Object.entries(d.tokens || {})) {
                     if (out.phaseSeen[p]) out.phaseSeen[p].tokens = tok;
+                }
+                // Every phase event that carries a reason — the opening pick and
+                // each actual switch — is a decision the user asked to see: when
+                // the model changed, and on what trigger.
+                if (d.model && d.reason) {
+                    out.switches.push({
+                        phase: d.phase,
+                        model: d.model,
+                        from: d.from || null,
+                        reason: d.reason,
+                        at: l.timestamp || '',
+                    });
                 }
                 break;
             }
@@ -202,4 +217,55 @@ export function runCost(run, rates) {
         total += c.total;
     }
     return priced ? Math.max(0, total) : null;
+}
+
+/**
+ * Per-model token + cost rows for the Run pane.
+ *
+ * `runCost` reduces the same data to one total; this keeps the rows so the pane
+ * can show WHICH model spent the tokens and what each slice cost. Returns
+ * `{ rows, total }` where `total` equals `runCost`'s result (null when nothing
+ * is priced) and each row is
+ * `{ model, label, prompt, completion, cacheRead, tokens, cost, priced }`.
+ */
+export function runCostBreakdown(run, rates) {
+    const rows = [];
+    const byBare = {};
+    if (rates) {
+        for (const [k, r] of Object.entries(rates)) byBare[k.slice(k.indexOf(':') + 1)] = r;
+    }
+    const bareName = (m) => {
+        const s = String(m || '');
+        const i = s.indexOf(':');
+        return i >= 0 ? s.slice(i + 1) : (s || '(unknown)');
+    };
+
+    let total = 0;
+    let priced = false;
+    for (const [model, u] of Object.entries(run?.byModel || {})) {
+        const r = rates ? (rates[model] || byBare[model]) : null;
+        const tokens = (u.prompt || 0) + (u.completion || 0);
+        let cost = null;
+        if (r) {
+            const c = costOf({
+                prompt_tokens: u.prompt,
+                completion_tokens: u.completion,
+                cache_read_input_tokens: u.cacheRead,
+                total_tokens: tokens,
+            }, per1m(r));
+            if (c) { cost = c.total; priced = true; total += cost; }
+        }
+        rows.push({
+            model,
+            label: r?.label || bareName(model),
+            prompt: u.prompt || 0,
+            completion: u.completion || 0,
+            cacheRead: u.cacheRead || 0,
+            tokens,
+            cost,
+            priced: !!r,
+        });
+    }
+    rows.sort((a, b) => (b.tokens - a.tokens) || (a.model < b.model ? -1 : 1));
+    return { rows, total: priced ? Math.max(0, total) : null };
 }

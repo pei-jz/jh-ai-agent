@@ -53,6 +53,14 @@ tmp/
 .agent/
 **/.agent/
 
+# The structural index is a DERIVED cache — rebuilt by Settings → Memory →
+# Study from the tree itself, so committing it would version a build artifact
+# that is stale the moment anyone edits a file. Listed explicitly as well as
+# under .agent/ because SQLite's write-ahead sidecars are easy to miss.
+**/index.db
+**/index.db-wal
+**/index.db-shm
+
 
 
 # ─── Runtime config / persisted state (contain API keys + history) ─

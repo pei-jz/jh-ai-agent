@@ -155,3 +155,53 @@ describe('memory writes', () => {
         expect(callsTo('set_allowed_roots')[0][1]).toEqual({ roots: ['C:/ws/.agent'] });
     });
 });
+
+// The Memory tab's Save button used to call `this._saveOverview(...)` — a method
+// that DID NOT EXIST (only `_writeOverview`, the study-pass generator, did). The
+// click threw and the edit was silently dropped: the reported "概観ノート保存
+// ボタンが動作しない". The method is the manual-edit counterpart of the study
+// pass: same write path, user-supplied text, fresh timestamp, immediate refresh.
+describe('overview note manual save', () => {
+    beforeEach(() => {
+        v.memoryWorkspace = 'C:/ws';
+        invoke.mockClear();
+    });
+
+    it('persists the edited text to .agent/memory/overview.md with a fresh stamp', async () => {
+        await v._saveOverview('- corrected orientation');
+        const wf = callsTo('write_file');
+        expect(wf).toHaveLength(1);
+        expect(wf[0][1].path).toBe('C:/ws/.agent/memory/overview.md');
+        expect(wf[0][1].content).toContain('<!-- generated: ');
+        expect(wf[0][1].content).toContain('- corrected orientation');
+    });
+
+    it('registers .agent with the path guard before writing (same as other memory)', async () => {
+        await v._saveOverview('text');
+        expect(callsTo('set_allowed_roots')[0][1]).toEqual({ roots: ['C:/ws/.agent'] });
+        expect(order().indexOf('set_allowed_roots')).toBeLessThan(order().indexOf('write_file'));
+    });
+
+    it('updates the panel state so the saved text shows immediately', async () => {
+        await v._saveOverview('fresh text');
+        expect(v.memoryOverview?.text).toBe('fresh text');
+        expect(v.memoryOverview?.generatedAt).toBeTruthy();
+    });
+
+    it('is a no-op without a workspace (no crash, no write)', async () => {
+        v.memoryWorkspace = '';
+        await v._saveOverview('x');
+        expect(callsTo('write_file')).toHaveLength(0);
+    });
+
+    it('surfaces a write failure instead of silently dropping the edit', async () => {
+        const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+        invoke.mockImplementation(async (cmd) => {
+            if (cmd === 'write_file') throw new Error('disk full');
+            return null;
+        });
+        await v._saveOverview('will fail');
+        expect(alertSpy).toHaveBeenCalled();
+        alertSpy.mockRestore();
+    });
+});

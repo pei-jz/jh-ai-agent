@@ -181,10 +181,12 @@
 
         <div class="input-group cfg-group-gap">
             <label class="input-label" for="cfg-memory-recall">{t('settings.memoryRecall')}</label>
-            <select id="cfg-memory-recall" class="input" value={config.memory_recall ?? 'on'}
+            <select id="cfg-memory-recall" class="input" value={config.memory_recall ?? 'auto'}
                 onchange={(e) => patch('memory_recall', e.currentTarget.value)}>
-                <option value="on">{t('settings.memoryRecall.on')}</option>
+                <!-- Auto leads because it is the default: it is the only arm that
+                     can answer whether recall is helping at all. -->
                 <option value="auto">{t('settings.memoryRecall.auto')}</option>
+                <option value="on">{t('settings.memoryRecall.on')}</option>
                 <option value="off">{t('settings.memoryRecall.off')}</option>
             </select>
             <p class="input-hint">{@html t('settings.memoryRecall.hint')}</p>

@@ -51,16 +51,20 @@ const rel = (path, root) => {
  * @param {Array<{q:string, target:string}>} cards study locator cards
  * @param {{root?:string, depth?:number}} opts
  */
-export function structureDigest(cards, { root = '', depth = 3 } = {}) {
+export function structureDigest(rows, { root = '', depth = 3 } = {}) {
     const areas = new Map();
-    for (const c of (cards || [])) {
-        const path = rel(targetPath(c?.target), root);
+    for (const r of (rows || [])) {
+        // Accepts either shape: `{path, names[]}` from the study pass, or the
+        // `{q, target}` locator shape, so the digest does not care which side of
+        // the index the caller happens to be holding.
+        const raw = r?.path ?? targetPath(r?.target);
+        const path = rel(raw, root);
         if (!path) continue;
         const parts = path.split('/');
         const dir = parts.slice(0, Math.min(depth, Math.max(1, parts.length - 1))).join('/');
         const a = areas.get(dir) || { dir, files: new Set(), names: [] };
         a.files.add(path);
-        if (c.q) a.names.push(c.q);
+        for (const n of (Array.isArray(r.names) ? r.names : (r.q ? [r.q] : []))) a.names.push(n);
         areas.set(dir, a);
     }
 

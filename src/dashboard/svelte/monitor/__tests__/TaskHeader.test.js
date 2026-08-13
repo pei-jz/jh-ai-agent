@@ -55,11 +55,9 @@ describe('TaskHeader — what it leads with', () => {
 });
 
 describe('TaskHeader — the vital signs', () => {
-    it('renders the started clock, steps and token totals', () => {
+    it('renders the elapsed and token totals', () => {
         const el = mount({ steps: 77, usage: { total_tokens: 2901720, prompt_tokens: 2861972, cache_read_input_tokens: 2530944, completion_tokens: 39748 } });
         const meta = el.querySelector('.mdh-meta').textContent;
-        expect(meta).toContain('21:25:30');
-        expect(meta).toContain('77');
         expect(meta).toContain('2901.7k');
         // The breakdown, with thousands separators.
         expect(meta).toContain('2,861,972');
@@ -67,16 +65,13 @@ describe('TaskHeader — the vital signs', () => {
         expect(meta).toContain('39,748');
     });
 
-    it('shows a DASH for steps before any have run, not a zero', () => {
-        // A zero next to real numbers reads as a measurement that came back empty.
-        expect(mount({ steps: 0 }).querySelector('.mdh-meta').textContent).toContain('—');
-    });
-
-    it('reflects the live status in the badge', () => {
-        const el = mount({ status: 'running' });
-        const badge = el.querySelector('.task-badge');
-        expect(badge.textContent).toBe('running');
-        expect(badge.classList.contains('badge-running')).toBe(true);
+    it('no longer repeats status, started or steps — the list and the inspector carry them', () => {
+        // A header line that only restates what is visible beside it costs a row
+        // of fixed furniture above the story and adds nothing.
+        const el = mount({ steps: 77, status: 'completed' });
+        expect(el.querySelector('.task-badge')).toBe(null);
+        expect(el.textContent).not.toContain('started');
+        expect(el.textContent).not.toContain('steps');
     });
 
     it('measures elapsed to the completion stamp on a finished run', () => {

@@ -8,7 +8,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
     isLandmark, symbolCards, staleStudyCards, applyStudy, coverageByDir,
-    runStudyPass, STUDY_FILE_CAP, SYMBOLS_PER_FILE, targetPath,
+    runStudyPass, STUDY_FILE_CAP, SYMBOLS_PER_FILE, targetPath, indexSpreadsheets, dropStudyCards,
 } from '../StudyPass.js';
 import { cardKey } from '../CardStore.js';
 
@@ -142,71 +142,113 @@ describe('coverageByDir', () => {
 });
 
 describe('runStudyPass', () => {
-    const FILE = 'export function licenseState() {}\nexport class ConfigView {}\n';
-    const mkInvoke = (files) => vi.fn(async (cmd) => {
-        if (cmd === 'glob_files') return { files, truncated: false };
-        if (cmd === 'read_file') return FILE;
-        return null;
-    });
+    /** One exported symbol, so a parse either finds `alpha` or found nothing. */
+    const SRC = 'export function alpha() {}\n';
 
-    it('reads the tree and reports what it found', async () => {
+    /**
+     * A backend that answers glob/read and records what was indexed.
+     *
+     * The two globs are answered separately: the pass asks for source and then
+     * for workbooks, and a mock that returns the same list to both would index
+     * every source file twice.
+     */
+    const backend = (files, bodies = {}, sheets = []) => {
+        const put = [];
         const invoke = vi.fn(async (cmd, args) => {
-            if (cmd === 'glob_files') return { files: ['src/license.js', 'src/ConfigView.js'] };
-            return args.path === 'src/license.js'
-                ? 'export function licenseState() {}\n'
-                : 'export class ConfigView {}\n';
+            if (cmd === 'glob_files') {
+                const isSheets = String(args.pattern || '').includes('xlsx');
+                return { files: isSheets ? sheets : files, truncated: false };
+            }
+            if (cmd === 'read_file') return bodies[args.path] ?? SRC;
+            if (cmd === 'index_hashes') return [];
+            if (cmd === 'index_put_files') { put.push(...args.files); return args.files.length; }
+            if (cmd === 'index_prune') return 0;
+            return null;
         });
+        return { invoke, put };
+    };
+
+    it('writes symbols to the INDEX, not to cards', async () => {
+        // Symbols are a lookup, and a lookup belongs behind a query. The first
+        // version wrote one card per symbol and produced 716 unreadable rows.
+        const { invoke, put } = backend(['src/a.js']);
         const r = await runStudyPass({ workspacePath: 'C:/ws', invoke });
-        expect(r.files).toBe(2);
-        expect(r.cards.map(c => c.q).sort()).toEqual(['ConfigView', 'licenseState']);
-        expect(r.cards.map(c => c.target).sort())
-            .toEqual(['src/ConfigView.js:1', 'src/license.js:1']);
+        expect(r.cards).toBeUndefined();
+        expect(put).toHaveLength(1);
+        expect(put[0].symbols.map(s => s.name)).toContain('alpha');
+        expect(put[0].lang).toBe('js');
     });
 
-    it('records the same name in two files as two places', () => {
-        // Not a duplicate: `handle` in two modules is two landmarks, and
-        // collapsing them would point every future search at whichever won.
-        const cards = symbolCards([
-            sym('processQueue', { path: 'src/a.js' }),
-            sym('processQueue', { path: 'src/b.js' }),
-        ], { date: '2026-08-12' });
-        expect(cards).toHaveLength(2);
+    it('records the import graph alongside the symbols', async () => {
+        const { invoke, put } = backend(['src/a.js'], {
+            'src/a.js': `import { b } from './b.js';\n${SRC}`,
+        });
+        await runStudyPass({ workspacePath: 'C:/ws', invoke });
+        expect(put[0].deps).toEqual([['src/b.js', 'imports']]);
+    });
+
+    it('re-parses only what changed since the last pass', async () => {
+        // The whole point of the content hash: a second pass over an untouched
+        // tree costs the reads and nothing else.
+        const body = SRC;
+        const { contentHash } = await import('../CodeIndex.js');
+        const put = [];
+        const invoke = vi.fn(async (cmd, args) => {
+            if (cmd === 'glob_files') {
+                return { files: String(args.pattern).includes('xlsx') ? [] : ['src/a.js', 'src/b.js'] };
+            }
+            if (cmd === 'read_file') return body;
+            if (cmd === 'index_hashes') return [['src/a.js', contentHash(body)]];
+            if (cmd === 'index_put_files') { put.push(...args.files); return args.files.length; }
+            return 0;
+        });
+        await runStudyPass({ workspacePath: 'C:/ws', invoke });
+        expect(put.map(f => f.path)).toEqual(['src/b.js']);
+    });
+
+    it('retires files the tree no longer has', async () => {
+        const { invoke } = backend(['src/a.js']);
+        await runStudyPass({ workspacePath: 'C:/ws', invoke });
+        const prune = invoke.mock.calls.find(c => c[0] === 'index_prune');
+        expect(prune[1].livePaths).toEqual(['src/a.js']);
     });
 
     it('reports progress so a long pass is not a frozen dialog', async () => {
-        const invoke = mkInvoke(Array.from({ length: 25 }, (_, i) => `src/f${i}.js`));
+        const { invoke } = backend(Array.from({ length: 25 }, (_, i) => `src/f${i}.js`));
         const onProgress = vi.fn();
         await runStudyPass({ workspacePath: 'C:/ws', invoke, onProgress });
-        expect(onProgress).toHaveBeenCalled();
         expect(onProgress.mock.calls.at(-1)[0]).toMatchObject({ read: 25, total: 25 });
     });
 
     it('stops at the cap rather than walking a monorepo forever', async () => {
-        const invoke = mkInvoke(Array.from({ length: 50 }, (_, i) => `src/f${i}.js`));
-        const r = await runStudyPass({ workspacePath: 'C:/ws', invoke, fileCap: 10 });
-        expect(r.files).toBe(10);
+        const { invoke } = backend(Array.from({ length: 50 }, (_, i) => `src/f${i}.js`));
+        expect((await runStudyPass({ workspacePath: 'C:/ws', invoke, fileCap: 10 })).files).toBe(10);
     });
 
     it('carries on past a file it cannot read', async () => {
         const invoke = vi.fn(async (cmd, args) => {
-            if (cmd === 'glob_files') return { files: ['src/ok.js', 'src/bad.js'] };
-            if (args?.path === 'src/bad.js') throw new Error('EACCES');
-            return FILE;
+            if (cmd === 'glob_files') {
+                return { files: String(args.pattern).includes('xlsx') ? [] : ['src/ok.js', 'src/bad.js'] };
+            }
+            if (cmd === 'read_file' && args.path === 'src/bad.js') throw new Error('EACCES');
+            if (cmd === 'read_file') return SRC;
+            if (cmd === 'index_hashes') return [];
+            return 0;
         });
         const r = await runStudyPass({ workspacePath: 'C:/ws', invoke });
         expect(r.files).toBe(2);
-        expect(r.cards.length).toBeGreaterThan(0);
+        expect(r.symbols).toBeGreaterThan(0);
     });
 
     it('returns empty rather than throwing when the glob fails', async () => {
         const invoke = vi.fn(async () => { throw new Error('no such command'); });
         const r = await runStudyPass({ workspacePath: 'C:/ws', invoke });
-        expect(r.cards).toEqual([]);
+        expect(r.symbols).toBe(0);
         expect(r.error).toContain('no such command');
     });
 
     it('does nothing without a workspace', async () => {
-        expect((await runStudyPass({ invoke: vi.fn() })).cards).toEqual([]);
+        expect((await runStudyPass({ invoke: vi.fn() })).files).toBe(0);
     });
 
     it('caps how much it takes from one file', () => {
@@ -215,10 +257,6 @@ describe('runStudyPass', () => {
     });
 });
 
-// Windows absolute paths start `C:\…`, so splitting a `path:line` target on the
-// first colon returns the drive letter. Every path comparison downstream —
-// staleness, coverage, the overview digest — then silently fails, and this app
-// stores absolute paths.
 describe('targetPath', () => {
     it('strips only the trailing line number', () => {
         expect(targetPath('src/a.js:412')).toBe('src/a.js');
@@ -242,5 +280,105 @@ describe('staleness with Windows paths', () => {
         const { stale, fresh } = staleStudyCards(cards, ['C:/ws/src/a.js']);
         expect(stale).toEqual([]);
         expect(fresh).toHaveLength(1);
+    });
+});
+
+// A cross-sheet formula is an explicit dependency, so it lands in the same edge
+// table as an import and `code_deps` answers over both. In a lot of enterprise
+// work the real system knowledge is in the workbook, not the code.
+describe('indexSpreadsheets', () => {
+    const stubIndex = () => {
+        const put = [];
+        return { put, putFiles: async (files) => { put.push(...files); return files.length; } };
+    };
+
+    it('records sheet-to-sheet references as edges', async () => {
+        const index = stubIndex();
+        const invoke = vi.fn(async (cmd) => {
+            if (cmd === 'glob_files') return { files: ['book.xlsx'] };
+            if (cmd === 'spreadsheet_refs') return [
+                { from_sheet: 'Summary', to_sheet: 'Data', example: '=SUM(Data!B:B)' },
+            ];
+            return null;
+        });
+        const r = await indexSpreadsheets({ workspacePath: 'C:/ws', invoke, index });
+        expect(r.edges).toBe(1);
+        expect(index.put[0]).toMatchObject({
+            path: 'book.xlsx#Summary', lang: 'excel',
+            deps: [['book.xlsx#Data', 'references']],
+        });
+    });
+
+    it('addresses a sheet the way a file is addressed', async () => {
+        // `workbook#Sheet` means one node type serves both, so the dependency
+        // question does not need a second tool for spreadsheets.
+        const index = stubIndex();
+        const invoke = vi.fn(async (cmd) => {
+            if (cmd === 'glob_files') return { files: ['C:/ws/plan.xlsx'] };
+            if (cmd === 'spreadsheet_refs') return [{ from_sheet: 'A', to_sheet: 'B', example: '=B!A1' }];
+            return null;
+        });
+        await indexSpreadsheets({ workspacePath: 'C:/ws', invoke, index });
+        expect(index.put[0].path).toBe('C:/ws/plan.xlsx#A');
+    });
+
+    it('groups every reference a sheet makes into one entry', async () => {
+        const index = stubIndex();
+        const invoke = vi.fn(async (cmd) => {
+            if (cmd === 'glob_files') return { files: ['b.xlsx'] };
+            if (cmd === 'spreadsheet_refs') return [
+                { from_sheet: 'S', to_sheet: 'X', example: '' },
+                { from_sheet: 'S', to_sheet: 'Y', example: '' },
+            ];
+            return null;
+        });
+        await indexSpreadsheets({ workspacePath: 'C:/ws', invoke, index });
+        expect(index.put).toHaveLength(1);
+        expect(index.put[0].deps).toHaveLength(2);
+    });
+
+    it('skips a workbook it cannot open, without losing the rest', async () => {
+        const index = stubIndex();
+        const invoke = vi.fn(async (cmd, args) => {
+            if (cmd === 'glob_files') return { files: ['bad.xlsx', 'good.xlsx'] };
+            if (cmd === 'spreadsheet_refs' && args.path === 'bad.xlsx') throw new Error('corrupt');
+            if (cmd === 'spreadsheet_refs') return [{ from_sheet: 'A', to_sheet: 'B', example: '' }];
+            return null;
+        });
+        const r = await indexSpreadsheets({ workspacePath: 'C:/ws', invoke, index });
+        expect(r.files).toBe(2);
+        expect(index.put[0].path).toBe('good.xlsx#A');
+    });
+
+    it('does nothing, quietly, when the backend has no such command', async () => {
+        const index = stubIndex();
+        const invoke = vi.fn(async () => { throw new Error('no such command'); });
+        expect(await indexSpreadsheets({ workspacePath: 'C:/ws', invoke, index }))
+            .toEqual({ files: 0, edges: 0, paths: [] });
+    });
+});
+
+// The first study pass wrote a card per symbol into cards.jsonl. Those moved to
+// the index, so the rows are now residue in a panel whose purpose is review.
+describe('dropStudyCards', () => {
+    it('removes study-written cards', () => {
+        const { kept, dropped } = dropStudyCards([
+            { origin: 'study', q: 'setSel' },
+            { origin: 'study', q: 'onKey' },
+        ]);
+        expect(kept).toEqual([]);
+        expect(dropped).toBe(2);
+    });
+
+    it('KEEPS experience cards — nothing else holds what happened', () => {
+        const lesson = { type: 'lesson', signature: 'write_file|edit_mismatch|.svelte' };
+        const learned = { origin: 'experience', q: 'licenseState' };
+        const { kept, dropped } = dropStudyCards([lesson, { origin: 'study', q: 'x' }, learned]);
+        expect(kept).toEqual([lesson, learned]);
+        expect(dropped).toBe(1);
+    });
+
+    it('survives junk', () => {
+        expect(dropStudyCards(null)).toEqual({ kept: [], dropped: 0 });
     });
 });

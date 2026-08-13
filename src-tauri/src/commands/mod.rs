@@ -6,6 +6,7 @@ pub mod git;
 pub mod office;
 pub mod shell;
 pub mod indexer;
+pub mod code_index;
 pub mod mcp;
 pub mod search;
 pub mod updater;

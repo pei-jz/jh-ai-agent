@@ -253,6 +253,13 @@ export const TIMELINE_STYLES = `
         margin-top: 2px; color: var(--text-tertiary); font-size: var(--fs-2xs);
         text-align: right;
     }
+    /* Per-model usage when a run touched more than one model. The rows reuse the
+       .insp-row rhythm but sit in their own group so the totals read as their sum. */
+    .insp-models { margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--border-light); }
+    .insp-models .insp-row { padding: 1px 0; }
+    .insp-models .insp-k { max-width: 55%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .insp-models .insp-cost { font-size: var(--fs-2xs); }
+    .insp-models .insp-v { font-size: var(--fs-2xs); }
     .insp-file, .insp-act, .insp-chap {
         display: flex; align-items: center; gap: var(--space-2);
         width: 100%; text-align: left; padding: 3px var(--space-1);

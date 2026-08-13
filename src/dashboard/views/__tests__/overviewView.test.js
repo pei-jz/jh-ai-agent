@@ -8,7 +8,7 @@
 // what ages out, what must never appear twice, and — since the page became a
 // cockpit — which half of it is showing.
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 const invoke = vi.fn(async () => '');
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a) => invoke(...a) }));
@@ -46,6 +46,11 @@ const card = (over = {}) => ({
 });
 
 let v;
+// The view coalesces repaints behind a 250ms timer. Without tearing it down the
+// timer outlives the test environment and paints into a document that is gone —
+// which surfaces as a failure in whichever file happens to run next.
+afterEach(() => { try { v?.destroy?.(); } catch (_) {} });
+
 beforeEach(() => {
     document.body.innerHTML = '';
     localStorage.clear();

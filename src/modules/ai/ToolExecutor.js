@@ -13,7 +13,8 @@ import { selectMcpTools } from './tools/ToolRelevance.js';
 import { classifyCommand, suggestApprovalPattern, isApprovedByPatterns } from './tools/commandPolicy.js';
 import {
     handleListFiles, handleReadFile, handleGrepSearch, handleGlob, handleFetchUrl, handleWebSearch,
-    handleSymbolSearch
+    handleSymbolSearch,
+    handleCodeDeps
 } from './tools/handlers/readOnlyHandlers.js';
 import {
     handleWriteFile, handleMultiReplace, handleReplaceLines
@@ -51,6 +52,7 @@ const TOOL_HANDLERS = {
     grep_search: (ex, c) => handleGrepSearch(ex, c.args, c.onAgentStatus),
     glob:        (ex, c) => handleGlob(ex, c.args, c.onAgentStatus),
     symbol_search: (ex, c) => handleSymbolSearch(ex, c.args, c.onAgentStatus),
+    code_deps:   (ex, c) => handleCodeDeps(ex, c.args, c.onAgentStatus),
     // Office documents
     read_office: (ex, c) => handleReadOffice(ex, c.args, c.onAgentStatus, c.resolvedPath),
     write_xlsx:  (ex, c) => handleWriteXlsx(ex, c.args, c.onConfirm, c.onAgentStatus),

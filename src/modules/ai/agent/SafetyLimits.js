@@ -18,7 +18,13 @@ export const SAFETY_DEFAULTS = {
     // 'on' | 'off' | 'auto' — whether learned cards are RECALLED into the run.
     // Learning continues either way, so a run without recall is a control
     // session, not a wasted one (docs/design/agent-memory-layers.md §6).
-    memoryRecall: 'on',
+    //
+    // Defaults to 'auto': a small random share of runs is held back as a control
+    // group, which is the only way to find out whether recall helps at all. The
+    // alternative default ('on') cannot answer that question, and a memory layer
+    // nobody can evaluate is the failure mode this whole design is arranged
+    // against. Set it to 'on' in Settings to opt out of the measurement.
+    memoryRecall: 'auto',
     // Step at which a run on the Fast tier is promoted to Deep. 0 ⇒ never.
     //
     // Default OFF. It used to read `safety.maxIterations`, a field this module

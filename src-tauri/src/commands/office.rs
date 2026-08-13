@@ -30,6 +30,7 @@
 // deck the agent can actually SEE and correct is a better answer than a fragile
 // pptx it cannot. Say so rather than emitting a broken file.
 
+use serde::Serialize;
 use std::io::{Cursor, Read};
 use crate::path_guard::PathGuard;
 use tauri::State;
@@ -1335,3 +1336,166 @@ two");
     }
 }
 
+
+// ── Spreadsheet dependency extraction ──────────────────────────────────────
+//
+// A formula is an explicit dependency edge, and a more reliable one than an
+// import: `=SUM(Sheet2!B:B)` states outright that this sheet reads that one.
+// Nothing is inferred, which is why the result can go into the same `edges`
+// table as code imports and be trusted the same way.
+//
+// This matters beyond spreadsheets being common. In a lot of enterprise work the
+// real system knowledge is in the workbook, not the code — the table definitions,
+// the business rules, the mapping. Indexing only source leaves the agent blind to
+// the half that decides the answer.
+
+/// One sheet-to-sheet reference discovered in a workbook.
+#[derive(Debug, Serialize, PartialEq)]
+pub struct SheetRef {
+    pub from_sheet: String,
+    pub to_sheet: String,
+    /// A formula showing the reference, for the human reading the index.
+    pub example: String,
+}
+
+/// Sheet names referenced by a formula.
+///
+/// Excel spells a cross-sheet reference `Sheet2!B4`, or `'My Sheet'!B4` when the
+/// name needs quoting. Both forms are matched; a bare `B4` is a same-sheet
+/// reference and carries no edge.
+pub(crate) fn sheets_in_formula(formula: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let bytes: Vec<char> = formula.chars().collect();
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        if bytes[i] == '\'' {
+            // Quoted name: everything to the closing quote, which must be
+            // followed by '!' to be a sheet reference rather than a string.
+            if let Some(end) = (i + 1..bytes.len()).find(|&j| bytes[j] == '\'') {
+                if end + 1 < bytes.len() && bytes[end + 1] == '!' {
+                    let name: String = bytes[i + 1..end].iter().collect();
+                    if !name.is_empty() && !out.contains(&name) {
+                        out.push(name);
+                    }
+                }
+                i = end + 1;
+                continue;
+            }
+        }
+        if bytes[i] == '!' && i > 0 {
+            // Unquoted name: walk back over the identifier before the '!'.
+            let mut start = i;
+            while start > 0 {
+                let c = bytes[start - 1];
+                if c.is_alphanumeric() || c == '_' || c == '.' {
+                    start -= 1;
+                } else {
+                    break;
+                }
+            }
+            if start < i {
+                let name: String = bytes[start..i].iter().collect();
+                // A leading digit means it is a cell/row token, not a sheet.
+                if !name.chars().next().map_or(true, |c| c.is_ascii_digit())
+                    && !out.contains(&name)
+                {
+                    out.push(name);
+                }
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Cross-sheet references in a workbook, as edges.
+///
+/// Only `xlsx`/`xlsm`: calamine exposes formulas for the OOXML formats, and the
+/// legacy binary `.xls` stores them in a form it does not surface.
+#[tauri::command]
+pub async fn spreadsheet_refs(
+    path: String,
+    guard: State<'_, PathGuard>,
+) -> Result<Vec<SheetRef>, String> {
+    use calamine::{open_workbook_from_rs, Reader, Xlsx};
+
+    guard.ensure_allowed(&path)?;
+    let ext = std::path::Path::new(&path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if !matches!(ext.as_str(), "xlsx" | "xlsm") {
+        return Ok(Vec::new());
+    }
+
+    let bytes = std::fs::read(&path).map_err(|e| format!("Failed to read {}: {}", path, e))?;
+    let mut wb = open_workbook_from_rs::<Xlsx<_>, _>(Cursor::new(bytes))
+        .map_err(|e| format!("Failed to open workbook: {}", e))?;
+
+    let names: Vec<String> = wb.sheet_names().to_vec();
+    let mut out: Vec<SheetRef> = Vec::new();
+    for name in &names {
+        let formulas = match wb.worksheet_formula(name) {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
+        for (_, _, f) in formulas.used_cells() {
+            if f.is_empty() {
+                continue;
+            }
+            for target in sheets_in_formula(f) {
+                // Only references to sheets that exist: `SUM!` in a name would
+                // otherwise be recorded as a phantom dependency.
+                if &target == name || !names.contains(&target) {
+                    continue;
+                }
+                if out.iter().any(|r| r.from_sheet == *name && r.to_sheet == target) {
+                    continue;
+                }
+                out.push(SheetRef {
+                    from_sheet: name.clone(),
+                    to_sheet: target,
+                    example: f.chars().take(120).collect(),
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod sheet_ref_tests {
+    use super::sheets_in_formula;
+
+    #[test]
+    fn finds_a_plain_cross_sheet_reference() {
+        assert_eq!(sheets_in_formula("=SUM(Sheet2!B2:B9)"), vec!["Sheet2"]);
+    }
+
+    #[test]
+    fn finds_a_quoted_sheet_name_with_spaces() {
+        assert_eq!(sheets_in_formula("='Master Data'!A1"), vec!["Master Data"]);
+    }
+
+    #[test]
+    fn reports_each_referenced_sheet_once() {
+        assert_eq!(
+            sheets_in_formula("=Sheet2!A1+Sheet2!A2+Sheet3!A1"),
+            vec!["Sheet2", "Sheet3"]
+        );
+    }
+
+    #[test]
+    fn a_same_sheet_formula_carries_no_edge() {
+        assert!(sheets_in_formula("=SUM(B2:B9)").is_empty());
+        assert!(sheets_in_formula("=A1*1.08").is_empty());
+    }
+
+    #[test]
+    fn does_not_mistake_a_function_call_for_a_sheet() {
+        // No '!' means no reference, however much it looks like a name.
+        assert!(sheets_in_formula("=VLOOKUP(A1,B:C,2,FALSE)").is_empty());
+    }
+}

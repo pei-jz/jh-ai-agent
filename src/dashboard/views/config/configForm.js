@@ -47,7 +47,9 @@ export const SAFETY_FIELDS = [
     {
         key: 'escalate_at_step', label: 'Promote to Deep model at step', fallback: 0, min: 0, max: 1000,
         placeholder: '0 = never',
-        hint: 'Switch a Fast-tier run to the Deep model once it reaches this step. <strong>0 disables (default).</strong> A mid-run model change <strong>discards the prompt cache for the whole remainder</strong>, so enable it only if cheap-tier runs are visibly stalling. (Until now this fired at step 15 on every run regardless of your step limit — that was a bug.)',
+        // Says what the setting does. Repository history belongs in the commit
+        // log, not in the help text of a field someone is trying to fill in.
+        hint: 'Switch a Fast-tier run to the Deep model once it reaches this step. <strong>0 disables (default).</strong> A mid-run model change <strong>discards the prompt cache for the whole remainder</strong>, so enable it only if cheap-tier runs are visibly stalling.',
         half: true,
     },
     {

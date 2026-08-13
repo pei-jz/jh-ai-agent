@@ -115,9 +115,20 @@ export const OVERVIEW_STYLES = `
 }
 .ds-top { display: flex; align-items: baseline; gap: 8px; }
 .ds-v { font-size: var(--fs-xl); font-weight: 700; font-variant-numeric: tabular-nums; }
+/* The window picker — Today / 7d / 30d. Small segmented control beside the
+   total so the number's meaning is always the range it was summed over. */
+.ds-range { margin-left: auto; display: inline-flex; gap: 2px; }
+.ds-range-btn {
+    font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.05em;
+    color: var(--text-tertiary); background: var(--bg-tertiary);
+    border: 1px solid var(--border-light); border-radius: 4px;
+    padding: 2px 7px; cursor: pointer;
+}
+.ds-range-btn:hover { color: var(--text-primary); border-color: var(--accent); }
+.ds-range-btn.is-on { color: var(--accent); border-color: var(--accent); background: var(--accent-glow); }
 .ds-k {
     font-size: 9px; color: var(--text-tertiary); font-family: var(--font-mono);
-    letter-spacing: 0.08em; text-transform: uppercase;
+    letter-spacing: 0.08em; text-transform: uppercase; margin-top: 2px;
 }
 .ds-bar {
     height: 5px; background: var(--bg-primary); border-radius: 3px;
@@ -261,6 +272,18 @@ export const OVERVIEW_STYLES = `
     border: 1px solid var(--border-light); border-radius: 3px; padding: 1px 5px; white-space: nowrap;
 }
 .dm-results { display: flex; flex-direction: column; }
+/* One-click workspace switches in the memory pane. Chips because a list of
+   paths is reference material, not a form — and the current one is marked. */
+.dm-wschips { display: flex; gap: 4px; flex-wrap: wrap; }
+.dm-wschip {
+    font-family: var(--font-mono); font-size: var(--fs-2xs);
+    color: var(--text-secondary); background: var(--bg-tertiary);
+    border: 1px solid var(--border-light); border-radius: 999px;
+    padding: 2px 9px; cursor: pointer; max-width: 180px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.dm-wschip:hover { border-color: var(--accent); color: var(--text-primary); }
+.dm-wschip.is-on { color: var(--accent); border-color: var(--accent); background: var(--accent-glow); }
 .dm-note { font-size: var(--fs-xs); color: var(--text-tertiary); padding: 10px 11px; line-height: 1.6; }
 /* Why a section is there, beside its heading — the sections answer different
    questions and the count alone does not say which. */
@@ -312,6 +335,16 @@ export const OVERVIEW_STYLES = `
 .dp-ph.is-now .m { color: var(--text-primary); font-weight: 600; }
 .dp-ph.is-todo .m { color: var(--text-tertiary); }
 
+/* ── Run pane: model switch log ───────────────────────────── */
+/* Why the run moved models, with the trigger spelled out. Newest first. */
+.dp-switch {
+    display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap;
+    padding: 4px 11px; font-size: var(--fs-xs);
+}
+.dp-switch-m { font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--accent); font-weight: 700; }
+.dp-switch-from { font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--text-tertiary); }
+.dp-switch-r { color: var(--text-secondary); line-height: 1.5; }
+
 /* ── Run pane: step feed ──────────────────────────────────── */
 .dp-steps { padding: 6px 5px; display: flex; flex-direction: column; }
 .dp-step { display: flex; gap: 9px; padding: 4px 7px; font-size: var(--fs-sm); align-items: baseline; }
@@ -362,4 +395,39 @@ export const OVERVIEW_STYLES = `
 .dash-empty h3 { margin: 0 0 6px; font-size: var(--fs-lg); color: var(--text-primary); }
 .dash-empty p { margin: 0 auto; max-width: 44ch; }
 .dash-empty-ico { color: var(--accent); display: flex; justify-content: center; margin-bottom: var(--space-2); }
+
+/* ── Stats pane ───────────────────────────────────────────── */
+/* The cut switcher — month / week / day / model / workspace.
+   Same segmented-control look as the spend-range picker. */
+.ds-st-toolbar { display: flex; gap: 4px; flex-wrap: wrap; }
+.ds-st-cut {
+    font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.05em;
+    color: var(--text-tertiary); background: var(--bg-tertiary);
+    border: 1px solid var(--border-light); border-radius: 4px;
+    padding: 3px 9px; cursor: pointer;
+}
+.ds-st-cut:hover { color: var(--text-primary); border-color: var(--accent); }
+.ds-st-cut.is-on { color: var(--accent); border-color: var(--accent); background: var(--accent-glow); }
+
+/* One row per bucket: label · proportional bar · tokens · cost. */
+.ds-st-list { padding: 4px 11px 10px; display: flex; flex-direction: column; gap: 5px; }
+.ds-st-row { display: flex; align-items: center; gap: 8px; font-size: var(--fs-xs); }
+.ds-st-label {
+    width: 110px; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; color: var(--text-primary);
+}
+.ds-st-bar {
+    flex: 1; height: 6px; background: var(--bg-primary); border-radius: 3px;
+    overflow: hidden; min-width: 30px;
+}
+.ds-st-bar i { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+.ds-st-tok {
+    width: 76px; flex-shrink: 0; text-align: right;
+    font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--text-secondary);
+}
+.ds-st-cost {
+    width: 62px; flex-shrink: 0; text-align: right;
+    font-family: var(--font-mono); font-size: var(--fs-xs); font-weight: 600;
+    color: var(--text-primary); font-variant-numeric: tabular-nums;
+}
 `;

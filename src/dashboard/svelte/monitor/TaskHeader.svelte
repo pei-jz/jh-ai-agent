@@ -22,7 +22,7 @@
 <script>
     import { icon } from '../../utils/icons.js';
     import {
-        contextGauge, elapsedText, startedText, compactTokens,
+        contextGauge, elapsedText, compactTokens,
     } from '../../views/monitor/headerStats.js';
 
     let {
@@ -50,7 +50,6 @@
     }));
     // "—" rather than "0": an unfilled dash reads as "not yet", where a zero next
     // to real numbers reads as a measurement that came back empty.
-    const stepText = $derived(steps ? String(steps) : '—');
     const n = (v) => Number(v || 0).toLocaleString();
 </script>
 
@@ -60,10 +59,11 @@
         <div class="mdh-main">
             <div class="mdh-title" title={task.prompt}>{task.prompt}</div>
             <div class="mdh-meta">
-                <span class="task-badge badge-{status}">{status}</span>
-                <span class="mdh-chip"><b>{startedText(task.started_at)}</b> started</span>
+                <!-- Status / started / steps are gone: the task list on the left
+                     and the Inspector already carry them, and the header's job is
+                     the numbers that change while you watch. What stays: the
+                     wall-clock elapsed and the token totals. -->
                 <span class="mdh-chip"><b>{elapsed}</b> elapsed</span>
-                <span class="mdh-chip"><b>{stepText}</b> steps</span>
                 <span class="mdh-chip" title="Input ↑ · cache ⚡ · output ↓">
                     <b>{compactTokens(usage.total_tokens)}</b> tokens
                 </span>

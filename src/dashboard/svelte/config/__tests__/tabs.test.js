@@ -436,3 +436,65 @@ describe('MemoryTab — study pass', () => {
         expect(el.textContent).toContain('120 / 400');
     });
 });
+
+// Coverage says which areas the agent knows NOTHING about — the question no
+// tooling usually answers, and the one that decides how far to trust an answer.
+describe('MemoryTab — index coverage', () => {
+    const stats = { files: 116, symbols: 375, edges: 210, coverage: [
+        { dir: 'src/modules', files: 60 },
+        { dir: 'src/dashboard', files: 40 },
+    ] };
+
+    it('reports the size of the index', () => {
+        const el = mount(MemoryTab, { workspace: 'C:/ws', indexStats: stats });
+        expect(el.textContent).toContain('116');
+        expect(el.textContent).toContain('375');
+    });
+
+    it('names each area with its share', () => {
+        const el = mount(MemoryTab, { workspace: 'C:/ws', indexStats: stats });
+        const rows = [...el.querySelectorAll('.cfg-mem-cov-row .d')].map(n => n.textContent);
+        expect(rows).toEqual(['src/modules', 'src/dashboard']);
+    });
+
+    it('shows nothing at all before a study has run', () => {
+        const el = mount(MemoryTab, { workspace: 'C:/ws', indexStats: { files: 0 } });
+        expect(el.querySelector('.cfg-mem-cov')).toBe(null);
+    });
+});
+
+// The orientation note is the ONLY memory here that is inferred rather than
+// observed, and it rides in every prompt — so a wrong line in it is repeated on
+// every step until somebody reads it. Which requires being able to read it.
+describe('MemoryTab — orientation note', () => {
+    const ov = { text: '- A Tauri desktop app.\n- Agent loop in AgentController.', generatedAt: '2026-08-13T10:00:00Z' };
+
+    it('shows the note', () => {
+        const el = mount(MemoryTab, { workspace: 'C:/ws', overview: ov });
+        expect(el.querySelector('.cfg-mem-ov-text').textContent).toContain('Agent loop in AgentController');
+    });
+
+    it('says when it was generated, and that it is in every prompt', () => {
+        const el = mount(MemoryTab, { workspace: 'C:/ws', overview: ov });
+        expect(el.textContent).toContain('2026-08-13');
+    });
+
+    it('lets a wrong line be corrected in place', async () => {
+        const onSaveOverview = vi.fn();
+        const el = mount(MemoryTab, { workspace: 'C:/ws', overview: ov, onSaveOverview });
+        el.querySelector('#btn-memory-ov-edit').click();
+        await tick();
+        const box = el.querySelector('.cfg-mem-ov-edit');
+        expect(box.value).toContain('Tauri');
+        box.value = '- corrected';
+        box.dispatchEvent(new Event('input', { bubbles: true }));
+        await tick();
+        el.querySelector('#btn-memory-ov-save').click();
+        expect(onSaveOverview).toHaveBeenCalledWith('- corrected');
+    });
+
+    it('shows nothing before a study has written one', () => {
+        const el = mount(MemoryTab, { workspace: 'C:/ws', overview: { text: '', generatedAt: '' } });
+        expect(el.querySelector('.cfg-mem-ov')).toBe(null);
+    });
+});

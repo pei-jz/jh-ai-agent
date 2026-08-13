@@ -78,9 +78,15 @@ describe('normalizeSafetyLimits', () => {
 
     it('validates memory_recall (on/off/auto), defaulting on bad input', () => {
         expect(normalizeSafetyLimits({ memory_recall: 'off' }).memoryRecall).toBe('off');
-        expect(normalizeSafetyLimits({ memory_recall: 'auto' }).memoryRecall).toBe('auto');
-        expect(normalizeSafetyLimits({ memory_recall: 'sometimes' }).memoryRecall).toBe('on');
-        expect(normalizeSafetyLimits({}).memoryRecall).toBe('on');
+        expect(normalizeSafetyLimits({ memory_recall: 'on' }).memoryRecall).toBe('on');
+        expect(normalizeSafetyLimits({ memory_recall: 'sometimes' }).memoryRecall).toBe('auto');
+    });
+
+    it('MEASURES by default — a small share of runs is the control group', () => {
+        // 'on' cannot answer whether recall helps, and a memory layer nobody can
+        // evaluate is the failure this design is arranged against.
+        expect(normalizeSafetyLimits({}).memoryRecall).toBe('auto');
+        expect(SAFETY_DEFAULTS.memoryRecall).toBe('auto');
     });
 
     // Phase routing changes WHICH MODEL answers, mid-task. That is not a change
