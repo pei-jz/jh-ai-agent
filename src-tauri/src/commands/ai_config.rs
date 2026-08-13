@@ -108,6 +108,12 @@ pub struct AiConfig {
     #[serde(default)]
     pub cycle_detection_min_repeats: Option<u32>,
 
+    /// Step at which a run on the Fast tier is promoted to the Deep model.
+    /// None / 0 ⇒ never (the default): a mid-run model change discards the
+    /// prompt cache for the whole remainder, so it is opt-in.
+    #[serde(default)]
+    pub escalate_at_step: Option<u32>,
+
     /// Fraction (0–1) of the model's context window that conversation history
     /// (including the injected file cache) may occupy before compaction triggers.
     /// None ⇒ frontend default (0.7). Lower = compact sooner (less context, cheaper);
@@ -218,6 +224,7 @@ pub async fn get_ai_config<R: tauri::Runtime>(
             no_progress_window: None,
             identical_call_threshold: None,
             cycle_detection_min_repeats: None,
+            escalate_at_step: None,
             history_budget_ratio: None,
             history_compress_ratio: None,
             agent_temperature: None,
@@ -336,6 +343,9 @@ pub async fn save_ai_config<R: tauri::Runtime>(
                 if final_config.identical_call_threshold.is_none() {
                     final_config.identical_call_threshold = old_config.identical_call_threshold;
                 }
+                if final_config.escalate_at_step.is_none() {
+                    final_config.escalate_at_step = old_config.escalate_at_step;
+                }
                 if final_config.cycle_detection_min_repeats.is_none() {
                     final_config.cycle_detection_min_repeats = old_config.cycle_detection_min_repeats;
                 }
@@ -421,6 +431,7 @@ pub async fn set_rag_approval<R: tauri::Runtime>(
             no_progress_window: None,
             identical_call_threshold: None,
             cycle_detection_min_repeats: None,
+            escalate_at_step: None,
             history_budget_ratio: None,
             history_compress_ratio: None,
             agent_temperature: None,

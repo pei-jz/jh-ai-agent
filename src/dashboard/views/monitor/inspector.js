@@ -48,6 +48,23 @@ export function freshInput(inn, cache, inclusive) {
     return inclusive ? Math.max(0, num(inn) - num(cache)) : num(inn);
 }
 
+/**
+ * Adapt the connection-shaped rates from `ModelPhaseRouter.modelRates()`
+ * (`{input, cacheRead, output}`) to the `_per_1m` names `costOf` speaks.
+ *
+ * Two shapes exist because one is read straight off a connection record and the
+ * other mirrors the backend's `/stats` payload. Converting here rather than at
+ * each call site keeps `costOf` the single entry point for cost arithmetic.
+ */
+export function per1m(r) {
+    if (!r) return null;
+    return {
+        input_per_1m: r.input_per_1m ?? r.input ?? 0,
+        cache_read_per_1m: r.cache_read_per_1m ?? r.cacheRead ?? 0,
+        output_per_1m: r.output_per_1m ?? r.output ?? 0,
+    };
+}
+
 /** USD, at the precision the number deserves — a run can cost less than a cent. */
 export function fmtCost(usd) {
     const v = Number(usd);

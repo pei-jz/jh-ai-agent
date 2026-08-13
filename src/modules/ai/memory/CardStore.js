@@ -20,6 +20,9 @@
 // facts.json for now; Step 3 unifies the two rather than duplicating them here.
 
 import { extOf, fingerprint } from './FailureSignature.js';
+// The same unit-overlap scorer the fact store recalls with (latin words + CJK
+// bigrams), so "which card is about THIS task" is judged one way across memory.
+import { relevanceScore } from './MemoryScoring.js';
 
 /** Injected text is a budget item, not a document. */
 export const CARD_MAX_CHARS = 240;
@@ -297,6 +300,56 @@ export function selectBrief(store, { limit = 3, now = Date.now(), exclude = new 
         .slice(0, limit);
 }
 
+/**
+ * How many of each kind the opening brief may carry.
+ *
+ * Separate budgets, NOT one ranked list — that is the whole point. `cardScore`
+ * is led by `costSteps`, which measures how much a failure HURT, not how much
+ * it matters: "run npm test before committing" costs 0 steps and outranks
+ * nothing, while a 7-step anchor mismatch outranks everything. Ranked together,
+ * the painful trivia always evicts the project's actual rules.
+ *
+ * Lessons get a small allowance rather than none: they still have a place up
+ * front, but they cannot take the whole brief, and the ones that matter for THIS
+ * call arrive through the trigger hook at the moment they apply.
+ */
+export const BRIEF_BUDGET = { insight: 2, lesson: 1 };
+
+/** The text of a card, for matching it against what the task is about. */
+export function cardText(card) {
+    const s = cardSummary(card);
+    return `${s.headline} ${s.detail}`.trim();
+}
+
+/**
+ * The opening brief, filled per KIND against its own budget.
+ *
+ * Within a kind, a `query` (the task prompt) ranks by relevance first — an
+ * insight about the area being worked on beats a higher-scoring one from an
+ * unrelated corner of the project. Without a query it falls back to score
+ * alone, which is the old behaviour.
+ */
+export function selectBriefBudgeted(store, {
+    budgets = BRIEF_BUDGET, query = '', now = Date.now(), exclude = new Set(),
+} = {}) {
+    if (!Array.isArray(store)) return [];
+    const picked = [];
+    for (const [kind, budget] of Object.entries(budgets)) {
+        if (!budget) continue;
+        const pool = store.filter(c => eligible(c, exclude) && c.type === kind && !picked.includes(c));
+        pool.sort((a, b) => {
+            if (query) {
+                const ra = relevanceScore({ summary: cardText(a) }, query);
+                const rb = relevanceScore({ summary: cardText(b) }, query);
+                if (rb !== ra) return rb - ra;
+            }
+            return cardScore(b, now) - cardScore(a, now);
+        });
+        picked.push(...pool.slice(0, budget));
+    }
+    return picked;
+}
+
 // ── Rendering ──────────────────────────────────────────────────────────────
 
 /**
@@ -524,10 +577,16 @@ export class CardStore {
         card.shown = (card.shown || 0) + 1;
     }
 
-    /** Recall for the start of a run. */
-    recallBrief(limit = 3) {
+    /**
+     * Recall for the start of a run.
+     *
+     * `query` is the task prompt: within each kind's budget, what the task is
+     * about outranks what merely scored high. Pass nothing and it degrades to
+     * pure score, which is what it did before budgets existed.
+     */
+    recallBrief(query = '', budgets = BRIEF_BUDGET) {
         if (!this.enabled || this.cards.length === 0) return [];
-        const picked = selectBrief(this.cards, { limit, exclude: this.injected });
+        const picked = selectBriefBudgeted(this.cards, { budgets, query, exclude: this.injected });
         for (const c of picked) this._markShown(c);
         return picked;
     }

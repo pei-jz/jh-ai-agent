@@ -191,6 +191,29 @@ export function applyConsolidation(facts, plan) {
 }
 
 /**
+ * The project's RULES — norms that have reached semantic memory.
+ *
+ * Selected WITHOUT a relevance filter, and on their own budget, because a norm
+ * applies whether or not the task mentions it: "run npm test before committing"
+ * shares no words with "fix the header alignment" and would never clear a
+ * keyword floor, yet it is exactly the thing that must not be forgotten.
+ *
+ * This is the standing half of the injection budget (plan §4.5): ranked against
+ * observations and lessons, a rule that cost nothing to learn always loses to a
+ * failure that hurt — which is how the agent ends up fussing over trivia while
+ * ignoring the conventions it was told about.
+ */
+export function selectNormFacts(facts, limit = 3) {
+    if (!Array.isArray(facts)) return [];
+    return facts
+        .filter(f => (f.kind === 'norm') && factType(f) === 'semantic')
+        .sort((a, b) => (b.confidence ?? 0.5) - (a.confidence ?? 0.5)
+            || (b.hits || 1) - (a.hits || 1)
+            || (b.timestamp || 0) - (a.timestamp || 0))
+        .slice(0, limit);
+}
+
+/**
  * Select the top-`limit` facts most relevant to `query` (keyword overlap), ties
  * broken by recency then original order. Returns an array of fact objects.
  * `minScore` (default 0 = no floor) drops facts below the relevance threshold, so

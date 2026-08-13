@@ -25,7 +25,33 @@ export function memoryPaths(workspace) {
         facts: `${root}/.agent/long_term/facts.json`,
         episodes: `${root}/.agent/memory.json`,
         cards: `${root}/.agent/memory/cards.jsonl`,
+        // Markdown, not JSON: the overview is the one memory a human reads and
+        // corrects by hand, so it is stored in the form they would edit.
+        overview: `${root}/.agent/memory/overview.md`,
     };
+}
+
+/** Front matter carrying when the overview was generated. */
+const OVERVIEW_STAMP = /^<!--\s*generated:\s*([^\s]+)\s*-->\s*/;
+
+/** Read the overview note. Missing file ⇒ empty, never an error. */
+export async function readOverview(workspace, invoke) {
+    try {
+        const raw = String(await invoke('read_file', { path: memoryPaths(workspace).overview }) || '');
+        const m = raw.match(OVERVIEW_STAMP);
+        return { text: raw.replace(OVERVIEW_STAMP, '').trim(), generatedAt: m ? m[1] : '' };
+    } catch (_) {
+        return { text: '', generatedAt: '' };
+    }
+}
+
+/** Write the overview note, stamped so staleness can be judged later. */
+export async function writeOverview(workspace, text, invoke, generatedAt = new Date().toISOString()) {
+    await allowMemoryDir(workspace, invoke);
+    await invoke('write_file', {
+        path: memoryPaths(workspace).overview,
+        content: `<!-- generated: ${generatedAt} -->\n${String(text || '').trim()}\n`,
+    });
 }
 
 /** Parse a cards.jsonl body. A corrupt line is dropped, never fatal. */

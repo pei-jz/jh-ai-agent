@@ -220,9 +220,23 @@ export class McpManager {
         };
     }
 
-    getAllTools() {
+    /**
+     * All tools from every connected MCP server.
+     * @param {{wsOnly?:boolean}} opts
+     *   wsOnly: true  → only tools from EXTERNAL-APP (WebSocket-dialed) servers
+     *                    (e.g. JHEditor's get_buffer). These advertise the app's
+     *                    live workspace and make no sense in a plain agent task.
+     *           false → only tools from CONFIG servers (stdio/http).
+     *           omit  → everything (current behaviour).
+     * @returns {Array<{name:string, description?:string, _serverName:string, inputSchema?:object}>}
+     */
+    getAllTools(opts = {}) {
+        const { wsOnly = null } = opts;
         const allTools = [];
         for (const client of this.clients.values()) {
+            const isWs = client instanceof McpWsClient;
+            if (wsOnly === true && !isWs) continue;
+            if (wsOnly === false && isWs) continue;
             const serverTools = client.tools.map(t => ({
                 ...t,
                 _serverName: client.name

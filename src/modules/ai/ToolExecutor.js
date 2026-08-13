@@ -172,6 +172,15 @@ export class ToolExecutor {
         this._mcpRelevanceQuery = null;
         this._mcpPruneOpts = {};
         this._tavilyEnabled = false; // Add state for Tavily availability
+        // ── External-app MCP exclusion (per-session) ─────────────────────
+        // true  → MCP tools from EXTERNAL-APP (WebSocket-dialed) servers
+        //         (JHEditor get_buffer / list_workspace_files / …) are hidden
+        //         from the LLM. Set for JHAI's OWN tasks (NewTask/Schedule/
+        //         DirectChat) — a plain workspace task should never be offered
+        //         a tool that reads a connected app's live editor state.
+        // false → include them (external callers like JHEditor, which NEED
+        //         their own workspace tools).
+        this._excludeExternalAppMcpTools = false;
         // run_subtask runner injected per-run by AgentController (null = unavailable).
         this._subtaskRunner = null;
         // Write scope (Step 3 ownership): null = unrestricted; array of path
@@ -255,6 +264,18 @@ export class ToolExecutor {
         this._mcpServerFilter = new Set(serverNames);
     }
 
+    /**
+     * Hide MCP tools that come from EXTERNAL-APP (WebSocket-dialed) servers
+     * (e.g. JHEditor's get_buffer / list_workspace_files). JHAI's OWN tasks
+     * (NewTask / Schedule / DirectChat / sub-agents) call this with `true` so
+     * the LLM is never offered a tool that reads a connected app's live editor
+     * state. External callers keep `false` — their own workspace tools are the
+     * point of the task.
+     */
+    setExcludeExternalAppMcpTools(on) {
+        this._excludeExternalAppMcpTools = !!on;
+    }
+
     /** Returns the tool definitions filtered by the active allowlist. */
     getActiveToolDefinitions() {
         let defs = this.toolDefinitions;
@@ -317,6 +338,7 @@ export class ToolExecutor {
         this._mcpContext = null;      // reset per-task MCP context
         this._mcpRelevanceQuery = null;        // reset MCP pruning (caller re-sets)
         this._mcpPruneOpts = {};               // reset MCP prune tuning
+        this._excludeExternalAppMcpTools = false; // reset; AgentController re-sets per run
         this._subtaskRunner = null;            // reset; AgentController re-injects per run
         this._writeScope = null;               // reset; caller re-sets after startSession
         this.workspacePath = workspacePath || '.';
@@ -1003,7 +1025,12 @@ export class ToolExecutor {
     /** MCP tools passing the session's server filter + allowlist (pre-pruning). */
     _eligibleMcpTools() {
         const allow = this._toolAllowlist;
-        return mcpManager.getAllTools().filter(t => {
+        // JHAI's own tasks exclude EXTERNAL-APP (WS) tools; external callers and
+        // Simple chat include every connected server.
+        const sourceTools = mcpManager.getAllTools(
+            this._excludeExternalAppMcpTools ? { wsOnly: false } : {}
+        );
+        return sourceTools.filter(t => {
             if (this._mcpServerFilter && !this._mcpServerFilter.has(t._serverName)) return false;
             if (allow && !this._mcpBypassesAllowlist && !allow.has(t.name)) return false;
             return true;
@@ -1207,6 +1234,15 @@ export class ToolExecutor {
         const targetTool = mcpManager.getAllTools().find(t => t.name === name);
         if (!targetTool) {
             return `Error: Tool "${name}" not found. Available MCP tools: ${mcpManager.getAllTools().map(t => t.name).join(', ') || 'none'}.`;
+        }
+        // Defense-in-depth: an external-app (WS) tool should never reach here in a
+        // JHAI-owned task (it was excluded from the advertised list). If it does,
+        // refuse with a clear reason rather than reading a connected app's state.
+        if (this._excludeExternalAppMcpTools) {
+            const externalNames = new Set(mcpManager.getAllTools({ wsOnly: true }).map(t => t.name));
+            if (externalNames.has(name)) {
+                return `Error: Tool "${name}" is provided by a connected external app and is not available in this task.`;
+            }
         }
         onAgentStatus?.(`Calling MCP tool: ${name} (${targetTool._serverName})...`);
         // Strict Structured Outputs forces the model to emit every (now-required)

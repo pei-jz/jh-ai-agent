@@ -262,6 +262,33 @@ export const OVERVIEW_STYLES = `
 }
 .dm-results { display: flex; flex-direction: column; }
 .dm-note { font-size: var(--fs-xs); color: var(--text-tertiary); padding: 10px 11px; line-height: 1.6; }
+/* Why a section is there, beside its heading — the sections answer different
+   questions and the count alone does not say which. */
+.dm-note-inline { font-size: var(--fs-2xs); color: var(--text-tertiary); font-weight: 400; }
+/* Arrived since the panel was last opened. The rows it marks are shown either
+   way — a "new" flag should draw the eye, not gate the content. */
+.dm-new {
+    font-size: var(--fs-2xs); font-weight: 700; letter-spacing: 0.04em;
+    color: var(--accent); align-self: flex-start; margin-top: 1px;
+}
+
+/* Per-model tokens + cost. The bar above it gives the split; this gives the
+   figures, which is what "how much is this model costing me" actually needs. */
+.ds-tbl { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: var(--fs-2xs); }
+.ds-tbl th {
+    text-align: right; font-weight: 600; color: var(--text-tertiary);
+    padding: 2px 0 4px; border-bottom: 1px solid var(--border);
+}
+.ds-tbl th:first-child, .ds-tbl td:first-child { text-align: left; }
+.ds-tbl td {
+    padding: 3px 0; text-align: right; color: var(--text-secondary);
+    font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+}
+.ds-tbl td:first-child { font-family: inherit; color: var(--text-primary); }
+/* An estimated row is still a row — dimming it says "this number is softer"
+   without hiding the spend, which is the one thing that must not be hidden. */
+.ds-tbl tr.is-est td { color: var(--text-tertiary); }
+.ds-est { margin-left: 2px; cursor: help; }
 .dm-note code { font-family: var(--font-mono); }
 
 /* ── Run pane: phase rail ─────────────────────────────────── */

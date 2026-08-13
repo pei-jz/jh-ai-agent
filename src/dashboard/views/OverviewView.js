@@ -5,11 +5,16 @@ import { modelRates } from '../../modules/ai/agent/ModelPhaseRouter.js';
 import { promptTemplateManager } from '../../modules/ai/PromptTemplateManager.js';
 import { readWorkspaceMemory, writeCards } from '../../modules/ai/memory/workspaceMemory.js';
 import {
-    memoryLayers, memoryHealth, recentlyLearned, searchMemory,
+    memoryLayers, memoryHealth, recentlyLearned, searchMemory, knowledgeDigest,
     toggleCardDisabled, HALF_LIFE_DAYS,
 } from './overview/memoryPanel.js';
 import { rankRecipes, readUseCounts, recordUse } from './overview/recipes.js';
 import { reduceRun, phaseRail, runCost } from './overview/runFeed.js';
+// Cache accounting is provider-dependent and easy to get wrong in both
+// directions. There is exactly one implementation of it — the Monitor
+// inspector's — and every cost figure in the app now goes through it.
+import { costOf, per1m } from './monitor/inspector.js';
+import { t } from '../../i18n/index.js';
 
 // Dashboard — a cockpit whose second half is the agent's memory.
 //
@@ -151,10 +156,17 @@ export class OverviewView {
     /**
      * Cost for a set of tasks, attributed per model.
      *
-     * Prices each model's tokens at that model's own rates — the same
-     * attribution the backend does, kept per-model here because the breakdown
-     * IS the point: it is the input to the Fast/Deep tier decision. Falls back
-     * to the flat rate for anything unpriced rather than pretending it was free.
+     * Prices each model's tokens at that model's own rates, because the
+     * breakdown IS the point here: it is the input to the Fast/Deep tier
+     * decision. Falls back to a flat rate for anything unpriced rather than
+     * pretending it was free.
+     *
+     * The arithmetic goes through the Monitor inspector's `costOf`, which is the
+     * one place that gets the cache accounting right — see the note on
+     * `cacheInsideInput`. This used to subtract the cache from the prompt count
+     * unconditionally, which is correct for OpenAI-compatible providers (DeepSeek,
+     * Kimi, Gemini: cache is a SUBSET of prompt_tokens) and wrong for Anthropic
+     * (cache is ADDITIVE), where it could drive the input figure negative.
      */
     _spend(tasks) {
         const rates = modelRates(this.config.llm_instances);
@@ -178,9 +190,7 @@ export class OverviewView {
                 const r = rateFor(model);
                 let cost;
                 if (r) {
-                    cost = ((u.prompt_tokens || 0) - (u.cache_read_input_tokens || 0)) / 1e6 * r.input
-                        + (u.cache_read_input_tokens || 0) / 1e6 * r.cacheRead
-                        + (u.completion_tokens || 0) / 1e6 * r.output;
+                    cost = costOf(u, per1m(r))?.total || 0;
                 } else {
                     cost = tokens * flat;
                     unpriced += tokens;
@@ -327,8 +337,34 @@ export class OverviewView {
                 </div>
                 <div class="ds-bar">${bar}</div>
                 <div class="ds-lg">${lg}</div>
+                ${this._spendRowsHtml(s)}
                 ${tip}
             </div>`;
+    }
+
+    /**
+     * Tokens AND money, per model.
+     *
+     * The bar above answers "what is the split"; it cannot answer "how much did
+     * that model actually cost me", because a percentage of an unknown total is
+     * not a number anyone can act on. Every model appears — including the ones
+     * too small for the bar's top-3 — since a cheap tier that turns out to be
+     * running most of the tokens is exactly what this view is for.
+     */
+    _spendRowsHtml(s) {
+        if (!s.rows.length) return '';
+        return `
+            <table class="ds-tbl">
+                <thead><tr><th>${esc(t('dash.spend.model'))}</th><th>${esc(t('dash.spend.tokens'))}</th><th>${esc(t('dash.spend.cost'))}</th></tr></thead>
+                <tbody>
+                    ${s.rows.map(r => `
+                        <tr${r.priced ? '' : ' class="is-est"'}>
+                            <td title="${esc(r.label)}">${esc(clip(r.label, 28))}</td>
+                            <td>${fmt(r.tokens)}</td>
+                            <td>${money(r.cost)}${r.priced ? '' : `<span class="ds-est" title="${esc(t('dash.spend.estimated'))}">≈</span>`}</td>
+                        </tr>`).join('')}
+                </tbody>
+            </table>`;
     }
 
     _tabsHtml(m) {
@@ -490,19 +526,19 @@ export class OverviewView {
                 </div>
 
                 ${this._healthHtml(H)}
-                ${this._learnedHtml()}
 
                 <div class="dm-search">
                     ${icon('search', 13)}
                     <input id="dash-mem-q" type="text" value="${esc(this.memQuery)}"
-                        placeholder="Search what it knows" aria-label="Search memory">
+                        placeholder="${esc(t('dash.mem.searchHint'))}"
+                        aria-label="${esc(t('dash.mem.searchHint'))}">
                     <span class="sc">${L.totalCards} cards · ${L.totalFacts} facts</span>
                 </div>
                 ${this.memQuery ? `<div class="dm-box dm-results">${
                     results.length
                         ? results.map(r => this._memRowHtml(r, { plain: true })).join('')
                         : `<p class="dm-note">Nothing matches “${esc(this.memQuery)}”.</p>`
-                }</div>` : ''}
+                }</div>` : this._digestHtml()}
             </div>`;
     }
 
@@ -558,18 +594,41 @@ export class OverviewView {
             </div>`;
     }
 
-    _learnedHtml() {
-        const rows = this._newCards();
-        if (!rows.length) return '';
-        return `
+    // NOTE: _learnedHtml is gone. It rendered a "Learned since you last looked"
+    // box from CARDS only, which is why a workspace with facts and no cards had
+    // an empty body. _digestHtml below covers the same ground for both stores,
+    // and marks the new rows rather than hiding the older ones.
+
+    /**
+     * The panel's DEFAULT body — what it knows, without being asked.
+     *
+     * Previously the body was a search box and nothing else: results existed only
+     * once you typed, and the "learned recently" box covered cards alone. A
+     * workspace with 14 facts and no cards rendered the number 14 and none of the
+     * facts. Reviewing what the agent believes is the reason to open this panel,
+     * so the knowledge is now the default view and search is the filter.
+     */
+    _digestHtml() {
+        const d = knowledgeDigest(this.memory, { sinceMs: this.memSeenAt });
+        const section = (ico, title, rows, note) => (rows.length ? `
             <div class="dm-box">
                 <div class="dm-h">
-                    ${icon('sparkle', 13)} Learned since you last looked
-                    <span class="badge">${rows.length} new</span>
+                    ${icon(ico, 13)} ${title}
+                    <span class="badge">${rows.length}</span>
+                    ${note ? `<span class="dm-note-inline">${note}</span>` : ''}
                     <a class="more" href="#config?tab=memory">Settings → Memory →</a>
                 </div>
-                ${rows.map(r => this._memRowHtml(r)).join('')}
-            </div>`;
+                ${rows.map(r => this._memRowHtml(r, { plain: true })).join('')}
+            </div>` : '');
+
+        const newCount = d.recent.filter(r => r.isNew).length;
+        const body = section('shield', t('dash.mem.rules'), d.rules, t('dash.mem.rules.note'))
+            + section('sparkle', t('dash.mem.recent'), d.recent,
+                newCount ? t('dash.mem.recent.note', { count: newCount }) : '')
+            + section('alert', t('dash.mem.lessons'), d.lessons, t('dash.mem.lessons.note'));
+
+        // Counts above but nothing below would read as a broken panel; say why.
+        return body || `<p class="dm-note">${esc(t('dash.mem.nothingToShow'))}</p>`;
     }
 
     _memRowHtml(r, { plain = false } = {}) {
@@ -583,6 +642,7 @@ export class OverviewView {
         return `
             <div class="dm-row ${card?.disabled ? 'is-off' : ''}">
                 <span class="dm-badge is-${esc(badge)}">${esc(badge)}</span>
+                ${r.isNew ? `<span class="dm-new" title="${esc(t('dash.mem.new.title'))}">${esc(t('dash.mem.new'))}</span>` : ''}
                 <span class="body">
                     <span class="hl">${esc(r.headline || '')}</span>
                     <span class="dt">${esc(r.detail || '')}</span>

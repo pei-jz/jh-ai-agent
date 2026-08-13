@@ -19,6 +19,15 @@ export const SAFETY_DEFAULTS = {
     // Learning continues either way, so a run without recall is a control
     // session, not a wasted one (docs/design/agent-memory-layers.md §6).
     memoryRecall: 'on',
+    // Step at which a run on the Fast tier is promoted to Deep. 0 ⇒ never.
+    //
+    // Default OFF. It used to read `safety.maxIterations`, a field this module
+    // has never returned (it is `maxSteps`), so the expression fell through to
+    // `30 * 0.5` and **every run escalated at step 15** no matter how the step
+    // limit was configured — including unlimited runs, where "half the budget"
+    // means nothing. A switch also throws away the prompt cache for the whole
+    // remainder of the run, so it is not something to do on a guessed threshold.
+    escalateAtStep: 0,
     // 'off' | 'on' — move the run between the Fast and Deep tiers as it passes
     // through plan → execute → review, instead of picking one tier up front.
     // Off by default: it changes which model answers, and that is not a change
@@ -95,6 +104,7 @@ export function normalizeSafetyLimits(cfg = {}) {
         agentTemperature,
         planMode,
         subagentReview,
+        escalateAtStep:           num(cfg.escalate_at_step,             d.escalateAtStep),
         memoryRecall: MEMORY_RECALL_MODES.has(cfg.memory_recall) ? cfg.memory_recall : d.memoryRecall,
         phaseRouting: PHASE_ROUTING_MODES.has(cfg.phase_routing) ? cfg.phase_routing : d.phaseRouting,
     };

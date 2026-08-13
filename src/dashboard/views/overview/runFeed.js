@@ -16,6 +16,7 @@
 
 import { toolLineText, toolTarget } from '../monitor/toolLine.js';
 import { replayLineType, replayStepNo } from '../monitor/taskTimeline.js';
+import { costOf, per1m } from '../monitor/inspector.js';
 
 /** Lines kept in the compact feed. Enough to see what it is doing, not a log. */
 export const FEED_LIMIT = 6;
@@ -170,7 +171,11 @@ export function phaseRail(run) {
 /**
  * Cost so far, priced per model.
  *
- * Same rule as the spend panel: each model's tokens at that model's own rates.
+ * Same rule as the spend panel, and through the same arithmetic: `costOf` is the
+ * one place that decides whether a provider's cache reads are inside its prompt
+ * count (OpenAI-compatible — DeepSeek, Kimi, Gemini) or beside it (Anthropic).
+ * Subtracting unconditionally, as this used to, is wrong for the second kind.
+ *
  * Returns null when nothing can be priced, so the caller shows no figure at all
  * rather than a confident "$0.00" for a run that has certainly cost something.
  */
@@ -184,10 +189,17 @@ export function runCost(run, rates) {
     for (const [model, u] of Object.entries(run?.byModel || {})) {
         const r = rates[model] || byBare[model];
         if (!r) continue;
+        // reduceRun accumulates under its own field names; costOf reads the
+        // provider's.
+        const c = costOf({
+            prompt_tokens: u.prompt,
+            completion_tokens: u.completion,
+            cache_read_input_tokens: u.cacheRead,
+            total_tokens: u.prompt + u.completion,
+        }, per1m(r));
+        if (!c) continue;
         priced = true;
-        total += (u.prompt - u.cacheRead) / 1e6 * r.input
-            + u.cacheRead / 1e6 * r.cacheRead
-            + u.completion / 1e6 * r.output;
+        total += c.total;
     }
     return priced ? Math.max(0, total) : null;
 }

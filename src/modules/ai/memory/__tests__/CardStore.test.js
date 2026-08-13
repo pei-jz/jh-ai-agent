@@ -8,7 +8,7 @@ import { describe, it, expect, vi } from 'vitest';
 import {
     mintCards, mergeCards, cardScore, cardKey, selectForTool, selectBrief,
     renderCard, renderBrief, reconcile, recurrenceRate, recurrenceStats, CardStore, HALF_LIFE_DAYS,
-    isDurableQuery, cardSummary, summarizeMinted,
+    isDurableQuery, cardSummary, summarizeMinted, selectBriefBudgeted, BRIEF_BUDGET,
 } from '../CardStore.js';
 import { toEvent, summarizeFailures } from '../TraceRecorder.js';
 
@@ -264,6 +264,67 @@ describe('recall', () => {
     it('says nothing when there is nothing to say', () => {
         expect(renderBrief([])).toBe('');
         expect(selectForTool([], { tool: 'x' })).toBeNull();
+    });
+});
+
+// The opening brief fills each KIND against its own budget instead of ranking
+// everything together. `cardScore` is led by costSteps — how much a failure
+// HURT, not how much it matters — so one ranked list let painful trivia evict
+// everything else (plan §4.5).
+describe('brief budgets', () => {
+    const card = (over) => ({
+        id: over.id, type: 'insight', hits: 1, confidence: 0.8,
+        last_recurrence: '2026-08-12', trigger: {}, ...over,
+    });
+
+    it('a costly lesson cannot take the whole brief', () => {
+        const store = [
+            card({ id: 'L1', type: 'lesson', costSteps: 40, symptom: 'anchor' }),
+            card({ id: 'L2', type: 'lesson', costSteps: 30, symptom: 'anchor' }),
+            card({ id: 'L3', type: 'lesson', costSteps: 20, symptom: 'anchor' }),
+            card({ id: 'I1', kind: 'recovery', what: 'read_file → write_file', costSteps: 1 }),
+        ];
+        const picked = selectBriefBudgeted(store);
+        // Under one ranked list this was L1, L2, L3 — the insight never appeared.
+        expect(picked.filter(c => c.type === 'lesson')).toHaveLength(1);
+        expect(picked.some(c => c.id === 'I1')).toBe(true);
+    });
+
+    it('ranks WITHIN a budget by what the task is about', () => {
+        const store = [
+            card({ id: 'far', kind: 'locator', q: 'billing', target: 'src/billing.js', costSteps: 9 }),
+            card({ id: 'near', kind: 'locator', q: 'licenseState', target: 'src/license.js', costSteps: 1 }),
+        ];
+        // 'far' scores higher (costSteps 9 vs 1); the query is what flips it.
+        expect(selectBriefBudgeted(store, { budgets: { insight: 1 } })[0].id).toBe('far');
+        expect(selectBriefBudgeted(store, { budgets: { insight: 1 }, query: 'licenseState を直す' })[0].id).toBe('near');
+    });
+
+    it('falls back to score when there is no query', () => {
+        const store = [
+            card({ id: 'a', kind: 'recovery', what: 'x', costSteps: 2 }),
+            card({ id: 'b', kind: 'recovery', what: 'y', costSteps: 9 }),
+        ];
+        expect(selectBriefBudgeted(store, { budgets: { insight: 1 } })[0].id).toBe('b');
+    });
+
+    it('skips disabled cards and ones already shown', () => {
+        const store = [
+            card({ id: 'off', kind: 'recovery', what: 'x', costSteps: 9, disabled: true }),
+            card({ id: 'seen', kind: 'recovery', what: 'y', costSteps: 8 }),
+            card({ id: 'ok', kind: 'recovery', what: 'z', costSteps: 1 }),
+        ];
+        const picked = selectBriefBudgeted(store, { budgets: { insight: 2 }, exclude: new Set(['seen']) });
+        expect(picked.map(c => c.id)).toEqual(['ok']);
+    });
+
+    it('leaves a kind out entirely when its budget is zero', () => {
+        const store = [card({ id: 'L1', type: 'lesson', costSteps: 40, symptom: 'x' })];
+        expect(selectBriefBudgeted(store, { budgets: { insight: 2, lesson: 0 } })).toEqual([]);
+    });
+
+    it('the default budget keeps lessons a minority', () => {
+        expect(BRIEF_BUDGET.lesson).toBeLessThan(BRIEF_BUDGET.insight);
     });
 });
 

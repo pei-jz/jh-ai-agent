@@ -14,10 +14,14 @@ import {
 } from '../configForm.js';
 
 describe('SAFETY_FIELDS', () => {
-    it('describes all six agent-safety limits', () => {
+    it('describes every agent-safety limit', () => {
         expect(SAFETY_FIELDS.map(f => f.key)).toEqual([
             'max_steps', 'token_budget', 'wall_clock_minutes',
-            'no_progress_window', 'identical_call_threshold', 'cycle_detection_min_repeats',
+            'no_progress_window', 'identical_call_threshold',
+            // Tier promotion by step count. Off by default: it used to fire at
+            // step 15 on every run — a stale field name, not a setting.
+            'escalate_at_step',
+            'cycle_detection_min_repeats',
         ]);
     });
 

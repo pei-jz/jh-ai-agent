@@ -14,6 +14,7 @@ const invoke = vi.fn(async () => '');
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a) => invoke(...a) }));
 
 const { OverviewView, ATTENTION_WINDOW_H } = await import('../OverviewView.js');
+const { t } = await import('../../../i18n/index.js');
 
 const hAgo = (n) => new Date(Date.now() - n * 3600000).toISOString();
 
@@ -170,6 +171,43 @@ describe('spend is attributed per model', () => {
         expect(v._spend(v.tasks).rows[0].label).toBe('(unattributed)');
     });
 
+    // Cache accounting differs by provider and getting it wrong is expensive in
+    // both directions. Kimi/DeepSeek/OpenAI/Gemini report cache INSIDE
+    // prompt_tokens; Anthropic reports it beside them.
+    it('does not bill a cached token twice for an OpenAI-compatible provider', () => {
+        // A real step from Kimi: ↑137,506 of which 135,680 cached, ↓211,
+        // total 137,717 — so total = prompt + completion, cache is a subset.
+        v.tasks = [task({
+            started_at: hAgo(2),
+            model_usage: { 'i2:k3': {
+                prompt_tokens: 137506, completion_tokens: 211,
+                cache_read_input_tokens: 135680, total_tokens: 137717,
+            } },
+        })];
+        v.config = RATED;
+        // fresh 1,826 @ $3 + cached 135,680 @ $0.30(=input×0.1) + out 211 @ $15
+        const expected = 1826 / 1e6 * 3 + 135680 / 1e6 * 0.3 + 211 / 1e6 * 15;
+        expect(v._spend(v.tasks).total).toBeCloseTo(expected, 6);
+    });
+
+    // Subtracting unconditionally drove this negative before the fix.
+    it('does not subtract a cache that was never inside the prompt count', () => {
+        v.tasks = [task({
+            started_at: hAgo(2),
+            // Anthropic shape: input is small, cache_read is separate and large,
+            // and the total reflects both.
+            model_usage: { 'i2:k3': {
+                prompt_tokens: 1000, completion_tokens: 500,
+                cache_read_input_tokens: 50000, total_tokens: 51500,
+            } },
+        })];
+        v.config = RATED;
+        const expected = 1000 / 1e6 * 3 + 50000 / 1e6 * 0.3 + 500 / 1e6 * 15;
+        const got = v._spend(v.tasks).total;
+        expect(got).toBeGreaterThan(0);
+        expect(got).toBeCloseTo(expected, 6);
+    });
+
     it('points at the tier setting only when one model dominates', () => {
         v.stats = { totalTokens: 1, estimatedCost: 0 };
         expect(left([mk('i2:k3', 1e7, 0), mk('i1:flash', 1e5, 0)], RATED))
@@ -246,10 +284,28 @@ describe('the memory pane', () => {
         expect(html).not.toContain('held — failure stopped');
     });
 
-    it('lists what was learned since the last look', () => {
+    it('lists what it knows WITHOUT being searched', () => {
+        // Reported: the panel showed "14 facts" and none of them. The body only
+        // rendered once a query was typed, and the one list it had covered cards.
+        const html = pane(mem({
+            facts: [{ fact: 'Always run npm test', kind: 'norm', type: 'semantic', timestamp: 1 }],
+            cards: [],
+        }));
+        expect(html).toContain('Always run npm test');
+        expect(html).toContain(t('dash.mem.rules'));
+    });
+
+    it('marks what arrived since the last look, without hiding the rest', () => {
         v.memSeenAt = Date.parse('2026-08-05');
         const html = pane(mem({ cards: [card({ last_recurrence: '2026-08-09' })] }));
-        expect(html).toContain('Learned since you last looked');
+        expect(html).toContain(t('dash.mem.recent'));
+        expect(html).toContain(t('dash.mem.new'));
+    });
+
+    it('shows failures separately, so they cannot be crowded out', () => {
+        const html = pane(mem({ cards: [card({ type: 'lesson', symptom: 'anchor mismatch', costSteps: 7 })] }));
+        expect(html).toContain(t('dash.mem.lessons'));
+        expect(html).toContain('anchor mismatch');
     });
 
     it('shows search results only once something is typed', () => {

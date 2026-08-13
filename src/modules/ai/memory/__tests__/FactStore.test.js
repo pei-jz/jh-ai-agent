@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { mergeFacts, selectRelevantFacts, retentionScore, pruneFacts, applyConsolidation, capFactText, FACT_MAX_CHARS, factType } from '../FactStore.js';
+import { mergeFacts, selectRelevantFacts, retentionScore, pruneFacts, applyConsolidation, capFactText, FACT_MAX_CHARS, factType, selectNormFacts } from '../FactStore.js';
 
 describe('mergeFacts', () => {
     it('adds new facts and skips too-short ones', () => {
@@ -292,5 +292,46 @@ describe('retention with layers', () => {
         const now = Date.now();
         expect(retentionScore({ hits: 1, timestamp: now }, now))
             .toBe(retentionScore({ hits: 1, timestamp: now, type: 'semantic' }, now));
+    });
+});
+
+// Project RULES get their own standing budget instead of competing with
+// observations on keyword relevance. "Run npm test before committing" shares no
+// words with "fix the header alignment" and would never clear a relevance floor,
+// yet it is exactly what must not be dropped (plan §4.5).
+describe('selectNormFacts', () => {
+    const norm = (fact, over = {}) => ({ fact, kind: 'norm', type: 'semantic', confidence: 0.5, hits: 1, timestamp: 1, ...over });
+
+    it('returns only promoted norms', () => {
+        const facts = [
+            norm('Always run npm test before committing'),
+            { fact: 'The dashboard mounts Svelte islands', kind: 'observation', type: 'semantic' },
+            norm('probationary rule', { type: 'episodic' }),
+        ];
+        expect(selectNormFacts(facts).map(f => f.fact)).toEqual(['Always run npm test before committing']);
+    });
+
+    it('does NOT filter by relevance — a rule applies regardless of the task', () => {
+        const facts = [norm('Always run npm test before committing')];
+        // selectRelevantFacts would drop this for an unrelated query; this must not.
+        expect(selectNormFacts(facts)).toHaveLength(1);
+    });
+
+    it('ranks the best-established rule first', () => {
+        const facts = [
+            norm('weakly held', { confidence: 0.5 }),
+            norm('well established', { confidence: 0.9 }),
+        ];
+        expect(selectNormFacts(facts)[0].fact).toBe('well established');
+    });
+
+    it('caps the standing budget', () => {
+        const facts = Array.from({ length: 9 }, (_, i) => norm(`rule number ${i}`));
+        expect(selectNormFacts(facts, 3)).toHaveLength(3);
+    });
+
+    it('survives junk', () => {
+        expect(selectNormFacts(null)).toEqual([]);
+        expect(selectNormFacts([])).toEqual([]);
     });
 });

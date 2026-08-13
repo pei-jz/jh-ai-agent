@@ -272,6 +272,14 @@ export class AgentController {
             || !!(this.behaviorOverrides && (this.behaviorOverrides.mcp_servers || this.behaviorOverrides.intent));
         this._isExternalCaller = isExternalCaller;
 
+        // JHAI's OWN tasks (NewTask / Schedule / DirectChat / sub-agents) must NOT
+        // be offered MCP tools that a connected external app provides over its
+        // WebSocket link (JHEditor get_buffer / list_workspace_files / …). Those
+        // tools read the app's LIVE editor state — meaningless for a plain
+        // workspace task, and a common way the model burns steps. External callers
+        // keep them: that workspace access is the whole point of their task.
+        this.toolExecutor.setExcludeExternalAppMcpTools(!isExternalCaller);
+
         // ── Plan-First approval gate ─────────────────────────────────────
         // For a complex task, the agent must FIRST deliver a concrete plan and
         // get the user's approval before it may edit files or run commands.
@@ -320,7 +328,9 @@ export class AgentController {
         // memory extraction). Those are JSON/boilerplate generators — running them
         // on the active deep model costs seconds of post-run latency for nothing.
         this._fastModelId = tierModels.fast || null;
-        this._escalateAtStep = Math.max(6, Math.ceil((safety.maxIterations || 30) * 0.5));
+        // 0 ⇒ never promote on step count alone. See SAFETY_DEFAULTS.escalateAtStep
+        // for why the old expression promoted every run at step 15.
+        this._escalateAtStep = safety.escalateAtStep > 0 ? safety.escalateAtStep : 0;
 
         // ── Phase routing ────────────────────────────────────────────────
         // Same tier ids, but re-decided as the run moves plan → execute →
@@ -469,6 +479,12 @@ export class AgentController {
             // while bypassing allowlist checks for MCP tools (provided by the workspace side).
             enabledTools = [];
             this.toolExecutor._mcpBypassesAllowlist = true;
+        } else if (isExternalCaller && Array.isArray(enabledTools)) {
+            // An EXPLICIT enabled_tools list from an external caller scopes BOTH built-in
+            // AND MCP tools — otherwise workspace-side MCP tools (list_workspace_files,
+            // read_workspace_file, …) are all advertised and the LLM calls tools that are
+            // not actually enabled for the task. Only the unspecified case above bypasses.
+            this.toolExecutor._mcpBypassesAllowlist = false;
         }
 
         if (Array.isArray(enabledTools)) {
@@ -619,12 +635,12 @@ export class AgentController {
             // otherwise one long task silently spends the rest of itself on the
             // expensive model, which is the cost leak this feature exists to close.
             if (this._phaseRouting) {
-                if (!this._phaseEscalated && iteration >= this._escalateAtStep) {
+                if (this._escalateAtStep > 0 && !this._phaseEscalated && iteration >= this._escalateAtStep) {
                     this._phaseEscalated = true;
                     onAgentStatus?.({ event: 'status', status: 'running', message: `🧠 実装フェーズを上位モデル(deep)に昇格 — step ${iteration} 到達` });
                     this._phaseEvent('step', { iteration }, onAgentStatus);
                 }
-            } else if (this._deepModelId && this._modelOverride !== this._deepModelId
+            } else if (this._escalateAtStep > 0 && this._deepModelId && this._modelOverride !== this._deepModelId
                 && iteration >= this._escalateAtStep) {
                 this._modelOverride = this._deepModelId;
                 onAgentStatus?.({ event: 'status', status: 'running', message: `🧠 上位モデル(deep)に切替 — step ${iteration} 到達` });
@@ -694,7 +710,10 @@ export class AgentController {
             // Deliberately outside the planning if/else below: it is orthogonal
             // to which planning mode the run is in.
             if (iteration === 1 && this._recallOn) {
-                const cards = this._cards?.recallBrief(3) || [];
+                // The task prompt ranks WITHIN each kind's budget: an insight about
+                // the area being worked on beats a higher-scoring one from an
+                // unrelated corner of the project.
+                const cards = this._cards?.recallBrief(prompt) || [];
                 const brief = renderBrief(cards);
                 if (brief) {
                     history.push({ role: 'user', content: brief });

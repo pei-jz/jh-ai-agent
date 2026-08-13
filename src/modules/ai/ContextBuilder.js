@@ -4,6 +4,8 @@ import { conversationMemory } from './ConversationMemory.js';
 import { tokenEstimator } from './TokenEstimator.js';
 import llmService from './LLMService.js';
 import { composePersona, buildInstructionsBlock, hashText } from './agent/ProjectInstructions.js';
+import { readOverview } from './memory/workspaceMemory.js';
+import { renderOverview } from './memory/ProjectOverview.js';
 // Which KIND of agent this task's prompt describes. Replaces a two-way
 // editing/lite branch that made every non-code task a second-class citizen.
 import { personaTier, personaFor, wantsEditingRules } from './agent/personaTier.js';
@@ -274,7 +276,12 @@ JSON FORMATTING RULES (critical — most failures come from these):
         try {
             personaOverride = await invoke('read_file', { path: `${root}/.agent/agents/default.md` }) || '';
         } catch (_) { /* no persona file — use the built-in one */ }
-        const filesHash = hashText(personaOverride, projectInstructions);
+        // The generated orientation note (Study → overview). Standing context, so
+        // it joins the cache key: regenerating it must take effect on the next
+        // step rather than after a restart.
+        let overview = { text: '', generatedAt: '' };
+        try { overview = await readOverview(root, invoke); } catch (_) { /* none yet */ }
+        const filesHash = hashText(personaOverride, projectInstructions, overview.text);
 
         const cacheKey = `${root}|${currentModel}|${outputLanguage}|${isNative}|${tier}|${subagentsEnabled ? 'sub' : 'nosub'}|${filesHash}`;
 
@@ -478,6 +485,13 @@ ${projectInfo}
         // — unlike the summary — never passed through trimToFit. Capped only by
         // a generous hard limit, and if that ever bites, the omission is stated
         // in-band rather than silently cutting the middle out of the rules.
+        // The generated orientation note — the GIST layer. Placed BEFORE the
+        // user's own instructions and labelled as generated, because the two must
+        // not read as equally authoritative: one is a machine's reading of the
+        // directory structure, the other is what the user actually requires.
+        const overviewBlock = renderOverview(overview.text, { generatedAt: overview.generatedAt });
+        if (overviewBlock) stablePart += `\n${overviewBlock}\n`;
+
         if (projectInstructions) {
             const maxChars = Math.max(4000, Math.floor(systemBudget * 0.30) * 4); // ~30% of the system budget, in chars
             const { block, truncated, chars } = buildInstructionsBlock(projectInstructions, { maxChars });

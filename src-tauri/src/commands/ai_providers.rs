@@ -152,6 +152,17 @@ pub(crate) fn clean_openai_tools(tools: &serde_json::Value, strict_supported: bo
     };
     let cleaned: Vec<serde_json::Value> = arr
         .iter()
+        .filter(|t| {
+            // Drop entries that cannot produce a valid OpenAI tool call —
+            // Azure 400s on a tool whose function has no name. The JS layer
+            // already filters, but this is the last line of defense before the
+            // request leaves the process.
+            t.get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(|n| n.as_str())
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false)
+        })
         .map(|t| {
             let mut tool = t.clone();
             let strict_ok = tool
@@ -162,7 +173,11 @@ pub(crate) fn clean_openai_tools(tools: &serde_json::Value, strict_supported: bo
                 obj.remove("_strict_ok");
                 if strict_supported && strict_ok {
                     if let Some(func) = obj.get_mut("function").and_then(|f| f.as_object_mut()) {
+                        // Azure/OpenAI Structured Outputs also require a parameters object.
                         func.insert("strict".to_string(), serde_json::json!(true));
+                        if func.get("parameters").is_none() {
+                            func.insert("parameters".to_string(), serde_json::json!({ "type": "object", "properties": {} }));
+                        }
                     }
                 }
             }

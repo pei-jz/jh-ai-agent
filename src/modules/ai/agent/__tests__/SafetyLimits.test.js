@@ -55,6 +55,27 @@ describe('normalizeSafetyLimits', () => {
         expect(normalizeSafetyLimits({ agent_temperature: -1 }).agentTemperature).toBe(SAFETY_DEFAULTS.agentTemperature);
     });
 
+    // Reported: "the Fast model switches to Deep at step 15" — on every run, at
+    // any step limit, including unlimited. The threshold read `maxIterations`,
+    // which this module has never returned (it is `maxSteps`), so it silently
+    // fell through to 30 × 0.5. Step-based promotion is off unless asked for.
+    it('leaves step-based tier promotion OFF by default', () => {
+        expect(normalizeSafetyLimits({}).escalateAtStep).toBe(0);
+        expect(SAFETY_DEFAULTS.escalateAtStep).toBe(0);
+    });
+
+    it('never derives a threshold from the step limit', () => {
+        // The old expression turned any max_steps into a promotion point.
+        expect(normalizeSafetyLimits({ max_steps: 30 }).escalateAtStep).toBe(0);
+        expect(normalizeSafetyLimits({ max_steps: 0 }).escalateAtStep).toBe(0);
+    });
+
+    it('takes an explicit step when one is configured', () => {
+        expect(normalizeSafetyLimits({ escalate_at_step: 40 }).escalateAtStep).toBe(40);
+        expect(normalizeSafetyLimits({ escalate_at_step: -5 }).escalateAtStep).toBe(0);
+        expect(normalizeSafetyLimits({ escalate_at_step: 'x' }).escalateAtStep).toBe(0);
+    });
+
     it('validates memory_recall (on/off/auto), defaulting on bad input', () => {
         expect(normalizeSafetyLimits({ memory_recall: 'off' }).memoryRecall).toBe('off');
         expect(normalizeSafetyLimits({ memory_recall: 'auto' }).memoryRecall).toBe('auto');

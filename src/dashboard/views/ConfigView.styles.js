@@ -190,6 +190,13 @@ export const CONFIG_SECTION_STYLES = `
 
                     /* Memory tab. */
                     .cfg-mem-hint { color: var(--text-tertiary); font-size: var(--fs-sm); padding: 14px 0; }
+                    /* The study control sits under the workspace row: it acts ON
+                       that workspace, so it belongs with it rather than in the
+                       lists it fills. */
+                    .cfg-mem-study {
+                        display: flex; align-items: center; gap: 10px; margin-top: 8px;
+                    }
+                    .cfg-mem-study .cfg-hint { margin: 0; font-size: var(--fs-xs); }
                     .cfg-mem-box {
                         margin-top: 8px; padding: 14px 16px;
                         border: 1px solid var(--border); border-radius: var(--radius-md);
