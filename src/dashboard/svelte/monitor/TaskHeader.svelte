@@ -31,6 +31,8 @@
         status = '',
         /** Reasoning steps so far, from the timeline. */
         steps = 0,
+        /** Subtask checklist tally {done,total} from the timeline, or null. */
+        progress = null,
         usage = {},
         /** {used, limit} from headerStats.contextReading, or null before the first call. */
         context = null,
@@ -42,6 +44,18 @@
 
     const running = $derived(status === 'running');
     const gauge = $derived(contextGauge(context));
+    // Subtask progress for the mini bar. A single-item or empty plan is not
+    // worth a bar — the tally next to it says everything.
+    const plan = $derived(
+        progress && progress.total > 1
+            ? {
+                done: Math.min(progress.done, progress.total),
+                total: progress.total,
+                pct: Math.round((Math.min(progress.done, progress.total) / progress.total) * 100),
+                allDone: progress.done >= progress.total,
+            }
+            : null,
+    );
     const elapsed = $derived(elapsedText({
         startedAt: task?.started_at,
         completedAt: task?.completed_at,
@@ -89,6 +103,16 @@
     <!-- One bar, its % on the right. An earlier version put the label and the
          number on a second line, which read as a second statistic rather than as
          the bar's own value. -->
+    {#if plan}
+        <div class="mdh-ctx mdh-progress" title="Subtask checklist: {plan.done}/{plan.total} complete">
+            <span class="mdh-ctx-label">Progress</span>
+            <span class="mdh-ctx-track">
+                <span class="mdh-ctx-fill mdh-progress-fill" class:is-danger={!plan.allDone && plan.pct === 100}
+                    style={`width:${plan.pct}%`}></span>
+            </span>
+            <span class="mdh-ctx-pct">{plan.done}/{plan.total}{plan.allDone ? ' ✓' : ''}</span>
+        </div>
+    {/if}
     <div class="mdh-ctx" title="How full the model's context window is (last LLM call's input vs the window)">
         <span class="mdh-ctx-label">Context</span>
         <span class="mdh-ctx-track">

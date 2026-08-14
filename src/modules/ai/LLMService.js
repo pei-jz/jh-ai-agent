@@ -552,7 +552,15 @@ class LLMService {
                     }
                     const kept = tcs.filter(tc => tc && tc.id && laterIds.has(tc.id));
                     if (kept.length > 0) {
-                        out.push({ role: 'assistant', content: content || null, tool_calls: kept });
+                        // NOTE: content stays a STRING even when empty. The wire
+                        // format wants null for a pure tool-call turn, but that
+                        // conversion belongs to Rust (build_messages maps "" → null
+                        // per provider): LlmMessage.content deserializes as String,
+                        // so sending null here failed the whole invoke with
+                        // "invalid args `payload` … invalid type: null, expected a
+                        // string" — every retry replayed the same history and the
+                        // run stalled.
+                        out.push({ role: 'assistant', content, tool_calls: kept });
                     } else if (content) {
                         out.push({ role: 'assistant', content });
                     }

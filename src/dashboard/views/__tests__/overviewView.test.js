@@ -582,3 +582,161 @@ describe('workspace pickers', () => {
         expect(document.getElementById('dash-mem-ws').value).toBe('E:\\typing');
     });
 });
+
+describe('stats tab conditions', () => {
+    const daysAgo = (n) => new Date(Date.now() - n * 86400000).toISOString();
+
+    it('_statsTasks defaults to all tasks', () => {
+        v.tasks = [task({ id: 'a1', status: 'completed' }), task({ id: 'b1', status: 'failed' })];
+        expect(v._statsTasks().length).toBe(2);
+    });
+
+    it('filters by status', () => {
+        v.tasks = [
+            task({ id: 'a1', status: 'completed' }),
+            task({ id: 'b1', status: 'failed' }),
+            task({ id: 'c1', status: 'running' }),
+        ];
+        v.statsStatus = 'failed';
+        const got = v._statsTasks();
+        expect(got.length).toBe(1);
+        expect(got[0].id).toBe('b1');
+    });
+
+    it('filters by period', () => {
+        v.tasks = [
+            task({ id: 'old1', started_at: daysAgo(10) }),
+            task({ id: 'new1', started_at: daysAgo(1) }),
+        ];
+        v.statsRange = '7d';
+        const got = v._statsTasks();
+        expect(got.length).toBe(1);
+        expect(got[0].id).toBe('new1');
+    });
+
+    it('combines period and status', () => {
+        v.tasks = [
+            task({ id: 'a1', status: 'completed', started_at: daysAgo(1) }),
+            task({ id: 'b1', status: 'failed', started_at: daysAgo(1) }),
+            task({ id: 'c1', status: 'failed', started_at: daysAgo(10) }),
+        ];
+        v.statsRange = '7d';
+        v.statsStatus = 'failed';
+        const got = v._statsTasks();
+        expect(got.length).toBe(1);
+        expect(got[0].id).toBe('b1');
+    });
+
+    it('offers only statuses that exist in history', () => {
+        v.tasks = [task({ status: 'completed' }), task({ status: 'failed' })];
+        const got = v._statsStatuses();
+        expect(got).toContain('completed');
+        expect(got).toContain('failed');
+        expect(got).not.toContain('paused');
+    });
+
+    it('keeps the selected status offered even after history changes', () => {
+        v.tasks = [task({ status: 'completed' })];
+        v.statsStatus = 'aborted';
+        expect(v._statsStatuses()).toContain('aborted');
+    });
+
+    it('_taskTokens reads token_usage', () => {
+        expect(v._taskTokens(task({ token_usage: { total_tokens: 42 } }))).toBe(42);
+    });
+
+    it('_taskTokens sums model_usage when token_usage is absent', () => {
+        const t = task({ token_usage: null, model_usage: {
+            'm1': { total_tokens: 10 }, 'm2': { total_tokens: 32 },
+        } });
+        expect(v._taskTokens(t)).toBe(42);
+    });
+
+    it('_taskTokens falls back to 0', () => {
+        expect(v._taskTokens(task({ token_usage: null }))).toBe(0);
+    });
+
+    it('the stats pane obeys the conditions in every figure', () => {
+        v.tasks = [
+            task({ id: 'ok1', status: 'completed', started_at: daysAgo(1), token_usage: { total_tokens: 100 } }),
+            task({ id: 'ng1', status: 'failed', started_at: daysAgo(1), token_usage: { total_tokens: 200 } }),
+            task({ id: 'old1', status: 'failed', started_at: daysAgo(40), token_usage: { total_tokens: 900 } }),
+        ];
+        v.statsRange = '30d';
+        v.statsStatus = 'failed';
+        const html = v._statsHtml(v._metrics());
+        expect(html).toContain('ng1');
+        expect(html).not.toContain('ok1');
+        expect(html).not.toContain('old1');
+    });
+
+    it('shows a message when no task matches the conditions', () => {
+        v.tasks = [task({ status: 'completed' })];
+        v.statsStatus = 'failed';
+        expect(v._statsHtml(v._metrics())).toContain('No tasks match these conditions');
+    });
+
+    it('_modelTokenRows splits tokens per model with the ↑⚡↓ shape', () => {
+        v.tasks = [
+            task({ model_usage: { 'i1:flash': { prompt_tokens: 100, cache_read_input_tokens: 40, completion_tokens: 10 } } }),
+            task({ model_usage: { 'i2:k3': { prompt_tokens: 1000, completion_tokens: 200 } } }),
+        ];
+        const { rows, anyCache } = v._modelTokenRows(v.tasks);
+        expect(rows.length).toBe(2);
+        const flash = rows.find(r => r.model === 'i1:flash');
+        expect(flash.in).toBe(100);
+        expect(flash.cache).toBe(40);
+        expect(flash.out).toBe(10);
+        expect(flash.tokens).toBe(150);
+        expect(anyCache).toBe(true);
+        // Sorted by total tokens, dearest first.
+        expect(rows[0].model).toBe('i2:k3');
+    });
+
+    it('_modelTokenRows marks no cache when none is reported', () => {
+        v.tasks = [task({ model_usage: { 'm': { prompt_tokens: 5, completion_tokens: 5 } } })];
+        expect(v._modelTokenRows(v.tasks).anyCache).toBe(false);
+    });
+
+    it('_modelTokenRows skips empty usage records', () => {
+        v.tasks = [task({ model_usage: { 'm': { prompt_tokens: 0, completion_tokens: 0 } } })];
+        expect(v._modelTokenRows(v.tasks).rows).toHaveLength(0);
+    });
+
+    it('the stats pane renders the per-model token table', () => {
+        v.tasks = [task({ model_usage: { 'i1:flash': { prompt_tokens: 100, completion_tokens: 10 } } })];
+        v.config = RATED;
+        const html = v._statsHtml(v._metrics());
+        expect(html).toContain(t('dash.stats.modelSplit'));
+        expect(html).toContain('flash');
+        expect(html).toContain(t('dash.stats.noCache'));
+    });
+
+    it('_taskModelLine summarises a task\'s models with cache detail', () => {
+        const t = task({ model_usage: {
+            'i1:flash': { prompt_tokens: 100, cache_read_input_tokens: 40, completion_tokens: 10 },
+        } });
+        const line = v._taskModelLine(t);
+        expect(line).toContain('flash');
+        expect(line).toContain('150');
+        expect(line).toContain('40');
+    });
+
+    it('_taskModelLine falls back to the flat usage when no model record exists', () => {
+        const t = task({ token_usage: { prompt_tokens: 7, completion_tokens: 3, total_tokens: 10 } });
+        expect(v._taskModelLine(t)).toContain('(all)');
+    });
+
+    it('_taskModelLine returns empty when there is no usage at all', () => {
+        expect(v._taskModelLine(task({ token_usage: null, model_usage: null }))).toBe('');
+    });
+
+    it('task sample rows carry the per-model line', () => {
+        v.tasks = [task({ id: 't1', model_usage: {
+            'i1:flash': { prompt_tokens: 100, completion_tokens: 10 },
+        } })];
+        const html = v._statsHtml(v._metrics());
+        expect(html).toContain('ds-st-task-models');
+        expect(html).toContain('flash');
+    });
+});

@@ -22,7 +22,7 @@
         selectedId = null,
         search = '',
         statusFilter = 'all',
-        groupBy = 'date',
+        groupBy = 'workspace',
         /** Persistent across renders, owned by the view — see applyDefaultCollapse. */
         seenKeys = new Set(),
         collapsedKeys = new Set(),
@@ -34,9 +34,19 @@
         onGroupBy = null,
     } = $props();
 
-    const STATUSES = ['all', 'running', 'paused', 'completed', 'failed', 'aborted'];
+    const STATUSES = ['running', 'paused', 'completed', 'failed', 'aborted'];
+
+    /** Normalize a single status (legacy 'all' string) to an array. */
+    const toArray = (v) => (Array.isArray(v) ? v : (!v || v === 'all' ? [] : [v]));
 
     const filtered = $derived(filterTasks(tasks, { search, status: statusFilter }));
+
+    const toggleStatus = (s) => {
+        const cur = new Set(toArray(statusFilter));
+        if (cur.has(s)) cur.delete(s);
+        else cur.add(s);
+        onStatusFilter?.([...cur]);
+    };
 
     // `collapsedKeys` (the caller's Set) stays the single source of truth — that is
     // what lets a manual toggle survive both a re-render and a re-route. A plain
@@ -74,19 +84,20 @@
         value={search}
         oninput={(e) => onSearch?.(e.currentTarget.value)}
     >
-    <select class="mtask-status" value={statusFilter}
-        onchange={(e) => onStatusFilter?.(e.currentTarget.value)}>
+    <div class="mtask-status-bar">
         {#each STATUSES as s (s)}
-            <option value={s}>{s === 'all' ? 'All statuses' : s}</option>
+            <button type="button" class="mtask-status-btn"
+                class:active={toArray(statusFilter).includes(s)}
+                onclick={() => toggleStatus(s)}>{s}</button>
         {/each}
-    </select>
+    </div>
 </div>
 
 <div class="mgroup-toggle">
-    <button class="mgroup-btn" class:active={groupBy === 'date'}
-        onclick={() => onGroupBy?.('date')}>{@html icon('calendar', 13)} Date</button>
     <button class="mgroup-btn" class:active={groupBy === 'workspace'}
         onclick={() => onGroupBy?.('workspace')}>{@html icon('folder', 13)} WS</button>
+    <button class="mgroup-btn" class:active={groupBy === 'date'}
+        onclick={() => onGroupBy?.('date')}>{@html icon('calendar', 13)} Date</button>
 </div>
 
 <div class="mpanel-left-list">

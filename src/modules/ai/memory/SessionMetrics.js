@@ -91,8 +91,15 @@ export function followsRecipe(events, recipe, fromIteration = 0) {
  * observations per session instead of ~0.2, and it fails loudly in the case
  * that matters — advice being injected and ignored.
  *
+ * On its own this number cannot be read. `read_file → write_file` is an ordering
+ * the agent produces constantly without being told to, so a follow-through of
+ * 0.32 might mean "a third of the advice landed" or "none of it did and a third
+ * of the recipes describe what happens anyway". Which one it is comes from
+ * running the same scoring over CONTROL runs, where the cards were selected but
+ * never shown (`shadow` entries) — see compareArms's `followThrough.lift`.
+ *
  * @param {Array} events    trace events
- * @param {Array} shownLog  [{ id, at, recipe }] — recipe as stored on the card
+ * @param {Array} shownLog  [{ id, at, recipe, shadow? }] — recipe as stored on the card
  */
 export function followThrough(events, shownLog) {
     const rows = (Array.isArray(shownLog) ? shownLog : [])
@@ -133,7 +140,11 @@ export function sessionMetrics({
         // Chars, not tokens: this is a RATIO between two arms, and chars need no
         // estimator (which would vary by model and add a dependency to a pure module).
         memoryChars,
-        cardsShown: shownLog.length,
+        // Cards that actually reached the prompt. A control run selects cards but
+        // shows none, so this is 0 there while followChecked stays positive —
+        // that pair is what a baseline row looks like.
+        cardsShown: shownLog.filter(s => !s.shadow).length,
+        cardsSelected: shownLog.length,
         followChecked: ft.checked,
         followed: ft.followed,
     };
@@ -173,14 +184,32 @@ export function compareArms(rows) {
             : null;
     }
 
-    const checked = on.reduce((s, r) => s + (r.followChecked || 0), 0);
-    const followed = on.reduce((s, r) => s + (r.followed || 0), 0);
+    // Follow-through, per arm. The OFF arm's rate is the base rate: how often the
+    // agent produced the recommended tool order in runs where nobody recommended
+    // it. `lift` is the only part of this that answers "is the advice doing
+    // anything" — the raw rate answers "how ordinary is the advice".
+    const followOf = (arm) => {
+        const checked = arm.reduce((s, r) => s + (r.followChecked || 0), 0);
+        const followed = arm.reduce((s, r) => s + (r.followed || 0), 0);
+        return { checked, followed, rate: checked ? followed / checked : null };
+    };
+    const ftOn = followOf(on);
+    const ftOff = followOf(off);
 
     return {
         on: onS,
         off: offS,
         delta,
-        followThroughRate: checked ? followed / checked : null,
+        // Kept: the recall arm's raw rate, which existing callers read.
+        followThroughRate: ftOn.rate,
+        followThrough: {
+            on: ftOn,
+            baseline: ftOff,
+            // null until control runs have scored recipes of their own. Rows
+            // written before shadow selection existed have followChecked = 0 in
+            // the off arm, so this stays null for them rather than reading 0.
+            lift: (ftOn.rate !== null && ftOff.rate !== null) ? ftOn.rate - ftOff.rate : null,
+        },
         /** Both arms need rows before any delta means anything. */
         comparable: on.length > 0 && off.length > 0,
     };
@@ -206,6 +235,32 @@ export async function appendSessionMetrics({ workspacePath, invoke, row }) {
         console.warn('SessionMetrics: could not append metrics:', e);
         return false;
     }
+}
+
+/**
+ * How many runs PER ARM would be needed to detect a relative improvement of
+ * `effect` in `key`, at the conventional 80% power and α = 0.05.
+ *
+ * n = 2(z_{α/2} + z_β)²·σ²/Δ², with the constant folded to 15.7. The σ comes
+ * from the rows themselves rather than a guess, because it is the whole answer:
+ * on this workspace exploration cost runs at a mean of ~22 with an sd of ~13,
+ * and a spread that wide is why the honest number is in the hundreds of runs and
+ * not the dozens anyone expects.
+ *
+ * @returns {{mean:number, sd:number, perArm:number}|null} null when there is
+ *   not enough data to estimate σ at all — reporting a target computed from
+ *   four data points would be worse than reporting none.
+ */
+export function runsNeeded(rows, { key = 'explorationCost', effect = 0.25 } = {}) {
+    const vals = (Array.isArray(rows) ? rows : [])
+        .map(r => r?.[key])
+        .filter(v => typeof v === 'number' && Number.isFinite(v));
+    if (vals.length < 5) return null;
+    const m = vals.reduce((a, b) => a + b, 0) / vals.length;
+    const sd = Math.sqrt(vals.reduce((s, v) => s + (v - m) ** 2, 0) / (vals.length - 1));
+    const delta = Math.abs(m * effect);
+    if (!(delta > 0) || !(sd > 0)) return null;
+    return { mean: m, sd, perArm: Math.ceil(15.7 * sd * sd / (delta * delta)) };
 }
 
 /** Parse a metrics.jsonl body into rows, skipping corrupt lines. */

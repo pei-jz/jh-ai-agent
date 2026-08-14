@@ -9,9 +9,23 @@ use tauri::Manager;
 use super::ai_providers::build_request_body;
 use super::ai_config::AiConfig;
 
+/// Accept `null` (and a missing field) as an empty string. The OpenAI wire
+/// format uses `content: null` for a pure tool-call assistant turn, so history
+/// coming from the JS layer — or restored from disk — can legitimately carry a
+/// null here. Without this, serde rejects the whole command argument and the
+/// agent loop dies on an unrecoverable "invalid type: null, expected a string".
+/// `build_messages` re-derives the per-provider null/empty handling anyway.
+fn null_as_empty_string<'de, D>(d: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(d)?.unwrap_or_default())
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct LlmMessage {
     pub role: String,
+    #[serde(default, deserialize_with = "null_as_empty_string")]
     pub content: String,
     /// NATIVE tool-call history (standards-aligned): an assistant turn that
     /// invoked tools carries them here in OpenAI wire format
@@ -782,5 +796,35 @@ mod sse_reassembly_tests {
     fn final_line_without_trailing_newline_is_still_delivered() {
         let lines = drive(&[b"data: {\"last\":true}"]);
         assert_eq!(lines, vec!["data: {\"last\":true}".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod message_deserialize_tests {
+    use super::LlmMessage;
+
+    /// A pure tool-call assistant turn carries `content: null` in the OpenAI
+    /// wire format. Rejecting it here killed the whole invoke (and the agent
+    /// run) with "invalid type: null, expected a string".
+    #[test]
+    fn null_content_deserializes_as_empty_string() {
+        let m: LlmMessage = serde_json::from_str(
+            r#"{"role":"assistant","content":null,"tool_calls":[{"id":"c1"}]}"#,
+        )
+        .expect("null content must be accepted");
+        assert_eq!(m.content, "");
+        assert!(m.tool_calls.is_some());
+    }
+
+    #[test]
+    fn missing_content_deserializes_as_empty_string() {
+        let m: LlmMessage = serde_json::from_str(r#"{"role":"assistant"}"#).unwrap();
+        assert_eq!(m.content, "");
+    }
+
+    #[test]
+    fn string_content_is_unchanged() {
+        let m: LlmMessage = serde_json::from_str(r#"{"role":"user","content":"hi"}"#).unwrap();
+        assert_eq!(m.content, "hi");
     }
 }

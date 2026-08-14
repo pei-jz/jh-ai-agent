@@ -7,7 +7,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
     explorationCost, reReads, parseRecipe, followsRecipe, followThrough,
-    sessionMetrics, compareArms, appendSessionMetrics, parseMetrics,
+    sessionMetrics, compareArms, appendSessionMetrics, parseMetrics, runsNeeded,
 } from '../SessionMetrics.js';
 
 const e = (i, tool, target) => ({ i, tool, target, ok: true });
@@ -105,6 +105,26 @@ describe('sessionMetrics', () => {
     it('records the arm even when nothing was recalled', () => {
         expect(sessionMetrics({ recall: 'off' }).recall).toBe('off');
     });
+
+    // A control row's whole purpose is to say "these recipes were scored, and
+    // none of them were shown". Counting shadow entries as shown would erase the
+    // distinction and make the control arm look like a recall arm that happened
+    // to do badly.
+    it('separates cards that were shown from cards merely selected', () => {
+        const row = sessionMetrics({
+            events: [e(1, 'read_file', 'a.js'), e(2, 'write_file', 'a.js')],
+            shownLog: [
+                { id: 'L-1', at: 1, recipe: 'read_file → write_file', shadow: true },
+                { id: 'L-2', at: 1, recipe: 'grep_search → read_file', shadow: true },
+            ],
+            recall: 'off', iterations: 2,
+        });
+        expect(row.cardsShown).toBe(0);
+        expect(row.cardsSelected).toBe(2);
+        // Still scored: this is the baseline the recall arm has to beat.
+        expect(row.followChecked).toBe(2);
+        expect(row.followed).toBe(1);
+    });
 });
 
 describe('compareArms', () => {
@@ -130,18 +150,84 @@ describe('compareArms', () => {
         expect(out.off.runs).toBe(0);
     });
 
-    it('pools follow-through across the recall arm only', () => {
+    it('reports the recall arm\'s own follow-through rate', () => {
         const out = compareArms([
             row({ followChecked: 2, followed: 1 }),
             row({ followChecked: 2, followed: 2 }),
-            row({ recall: 'off', followChecked: 9, followed: 0 }),
+            row({ recall: 'off', followChecked: 4, followed: 1 }),
         ]);
         expect(out.followThroughRate).toBeCloseTo(0.75);
+        expect(out.followThrough.on).toMatchObject({ checked: 4, followed: 3 });
+    });
+
+    // The number that actually answers "is the advice doing anything". A raw
+    // follow-through of 0.75 is unimpressive if the agent produces the same tool
+    // order 0.70 of the time when nobody suggests it.
+    it('subtracts the control arm\'s base rate to get the lift', () => {
+        const out = compareArms([
+            row({ followChecked: 4, followed: 3 }),                  // 0.75 with advice
+            row({ recall: 'off', followChecked: 4, followed: 1 }),   // 0.25 without
+        ]);
+        expect(out.followThrough.baseline.rate).toBeCloseTo(0.25);
+        expect(out.followThrough.lift).toBeCloseTo(0.5);
+    });
+
+    it('leaves the lift null while the control arm has scored nothing', () => {
+        // Rows written before control runs shadow-scored recipes have
+        // followChecked = 0 in the off arm. That is missing data, not a base
+        // rate of zero — reading it as zero would report the full raw rate as
+        // lift and overstate the effect by exactly the amount in question.
+        const out = compareArms([
+            row({ followChecked: 4, followed: 3 }),
+            row({ recall: 'off', followChecked: 0, followed: 0 }),
+        ]);
+        expect(out.followThrough.baseline.rate).toBeNull();
+        expect(out.followThrough.lift).toBeNull();
     });
 
     it('survives an empty or junk input', () => {
         expect(compareArms([]).comparable).toBe(false);
         expect(compareArms(null).on.runs).toBe(0);
+    });
+});
+
+describe('runsNeeded', () => {
+    const rows = (vals) => vals.map(v => ({ explorationCost: v }));
+
+    it('scales with the spread, which is what makes the target large', () => {
+        const tight = runsNeeded(rows([10, 10, 11, 9, 10, 10]));
+        const wide = runsNeeded(rows([2, 20, 5, 30, 1, 22, 12, 8]));
+        expect(wide.perArm).toBeGreaterThan(tight.perArm);
+    });
+
+    it('reports the mean and spread it derived the target from', () => {
+        // Shown next to the target so the number can be argued with rather than
+        // just believed: it is the spread, not the mean, that sets the target.
+        const out = runsNeeded(rows([10, 20, 30, 20, 10, 20]));
+        expect(out.mean).toBeCloseTo(18.33, 1);
+        expect(out.sd).toBeCloseTo(7.53, 1);
+        expect(out.perArm).toBe(Math.ceil(15.7 * out.sd ** 2 / (out.mean * 0.25) ** 2));
+    });
+
+    it('gives no target for a sample with no spread at all', () => {
+        // Identical values mean the sample has not yet seen the variation it
+        // will have; "0 runs needed" would be the wrong reading of that.
+        expect(runsNeeded(rows([10, 10, 10, 10, 10, 10]))).toBeNull();
+    });
+
+    it('refuses to estimate from too few points', () => {
+        // A target computed off four numbers would be a guess wearing a
+        // precise-looking integer, and it is the integer people would act on.
+        expect(runsNeeded(rows([5, 7, 6, 8]))).toBeNull();
+        expect(runsNeeded([])).toBeNull();
+        expect(runsNeeded(null)).toBeNull();
+    });
+
+    it('ignores rows where the metric is missing', () => {
+        // explorationCost is null when a run never edited anything — that is not
+        // a zero, and averaging it in would drag the mean toward one.
+        const out = runsNeeded([...rows([20, 22, 21, 19, 20]), { explorationCost: null }, {}]);
+        expect(out.mean).toBeCloseTo(20.4);
     });
 });
 

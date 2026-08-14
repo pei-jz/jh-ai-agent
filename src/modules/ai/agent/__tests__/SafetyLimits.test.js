@@ -119,8 +119,15 @@ describe('resolveRecallArm', () => {
         expect(resolveRecallArm('auto', () => 0.99)).toBe(true);
     });
 
-    it('keeps the control group a MINORITY — it costs real runs', () => {
-        expect(CONTROL_GROUP_SHARE).toBeGreaterThan(0);
-        expect(CONTROL_GROUP_SHARE).toBeLessThanOrEqual(0.2);
+    // This used to assert the control group was a MINORITY (≤ 0.2), on the
+    // reasoning that withheld runs cost the user something real. They do — but
+    // the sample size a comparison needs is set by the SMALLER arm, so a 10%
+    // control made the whole measurement need ~890 runs where an even split
+    // needs ~178. A control group small enough to be painless is one that never
+    // produces an answer, which is a worse deal than the one it was avoiding.
+    // Bounded on both sides now: over half would starve the arm being measured.
+    it('splits the arms evenly enough that the comparison can converge', () => {
+        expect(CONTROL_GROUP_SHARE).toBeGreaterThanOrEqual(0.3);
+        expect(CONTROL_GROUP_SHARE).toBeLessThanOrEqual(0.5);
     });
 });

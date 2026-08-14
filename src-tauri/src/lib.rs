@@ -173,6 +173,35 @@ fn task_logs_dir(history_path: &std::path::Path) -> PathBuf {
 /// read-modify-write atomic across all writers (any config dir, so process-wide).
 static HISTORY_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
+/// Write `bytes` to `path` atomically: fill a sibling temp file, flush it to
+/// the OS, then rename it over the target.
+///
+/// `std::fs::write` TRUNCATES the target first and then streams into it, so a
+/// crash — or the user force-quitting the app — mid-write leaves a half-written
+/// file behind. For task_history.json that is fatal: the truncated JSON no
+/// longer parses, the whole task list reads as empty, and every per-task
+/// `task_logs/<id>.json` sidecar is orphaned (they are only ever deleted via an
+/// entry in the history file, so the disk usage stays while the UI shows
+/// nothing). A rename is atomic, so the target is always either the previous
+/// complete file or the new complete one.
+pub(crate) fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let tmp = path.with_extension("json.tmp");
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+    }
+    // Windows' rename replaces an existing destination (MOVEFILE_REPLACE_EXISTING).
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp); // never leave a stray .tmp behind
+            Err(e)
+        }
+    }
+}
+
 /// Persist a task to disk: the metadata goes into the big `task_history.json`
 /// (kept lean — logs stripped), while the full logs array is written to a
 /// per-task sidecar `task_logs/<task_id>.json` so we don't blow up the main
@@ -230,7 +259,7 @@ fn save_task_to_history(path: &std::path::Path, task: &TaskInfo) {
     }
 
     if let Ok(json) = serde_json::to_string_pretty(&history) {
-        let _ = std::fs::write(path, json);
+        let _ = write_atomic(path, json.as_bytes());
     }
 
     // Write the per-task logs sidecar. Best-effort; failures are silent so
@@ -241,7 +270,7 @@ fn save_task_to_history(path: &std::path::Path, task: &TaskInfo) {
     }
     let logs_path = logs_dir.join(format!("{}.json", task.id));
     if let Ok(logs_json) = serde_json::to_string(&task.logs) {
-        let _ = std::fs::write(logs_path, logs_json);
+        let _ = write_atomic(&logs_path, logs_json.as_bytes());
     }
 }
 
@@ -800,6 +829,7 @@ mod history_persistence_tests {
             completed_at: if status == "completed" { Some("2026-01-01T00:01:00Z".to_string()) } else { None },
             workspace_path: Some("C:/ws".to_string()),
             caller: Some("NewTask".to_string()),
+            mcp_servers: None,
             result_summary: None,
             logs: vec![],
         }
@@ -890,5 +920,48 @@ mod history_persistence_tests {
         assert_eq!(parsed[0]["id"], "task-new");
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&backup);
+    }
+
+    #[test]
+    fn a_save_never_leaves_the_history_file_truncated() {
+        // `fs::write` truncates first, so a force-quit mid-write left a partial
+        // file that no longer parsed — the whole task list read as empty on the
+        // next launch while task_logs/ kept its (now orphaned) gigabytes. Every
+        // save must land through a temp file + rename: the target parses at all
+        // times, and no .tmp is left lying around.
+        let path = temp_history_path("atomic");
+        let tmp = path.with_extension("json.tmp");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&tmp);
+
+        save_task_to_history(&path, &sample_task("task-1", "completed"));
+        let first = std::fs::read_to_string(&path).unwrap();
+
+        // Overwrite the same file with a bigger payload (the shrink/grow case
+        // that leaves trailing garbage without a rename).
+        let mut big = sample_task("task-2", "completed");
+        big.prompt = "x".repeat(50_000);
+        save_task_to_history(&path, &big);
+
+        assert!(!tmp.exists(), "temp file left behind: {:?}", tmp);
+        let content = std::fs::read_to_string(&path).unwrap();
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&content)
+            .expect("history must always be parseable after a save");
+        assert_eq!(parsed.len(), 2);
+        assert!(first.contains("task-1"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn write_atomic_replaces_an_existing_file_without_a_stray_temp() {
+        let path = temp_history_path("atomic_raw");
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&path, b"old contents that are much longer than the new ones").unwrap();
+
+        write_atomic(&path, b"new").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        assert!(!tmp.exists());
+        let _ = std::fs::remove_file(&path);
     }
 }

@@ -141,6 +141,7 @@ export class TaskTimeline {
         this._seq = 0;
         this._group = null;      // open reasoning group, if any
         this._narration = null;  // open narration item, if any
+        this._progress = null;   // the one live task_progress card, if any
         this._clock = null;      // replay clock; null = wall-clock (live)
         this._stepNo = 0;        // monotonic step counter for the rail
     }
@@ -176,6 +177,24 @@ export class TaskTimeline {
     _touch(item) {
         item.rev += 1;
         return item;
+    }
+
+    /**
+     * Whether two task_progress payloads describe the SAME plan.
+     *
+     * The identity of a plan is its checklist SHAPE — the ordered ids and titles.
+     * Status changes (pending → in_progress → completed) are progress on that
+     * plan and must update the card in place; a different shape is a replan and
+     * deserves its own card. Comparing just ids would treat a reordered or
+     * retitled plan as "the same", which is exactly the confusion reported: a
+     * second turn's new plan kept rendering the first turn's card.
+     */
+    sameProgressPlan(a, b) {
+        if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+        for (let i = 0; i < a.length; i++) {
+            if (a[i].id !== b[i].id || a[i].title !== b[i].title) return false;
+        }
+        return true;
     }
 
     /**
@@ -383,6 +402,41 @@ export class TaskTimeline {
     }
 
     /**
+     * task_progress — the agent's subtask checklist, as its own chapter.
+     *
+     * The model calls task_progress to register (set) and update its subtasks, and
+     * the current state — "2/4 complete, step 3 in progress" — is exactly what a
+     * reader wants from the story. A NEW item per event would flood the timeline
+     * (the tool fires on every update), so the FIRST event creates the card and
+     * each later one REPLACES its contents in place, bumping `rev` so the
+     * renderer repaints it. Like `ask`, it sits outside any reasoning group.
+     *
+     * @param {Array<{id,title,status,note?}>} items the persisted checklist
+     */
+    pushTaskProgress(items) {
+        const list = (Array.isArray(items) ? items : [])
+            .filter(it => it && (it.id != null || it.title))
+            .map(it => ({
+                id: String(it.id ?? ''),
+                title: String(it.title ?? ''),
+                status: String(it.status || 'pending'),
+                note: it.note != null ? String(it.note) : '',
+            }));
+        if (list.length === 0) return null;
+        this._group = null;
+        // Same plan as the current card → update it in place. A DIFFERENT plan
+        // (a new turn replanned the work) is a new moment in the story and gets
+        // its own card — reusing the old one showed the first plan's progress
+        // while the agent was executing the second.
+        if (this._progress && this.sameProgressPlan(this._progress.items, list)) {
+            this._progress.items = list;
+            return this._touch(this._progress);
+        }
+        this._progress = this._add({ kind: 'task_progress', items: list, live: false });
+        return this._progress;
+    }
+
+    /**
      * Fold or unfold one card, by item id.
      *
      * The MODEL owns this flag — it flips it itself (opening a step folds the earlier
@@ -545,6 +599,7 @@ export class TaskTimeline {
         // silently un-grouped every subsequent line.
         const lastGroup = [...this._items].reverse().find(i => i.kind === 'group' && i.live);
         this._group = lastGroup || null;
+        this._progress = [...this._items].reverse().find(i => i.kind === 'task_progress') || null;
         // Continue numbering from the highest step already in the story.
         this._stepNo = this._items.reduce((m, i) => Math.max(m, i._stepNo || 0), 0);
         this._narration = [...this._items].reverse().find(i => i.kind === 'narration' && i.live) || null;
@@ -601,6 +656,9 @@ export function buildTimeline(logs, opts = {}) {
             // Replaying these keeps a delivered report visible after a reload,
             // the same way the live path does.
             tl.pushDeliverable(d.envelope.kind, envelopeText(d.envelope));
+        } else if (l.event === 'task_progress' && Array.isArray(d.items)) {
+            // The subtask checklist survives a reload exactly like the live path.
+            tl.pushTaskProgress(d.items);
         } else if (l.event === 'ask' || (l.event === 'status' && d.status === 'waiting')) {
             tl.pushAsk({ text: d.message, options: d.options, multi: d.multiSelect });
         }
@@ -735,6 +793,47 @@ export function withTurnDividers(items) {
     return out;
 }
 
+/**
+ * Pin the task_progress card to the BOTTOM of the stream while a run is live.
+ *
+ * The checklist card is created once, at the moment the plan first registers,
+ * and its position is wherever the story happened to be then. A long run buries
+ * it under the new messages it keeps producing — the one thing a reader wants
+ * pinned is the thing that ends up least visible. While the run is live the
+ * card is moved to the END of the stream, which is exactly where the reader is
+ * looking (the view auto-follows the newest content); when the run settles it
+ * returns to its chronological place, where it reads as history.
+ *
+ * Pinning must be to the BOTTOM, not to "ahead of the first live item": the
+ * request that opened the exchange is itself flagged live while the run is
+ * running, so "first live" is the TOP of the story — pinning there buried the
+ * card at the top while the action streamed below it (the exact bug this
+ * function exists to fix).
+ *
+ * PURE: the caller passes `live` (the view knows whether the run is running);
+ * this never inspects sockets or DOM.
+ *
+ * @param {Array<object>} items rendered stream (withExchangeFolds output)
+ * @param {boolean} live whether the run is currently running
+ * @returns {Array<object>} the same items, possibly with the card moved
+ */
+export function pinLiveProgress(items, live) {
+    const list = Array.isArray(items) ? items : [];
+    if (!live) return list;
+    // Only the LATEST plan is pinned. Older cards (a replan left them in the
+    // story) are history — they stay where they are, and pinning them all would
+    // stack a pile of checklists at the bottom.
+    let last = -1;
+    for (let i = 0; i < list.length; i++) {
+        if (list[i] && list[i].kind === 'task_progress') last = i;
+    }
+    if (last < 0) return list;
+    const out = list.slice();
+    const [card] = out.splice(last, 1);
+    out.push(card);
+    return out;
+}
+
 /** The items that are the agent's WORKING — the part an exchange folds away. */
 const WORKING = new Set(['group', 'narration', 'activity']);
 
@@ -854,9 +953,11 @@ export function collapsedIds(items) {
 /**
  * Chapter markers for the navigation rail.
  *
- * A long run is a story with parts — the request, each reasoning step, a
- * question, the deliverable. Listing them lets the reader jump instead of
- * scrolling, which is the whole point of giving the trace a spine.
+ * The rail is deliberately MINIMAL: only the request that started the work and
+ * the deliverable it produced. Steps, questions and approvals are phases of the
+ * same story — listing them made a long run's rail longer than the content it
+ * navigated. Each marker carries a one-line peek at its content, so the rail
+ * doubles as a summary of what was asked and what came back.
  *
  * @param {Array<object>} items
  * @returns {Array<{id:string, kind:string, label:string, n:number}>}
@@ -867,25 +968,32 @@ export function chapters(items) {
     for (const i of (Array.isArray(items) ? items : [])) {
         switch (i.kind) {
             case 'request':
-                out.push({ id: i.id, kind: 'request', label: 'Request', n: 0 });
-                break;
-            case 'group':
-                step += 1;
-                out.push({ id: i.id, kind: 'step', label: `Step ${String(step).padStart(2, '0')}`, n: step });
-                break;
-            case 'ask':
-                out.push({ id: i.id, kind: 'ask', label: i.answered ? 'Answered' : 'Question', n: 0 });
-                break;
-            case 'confirm':
-                out.push({ id: i.id, kind: 'confirm', label: 'Approval', n: 0 });
+                out.push({ id: i.id, kind: 'request', label: `Request · ${peek(i.text)}`, n: 0 });
                 break;
             case 'run':
             case 'document':
-                out.push({ id: i.id, kind: 'deliverable', label: 'Deliverable', n: 0 });
+                out.push({ id: i.id, kind: 'deliverable', label: `Deliverable · ${peek(i.text || i.answer)}`, n: 0 });
+                break;
+            case 'deliverable':
+                out.push({ id: i.id, kind: 'deliverable', label: `Deliverable · ${peek(i.text)}`, n: 0 });
                 break;
             default:
-                break;   // narration / activity lines are not chapter-worthy
+                break;   // steps / questions / narration are not chapter-worthy
         }
     }
     return out;
+}
+
+/**
+ * A one-line peek at a chapter's content: strip markdown noise, collapse
+ * whitespace and cut at ~60 chars so the rail stays skimmable.
+ */
+function peek(text) {
+    const t = String(text || '')
+        .replace(/```[\s\S]*?```/g, ' ')
+        .replace(/[#*_`>~|\-]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    if (!t) return '(empty)';
+    return t.length > 60 ? `${t.slice(0, 60).trim()}…` : t;
 }

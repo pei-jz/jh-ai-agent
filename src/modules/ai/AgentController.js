@@ -267,9 +267,15 @@ export class AgentController {
         // must keep the FULL built-in toolset like DirectChat. Without it the
         // external-caller branch below strips tools to finish/present only, so a
         // NewTask agent couldn't even read_file its workspace.
+        //
+        // NOTE: behavior.mcp_servers is deliberately NOT a marker of an external
+        // caller. JHAI's own UI (Schedule / NewTask) lets the user pick MCP servers
+        // for a run, and those runs are still interactive JHAI tasks that keep the
+        // full built-in toolset. External callers are identified by their caller
+        // name (REST API) or by behavior.intent (an external app's intent).
         const INTERACTIVE_CALLERS = ['DirectChat', 'Schedule', 'NewTask'];
         const isExternalCaller = (this.caller && !INTERACTIVE_CALLERS.includes(this.caller))
-            || !!(this.behaviorOverrides && (this.behaviorOverrides.mcp_servers || this.behaviorOverrides.intent));
+            || !!(this.behaviorOverrides && this.behaviorOverrides.intent);
         this._isExternalCaller = isExternalCaller;
 
         // JHAI's OWN tasks (NewTask / Schedule / DirectChat / sub-agents) must NOT
@@ -490,6 +496,9 @@ export class AgentController {
         this._cleanupOldSessions(workspacePath).catch(() => {});
 
         // Determine tool allowlist behavior. (isExternalCaller computed above.)
+        // NOTE: for interactive callers that picked MCP servers (Schedule/NewTask),
+        // mcp_servers is NOT external — so the built-in toolset is preserved and
+        // the selected servers' tools are surfaced through the normal MCP filter.
         let enabledTools = this.behaviorOverrides?.enabled_tools;
 
         if (isExternalCaller && (enabledTools === null || enabledTools === undefined)) {
@@ -727,17 +736,28 @@ export class AgentController {
             // memory consulted only after the mistake is a log, not a memory.
             // Deliberately outside the planning if/else below: it is orthogonal
             // to which planning mode the run is in.
-            if (iteration === 1 && this._recallOn) {
+            //
+            // The SELECTION runs in both arms; only the injection is withheld in
+            // the control arm. Without that, "did the agent follow the advice?"
+            // has no baseline: a recipe like read_file → write_file is a common
+            // ordering that happens anyway, so a bare 32% follow-through cannot
+            // be told apart from the rate at which the agent would have done it
+            // unprompted. Scoring the same cards against a run that never saw
+            // them is what supplies the "anyway" number.
+            if (iteration === 1) {
+                const shadow = !this._recallOn;
                 // The task prompt ranks WITHIN each kind's budget: an insight about
                 // the area being worked on beats a higher-scoring one from an
                 // unrelated corner of the project.
-                const cards = this._cards?.recallBrief(prompt) || [];
+                const cards = this._cards?.recallBrief(prompt, undefined, { shadow }) || [];
                 const brief = renderBrief(cards);
                 if (brief) {
-                    history.push({ role: 'user', content: brief });
-                    this._noteCardsShown(cards, iteration, brief);
-                    this._emitRecall(onAgentStatus, cards, iteration, 'brief');
-                    onAgentStatus?.({ event: 'status', status: 'running', message: '🧠 過去セッションの学習を参照' });
+                    this._noteCardsShown(cards, iteration, brief, shadow);
+                    if (!shadow) {
+                        history.push({ role: 'user', content: brief });
+                        this._emitRecall(onAgentStatus, cards, iteration, 'brief');
+                        onAgentStatus?.({ event: 'status', status: 'running', message: '🧠 過去セッションの学習を参照' });
+                    }
                 }
             }
 
@@ -2334,12 +2354,17 @@ ${String(finalResponse || '').slice(0, 2000)}`;
     }
 
     _recallMemory(call, result, onAgentStatus, iteration = 0) {
-        if (typeof result !== 'string' || !this._recallOn) return result;
+        if (typeof result !== 'string') return result;
         try {
-            const card = this._cards?.recallForTool(call.name, targetOf(call.args));
+            // Control arm: pick the card, log it, return the result untouched.
+            // The card's recipe is still scored against what the agent does from
+            // here on, which is the base rate the recall arm has to beat.
+            const shadow = !this._recallOn;
+            const card = this._cards?.recallForTool(call.name, targetOf(call.args), { shadow });
             if (!card) return result;
             const note = renderCard(card);
-            this._noteCardsShown([card], iteration, note);
+            this._noteCardsShown([card], iteration, note, shadow);
+            if (shadow) return result;
             // Structured, so the Dashboard can show WHICH memory fired and WHEN.
             // That is the pairing that makes a useless lesson visible: you see it
             // fire at step 12 and the same failure happen at step 13.
@@ -2356,11 +2381,17 @@ ${String(finalResponse || '').slice(0, 2000)}`;
      * did the agent actually do what the card recommended? The recipe is the
      * card's own claim (`fix` for a lesson, `what` for an insight); a card that
      * makes no tool-order claim is logged but not counted against follow-through.
+     *
+     * `shadow` entries were selected but never injected (control arm). They are
+     * logged because they are the baseline; they add no `memoryChars`, because
+     * no memory reached the prompt.
      */
-    _noteCardsShown(cards, iteration, text = '') {
-        this._memoryChars = (this._memoryChars || 0) + String(text || '').length;
+    _noteCardsShown(cards, iteration, text = '', shadow = false) {
+        if (!shadow) this._memoryChars = (this._memoryChars || 0) + String(text || '').length;
         for (const c of cards || []) {
-            this._cardsShownLog.push({ id: c.id, at: iteration, recipe: c.fix || c.what || '' });
+            const row = { id: c.id, at: iteration, recipe: c.fix || c.what || '' };
+            if (shadow) row.shadow = true;
+            this._cardsShownLog.push(row);
         }
     }
 

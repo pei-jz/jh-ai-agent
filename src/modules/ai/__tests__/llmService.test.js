@@ -239,6 +239,20 @@ describe('_sanitizeMessagesForWire', () => {
         expect(out[1].role).toBe('tool');
     });
 
+    it('emits an EMPTY STRING (never null) for a pure tool-call assistant turn', () => {
+        // Rust's LlmMessage.content is a String: a null here failed the whole
+        // invoke ("invalid args `payload` … invalid type: null, expected a
+        // string"), and since the bad turn stayed in history every retry hit
+        // the same error and the run stalled. "" → null is Rust's job.
+        const h = [
+            { role: 'assistant', content: '', tool_calls: [{ id: 'c1', type: 'function', function: { name: 'read_file', arguments: '{}' } }] },
+            { role: 'tool', tool_call_id: 'c1', name: 'read_file', content: 'body' },
+        ];
+        const out = llmService._sanitizeMessagesForWire(h);
+        expect(out[0].content).toBe('');
+        expect(out.every(m => typeof m.content === 'string')).toBe(true);
+    });
+
     it('returns an empty array for non-array input and skips malformed entries', () => {
         expect(llmService._sanitizeMessagesForWire(null)).toEqual([]);
         expect(llmService._sanitizeMessagesForWire(undefined)).toEqual([]);

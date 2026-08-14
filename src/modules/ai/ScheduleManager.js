@@ -118,11 +118,14 @@ class ScheduleManager {
             }
 
             try {
-                const mcpServers = s.mcpServers && s.mcpServers.length > 0 ? s.mcpServers : null;
+                // Explicit [] when nothing is picked: an empty list means "NO
+                // MCP tools" while an OMITTED list would mean "all servers" —
+                // a server connecting mid-task would then leak its tools in.
+                const mcpServers = (s.mcpServers && s.mcpServers.length > 0) ? s.mcpServers : [];
                 const behavior = {
                     mode: 'iterative_agent',
                     ...buildBehavior(s.agentModeId || DEFAULT_MODE_ID),
-                    ...(mcpServers ? { mcp_servers: mcpServers } : {})
+                    mcp_servers: mcpServers
                 };
                 const task = await window.apiClient.request('/tasks', {
                     method: 'POST',

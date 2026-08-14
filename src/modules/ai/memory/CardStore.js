@@ -557,12 +557,12 @@ export class CardStore {
      * Recall for a call about to run. Marks the card injected so it is not
      * repeated, and so a later recurrence counts against it.
      */
-    recallForTool(tool, target) {
+    recallForTool(tool, target, { shadow = false } = {}) {
         if (!this.enabled || this.cards.length === 0) return null;
         if (this.injected.size >= this.maxPerRun) return null;
         const card = selectForTool(this.cards, { tool, ext: extOf(target) }, { exclude: this.injected });
         if (!card) return null;
-        this._markShown(card);
+        this._markShown(card, shadow);
         return card;
     }
 
@@ -570,9 +570,18 @@ export class CardStore {
      * `shown` is the denominator of the recurrence rate (how often a card was
      * put in front of the agent); `injected` is the per-run flag that decides
      * whether a recurrence at the end of this run counts against it.
+     *
+     * `shadow` marks a CONTROL-arm selection: the card was chosen but never put
+     * in front of the agent, so it enters neither statistic — a card cannot be
+     * blamed for a recurrence it was never given a chance to prevent, and
+     * counting it as shown would inflate the recurrence-rate denominator with
+     * runs where nothing was shown at all. It still joins `injected`, which only
+     * stops the same card being picked twice in one run and is as true of a card
+     * we are merely pretending to show.
      */
-    _markShown(card) {
+    _markShown(card, shadow = false) {
         this.injected.add(card.id);
+        if (shadow) return;
         card.injected = true;
         card.shown = (card.shown || 0) + 1;
     }
@@ -584,10 +593,10 @@ export class CardStore {
      * about outranks what merely scored high. Pass nothing and it degrades to
      * pure score, which is what it did before budgets existed.
      */
-    recallBrief(query = '', budgets = BRIEF_BUDGET) {
+    recallBrief(query = '', budgets = BRIEF_BUDGET, { shadow = false } = {}) {
         if (!this.enabled || this.cards.length === 0) return [];
         const picked = selectBriefBudgeted(this.cards, { budgets, query, exclude: this.injected });
-        for (const c of picked) this._markShown(c);
+        for (const c of picked) this._markShown(c, shadow);
         return picked;
     }
 }

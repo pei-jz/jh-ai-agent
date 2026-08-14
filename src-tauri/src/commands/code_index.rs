@@ -228,12 +228,22 @@ pub async fn index_put_files(
 }
 
 /// Drop everything for files that are no longer in the tree.
+///
+/// `truncated` is the caller telling us the file list is NOT the whole tree —
+/// the glob hit its cap. Deleting against a partial list would retire files
+/// the tree still has, so a truncated pass prunes NOTHING: the old index is
+/// kept, new entries are upserted beside it, and the gap is closed by the
+/// next full pass.
 #[tauri::command]
 pub async fn index_prune(
     workspace: String,
     live_paths: Vec<String>,
+    truncated: Option<bool>,
     guard: State<'_, PathGuard>,
 ) -> Result<usize, String> {
+    if truncated.unwrap_or(false) {
+        return Ok(0);
+    }
     let mut conn = open(&workspace, &guard)?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     tx.execute("CREATE TEMP TABLE live(path TEXT PRIMARY KEY)", [])

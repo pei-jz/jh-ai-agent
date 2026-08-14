@@ -175,6 +175,28 @@ describe('tool advertisement — MCP tools', () => {
         expect(names).toEqual(expect.arrayContaining(['a', 'b']));
     });
 
+    // Regression: the task UI sends an EXPLICIT [] when the user unchecked every
+    // MCP server. That must mean "NO MCP tools" — not "all servers" — or a
+    // server that connects MID-task (ChatView's async _startEnabledMcpServers)
+    // would leak its tools into later turns of the same task.
+    it('an EXPLICIT empty filter blocks every MCP tool, even one connected mid-task', () => {
+        mcpTools = [mcp('get_buffer', 'jheditor'), mcp('query_db', 'er-app')];
+        ex.setMcpServerFilter([]);
+        expect(ex.getToolsForNativeAPI().map(t => t.function.name)).not.toContain('get_buffer');
+        expect(ex.getToolsForNativeAPI().map(t => t.function.name)).not.toContain('query_db');
+        // A server that connects AFTER the filter was set must stay out too.
+        mcpTools.push(mcp('late_connector', 'er-app'));
+        expect(ex.getToolsForNativeAPI().map(t => t.function.name)).not.toContain('late_connector');
+    });
+
+    it('an explicit empty filter still keeps the built-in native tools', () => {
+        mcpTools = [mcp('a', 's1')];
+        ex.setMcpServerFilter([]);
+        const names = ex.getToolsForNativeAPI().map(t => t.function.name);
+        expect(names).toContain('read_file');
+        expect(names).not.toContain('a');
+    });
+
     it('MCP tools bypass the built-in allowlist when the flag is set (Simple chat)', () => {
         mcpTools = [mcp('get_buffer', 'jheditor')];
         ex.setToolAllowlist(['read_file']);

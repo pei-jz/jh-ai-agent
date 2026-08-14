@@ -9,6 +9,7 @@ import { describe, it, expect, vi } from 'vitest';
 import {
     isLandmark, symbolCards, staleStudyCards, applyStudy, coverageByDir,
     runStudyPass, STUDY_FILE_CAP, SYMBOLS_PER_FILE, targetPath, indexSpreadsheets, dropStudyCards,
+    fairShare, dirOf,
 } from '../StudyPass.js';
 import { cardKey } from '../CardStore.js';
 
@@ -141,6 +142,72 @@ describe('coverageByDir', () => {
     });
 });
 
+// A cap that always spends itself on the busiest directory never reaches the
+// places the agent has not looked. fairShare spreads the budget round-robin.
+describe('fairShare', () => {
+    it('keeps everything when the tree fits in the cap', () => {
+        const files = ['src/a/a.js', 'src/b/b.js'];
+        expect(fairShare(files, 10)).toEqual({ selected: files, omitted: 0 });
+    });
+
+    it('spreads the budget across directories instead of one alphabetical prefix', () => {
+        // 6 files in src/a, 4 in src/b. A cap of 4 must take from BOTH, not the
+        // first four of src/a.
+        const files = [
+            'src/a/f1.js', 'src/a/f2.js', 'src/a/f3.js', 'src/a/f4.js',
+            'src/a/f5.js', 'src/a/f6.js', 'src/b/g1.js', 'src/b/g2.js',
+            'src/b/g3.js', 'src/b/g4.js',
+        ];
+        const { selected, omitted } = fairShare(files, 4);
+        expect(selected).toEqual(['src/a/f1.js', 'src/b/g1.js', 'src/a/f2.js', 'src/b/g2.js']);
+        expect(omitted).toBe(6);
+    });
+
+    it('gives a small directory a voice even against a giant one', () => {
+        // 10 files in src/a, 1 in src/b. The lone src/b file MUST be selected.
+        const files = Array.from({ length: 10 }, (_, i) => `src/a/f${i}.js`);
+        files.push('src/b/only.js');
+        const { selected } = fairShare(files, 5);
+        expect(selected).toContain('src/b/only.js');
+    });
+
+    it('returns selected paths in stable input order per directory', () => {
+        const files = ['src/a/z.js', 'src/a/a.js', 'src/b/b.js'];
+        const { selected } = fairShare(files, 2);
+        expect(selected).toEqual(['src/a/z.js', 'src/b/b.js']);
+    });
+
+    it('reports how many were skipped, so the UI can say so', () => {
+        const files = Array.from({ length: 7 }, (_, i) => `src/x/f${i}.js`);
+        expect(fairShare(files, 3).omitted).toBe(4);
+    });
+
+    it('survives junk', () => {
+        expect(fairShare(null, 5)).toEqual({ selected: [], omitted: 0 });
+        expect(fairShare([], 5)).toEqual({ selected: [], omitted: 0 });
+    });
+});
+
+describe('dirOf', () => {
+    it('buckets at the configured depth', () => {
+        expect(dirOf('src/modules/ai/a.js')).toBe('src/modules');
+    });
+
+    it('never lets the filename become the directory', () => {
+        expect(dirOf('lib/z.js')).toBe('lib');
+    });
+
+    it('normalises Windows separators and drops the drive letter', () => {
+        // The drive letter is not a directory, and every path in one workspace
+        // shares it — keeping it would merge nothing but would clutter the bucket.
+        expect(dirOf('C:\\ws\\src\\a\\b.js')).toBe('ws/src');
+    });
+
+    it('labels a root-level file as (root)', () => {
+        expect(dirOf('a.js')).toBe('(root)');
+    });
+});
+
 describe('runStudyPass', () => {
     /** One exported symbol, so a parse either finds `alpha` or found nothing. */
     const SRC = 'export function alpha() {}\n';
@@ -211,6 +278,35 @@ describe('runStudyPass', () => {
         await runStudyPass({ workspacePath: 'C:/ws', invoke });
         const prune = invoke.mock.calls.find(c => c[0] === 'index_prune');
         expect(prune[1].livePaths).toEqual(['src/a.js']);
+    });
+
+    it('does NOT retire anything when the glob was truncated — the list is partial', async () => {
+        // A truncated glob means the pass saw only part of the tree. Pruning
+        // against a partial list would delete files that still exist.
+        const put = [];
+        const invoke = vi.fn(async (cmd, args) => {
+            if (cmd === 'glob_files') {
+                const isSheets = String(args.pattern || '').includes('xlsx');
+                return { files: isSheets ? [] : ['src/a.js'], truncated: true };
+            }
+            if (cmd === 'read_file') return SRC;
+            if (cmd === 'index_hashes') return [];
+            if (cmd === 'index_put_files') { put.push(...args.files); return args.files.length; }
+            if (cmd === 'index_prune') { prunedArgs = args; return 0; }
+            return null;
+        });
+        let prunedArgs = null;
+        const r = await runStudyPass({ workspacePath: 'C:/ws', invoke });
+        expect(prunedArgs.truncated).toBe(true);
+        expect(r.truncated).toBe(true);
+    });
+
+    it('reports how many files were omitted when the tree exceeds the cap', async () => {
+        const { invoke } = backend(Array.from({ length: 20 }, (_, i) => `src/d${i}/f.js`));
+        const r = await runStudyPass({ workspacePath: 'C:/ws', invoke, fileCap: 5 });
+        expect(r.files).toBe(5);
+        expect(r.total).toBe(20);
+        expect(r.omitted).toBe(15);
     });
 
     it('reports progress so a long pass is not a frozen dialog', async () => {

@@ -23,11 +23,18 @@ export function taskGroupKey(task, groupBy = 'date') {
  *
  * The search covers id, prompt and caller together: a user looking for a task
  * remembers one of the three and should not have to say which.
+ *
+ * `status` accepts 'all' (no filter), a single status string, or an ARRAY of
+ * statuses — an array matches ANY of the listed statuses (the button-bar
+ * multi-select in TaskList).
  */
 export function filterTasks(tasks, { search = '', status = 'all' } = {}) {
     const q = String(search || '').toLowerCase().trim();
+    const wanted = Array.isArray(status)
+        ? status.filter(Boolean)
+        : (status && status !== 'all' ? [status] : []);
     return (tasks || []).filter(t => {
-        if (status !== 'all' && t.status !== status) return false;
+        if (wanted.length > 0 && !wanted.includes(t.status)) return false;
         if (!q) return true;
         return (t.id || '').toLowerCase().includes(q)
             || (t.prompt || '').toLowerCase().includes(q)

@@ -489,7 +489,7 @@ ${projectInfo}
         // user's own instructions and labelled as generated, because the two must
         // not read as equally authoritative: one is a machine's reading of the
         // directory structure, the other is what the user actually requires.
-        const overviewBlock = renderOverview(overview.text, { generatedAt: overview.generatedAt });
+        const overviewBlock = renderOverview(overview.text, { generatedAt: overview.generatedAt, conventions: overview.conventions });
         if (overviewBlock) stablePart += `\n${overviewBlock}\n`;
 
         if (projectInstructions) {

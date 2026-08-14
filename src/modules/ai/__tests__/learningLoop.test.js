@@ -16,9 +16,17 @@ function cardsWritten(h) {
 }
 
 /** A run that fails an edit, reads the file, then succeeds. */
+// Every test below that is ABOUT recall pins the arm explicitly. Left on the
+// 'auto' default these were coin flips — they passed only because the control
+// share used to be 10%, and raising it to 50% turned a rarely-flaky suite into
+// a reliably-failing one. The arm assignment has its own tests; a test of what
+// recall does should not also be a test of which arm it landed in.
+const RECALL_ON = { memory_recall: 'on' };
+
 function recoveryRun(extra = {}) {
     let attempt = 0;
     return makeHarness({
+        config: RECALL_ON,
         script: [
             toolStep('write_file', { path: 'a.svelte', content: 'x' }),
             toolStep('read_file', { path: 'a.svelte' }),
@@ -71,19 +79,20 @@ describe('learning from a session', () => {
     });
 });
 
-describe('recall in a later session', () => {
-    /** Cards on disk, as the previous run would have left them. */
-    const stored = (over = {}) => JSON.stringify({
-        id: 'L-1', type: 'lesson', signature: 'write_file|edit_mismatch|.svelte',
-        trigger: { tool: 'write_file', ext: '.svelte', argShape: 'content,path', scope: 'workspace' },
-        symptom: 'anchor does not match', fix: 'read_file → write_file', verified: true,
-        costSteps: 7, attempts: 2, hits: 2, confidence: 0.8,
-        first_seen: '2026-08-01', last_recurrence: '2026-08-11', stale: false, disabled: false,
-        evidence: ['session:prev'], ...over,
-    });
+/** Cards on disk, as the previous run would have left them. */
+const stored = (over = {}) => JSON.stringify({
+    id: 'L-1', type: 'lesson', signature: 'write_file|edit_mismatch|.svelte',
+    trigger: { tool: 'write_file', ext: '.svelte', argShape: 'content,path', scope: 'workspace' },
+    symptom: 'anchor does not match', fix: 'read_file → write_file', verified: true,
+    costSteps: 7, attempts: 2, hits: 2, confidence: 0.8,
+    first_seen: '2026-08-01', last_recurrence: '2026-08-11', stale: false, disabled: false,
+    evidence: ['session:prev'], ...over,
+});
 
+describe('recall in a later session', () => {
     const runWith = (jsonl, opts = {}) => {
         const h = makeHarness({
+            config: RECALL_ON,
             script: [toolStep('write_file', { path: 'b.svelte', content: 'x' }), finishStep('done')],
             toolResults: { write_file: () => 'Success: wrote b.svelte' },
             invokeResults: { read_file: (args) => (args?.path === CARDS ? jsonl : null) },
@@ -161,6 +170,29 @@ describe('measurement', () => {
         const h = recoveryRun({ config: { memory_recall: 'off' } });
         await h.run('edit the component', { workspacePath: 'C:/ws' });
         expect(metricsOf(h).recall).toBe('off');
+    });
+
+    // The control arm's reason for existing. A card whose recipe is
+    // "read_file → write_file" describes an ordering the agent produces
+    // constantly on its own, so the recall arm's follow-through rate says
+    // nothing until it can be set against how often that happened with no card
+    // in the prompt. Scoring the same cards against a run that never saw them
+    // is where that number comes from — so a control run has to select cards
+    // (followChecked > 0) while showing none (cardsShown === 0).
+    it('scores cards against the control arm without showing them', async () => {
+        const h = recoveryRun({
+            config: { memory_recall: 'off' },
+            invokeResults: { read_file: (args) => (args?.path === CARDS ? stored() : null) },
+        });
+        await h.run('edit the component', { workspacePath: 'C:/ws' });
+        const row = metricsOf(h);
+
+        expect(row.cardsShown).toBe(0);
+        expect(row.cardsSelected).toBeGreaterThan(0);
+        expect(row.followChecked).toBeGreaterThan(0);
+        // Nothing reached the prompt, so nothing was spent on it.
+        expect(row.memoryChars).toBe(0);
+        expect(h.state.histories.flat().some(m => String(m.content).includes('[Memory'))).toBe(false);
     });
 
     it('records how much looking around preceded the first edit', async () => {

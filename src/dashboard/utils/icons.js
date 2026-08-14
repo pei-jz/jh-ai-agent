@@ -122,6 +122,12 @@ const PATHS = {
      *  plus in it, which is the universal "add" glyph and read as a button.
      *  Not a side-on stack: that is already the `memory` cylinder. */
     tokens: `<circle cx="10" cy="10" r="7"/><circle cx="10" cy="10" r="3.1"/>`,
+    /** Done — a checkmark. Used by the task_progress checklist. */
+    check: `<path d="M4 10.5l4 4 8-9"/>`,
+    /** Pending — an empty ring. Used by the task_progress checklist. */
+    circle: `<circle cx="10" cy="10" r="7"/>`,
+    /** In progress — a ring with a pulsing dot. Used by the task_progress checklist. */
+    pulse: `<circle cx="10" cy="10" r="7"/><circle cx="10" cy="10" r="2.4" fill="currentColor" stroke="none"/>`,
 };
 
 /** Return an inline SVG string for `name`, sized `size` px (default 1em). */

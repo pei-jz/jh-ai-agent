@@ -55,10 +55,12 @@ describe('mountComponent', () => {
 
     it('an imperative update() reaches the DOM', async () => {
         const handle = mountComponent(Inspector, makeHost(), { task });
-        expect(host.textContent).toContain('running');
-        handle.update({ task: { ...task, status: 'completed' } });
+        // Status row is gone (the left list carries it) — assert on what stays.
+        expect(host.textContent).toContain('IDE');
+        handle.update({ task: { ...task, caller: 'CLI' } });
         await tick();
-        expect(host.textContent).toContain('completed');
+        expect(host.textContent).toContain('CLI');
+        expect(host.textContent).not.toContain('IDE');
     });
 
     it('a partial update leaves the other props alone', async () => {

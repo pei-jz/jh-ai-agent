@@ -159,6 +159,7 @@ export function chapterKind(item) {
         // boxes with nothing in them.
         case 'activity':  return 'bare';
         case 'narration': return 'note';
+        case 'task_progress': return 'progress';
         case 'ask':       return item.answered ? 'answered' : 'question';
         case 'confirm':   return 'approval';
         case 'document':
@@ -173,6 +174,7 @@ const CHAPTER_TAG = {
     request: 'Request',
     step: 'Step',
     note: 'Note',
+    progress: 'Progress',
     question: 'Question',
     answered: 'Answered',
     approval: 'Approval',

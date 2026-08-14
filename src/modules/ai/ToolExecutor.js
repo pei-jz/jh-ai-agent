@@ -257,9 +257,20 @@ export class ToolExecutor {
         this._toolAllowlist = set;
     }
 
-    /** Restrict which MCP servers contribute tools this session. null = all. */
+    /**
+     * Restrict which MCP servers contribute tools this session.
+     *   null / undefined → ALL servers (no filter).
+     *   []               → NO servers — an explicit "no MCP" request from the
+     *                      task UI (all MCP checkboxes unchecked). This must be
+     *                      honored as a hard zero: getToolsForNativeAPI() is
+     *                      re-evaluated every iteration and a server that
+     *                      connects MID-task would otherwise leak its tools in
+     *                      (the reported bug: first turn 37 native tools, later
+     *                      turns also advertise MCP tools).
+     *   [names]          → only those servers.
+     */
     setMcpServerFilter(serverNames) {
-        if (!serverNames || serverNames.length === 0) {
+        if (serverNames === null || serverNames === undefined) {
             this._mcpServerFilter = null;
             return;
         }
@@ -1033,6 +1044,9 @@ export class ToolExecutor {
             this._excludeExternalAppMcpTools ? { wsOnly: false } : {}
         );
         return sourceTools.filter(t => {
+            // An EXPLICIT empty filter means "no MCP tools at all" — even a
+            // server that connects mid-task must stay out. (An empty array is
+            // distinct from null: null = no filter = all servers.)
             if (this._mcpServerFilter && !this._mcpServerFilter.has(t._serverName)) return false;
             if (allow && !this._mcpBypassesAllowlist && !allow.has(t.name)) return false;
             return true;
