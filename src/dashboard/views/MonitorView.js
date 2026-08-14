@@ -4,13 +4,12 @@ import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { AGENT_MODES, DEFAULT_MODE_ID, buildBehavior } from '../../modules/ai/AgentModes.js';
 import { mcpManager } from '../../modules/ai/McpManager.js';
-import { ModeDropdown } from '../components/ModeDropdown.js';
 import { SlashCommands } from '../components/SlashCommands.js';
 import { promptTemplateManager } from '../../modules/ai/PromptTemplateManager.js';
 import { skillManager } from '../../modules/ai/SkillManager.js';
 import { icon } from '../utils/icons.js';
 import llmService from '../../modules/ai/LLMService.js';
-import { TaskTimeline, buildTimeline, envelopeText, splitForPanes, chapters, withExchangeFolds, exchangeCount, collapsedIds, applyFileDescriptions } from './monitor/taskTimeline.js';
+import { TaskTimeline, buildTimeline, envelopeText, splitForPanes, chapters, withExchangeFolds, exchangeCount, collapsedIds, applyFileDescriptions, pinLiveProgress } from './monitor/taskTimeline.js';
 // timelineRender.js is retired: Timeline.svelte's keyed {#each} does the keyed
 // DOM reuse it hand-rolled, and timelineItems.js now exports only pure vocabulary.
 import { hubApps } from './monitor/hubStrip.js';
@@ -46,7 +45,7 @@ const _liveSnapshots = new Map();
 const TASKS_CACHE_MS = 2500;
 function invalidateTasksCache() { _tasksCache = null; _tasksCacheAt = 0; }
 // Remembered task-list grouping preference ('date' | 'workspace').
-let _taskGroupByPref = 'date';
+let _taskGroupByPref = 'workspace';
 // Remembered task-list filters (search text + status), folded in from History.
 let _taskSearchPref = '';
 let _taskStatusPref = 'all';
@@ -55,6 +54,22 @@ let _collapsedGroups = new Set();
 // Group keys seen at least once — so non-first groups can be default-COLLAPSED
 // on their first appearance without overriding the user's later manual toggles.
 let _seenGroupKeys = new Set();
+
+// Remembered pane widths for the two drag-resizable edges (task list ↔ story,
+// story ↔ inspector). Module vars so they survive re-routes (a new MonitorView
+// is built on every hash change); read from localStorage on first use, written
+// back on drag-end.
+const PANE_W_MIN = 180;          // never let a pane collapse to nothing
+const PANE_W_MAX = 640;          // ...or eat the whole window
+const _readPaneWidth = (key, fallback) => {
+    try {
+        const v = parseInt(localStorage.getItem(key), 10);
+        if (Number.isFinite(v) && v >= PANE_W_MIN && v <= PANE_W_MAX) return v;
+    } catch (_) { /* storage unavailable — use fallback */ }
+    return fallback;
+};
+let _leftPaneWidth = _readPaneWidth('jhai_monitor_left_width', 240);
+let _inspPaneWidth = _readPaneWidth('jhai_monitor_insp_width', 264);
 
 /** How many log entries the Task view fetches on open (newest first). */
 const LOG_PAGE_SIZE = 400;
@@ -82,6 +97,10 @@ export class MonitorView {
         this._inspectorOpen = (() => {
             try { return localStorage.getItem('jhai_inspector_open') === '1'; } catch (_) { return false; }
         })();
+        // Remembered pane widths (px) for the two drag-resizable edges. Module
+        // vars so they survive re-routes; written back on drag-end.
+        this._leftPaneWidth = _leftPaneWidth;
+        this._inspPaneWidth = _inspPaneWidth;
         this._activeChapter = '';
         // Folding is per EXCHANGE, not per story — and the working and the result
         // fold SEPARATELY, because reading an answer while skimming its steps (or
@@ -249,7 +268,7 @@ export class MonitorView {
             selectedId: this.selectedTaskId,
             search: this._taskSearch || '',
             statusFilter: this._taskStatusFilter || 'all',
-            groupBy: this._taskGroupBy || 'date',
+            groupBy: this._taskGroupBy || 'workspace',
             // Module-level sets: the collapse memory has to outlive this view
             // instance, or every task click would re-fold the groups.
             seenKeys: _seenGroupKeys,
@@ -316,10 +335,18 @@ export class MonitorView {
                     <div id="mtask-list"></div>
                 </div>
 
+                <!-- Drag edge: resize the task list column. The 12px flex gap is
+                     the hit area; the divider itself is invisible (see styles). -->
+                <div id="mpane-divider-left" class="mpane-divider" title="Drag to resize the task list"></div>
+
                 <!-- Right panel — the task's story. -->
                 <div class="mpanel-right">
                     ${rightHtml}
                 </div>
+
+                <!-- Drag edge: resize the inspector column. Hidden while the
+                     inspector is closed (kept in sync by _renderInspector). -->
+                <div id="mpane-divider-insp" class="mpane-divider" style="display:none" title="Drag to resize the inspector"></div>
 
                 <!-- Inspector: its OWN column, a sibling of the story rather than
                      a child of it. Nested inside the scrolling panel it moved with
@@ -1118,6 +1145,12 @@ export class MonitorView {
                 // re-visit replayed the event).
                 if (packet.event === 'confirm_request') {
                     this._showTaskConfirm(packet.data);
+                }
+                // The agent's subtask checklist (task_progress tool) becomes its
+                // own chapter in the story: the plan and its current state are
+                // exactly what a reader wants while the run is still going.
+                if (packet.event === 'task_progress' && Array.isArray(packet.data?.items)) {
+                    if (this._timeline.pushTaskProgress(packet.data.items)) this._renderResultPanel();
                 }
                 // Live deliverable (present_result) — render it NOW so a plan is
                 // visible together with a following ask_user question. Only fires
@@ -1982,7 +2015,26 @@ export class MonitorView {
         // The document is already positioned inside `stream` — it sits where the
         // agent produced it, which is what makes the story read in order.
         const { stream } = splitForPanes(this._timeline.items);
-        const items = withExchangeFolds(stream, this._collapsedExchanges(stream));
+        const folded = withExchangeFolds(stream, this._collapsedExchanges(stream));
+        // While the run is live, the checklist card is PINNED below the newest
+        // message instead of staying where the plan first registered — a long
+        // run would otherwise bury the one thing the reader is watching. When
+        // the run settles, the card returns to its chronological place.
+        const running = this.currentStatus === 'running';
+        // Pinned = worth seeing. The card's own collapse flag (a click on its
+        // header) still wins — only an UNtouched card is forced open, so a
+        // reader who folded it once keeps it folded.
+        if (running) {
+            // The LATEST plan is the one being executed — older cards are
+            // history and keep whatever fold state they have.
+            const progs = this._timeline.items.filter(i => i.kind === 'task_progress');
+            const latest = progs[progs.length - 1];
+            if (latest && !latest.userFolded) {
+                latest.collapsed = false;
+                latest.userFolded = !!(latest.userFolded);
+            }
+        }
+        const items = pinLiveProgress(folded, running);
         this._timelineCmp = mountComponent(Timeline, host, {
             items,
             collapsed: collapsedIds(this._timeline.items),
@@ -1998,6 +2050,10 @@ export class MonitorView {
         this._renderPendingAsk(items);
         this._renderInspector(items);
         this._syncFoldAllButton();
+        // The header's mini progress bar is fed by the same task_progress card
+        // that just rendered, so keep them in lockstep — a card that appears or
+        // updates must move the bar with it.
+        this._syncHeader();
         document.getElementById('result-loading')?.remove();
 
         // Follow the newest content only when the reader has NOT scrolled away.
@@ -2058,6 +2114,8 @@ export class MonitorView {
         items = items || this._inspectorItems || [];
         const open = !!this._inspectorOpen;
         el.style.display = open ? 'block' : 'none';
+        const inspDivider = document.getElementById('mpane-divider-insp');
+        if (inspDivider) inspDivider.style.display = open ? '' : 'none';
 
         document.getElementById('btn-inspector')?.classList.toggle('active', open);
         if (!open) return;
@@ -2112,10 +2170,40 @@ export class MonitorView {
     /** Scroll the story to a chapter, and mark it active in the rail. */
     _jumpToChapter(id) {
         this._activeChapter = id;
-        document.querySelector(`#task-timeline [data-item-id="${id}"]`)
-            ?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+        this._scrollStoryTo(
+            document.querySelector(`#task-timeline [data-item-id="${id}"]`),
+            'start',
+        );
         // The rail reads activeChapter from its props, so a re-push is the update.
         this._inspector?.update({ activeChapter: id });
+    }
+
+    /**
+     * Scroll the story panel to an item WITHOUT touching any outer scroll
+     * container. scrollIntoView scrolls EVERY scrollable ancestor — including
+     * the app shell's .main-content — so a chapter jump yanked the whole page
+     * up and hid the task header behind the top edge. The only container that
+     * should move is #result-panel, so compute the offset within it and scroll
+     * that alone.
+     *
+     * @param {HTMLElement|null} el the timeline row to reveal
+     * @param {'start'|'center'} block where to place it in the panel
+     */
+    _scrollStoryTo(el, block = 'start') {
+        const panel = document.getElementById('result-panel');
+        if (!panel || !el) return;
+        const pRect = panel.getBoundingClientRect();
+        const eRect = el.getBoundingClientRect();
+        const rel = eRect.top - pRect.top;
+        let top;
+        if (block === 'center') {
+            top = panel.scrollTop + rel - (pRect.height - eRect.height) / 2;
+        } else {
+            // Leave a little air below the filter bar instead of gluing the row
+            // flush to the panel's top edge.
+            top = panel.scrollTop + rel - 8;
+        }
+        panel.scrollTo({ top: Math.max(top, 0), behavior: 'smooth' });
     }
 
     /**
@@ -2187,6 +2275,10 @@ export class MonitorView {
     _toggleCard(id) {
         const item = this._timeline.items.find(i => i.id === id);
         if (!item) return;
+        // A user click is a deliberate choice: remember it so the live pinning
+        // never force-opens a card the reader chose to fold. (The pinning only
+        // opens cards that have never been touched.)
+        item.userFolded = true;
         if (this._timeline.setCollapsed(id, !item.collapsed)) this._renderResultPanel();
     }
 
@@ -2265,8 +2357,10 @@ export class MonitorView {
             + `${icon('question', 14)}<span>Waiting for your answer</span>`
             + `<span class="mask-pending-go">Go to the question ↓</span></div>`;
         slot.querySelector('.mask-pending')?.addEventListener('click', () => {
-            document.querySelector(`#task-timeline [data-item-id="${ask.id}"]`)
-                ?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+            this._scrollStoryTo(
+                document.querySelector(`#task-timeline [data-item-id="${ask.id}"]`),
+                'center',
+            );
         });
     }
 
@@ -2346,6 +2440,89 @@ export class MonitorView {
         const pane = document.querySelector('.mpanel-left');
         if (pane) pane.style.display = this._listCollapsed ? 'none' : '';
         document.getElementById('btn-toggle-list')?.classList.toggle('active', !this._listCollapsed);
+    }
+
+    /**
+     * Apply the remembered pane widths to the layout via CSS custom properties.
+     * The widths are written to the .monitor-layout root so every pane can read
+     * them (the inspector's width lives in timelineStyles.js, which reads
+     * --mpane-insp-w off the same root).
+     */
+    _applyPaneWidths() {
+        const layout = document.querySelector('.monitor-layout');
+        if (!layout) return;
+        layout.style.setProperty('--mpane-left-w', `${this._leftPaneWidth}px`);
+        layout.style.setProperty('--mpane-insp-w', `${this._inspPaneWidth}px`);
+    }
+
+    /**
+     * Bind the two drag edges (task list ↔ story, story ↔ inspector). Pointer
+     * events so a drag survives leaving the divider (no mouseleave gap); the
+     * layout resizes live during the drag, the final width is remembered.
+     */
+    _bindPaneDividers() {
+        this._applyPaneWidths();
+        // A drag is ONE session: the base width is snapshotted on pointerdown and
+        // every move applies `base + dx`. Adding dx to the LIVE width instead
+        // double-counted the delta (the width was already updated by the previous
+        // move), so the pane ran ahead of the cursor and the drag snapped between
+        // positions rather than sliding with it.
+        const startDrag = (getBase, onMove, onEnd) => {
+            return (e) => {
+                e.preventDefault();
+                const startX = e.clientX;
+                const base = getBase();
+                const onMoveH = (ev) => onMove(base, ev.clientX - startX);
+                const onEndH = () => {
+                    document.removeEventListener('pointermove', onMoveH);
+                    document.removeEventListener('pointerup', onEndH);
+                    document.body.classList.remove('resizing-panes');
+                    if (onEnd) onEnd();
+                };
+                document.body.classList.add('resizing-panes');
+                document.addEventListener('pointermove', onMoveH);
+                document.addEventListener('pointerup', onEndH);
+            };
+        };
+
+        const applyVar = (key, value) => {
+            const layout = document.querySelector('.monitor-layout');
+            if (layout) layout.style.setProperty(key, `${value}px`);
+        };
+
+        const leftDivider = document.getElementById('mpane-divider-left');
+        if (leftDivider) {
+            const start = startDrag(() => this._leftPaneWidth, (base, dx) => {
+                const w = base + dx;
+                if (w < PANE_W_MIN || w > PANE_W_MAX) return;
+                this._leftPaneWidth = w;
+                // Drive the CSS variable, not inline width: the panes' real
+                // sizes come from var(--mpane-left-w) (MonitorView.styles.js),
+                // so the live drag must write there or a re-render snaps back.
+                applyVar('--mpane-left-w', w);
+            }, () => {
+                _leftPaneWidth = this._leftPaneWidth;
+                try { localStorage.setItem('jhai_monitor_left_width', String(this._leftPaneWidth)); } catch (_) {}
+            });
+            leftDivider.addEventListener('pointerdown', start);
+        }
+
+        const inspDivider = document.getElementById('mpane-divider-insp');
+        if (inspDivider) {
+            const start = startDrag(() => this._inspPaneWidth, (base, dx) => {
+                const w = base - dx;
+                if (w < PANE_W_MIN || w > PANE_W_MAX) return;
+                this._inspPaneWidth = w;
+                // Same story as the left edge: .mtl-insp sizes itself from
+                // var(--mpane-insp-w) via flex-basis, which would beat an
+                // inline width — write the variable instead.
+                applyVar('--mpane-insp-w', w);
+            }, () => {
+                _inspPaneWidth = this._inspPaneWidth;
+                try { localStorage.setItem('jhai_monitor_insp_width', String(this._inspPaneWidth)); } catch (_) {}
+            });
+            inspDivider.addEventListener('pointerdown', start);
+        }
     }
 
     // NOTE: _bindInspector is gone. It queried [data-chap] / [data-insp-act] out
@@ -2508,10 +2685,23 @@ export class MonitorView {
         const status = (this.currentStatus && this.currentStatus !== 'idle')
             ? this.currentStatus : task.status;
 
+        // Subtask tally for the header's mini progress bar: only meaningful
+        // while a run is live (the card returns to history once it settles).
+        // The LATEST plan is the one being executed.
+        const progs = this._timeline.items.filter(i => i.kind === 'task_progress');
+        const progressItem = progs[progs.length - 1];
+        const progress = (status === 'running' && progressItem && Array.isArray(progressItem.items))
+            ? {
+                done: progressItem.items.filter(t => t.status === 'completed').length,
+                total: progressItem.items.length,
+            }
+            : null;
+
         this._header = mountComponent(TaskHeader, el, {
             task,
             status,
             steps: this._timeline.items.filter(i => i.kind === 'group').length,
+            progress,
             usage: this._usageTotals(),
             context: this._contextReading,
             // Elapsed measures against the clock while running, so the component
@@ -3167,6 +3357,11 @@ export class MonitorView {
         // Setup CHAT modal overlay (once, appended to body)
         this._setupChatModal();
 
+        // Remembered pane widths + the two drag edges (task list ↔ story ↔
+        // inspector). The dividers live in render()'s layout markup; binding
+        // here so a re-render that replaces the layout still works.
+        this._bindPaneDividers();
+
         // Task list: one prop push. Its clicks, its filters and its group collapse
         // are the component's own (TaskList.svelte).
         this._syncTaskList();
@@ -3709,6 +3904,33 @@ export class MonitorView {
      *        attachments, so it stays the single task-creation path.
      */
     async _openNewTaskModal(presetWs = null, presetPrompt = '') {
+        // Modal-local styles (mode buttons + resize grip). Injected once; the
+        // overlay is rebuilt every open, so a style element is added lazily.
+        if (!document.getElementById('nt-modal-styles')) {
+            const st = document.createElement('style');
+            st.id = 'nt-modal-styles';
+            st.textContent = `
+                .nt-mode-btn {
+                    display:inline-flex; align-items:center; gap:6px;
+                    padding:5px 12px; border-radius:7px; cursor:pointer;
+                    background:var(--bg-tertiary); border:1px solid var(--border);
+                    color:var(--text-secondary); font-size:12px; user-select:none;
+                    transition: border-color .12s, background .12s, color .12s;
+                }
+                .nt-mode-btn:hover { border-color: var(--border-focus); color: var(--text-primary); }
+                .nt-mode-btn.sel {
+                    background: var(--accent); border-color: var(--accent);
+                    color: #fff; font-weight: 600;
+                }
+                .nt-mode-btn .nt-mode-ico { display:inline-flex; }
+                .nt-modal-box { position: relative; }
+                .nt-modal-box::-webkit-resizer {
+                    background: var(--text-tertiary); border-radius: 2px;
+                }
+            `;
+            document.head.appendChild(st);
+        }
+
         let config = {};
         try { config = (await invoke('get_ai_config')) || {}; } catch (_) {}
         const projects = Array.isArray(config.approved_projects) ? config.approved_projects : [];
@@ -3718,7 +3940,23 @@ export class MonitorView {
         const mcpServers = config.mcp_servers || {};
         const running = new Set(mcpManager.clients.keys());
 
-        const modeDropdown = new ModeDropdown(this._lastNewTaskMode || DEFAULT_MODE_ID);
+        // Agent-mode picker — BUTTON GROUP instead of the dropdown (per user
+        // request). Each mode is a small button; the selected one is highlighted
+        // and its description is shown below in a one-line hint. The value is
+        // read via currentModeId.
+        const modeOptions = Object.values(AGENT_MODES);
+        // Mode label without its leading emoji (we render an SVG icon instead).
+        const modeName = (m) => (m.label || m.id).replace(/^\S+\s+/, '');
+        // Mode id → SVG icon name (icons.js) — mirrors ModeDropdown.
+        const MODE_ICON = { develop: 'code', research: 'search', automation: 'gear' };
+        const initialModeId = this._lastNewTaskMode || DEFAULT_MODE_ID;
+        let currentModeId = initialModeId;
+        const modeButtonsHtml = modeOptions.map(mo => `
+            <button type="button" class="nt-mode-btn ${mo.id === initialModeId ? 'sel' : ''}" data-id="${mo.id}" title="${escapeHtml(mo.description || '')}">
+                <span class="nt-mode-ico">${icon(MODE_ICON[mo.id] || 'gear')}</span>
+                <span class="nt-mode-name">${escapeHtml(modeName(mo))}</span>
+            </button>`).join('');
+        const initialModeDesc = escapeHtml(AGENT_MODES[initialModeId].description || '');
 
         const wsDatalist = projects.map(p => `<option value="${escapeHtml(p)}"></option>`).join('');
 
@@ -3734,12 +3972,12 @@ export class MonitorView {
         overlay.id = 'mnt-modal-overlay';   // lets Ctrl+N detect it's already open
         overlay.style.cssText = `position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:4000;display:flex;align-items:center;justify-content:center;`;
         overlay.innerHTML = `
-            <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:12px;width:640px;max-width:92vw;max-height:88vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 12px 40px rgba(0,0,0,0.5);">
-                <div style="padding:14px 18px;border-bottom:1px solid var(--border);background:var(--bg-tertiary);display:flex;justify-content:space-between;align-items:center;">
-                    <strong style="font-size:15px;display:flex;align-items:center;gap:7px;"><span style="color:var(--accent);display:inline-flex">${icon('bolt')}</span>New Task</strong>
+            <div class="nt-modal-box" style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:12px;width:720px;max-width:94vw;height:80vh;min-height:420px;min-width:520px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 12px 40px rgba(0,0,0,0.5);resize:both;">
+                <div style="padding:10px 16px;border-bottom:1px solid var(--border);background:var(--bg-tertiary);display:flex;justify-content:space-between;align-items:center;flex-shrink:0;">
+                    <strong style="font-size:14px;display:flex;align-items:center;gap:7px;"><span style="color:var(--accent);display:inline-flex">${icon('bolt')}</span>New Task</strong>
                     <button class="nt-close" style="background:none;border:none;color:var(--text-primary);cursor:pointer;font-size:18px;">✖</button>
                 </div>
-                <div style="padding:16px 18px;overflow-y:auto;display:flex;flex-direction:column;gap:14px;">
+                <div style="padding:10px 16px;overflow-y:auto;display:flex;flex-direction:column;gap:10px;flex:1;min-height:0;">
                     <div>
                         <label class="input-label" style="font-size:11px;">Workspace (required for agent tasks)</label>
                         <div style="display:flex;gap:8px;">
@@ -3748,19 +3986,18 @@ export class MonitorView {
                             <button class="btn btn-secondary nt-browse" type="button" style="padding:0 12px;display:flex;align-items:center;">${icon('folder')}</button>
                         </div>
                     </div>
-                    <div style="display:flex;gap:14px;flex-wrap:wrap;">
-                        <div style="flex:1;min-width:180px;">
-                            <label class="input-label" style="font-size:11px;">Agent mode</label>
-                            ${modeDropdown.render()}
-                        </div>
+                    <div>
+                        <label class="input-label" style="font-size:11px;">Agent mode</label>
+                        <div class="nt-mode-group" style="display:flex;flex-wrap:wrap;gap:6px;">${modeButtonsHtml}</div>
+                        <div id="nt-mode-desc" style="margin-top:6px;font-size:11.5px;color:var(--text-secondary);line-height:1.5;">${initialModeDesc}</div>
                     </div>
                     <div>
                         <label class="input-label" style="font-size:11px;">MCP servers to use (optional)</label>
-                        <div style="display:flex;flex-wrap:wrap;gap:14px;padding:8px 10px;border:1px solid var(--border-light);border-radius:6px;background:var(--bg-tertiary);">
+                        <div style="display:flex;flex-wrap:wrap;gap:10px;padding:6px 10px;border:1px solid var(--border-light);border-radius:6px;background:var(--bg-tertiary);">
                             ${mcpHtml}
                         </div>
                     </div>
-                    <div style="position:relative;">
+                    <div style="position:relative;display:flex;flex-direction:column;flex:1;min-height:0;">
                         <div style="display:flex;justify-content:space-between;align-items:center;">
                             <label class="input-label" style="font-size:11px;margin:0;">Task <span style="opacity:0.6">(/ to expand a template or attach a skill)</span></label>
                             <button class="btn btn-secondary nt-attach" type="button" style="height:24px;padding:0 8px;font-size:11px;display:flex;align-items:center;gap:4px;" title="Attach image or file">📎 Attach</button>
@@ -3769,15 +4006,25 @@ export class MonitorView {
                         <div id="nt-skill-chips" class="sc-chips" style="display:none;margin-top:6px;"></div>
                         <div id="nt-previews" style="display:none;flex-wrap:wrap;gap:8px;margin-top:6px;"></div>
                         <div id="nt-slash-popup" class="slash-popup" style="display:none;"></div>
-                        <textarea id="nt-prompt" class="input" rows="8" placeholder="Describe the task to run…  (/ for commands, Ctrl+Enter to create, paste images too)" style="width:100%;resize:vertical;min-height:160px;font-size:13.5px;line-height:1.6;margin-top:6px;"></textarea>
+                        <textarea id="nt-prompt" class="input" rows="8" placeholder="Describe the task to run…  (/ for commands, Ctrl+Enter to create, paste images too)" style="width:100%;flex:1;min-height:120px;resize:none;font-size:13.5px;line-height:1.6;margin-top:6px;"></textarea>
                     </div>
                 </div>
-                <div style="padding:12px 18px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px;">
+                <div style="padding:10px 16px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px;flex-shrink:0;">
                     <button class="btn btn-secondary nt-cancel">Cancel</button>
                     <button class="btn btn-primary nt-send">Create & Run ▶</button>
                 </div>
             </div>`;
         document.body.appendChild(overlay);
+
+        // ── Agent-mode button group ──
+        const modeButtons = overlay.querySelectorAll('.nt-mode-btn');
+        const modeDescEl = overlay.querySelector('#nt-mode-desc');
+        const setMode = (id) => {
+            currentModeId = id;
+            modeButtons.forEach(b => b.classList.toggle('sel', b.getAttribute('data-id') === id));
+            modeDescEl.textContent = AGENT_MODES[id].description || '';
+        };
+        modeButtons.forEach(btn => btn.addEventListener('click', () => setMode(btn.getAttribute('data-id'))));
 
         let dragUnlisten = null;
         const close = () => {
@@ -3791,7 +4038,6 @@ export class MonitorView {
         const wsInput = overlay.querySelector('#nt-ws');
         const textarea = overlay.querySelector('#nt-prompt');
         const sendBtn = overlay.querySelector('.nt-send');
-        modeDropdown.init(); // custom dropdown (SVG icons + per-row descriptions)
 
         // "/" command popup — templates EXPAND, skills ATTACH as chips (same as
         // ChatView); skill bodies are injected at send via slash.buildPrompt().
@@ -3909,7 +4155,7 @@ export class MonitorView {
                 prompt += '\n\n' + fileAtts.map(f => `[Attached File: ${f.name}]\n\`\`\`\n${f.content}\n\`\`\`\n`).join('\n');
             }
             const images = attachments.filter(a => a.type === 'image').map(a => a.dataUrl);
-            const modeId = modeDropdown.value;
+            const modeId = currentModeId;
             const selectedMcp = [...overlay.querySelectorAll('.nt-mcp-cb')]
                 .filter(c => c.checked).map(c => c.getAttribute('data-name'));
             // Remember for next time (per view instance).
@@ -3926,11 +4172,21 @@ export class MonitorView {
                         catch (e) { console.warn(`MCP start failed for ${name}:`, e); }
                     }
                 }
-                // NOTE: do NOT pass behavior.mcp_servers — that flags the run as
-                // an "external caller" in AgentController and strips the built-in
-                // toolset. The selected servers are simply STARTED above; their
-                // tools then surface globally (relevance-pruned), same as DirectChat.
-                const behavior = { mode: 'iterative_agent', ...buildBehavior(modeId) };
+                // Pass the selected MCP servers through behavior.mcp_servers so
+                // AgentController's setMcpServerFilter restricts this run's MCP
+                // tools to exactly the checked servers. (Schedule does the same.)
+                // AgentController no longer treats mcp_servers as an external-
+                // caller marker, so the full built-in toolset is preserved.
+                // An EXPLICIT [] when nothing is checked is important: an empty
+                // list means "NO MCP tools" (all servers excluded), while an
+                // OMITTED list would mean "all servers" — and a server that
+                // connects MID-task (e.g. ChatView's async _startEnabledMcpServers)
+                // would then leak its tools into later turns of this task.
+                const behavior = {
+                    mode: 'iterative_agent',
+                    ...buildBehavior(modeId),
+                    mcp_servers: selectedMcp
+                };
                 const res = await window.apiClient.request('/tasks', {
                     method: 'POST',
                     body: JSON.stringify({

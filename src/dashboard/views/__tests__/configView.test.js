@@ -12,8 +12,18 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 const invoke = vi.fn(async () => null);
+const studyMock = vi.hoisted(() => ({
+    runStudyPass: vi.fn(),
+    dropStudyCards: vi.fn(() => ({ kept: [], dropped: 0 })),
+}));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a) => invoke(...a) }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async () => () => {}) }));
+// _runStudy dynamic-imports StudyPass; the module namespace is immutable, so the
+// mock is declared here and the stub's resolved value is set per test.
+vi.mock('../../../modules/ai/memory/StudyPass.js', () => ({
+    runStudyPass: studyMock.runStudyPass,
+    dropStudyCards: studyMock.dropStudyCards,
+}));
 vi.mock('../../../modules/ai/PromptTemplateManager.js', () => ({
     promptTemplateManager: { list: () => [], listTemplates: async () => [], toConfigValue: () => ({}) },
 }));
@@ -161,6 +171,36 @@ describe('memory writes', () => {
 // click threw and the edit was silently dropped: the reported "概観ノート保存
 // ボタンが動作しない". The method is the manual-edit counterpart of the study
 // pass: same write path, user-supplied text, fresh timestamp, immediate refresh.
+describe('overview note load (regression: it vanished after Load)', () => {
+    beforeEach(() => {
+        v.memoryWorkspace = 'C:/ws';
+        invoke.mockClear();
+    });
+
+    it('reads the overview file back so the note survives a Load', async () => {
+        // readWorkspaceMemory (facts/episodes/cards) first, then read_file for
+        // .agent/memory/overview.md. Missing file must not throw.
+        invoke.mockImplementation(async (cmd, args) => {
+            if (cmd === 'read_file' && args?.path === 'C:/ws/.agent/memory/overview.md') {
+                return '<!-- generated: 2026-08-13T00:00:00.000Z -->\n- the project is a dashboard\n';
+            }
+            return null;
+        });
+        await v.loadMemoryData();
+        expect(v.memoryOverview?.text).toContain('the project is a dashboard');
+        expect(v.memoryOverview?.generatedAt).toBe('2026-08-13T00:00:00.000Z');
+    });
+
+    it('yields an empty note (not an error) when the file is missing', async () => {
+        invoke.mockImplementation(async (cmd) => {
+            if (cmd === 'read_file') throw new Error('no such file');
+            return null;
+        });
+        await v.loadMemoryData();
+        expect(v.memoryOverview).toEqual({ text: '', generatedAt: '', head: '', conventions: null });
+    });
+});
+
 describe('overview note manual save', () => {
     beforeEach(() => {
         v.memoryWorkspace = 'C:/ws';
@@ -203,5 +243,41 @@ describe('overview note manual save', () => {
         await v._saveOverview('will fail');
         expect(alertSpy).toHaveBeenCalled();
         alertSpy.mockRestore();
+    });
+});
+
+// When the study pass hits the file cap it says so, instead of silently
+// indexing a prefix of the tree and looking complete.
+describe('study pass capped warning', () => {
+    beforeEach(() => {
+        v.memoryWorkspace = 'C:/ws';
+        invoke.mockClear();
+        studyMock.runStudyPass.mockReset();
+        // The overview step uses a model and is not what we are testing.
+        v._writeOverview = vi.fn(async () => {});
+    });
+
+    it('warns when the pass was truncated or omitted files', async () => {
+        studyMock.runStudyPass.mockResolvedValue({
+            files: 800, symbols: 1200, edges: 300, sheets: 0,
+            pruned: 0, total: 5000, omitted: 200, truncated: true,
+            paths: [], areas: [],
+        });
+        await v._runStudy();
+        // The ja catalog renders the cap notice with the totals; a prefix-only
+        // pass must never look complete.
+        expect(v._studyStatus).toContain('上限');
+        expect(v._studyStatus).toContain('5000');
+        expect(v._studyStatus).toContain('200');
+    });
+
+    it('does not warn when the whole tree was indexed', async () => {
+        studyMock.runStudyPass.mockResolvedValue({
+            files: 300, symbols: 900, edges: 200, sheets: 0,
+            pruned: 0, total: 300, omitted: 0, truncated: false,
+            paths: [], areas: [],
+        });
+        await v._runStudy();
+        expect(v._studyStatus).not.toContain('上限');
     });
 });

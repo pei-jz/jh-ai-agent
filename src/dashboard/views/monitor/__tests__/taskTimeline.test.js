@@ -2,7 +2,7 @@
 // tested. Every case here corresponds to a reported Task-view symptom.
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { TaskTimeline, buildTimeline, envelopeText, splitForPanes, chapters, replayLineType, replayStepNo, withTurnDividers, clockText, withExchangeFolds, exchangeCount, collapsedIds } from '../taskTimeline.js';
+import { TaskTimeline, buildTimeline, envelopeText, splitForPanes, chapters, replayLineType, replayStepNo, withTurnDividers, clockText, withExchangeFolds, exchangeCount, collapsedIds, pinLiveProgress } from '../taskTimeline.js';
 
 const kinds = (tl) => tl.items.map(i => i.kind);
 
@@ -155,6 +155,154 @@ describe('confirm', () => {
 
     it('resolving nothing is a no-op', () => {
         expect(tl.resolveConfirm()).toBe(null);
+    });
+});
+
+describe('task_progress', () => {
+    const items = () => [
+        { id: '1', title: '調査', status: 'pending' },
+        { id: '2', title: '実装', status: 'in_progress' },
+        { id: '3', title: 'テスト', status: 'completed' },
+    ];
+
+    it('adds its own chapter with the checklist', () => {
+        tl.pushTaskProgress(items());
+        expect(kinds(tl)).toEqual(['task_progress']);
+        expect(tl.items[0].items).toHaveLength(3);
+        expect(tl.items[0].items[1].status).toBe('in_progress');
+    });
+
+    it('REPLACES the list in place on update instead of stacking cards', () => {
+        // Same plan, statuses moving forward — ONE card, refreshed in place.
+        tl.pushTaskProgress(items());
+        tl.pushTaskProgress(items().map(t => ({ ...t, status: 'completed' })));
+        expect(tl.items.filter(i => i.kind === 'task_progress')).toHaveLength(1);
+        expect(tl.items[0].items).toHaveLength(3);
+        expect(tl.items[0].rev).toBe(1);   // the renderer is told it changed
+    });
+
+    it('gives a DIFFERENT plan its own card instead of reusing the first', () => {
+        // A multi-turn task: the agent plans, asks, then replans with a new
+        // checklist. The old card showed the FIRST plan's progress while the
+        // agent executed the second — the reported confusion.
+        tl.pushTaskProgress(items());
+        tl.pushTaskProgress([
+            { id: 'a', title: '新計画1', status: 'in_progress' },
+            { id: 'b', title: '新計画2', status: 'pending' },
+        ]);
+        const cards = tl.items.filter(i => i.kind === 'task_progress');
+        expect(cards).toHaveLength(2);
+        expect(cards[0].items.map(t => t.id)).toEqual(['1', '2', '3']);
+        expect(cards[1].items.map(t => t.id)).toEqual(['a', 'b']);
+    });
+
+    it('updates the card in place when only STATUSES change (same plan)', () => {
+        tl.pushTaskProgress(items());
+        const done = items().map(t => ({ ...t, status: t.id === '1' ? 'completed' : t.status }));
+        tl.pushTaskProgress(done);
+        const cards = tl.items.filter(i => i.kind === 'task_progress');
+        expect(cards).toHaveLength(1);
+        expect(cards[0].items[0].status).toBe('completed');
+    });
+
+    it('normalises entries and drops junk', () => {
+        const p = tl.pushTaskProgress([
+            { id: 1, title: 'ok', status: 'pending' },
+            { title: 'no id', status: 'pending' },
+            null,
+            'junk',
+        ]);
+        expect(p.items).toHaveLength(2);
+        expect(p.items[0].id).toBe('1');
+    });
+
+    it('ignores an empty payload', () => {
+        expect(tl.pushTaskProgress([])).toBe(null);
+        expect(tl.pushTaskProgress(null)).toBe(null);
+        expect(tl.items).toHaveLength(0);
+    });
+
+    it('ends the current reasoning group, like ask', () => {
+        tl.pushActivity('thought', 'thinking');
+        tl.pushTaskProgress(items());
+        tl.pushActivity('tool', 'after');
+        expect(tl.items[0].lines).toHaveLength(0);
+        expect(kinds(tl)).toEqual(['group', 'task_progress', 'activity']);
+    });
+
+    it('a completed run does not sweep the checklist away', () => {
+        tl.pushRequest('do it');
+        tl.pushTaskProgress(items());
+        tl.pushRun({ request: 'do it', answer: 'done' });
+        expect(kinds(tl)).toContain('task_progress');
+    });
+});
+
+describe('pinLiveProgress — the checklist stays visible while the run is live', () => {
+    // Build a stream shaped like the rendered timeline: settled history, the
+    // checklist card, then live activity below it.
+    const stream = () => [
+        { id: 'a', kind: 'request', live: false },
+        { id: 'b', kind: 'run', live: false },
+        { id: 'c', kind: 'task_progress', live: false, items: [] },
+        { id: 'd', kind: 'group', live: true },
+        { id: 'e', kind: 'activity', live: true },
+    ];
+
+    it('pins the card to the BOTTOM while the run is live', () => {
+        const out = pinLiveProgress(stream(), true);
+        const kinds = out.map(i => i.kind);
+        // The live request is itself flagged live, so "ahead of the first live
+        // item" would pin the card to the TOP — the exact burying this function
+        // exists to fix. The card goes to the end, where the reader is looking.
+        expect(kinds).toEqual(['request', 'run', 'group', 'activity', 'task_progress']);
+    });
+
+    it('leaves the order untouched when the run is NOT live', () => {
+        expect(pinLiveProgress(stream(), false).map(i => i.kind))
+            .toEqual(['request', 'run', 'task_progress', 'group', 'activity']);
+    });
+
+    it('keeps a live request ABOVE the pinned card (the request stays first)', () => {
+        // The run is live, so the request is live too. The card must NOT jump
+        // above it — that is the original bug (card pinned at the top).
+        const liveReq = stream().map(i => (i.kind === 'request' ? { ...i, live: true } : i));
+        const out = pinLiveProgress(liveReq, true);
+        expect(out[0].kind).toBe('request');
+        expect(out[out.length - 1].kind).toBe('task_progress');
+    });
+
+    it('returns the same array reference when there is no progress card', () => {
+        const noCard = stream().filter(i => i.kind !== 'task_progress');
+        expect(pinLiveProgress(noCard, true)).toBe(noCard);
+    });
+
+    it('appends at the end when everything is settled (no live items)', () => {
+        const settled = stream().map(i => ({ ...i, live: false }));
+        const out = pinLiveProgress(settled, true);
+        expect(out[out.length - 1].kind).toBe('task_progress');
+    });
+
+    it('does not mutate the input array', () => {
+        const input = stream();
+        const before = input.map(i => i.id).join(',');
+        pinLiveProgress(input, true);
+        expect(input.map(i => i.id).join(',')).toBe(before);
+    });
+
+    it('pins ONLY the LATEST card when a replan left several in the story', () => {
+        // Old cards are history: pinning them all would stack a pile of
+        // checklists at the bottom. The newest plan is the one being executed.
+        const multi = [
+            { id: 'old', kind: 'task_progress', live: false, items: [] },
+            { id: 'req', kind: 'request', live: true },
+            { id: 'g', kind: 'group', live: true },
+            { id: 'new', kind: 'task_progress', live: false, items: [] },
+        ];
+        const out = pinLiveProgress(multi, true);
+        expect(out[0].id).toBe('old');        // stays in place
+        expect(out[out.length - 1].id).toBe('new');  // pinned to the bottom
+        expect(out.filter(i => i.kind === 'task_progress')).toHaveLength(2);
     });
 });
 
@@ -551,6 +699,46 @@ describe('replaying a delivered report', () => {
     });
 });
 
+describe('replaying a task_progress checklist', () => {
+    it('restores it from the stored event, matching the live path', () => {
+        const tl2 = buildTimeline([
+            { event: 'task_progress', data: { items: [
+                { id: '1', title: '調査', status: 'completed' },
+                { id: '2', title: '実装', status: 'in_progress' },
+            ] } },
+        ]);
+        const card = tl2.items.find(i => i.kind === 'task_progress');
+        expect(card).toBeTruthy();
+        expect(card.items).toHaveLength(2);
+        expect(card.items[1].status).toBe('in_progress');
+    });
+
+    it('collapses repeated updates of the SAME plan into one card', () => {
+        const tl2 = buildTimeline([
+            { event: 'task_progress', data: { items: [{ id: '1', title: 'a', status: 'pending' }] } },
+            { event: 'task_progress', data: { items: [{ id: '1', title: 'a', status: 'completed' }] } },
+        ]);
+        const cards = tl2.items.filter(i => i.kind === 'task_progress');
+        expect(cards).toHaveLength(1);
+        expect(cards[0].items[0].status).toBe('completed');
+    });
+
+    it('keeps a REPLANNED checklist as its own card after a reload', () => {
+        const tl2 = buildTimeline([
+            { event: 'task_progress', data: { items: [{ id: '1', title: 'a', status: 'completed' }] } },
+            { event: 'task_progress', data: { items: [{ id: 'x', title: 'new', status: 'in_progress' }] } },
+        ]);
+        const cards = tl2.items.filter(i => i.kind === 'task_progress');
+        expect(cards).toHaveLength(2);
+        expect(cards[1].items.map(t => t.id)).toEqual(['x']);
+    });
+
+    it('ignores a task_progress event with no items array', () => {
+        expect(() => buildTimeline([{ event: 'task_progress', data: {} }])).not.toThrow();
+        expect(buildTimeline([{ event: 'task_progress', data: {} }]).items).toEqual([]);
+    });
+});
+
 describe('splitForPanes — the deliverable becomes a document, in place', () => {
     it('features a present_result and takes it out of the stream', () => {
         tl.pushActivity('thought', 'working');
@@ -691,30 +879,33 @@ describe('step lines carry the file their tool touched', () => {
 });
 
 describe('chapters', () => {
-    it('numbers the reasoning steps of an in-flight run', () => {
-        tl.pushRequest('do the thing');
+    it('lists only the request and the deliverable, each with a one-line peek', () => {
+        tl.pushRequest('refactor the dashboard');
         tl.pushActivity('thought', 'first');
         tl.pushActivity('thought', 'second');
         tl.pushAsk({ text: 'which one?' });
+        tl.pushRun({ request: 'refactor the dashboard', answer: 'done — everything moved' });
 
-        expect(chapters(tl.items).map(c => c.label))
-            .toEqual(['Request', 'Step 01', 'Step 02', 'Question']);
+        const cs = chapters(tl.items);
+        expect(cs.map(c => c.label)).toEqual([
+            'Request · refactor the dashboard',
+            'Deliverable · done — everything moved',
+        ]);
     });
 
-    it('after completion the steps stay navigable alongside the outcome', () => {
+    it('shows steps/questions/approvals are NOT chapters — only request + outcome', () => {
         tl.pushRequest('do the thing');
         tl.pushActivity('thought', 'first');
         tl.pushAsk({ text: 'which one?' });
         tl.pushRun({ request: 'do the thing', answer: 'done' });
 
         expect(chapters(tl.items).map(c => c.label))
-            .toEqual(['Request', 'Step 01', 'Deliverable', 'Question']);
+            .toEqual(['Request · do the thing', 'Deliverable · done']);
     });
 
-    it('labels an answered question differently', () => {
+    it('an unanswered question alone produces no chapters', () => {
         tl.pushAsk({ text: 'q' });
-        tl.resolveAsk('a');
-        expect(chapters(tl.items)[0].label).toBe('Answered');
+        expect(chapters(tl.items)).toEqual([]);
     });
 
     it('skips narration and plain activity lines — they are not chapters', () => {
@@ -723,8 +914,20 @@ describe('chapters', () => {
         expect(chapters(tl.items)).toEqual([]);
     });
 
+    it('strips markdown noise from the peek and caps its length', () => {
+        tl.pushRequest('# **Big** `header`\n\n- first\n- second');
+        const [c] = chapters(tl.items);
+        expect(c.label).toBe('Request · Big header first second');
+    });
+
+    it('caps a very long peek at ~60 chars with an ellipsis', () => {
+        tl.pushRequest('a'.repeat(200));
+        const [c] = chapters(tl.items);
+        expect(c.label).toMatch(/^Request · a{60}…$/);
+    });
+
     it('points at real item ids so a jump can find the node', () => {
-        tl.pushActivity('thought', 'step');
+        tl.pushRequest('hello');
         const [c] = chapters(tl.items);
         expect(tl.items.some(i => i.id === c.id)).toBe(true);
     });

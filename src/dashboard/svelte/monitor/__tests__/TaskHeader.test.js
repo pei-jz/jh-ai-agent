@@ -135,3 +135,26 @@ describe('TaskHeader — context gauge', () => {
         expect(el.querySelector('.mdh-ctx-fill').style.width).toBe('0%');
     });
 });
+
+describe('TaskHeader — subtask progress bar', () => {
+    it('renders a Progress bar with the tally when a plan is running', () => {
+        const el = mount({ status: 'running', progress: { done: 2, total: 5 } });
+        const bar = el.querySelector('.mdh-progress');
+        expect(bar).not.toBe(null);
+        expect(bar.querySelector('.mdh-ctx-pct').textContent).toBe('2/5');
+        expect(bar.querySelector('.mdh-ctx-fill').style.width).toBe('40%');
+    });
+
+    it('adds a checkmark when every subtask is complete', () => {
+        const el = mount({ status: 'running', progress: { done: 5, total: 5 } });
+        expect(el.querySelector('.mdh-progress .mdh-ctx-pct').textContent).toBe('5/5 ✓');
+    });
+
+    it('hides the bar for a single-step or empty plan', () => {
+        const one = mount({ status: 'running', progress: { done: 1, total: 1 } });
+        expect(one.querySelector('.mdh-progress')).toBe(null);
+        cleanup();
+        const none = mount({ status: 'running', progress: null });
+        expect(none.querySelector('.mdh-progress')).toBe(null);
+    });
+});

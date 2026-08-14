@@ -75,7 +75,6 @@
     })());
 
     const elapsed = $derived(stats.durationMs ? `${Math.round(stats.durationMs / 1000)}s` : '');
-    const started = $derived(String(task?.started_at || '').replace('T', ' ').slice(0, 19));
     const shortId = $derived(task?.id ? `#${String(task.id).slice(0, 8)}` : '');
 
     const fileList = $derived(Array.isArray(files) ? files : []);
@@ -93,14 +92,15 @@
 </script>
 
 {#if task}
+    <!-- Status / Started / Steps are gone: the task list on the left already
+         carries them (status dot, start time, progress), so a reference column
+         repeating them costs height without adding information. What stays is
+         what the list cannot show: the stable id, the caller and the elapsed. -->
     <div class="insp-sec">
         <div class="insp-h">Task</div>
         {#each [
             ['ID', shortId],
             ['Caller', task.caller],
-            ['Status', task.status],
-            ['Started', started],
-            ['Steps', stats.steps],
             ['Elapsed', elapsed],
         ] as [label, value]}
             {#if has(value)}

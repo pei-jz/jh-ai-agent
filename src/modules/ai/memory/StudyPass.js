@@ -49,7 +49,7 @@ export function targetPath(target) {
 }
 
 /** Files parsed per pass. A cap, not a target — the point is breadth, not depth. */
-export const STUDY_FILE_CAP = 400;
+export const STUDY_FILE_CAP = 1000;
 /** Symbols kept per file. A 2000-line module does not need 300 entries here. */
 export const SYMBOLS_PER_FILE = 12;
 /** Source types SymbolIndex can actually parse. */
@@ -66,6 +66,74 @@ export const STUDY_GLOB = '**/*.{js,jsx,mjs,cjs,ts,tsx,rs,py,java}';
 export const STUDY_SHEET_GLOB = '**/*.{xlsx,xlsm}';
 /** Workbooks opened per pass. Lower than the source cap: each one is a zip read. */
 export const SHEET_FILE_CAP = 60;
+/**
+ * Depth of the directory buckets for the fair-share selection.
+ * `src/modules/ai/a.js` at depth 2 is the area `src/modules`.
+ */
+export const FAIRSHARE_DEPTH = 2;
+
+/**
+ * Directory prefix of a path, bucketed for fair-share selection.
+ *
+ * Workspace-relative or absolute, forward or back slashes — always normalised
+ * to forward slashes first so the two never disagree.
+ */
+export function dirOf(path, depth = FAIRSHARE_DEPTH) {
+    let parts = String(path || '').replace(/\\/g, '/').split('/');
+    // A leading drive letter (`C:`) is not a directory. Without dropping it,
+    // every absolute Windows path under one drive buckets to the same place and
+    // the fair share never spreads.
+    if (parts.length > 1 && /^[A-Za-z]:$/.test(parts[0])) parts = parts.slice(1);
+    const dir = parts.length > 1
+        ? parts.slice(0, Math.min(depth, parts.length - 1)).join('/')
+        : '(root)';
+    return dir || '(root)';
+}
+
+/**
+ * Pick `cap` files spread across directories, not dominated by one.
+ *
+ * A 2000-file monorepo with 1900 files in `src/a` and 100 everywhere else must
+ * not produce an index that is 95% one area: the search that matters is "where
+ * is X in a place I have not looked", and a cap that always spends itself on
+ * the busiest directory never reaches the places the agent has not looked.
+ *
+ * Round-robin over the directory buckets, one file per bucket per round. When a
+ * bucket runs out, its budget is re-spent on the remaining ones — so a bucket
+ * with few files is not starved, it just finishes early.
+ *
+ * @param {string[]} files all matching files, in glob order
+ * @param {number} cap how many to keep
+ * @returns {{selected: string[], omitted: number}} the kept paths and how many were skipped
+ */
+export function fairShare(files, cap = STUDY_FILE_CAP) {
+    if (!Array.isArray(files) || files.length <= cap) {
+        return { selected: files || [], omitted: 0 };
+    }
+    const buckets = new Map();
+    for (const f of files) {
+        const d = dirOf(f);
+        if (!buckets.has(d)) buckets.set(d, []);
+        buckets.get(d).push(f);
+    }
+    const keys = [...buckets.keys()];
+    const selected = [];
+    const seen = new Set(keys);
+    while (selected.length < cap && seen.size > 0) {
+        for (const d of keys) {
+            if (!seen.has(d)) continue;
+            const list = buckets.get(d);
+            if (!list.length) { seen.delete(d); continue; }
+            selected.push(list.shift());
+            if (selected.length >= cap) break;
+        }
+        // Drop buckets that ran dry so their budget flows to the rest.
+        for (const d of [...seen]) {
+            if (!buckets.get(d).length) seen.delete(d);
+        }
+    }
+    return { selected, omitted: files.length - selected.length };
+}
 
 /**
  * Is this symbol worth remembering as "where X lives"?
@@ -223,16 +291,23 @@ export async function runStudyPass({
         return { files: 0, parsed: 0, symbols: 0, edges: 0, paths: [], areas: [] };
     }
 
-    let paths = [];
+    // Two globs on purpose. The first asks for EVERYTHING (up to the backend's
+    // hard cap) so the pass knows how big the tree really is and can pick a
+    // representative spread; a cap-sized glob would silently bias the index
+    // toward whatever alphabetical prefix came first. The second is the fair
+    // share: keep `fileCap` files, spread across directories.
+    let all = [];
+    let truncated = false;
     try {
         const res = await invoke('glob_files', {
-            pattern: STUDY_GLOB, path: workspacePath, maxResults: fileCap,
+            pattern: STUDY_GLOB, path: workspacePath, maxResults: 5000,
         });
-        paths = Array.isArray(res?.files) ? res.files : (Array.isArray(res) ? res : []);
+        all = Array.isArray(res?.files) ? res.files : (Array.isArray(res) ? res : []);
+        truncated = !!(res && res.truncated);
     } catch (e) {
         return { files: 0, parsed: 0, symbols: 0, edges: 0, paths: [], areas: [], error: String(e?.message || e) };
     }
-    paths = paths.slice(0, fileCap);
+    const { selected: paths, omitted } = fairShare(all, fileCap);
 
     const index = new CodeIndexClient({ workspacePath, invoke });
     // Built once. `changedFiles` rebuilds this map per call, so asking it inside
@@ -283,8 +358,10 @@ export async function runStudyPass({
     edgeCount += sheets.edges;
     for (const p of sheets.paths) seen.push({ path: p, hash: '' });
 
-    // Retire files the tree no longer has.
-    const gone = await index.prune(seen.map(f => f.path));
+    // Retire files the tree no longer has. A truncated glob means the list is
+    // NOT the whole tree, so pruning against it would delete files that still
+    // exist — the backend refuses that, and the pass reports it instead.
+    const gone = await index.prune(seen.map(f => f.path), { truncated });
 
     return {
         files: read + sheets.files,
@@ -293,6 +370,9 @@ export async function runStudyPass({
         edges: edgeCount,
         sheets: sheets.files,
         pruned: gone,
+        total: all.length,
+        omitted,
+        truncated,
         paths: seen.map(f => f.path),
         areas,
     };

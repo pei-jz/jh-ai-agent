@@ -61,6 +61,12 @@ export class OverviewView {
         /** Stats cut: 'month' | 'week' | 'day' | 'model' | 'ws'. */
         this.statsCut = 'month';
         try { this.statsCut = localStorage.getItem('jhai_dash_stats_cut') || 'month'; } catch (_) {}
+        /** Stats period filter: 'all' | '7d' | '30d'. */
+        this.statsRange = 'all';
+        try { this.statsRange = localStorage.getItem('jhai_dash_stats_range') || 'all'; } catch (_) {}
+        /** Stats status filter: 'all' | 'completed' | 'failed' | 'running' | 'paused' | 'aborted'. */
+        this.statsStatus = 'all';
+        try { this.statsStatus = localStorage.getItem('jhai_dash_stats_status') || 'all'; } catch (_) {}
         this._destroyed = false;
         /** Live run state: the reduction of the watched task's log stream. */
         this.run = null;
@@ -829,13 +835,126 @@ export class OverviewView {
     }
 
     /**
-     * The Stats tab body: token spend and cost, cut by date (month/week/day),
-     * by model, and by workspace. One segmented control switches the cut.
+     * Tasks filtered by the Stats tab's own conditions (period + status).
+     *
+     * Both pickers feed every figure below — KPIs, the per-bucket breakdown,
+     * and the task sample — so "how much did failed tasks cost this week?" is
+     * one click, not a mental step.
+     */
+    _statsTasks() {
+        const rangeDays = { '7d': 7, '30d': 30 }[this.statsRange] || 0;
+        const cutoff = rangeDays ? Date.now() - rangeDays * 86400000 : 0;
+        return (this.tasks || []).filter(t => {
+            if (this.statsStatus !== 'all' && t.status !== this.statsStatus) return false;
+            if (cutoff) {
+                const at = t.started_at ? new Date(t.started_at).getTime() : 0;
+                if (!at || at < cutoff) return false;
+            }
+            return true;
+        });
+    }
+
+    /**
+     * The status buttons offered in the Stats tab: statuses that actually exist
+     * in history (so the row never offers an empty filter), plus the currently
+     * selected one so a pick stays visible even after history changes.
+     */
+    _statsStatuses() {
+        const seen = new Set((this.tasks || []).map(t => t.status).filter(Boolean));
+        return ['completed', 'failed', 'aborted', 'paused', 'running']
+            .filter(s => seen.has(s) || this.statsStatus === s);
+    }
+
+    /**
+     * Per-model token breakdown with the Input/Cache/Output split.
+     *
+     * Same shape as the Monitor inspector's model rows (`in ↑ · cache ⚡ · out ↓`)
+     * so a number read in one place reads the same in the other. The cache column
+     * is only shown when some model actually reported cached tokens.
+     *
+     * @returns {Array<{model:string, tokens:number, in:number, cache:number, out:number}>}
+     */
+    _modelTokenRows(tasks) {
+        const rows = new Map();
+        let anyCache = false;
+        for (const t of tasks) {
+            const usage = (t.model_usage && Object.keys(t.model_usage).length)
+                ? t.model_usage
+                : { '(unattributed)': t.token_usage || {} };
+            for (const [model, u] of Object.entries(usage)) {
+                const inn = Number(u.prompt_tokens) || 0;
+                const cache = Number(u.cache_read_input_tokens) || 0;
+                const out = Number(u.completion_tokens) || 0;
+                if (!(inn + cache + out)) continue;
+                const row = rows.get(model) || { model, tokens: 0, in: 0, cache: 0, out: 0 };
+                row.in += inn; row.cache += cache; row.out += out;
+                row.tokens += inn + cache + out;
+                if (cache) anyCache = true;
+                rows.set(model, row);
+            }
+        }
+        const list = [...rows.values()]
+            .sort((a, b) => b.tokens - a.tokens)
+            .map(r => ({ ...r, tokens: r.in + r.cache + r.out }));
+        return { rows: list, anyCache };
+    }
+
+    /** Total tokens for a task, whichever record carries them. */
+    _taskTokens(t) {
+        if (t.token_usage && t.token_usage.total_tokens) return t.token_usage.total_tokens;
+        if (t.model_usage) {
+            let n = 0;
+            for (const u of Object.values(t.model_usage)) n += (u.total_tokens || 0);
+            return n;
+        }
+        return 0;
+    }
+
+    /**
+     * One-line per-model token summary for a task row.
+     *
+     * "k3 123k · flash 12k" — the same ↑⚡↓ split as the model table above, but
+     * compressed to a single line because a task row must stay scannable. Empty
+     * when the task carries no per-model record.
+     */
+    _taskModelLine(t) {
+        const usage = (t.model_usage && Object.keys(t.model_usage).length)
+            ? t.model_usage
+            : (t.token_usage ? { '(all)': t.token_usage } : null);
+        if (!usage) return '';
+        const parts = [];
+        for (const [model, u] of Object.entries(usage)) {
+            const inn = Number(u.prompt_tokens) || 0;
+            const cache = Number(u.cache_read_input_tokens) || 0;
+            const out = Number(u.completion_tokens) || 0;
+            if (!(inn + cache + out)) continue;
+            const tok = short(inn + cache + out);
+            parts.push(cache
+                ? `${shortModel(model)} ${tok} (${short(inn)}↑ · ${short(cache)}⚡ · ${short(out)}↓)`
+                : `${shortModel(model)} ${tok}`);
+        }
+        return parts.slice(0, 3).join(' · ');
+    }
+
+    /**
+     * The Stats tab body: token spend and cost under the current conditions,
+     * cut by date (month/week/day), by model, and by workspace.
+     *
+     * The conditions — period and status — are picked at the top and every
+     * figure below obeys them: KPI row, breakdown bars and the task sample all
+     * describe the SAME set, so cross-reading them (e.g. how many tokens the
+     * failures burned) is a filter change, not arithmetic.
      */
     _statsHtml(m) {
-        const totalTasks = this.tasks.length;
-        if (!totalTasks) {
+        const tasks = this._statsTasks();
+        if (!this.tasks.length) {
             return `<div class="dash-empty"><p>No tasks yet — run something and the usage breakdown will appear here.</p></div>`;
+        }
+        if (!tasks.length) {
+            const noMatch = this.statsStatus !== 'all' && this.statsRange !== 'all'
+                ? `No ${this.statsStatus} tasks in this period — change the conditions above.`
+                : `No tasks match these conditions — change them above.`;
+            return `<div class="dash-empty"><p>${noMatch}</p></div>`;
         }
 
         const cuts = [
@@ -845,8 +964,23 @@ export class OverviewView {
             ['model', t('dash.stats.model')],
             ['ws', t('dash.stats.ws')],
         ];
+        const ranges = [
+            ['all', t('dash.stats.all')],
+            ['7d', t('dash.stats.last7d')],
+            ['30d', t('dash.stats.last30d')],
+        ];
+        const statuses = this._statsStatuses();
         const cut = this.statsCut || 'month';
-        const agg = this._aggregate(this.tasks, cut);
+        const agg = this._aggregate(tasks, cut);
+
+        const done = tasks.filter(t => t.status === 'completed').length;
+        const failed = tasks.filter(t => t.status === 'failed').length;
+        const ended = done + failed;
+        const successRate = ended ? Math.round(done / ended * 100) : null;
+        const tokens = tasks.reduce((s, t) => s + this._taskTokens(t), 0);
+        const totalCost = this._spend(tasks).total;
+        const avgCost = tasks.length ? totalCost / tasks.length : 0;
+        const avgTok = tasks.length ? Math.round(tokens / tasks.length) : 0;
 
         const maxCost = Math.max(1, ...agg.rows.map(r => r.cost));
         const barRows = agg.rows.map(r => {
@@ -861,19 +995,51 @@ export class OverviewView {
                 </div>`;
         }).join('');
 
+        // Model × (fresh input / cache / output) — the same split the Monitor
+        // inspector draws, so the two agree about what "in" means. A cheap tier
+        // that runs most of the TOKENS while costing little is exactly the
+        // insight this row exists for, which is why it shows tokens, not cost.
+        const modelTok = this._modelTokenRows(tasks);
+        const modelRows = modelTok.rows.map(r => `
+            <div class="ds-st-mrow">
+                <span class="ds-st-label" title="${esc(r.model)}">${esc(clip(shortModel(r.model), 26))}</span>
+                <span class="ds-st-mtok">${short(r.in)}↑ · ${short(r.cache)}⚡ · ${short(r.out)}↓</span>
+                <span class="ds-st-tok">${short(r.tokens)} tok</span>
+            </div>`).join('');
+
+        const sample = [...tasks]
+            .sort((a, b) => (b.completed_at || b.started_at || '').localeCompare(a.completed_at || a.started_at || ''))
+            .slice(0, 8);
+        const sampleRows = sample.map(t => {
+            // Per-task model breakdown — a one-line summary, the detail in a
+            // tooltip so a row that used several models can still be scanned.
+            const modelLine = this._taskModelLine(t);
+            return `
+            <a class="ds-st-task" href="#monitor?id=${encodeURIComponent(t.id)}">
+                <span class="drow-dot dot-${t.status}"></span>
+                <span class="grow">${esc(clip(t.prompt || '(no prompt)', 60))}</span>
+                <span class="ds-st-task-tok" title="${esc(modelLine)}">${short(this._taskTokens(t))} tok${modelLine ? ` <span class="ds-st-task-models">· ${modelLine}</span>` : ''}</span>
+                <span class="ds-st-task-cost">${money(this._spend([t]).total)}</span>
+                <span class="ds-st-task-when">${ago(t.completed_at || t.started_at)}</span>
+            </a>`;
+        }).join('');
+
         return `
             <div class="dm">
                 <div class="dm-layers">
-                    <div><span class="k">TASKS</span><span class="v">${totalTasks}</span><span class="s">total</span></div>
-                    <div><span class="k">COST</span><span class="v">${money(agg.total)}</span><span class="s">${agg.unpriced ? 'some estimated' : 'at your rates'}</span></div>
-                    <div><span class="k">TOKENS</span><span class="v">${short(agg.rows.reduce((s, r) => s + r.tokens, 0))}</span><span class="s">across all tasks</span></div>
-                    <div><span class="k">MODELS</span><span class="v">${this._aggregate(this.tasks, 'model').rows.length}</span><span class="s">in use</span></div>
-                    <div><span class="k">WORKSPACES</span><span class="v">${this._aggregate(this.tasks, 'ws').rows.length}</span><span class="s">in use</span></div>
+                    <div><span class="k">TASKS</span><span class="v">${tasks.length}</span><span class="s">${this.statsStatus === 'all' ? 'all statuses' : this.statsStatus}</span></div>
+                    <div><span class="k">SUCCESS</span><span class="v">${successRate === null ? '—' : successRate + '%'}</span><span class="s">${done} done / ${failed} failed</span></div>
+                    <div><span class="k">COST</span><span class="v">${money(totalCost)}</span><span class="s">≈ ${money(avgCost)} / task</span></div>
+                    <div><span class="k">TOKENS</span><span class="v">${short(tokens)}</span><span class="s">≈ ${short(avgTok)} / task</span></div>
                 </div>
 
                 <div class="ds-st-toolbar">
-                    ${cuts.map(([key, label]) => `
-                        <button type="button" class="ds-st-cut ${cut === key ? 'is-on' : ''}" data-cut="${key}">${esc(label)}</button>
+                    ${ranges.map(([key, label]) => `
+                        <button type="button" class="ds-st-cut ${this.statsRange === key ? 'is-on' : ''}" data-range="${key}">${esc(label)}</button>
+                    `).join('')}
+                    <span class="ds-st-sep"></span>
+                    ${statuses.map(s => `
+                        <button type="button" class="ds-st-cut ${this.statsStatus === s ? 'is-on' : ''}" data-status="${s}">${esc(s)}</button>
                     `).join('')}
                 </div>
 
@@ -885,6 +1051,20 @@ export class OverviewView {
                         ? `<div class="ds-st-list">${barRows}</div>`
                         : `<p class="dm-note">${esc(t('dash.stats.empty'))}</p>`}
                 </div>
+
+                ${modelTok.rows.length ? `
+                <div class="dm-box">
+                    <div class="dm-h">${esc(t('dash.stats.modelSplit'))}
+                        ${modelTok.anyCache ? '' : `<span class="more">${esc(t('dash.stats.noCache'))}</span>`}
+                    </div>
+                    <div class="ds-st-list ds-st-mlist">${modelRows}</div>
+                </div>` : ''}
+
+                ${sample.length ? `
+                <div class="dm-box">
+                    <div class="dm-h">${esc(t('dash.stats.sample'))}</div>
+                    <div class="ds-st-tasks">${sampleRows}</div>
+                </div>` : ''}
             </div>`;
     }
 
@@ -1101,6 +1281,24 @@ export class OverviewView {
             btn.addEventListener('click', () => {
                 this.statsCut = btn.getAttribute('data-cut');
                 try { localStorage.setItem('jhai_dash_stats_cut', this.statsCut); } catch (_) {}
+                this._paint();
+            });
+        });
+
+        // Stats period filter: conditions and breakdown share one repaint.
+        document.querySelectorAll('.ds-st-cut[data-range]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                this.statsRange = btn.getAttribute('data-range');
+                try { localStorage.setItem('jhai_dash_stats_range', this.statsRange); } catch (_) {}
+                this._paint();
+            });
+        });
+
+        // Stats status filter: same persistence pattern.
+        document.querySelectorAll('.ds-st-cut[data-status]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                this.statsStatus = btn.getAttribute('data-status');
+                try { localStorage.setItem('jhai_dash_stats_status', this.statsStatus); } catch (_) {}
                 this._paint();
             });
         });

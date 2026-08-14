@@ -209,6 +209,59 @@ describe('agent loop — external-app (WS) MCP tool exclusion', () => {
         const lastExcl = exclCalls[exclCalls.length - 1];
         expect(lastExcl).toBeGreaterThan(startSessionCalls[0]);
     });
+
+    it('does NOT treat behavior.mcp_servers as an external-caller marker (interactive pick)', async () => {
+        // Regression: NewTask/Schedule pass the user's MCP-server selection via
+        // behavior.mcp_servers. That used to flip isExternalCaller=true, which
+        // stripped the built-in toolset AND kept the WS-app MCP tools advertised
+        // (so get_space_activities & co kept leaking into the request).
+        const h = makeHarness({
+            caller: 'NewTask',
+            script: [finishStep('done')],
+        });
+        const agent = await h.build();
+        agent.behaviorOverrides = { mcp_servers: ['backlog'] };
+        await agent.run('do the thing');
+        const calls = h.toolExecutor.setExcludeExternalAppMcpTools.mock.calls;
+        // JHAI-owned task → exclusion ON (the winning last call must be true).
+        expect(calls[calls.length - 1][0]).toBe(true);
+        // The MCP server filter is still applied — the selection reaches the
+        // tool executor through the normal path.
+        const filterCalls = h.toolExecutor.setMcpServerFilter.mock.calls;
+        expect(filterCalls.length).toBeGreaterThanOrEqual(1);
+        expect(filterCalls[filterCalls.length - 1][0]).toEqual(['backlog']);
+        // And the run itself completes.
+        expect(h.toolCalls.map(c => c.name)).toContain('finish_task');
+    });
+
+    it('keeps the external-caller markers: intent (an app intent) still counts as external', async () => {
+        // behavior.intent comes from an EXTERNAL app (JHEditor/JHProjectManager
+        // via the REST API). It must remain an external-caller marker.
+        const h = makeHarness({
+            caller: 'JHEditor',
+            script: [finishStep('done')],
+        });
+        const agent = await h.build();
+        agent.behaviorOverrides = { intent: { tools: ['read_file'] }, mcp_servers: ['backlog'] };
+        await agent.run('do the thing');
+        const calls = h.toolExecutor.setExcludeExternalAppMcpTools.mock.calls;
+        // External caller → WS-app tools stay ADVERTISED (last call = false).
+        expect(calls[calls.length - 1][0]).toBe(false);
+    });
+
+    it('behavior.intent forces the external path even with an interactive caller name', async () => {
+        // intent is set by an EXTERNAL app; it stays a hard external marker.
+        // The caller NAME alone is not enough to override it.
+        const h = makeHarness({
+            caller: 'DirectChat',
+            script: [finishStep('done')],
+        });
+        const agent = await h.build();
+        agent.behaviorOverrides = { intent: { tools: ['read_file'] } };
+        await agent.run('do the thing');
+        const calls = h.toolExecutor.setExcludeExternalAppMcpTools.mock.calls;
+        expect(calls[calls.length - 1][0]).toBe(false);
+    });
 });
 
 describe('agent loop — ask_user pause', () => {

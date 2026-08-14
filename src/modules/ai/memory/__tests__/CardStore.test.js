@@ -429,6 +429,30 @@ describe('CardStore persistence', () => {
         expect(store.recallForTool('grep_search', 'z.js')).toBeNull();
     });
 
+    // Control-arm selection. The card is picked so its recipe can be scored
+    // against a run that never saw it — that score is the base rate the recall
+    // arm has to beat — but nothing was put in front of the agent, so neither
+    // `shown` (the recurrence-rate denominator) nor `injected` (which decides
+    // whether a later recurrence is the card's fault) may move.
+    it('picks a card in shadow mode without counting it as shown', () => {
+        const { store } = make('');
+        store.cards = [{ id: 'a', type: 'lesson', trigger: { tool: 'write_file', ext: '.js' }, costSteps: 5, hits: 1, confidence: 0.8, last_recurrence: '2026-08-11' }];
+        expect(store.recallForTool('write_file', 'x.js', { shadow: true }).id).toBe('a');
+        expect(store.cards[0].shown || 0).toBe(0);
+        expect(store.cards[0].injected).toBeUndefined();
+        // Still deduplicated within the run — picking it twice would score the
+        // same recipe twice off one selection.
+        expect(store.recallForTool('write_file', 'x.js', { shadow: true })).toBeNull();
+    });
+
+    it('keeps the opening brief out of the statistics in shadow mode', () => {
+        const { store } = make('');
+        store.cards = [{ id: 'i1', type: 'insight', kind: 'locator', what: 'grep_search → read_file', hits: 2, confidence: 0.8, last_recurrence: '2026-08-11' }];
+        expect(store.recallBrief('anything', undefined, { shadow: true })).toHaveLength(1);
+        expect(store.cards[0].shown || 0).toBe(0);
+        expect(store.cards[0].injected).toBeUndefined();
+    });
+
     it('is inert without a workspace', () => {
         const store = new CardStore({ invoke: vi.fn() });
         expect(store.enabled).toBe(false);

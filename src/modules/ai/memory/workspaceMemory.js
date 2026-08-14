@@ -31,26 +31,53 @@ export function memoryPaths(workspace) {
     };
 }
 
-/** Front matter carrying when the overview was generated. */
-const OVERVIEW_STAMP = /^<!--\s*generated:\s*([^\s]+)\s*-->\s*/;
+/** Front matter carrying when the overview was generated and what it measured. */
+const OVERVIEW_STAMP = /^<!--\s*generated:\s*([^\s]+)\s*-->\s*/m;
+// The HEAD commit the note's PROSE was written against. A changed HEAD means the
+// prose described an older tree even if the calendar says the note is young.
+const HEAD_STAMP = /^<!--\s*head:\s*([0-9a-f]+)\s*-->\s*/m;
+// The measured conventions ride in the SAME file, as a second front-matter line.
+// They are the cheapest thing to refresh (pure path arithmetic), so keeping them
+// next to the prose — but machine-parsed, not prose — lets a later pass update
+// the measurements without paying for a model (proposal A).
+const CONVENTIONS_STAMP = /^<!--\s*conventions:\s*(\{.*?\})\s*-->\s*/ms;
 
 /** Read the overview note. Missing file ⇒ empty, never an error. */
 export async function readOverview(workspace, invoke) {
     try {
         const raw = String(await invoke('read_file', { path: memoryPaths(workspace).overview }) || '');
         const m = raw.match(OVERVIEW_STAMP);
-        return { text: raw.replace(OVERVIEW_STAMP, '').trim(), generatedAt: m ? m[1] : '' };
+        const h = raw.match(HEAD_STAMP);
+        const c = raw.match(CONVENTIONS_STAMP);
+        let conventions = null;
+        try { conventions = c ? JSON.parse(c[1]) : null; } catch (_) { conventions = null; }
+        return {
+            text: raw.replace(OVERVIEW_STAMP, '').replace(HEAD_STAMP, '').replace(CONVENTIONS_STAMP, '').trim(),
+            generatedAt: m ? m[1] : '',
+            head: h ? h[1] : '',
+            conventions,
+        };
     } catch (_) {
-        return { text: '', generatedAt: '' };
+        return { text: '', generatedAt: '', head: '', conventions: null };
     }
 }
 
-/** Write the overview note, stamped so staleness can be judged later. */
-export async function writeOverview(workspace, text, invoke, generatedAt = new Date().toISOString()) {
+/**
+ * Write the overview note, stamped so staleness can be judged later.
+ *
+ * @param {object} [conventions]  the measured layer (detectConventionsFull's
+ *   return), stored verbatim so it can be refreshed without the model.
+ * @param {string} [head]  the workspace HEAD the PROSE was written against.
+ */
+export async function writeOverview(workspace, text, invoke, generatedAt = new Date().toISOString(), conventions = null, head = '') {
     await allowMemoryDir(workspace, invoke);
+    const conv = conventions
+        ? `<!-- conventions: ${JSON.stringify(conventions)} -->\n`
+        : '';
+    const h = head ? `<!-- head: ${head} -->\n` : '';
     await invoke('write_file', {
         path: memoryPaths(workspace).overview,
-        content: `<!-- generated: ${generatedAt} -->\n${String(text || '').trim()}\n`,
+        content: `<!-- generated: ${generatedAt} -->\n${h}${conv}${String(text || '').trim()}\n`,
     });
 }
 

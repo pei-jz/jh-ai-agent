@@ -31,10 +31,19 @@ describe('Inspector — task facts', () => {
         const text = el.textContent;
         expect(text).toContain('#a1f2c3d4');      // id, shortened
         expect(text).toContain('IDE');
-        expect(text).toContain('running');
-        expect(text).toContain('2026-07-29 02:14:08');
-        expect(text).toContain('6');              // steps
         expect(text).toContain('18s');            // elapsed
+    });
+
+    it('NO LONGER repeats Status / Started / Steps — the task list carries them', () => {
+        // The left panel already shows the status dot, the start time and the
+        // progress; a reference column repeating them was pure height.
+        const el = mountInsp({ stats: { steps: 6, durationMs: 18400 } });
+        const text = el.textContent;
+        expect(text).not.toContain('Status');
+        expect(text).not.toContain('Started');
+        expect(text).not.toContain('Steps');
+        // And no accidental timestamps either.
+        expect(text).not.toContain('2026-07-29 02:14:08');
     });
 
     it('omits rows it has no value for', () => {
@@ -221,15 +230,15 @@ describe('Inspector — changed files as a tree', () => {
 
 describe('Inspector — chapters', () => {
     const chapters = [
-        { id: 'i1', kind: 'request', label: 'Request' },
-        { id: 'i2', kind: 'step', label: 'Step 01' },
-        { id: 'i5', kind: 'ask', label: 'Question' },
+        { id: 'i1', kind: 'request', label: 'Request · refactor the dashboard' },
+        { id: 'i5', kind: 'deliverable', label: 'Deliverable · everything moved' },
     ];
 
     it('renders a jump target per chapter', () => {
         const el = mountInsp({ chapters });
-        expect(el.querySelector('[data-chap="i2"]').textContent).toContain('Step 01');
-        expect(el.querySelector('.insp-chap-ask')).not.toBe(null);
+        expect(el.querySelector('[data-chap="i5"]').textContent).toContain('everything moved');
+        expect(el.querySelector('.insp-chap-deliverable')).not.toBe(null);
+        expect(el.querySelector('.insp-chap-request')).not.toBe(null);
     });
 
     it('marks the active one', () => {

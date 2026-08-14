@@ -14,14 +14,45 @@ const BASE_STYLES = `
                     /* 24px = .main-content's top+bottom padding (4 + 20), plus
                        this element's own 4px top. Both move together. */
                     height: calc(100vh - var(--titlebar-height) - 28px);
-                    gap: 12px;
+                    /* The pane dividers live IN the gaps: each divider is a
+                       12px hit area with -6px margins, so it needs 6px of gap
+                       on each side to reconstruct the original 12px spacing. */
+                    gap: 6px;
                     padding: 4px 0 0 0;
                 }
 
+                /* ── Pane dividers (drag edges) ───────────────────── */
+                /* Invisible full-height hit areas centered in the 12px gap
+                   between the three panes. The user drags them to resize the
+                   task list / inspector columns; the widths persist in
+                   localStorage (jhai_monitor_left_width / _insp_width). */
+                .mpane-divider {
+                    flex: 0 0 12px;
+                    margin: 0 -6px;
+                    align-self: stretch;
+                    position: relative;
+                    cursor: col-resize;
+                    z-index: 20;
+                    background: transparent;
+                }
+                .mpane-divider::after {
+                    content: '';
+                    position: absolute; left: 50%; top: 0; bottom: 0;
+                    width: 2px; transform: translateX(-50%);
+                    background: transparent;
+                    transition: background 0.15s;
+                }
+                .mpane-divider:hover::after { background: var(--accent); opacity: 0.5; }
+                body.resizing-panes { cursor: col-resize; user-select: none; }
+                body.resizing-panes .mpane-divider::after { background: var(--accent); opacity: 0.8; }
+
                 /* ── Left Panel ────────────────────────────────── */
                 .mpanel-left {
-                    width: 240px;
+                    width: var(--mpane-left-w, 240px);
                     min-width: 200px;
+                    /* 640 matches PANE_W_MAX in MonitorView.js — the drag
+                       clamps to the same range the CSS allows. */
+                    max-width: 640px;
                     background: var(--bg-secondary);
                     border: 1px solid var(--border);
                     border-radius: var(--radius-lg);
@@ -50,7 +81,7 @@ const BASE_STYLES = `
                     border-bottom: 1px solid var(--border);
                     background: var(--bg-secondary);
                 }
-                .mtask-search, .mtask-status {
+                .mtask-search {
                     width: 100%;
                     height: 26px;
                     font-size: var(--fs-xs);
@@ -61,8 +92,32 @@ const BASE_STYLES = `
                     padding: 0 8px;
                     outline: none;
                 }
-                .mtask-search:focus, .mtask-status:focus { border-color: var(--accent); }
-                .mtask-status { cursor: pointer; }
+                .mtask-search:focus { border-color: var(--accent); }
+                .mtask-status-bar {
+                    display: flex;
+                    flex-wrap: wrap;
+                    gap: 3px;
+                }
+                .mtask-status-btn {
+                    flex: 1 1 auto;
+                    min-width: 48px;
+                    padding: 3px 6px;
+                    font-size: var(--fs-2xs);
+                    font-weight: 600;
+                    text-transform: capitalize;
+                    border: 1px solid var(--border);
+                    background: var(--bg-tertiary);
+                    color: var(--text-secondary);
+                    border-radius: 5px;
+                    cursor: pointer;
+                    transition: background 0.12s, color 0.12s, border-color 0.12s;
+                }
+                .mtask-status-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
+                .mtask-status-btn.active {
+                    background: var(--accent);
+                    color: var(--text-inverse);
+                    border-color: var(--accent);
+                }
                 .mgroup-toggle {
                     display: flex;
                     gap: 3px;

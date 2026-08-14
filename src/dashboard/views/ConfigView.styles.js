@@ -225,6 +225,17 @@ export const CONFIG_SECTION_STYLES = `
                     .cfg-mem-cov-row .b > i { display: block; height: 100%; background: var(--accent); }
                     .cfg-mem-cov-row .n { width: 40px; text-align: right;
                         font-variant-numeric: tabular-nums; font-family: var(--font-mono); }
+                    /* A/B readout. Reuses the coverage row so the progress bar
+                       and the index bars read as the same kind of thing. */
+                    .cfg-mem-ab { margin-top: 10px; }
+                    .cfg-mem-ab-grid {
+                        display: grid; grid-template-columns: 1fr auto 56px;
+                        gap: 2px 10px; margin: 6px 0 4px;
+                        font-size: var(--fs-2xs); color: var(--text-tertiary);
+                        font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+                    }
+                    .cfg-mem-ab-grid > span:nth-child(3n) { text-align: right; }
+                    .cfg-mem-ab-grid > span.good { color: var(--success, #16a34a); font-weight: 600; }
                     .cfg-mem-box {
                         margin-top: 8px; padding: 14px 16px;
                         border: 1px solid var(--border); border-radius: var(--radius-md);

@@ -342,6 +342,45 @@ describe('TimelineItem — folded exchanges', () => {
     });
 });
 
+describe('TimelineItem — task_progress', () => {
+    const progress = {
+        id: 'i14', kind: 'task_progress',
+        items: [
+            { id: '1', title: 'タスク一覧の調査', status: 'completed' },
+            { id: '2', title: '実装', status: 'in_progress' },
+            { id: '3', title: 'テスト', status: 'pending' },
+            { id: '4', title: '修正内容を反映', status: 'pending' },
+        ],
+    };
+
+    it('shows the tally and every subtask with its status', () => {
+        const el = mountItem(progress);
+        expect(el.textContent).toContain('task_progress (1/4 complete)');
+        expect(el.textContent).toContain('[1]');
+        expect(el.textContent).toContain('タスク一覧の調査');
+        expect(el.textContent).toContain('[2]');
+        expect(el.textContent).toContain('実装');
+        expect(el.querySelectorAll('.tl-progress-row')).toHaveLength(4);
+        // Completed rows are marked so the tick reads as done.
+        expect(el.querySelectorAll('.tl-progress-row.is-done')).toHaveLength(1);
+    });
+
+    it('folds on its OWN header click, not through the exchange', () => {
+        const onToggleCollapse = vi.fn();
+        const el = mountItem({ ...progress, _ex: 3 }, { onToggleCollapse });
+        el.querySelector('.tl-card-h').click();
+        expect(onToggleCollapse).toHaveBeenCalledWith('i14');
+    });
+
+    it('renders a note when a subtask carries one', () => {
+        const el = mountItem({
+            ...progress,
+            items: [{ id: '1', title: 'x', status: 'pending', note: 'blocked on API' }],
+        });
+        expect(el.textContent).toContain('blocked on API');
+    });
+});
+
 describe('TimelineItem — the rest', () => {
     it('renders a turn divider', () => {
         expect(mountItem({ id: 'i9', kind: 'turn', n: 2 }).textContent).toContain('Request 2');

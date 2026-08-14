@@ -37,6 +37,14 @@ pub struct TaskInfo {
     pub completed_at: Option<String>,
     pub workspace_path: Option<String>,
     pub caller: Option<String>,
+    /// Which MCP servers this task may use (from behavior.mcp_servers at creation).
+    /// Persisted so a CONTINUATION ("add a message to continue the task") keeps
+    /// the same tool scope: the task UI sends an explicit [] when the user
+    /// unchecked every server, and an omitted/None here would silently re-enable
+    /// ALL servers — including ones that connect MID-task.
+    /// `serde(default)` keeps pre-existing persisted history loadable.
+    #[serde(default)]
+    pub mcp_servers: Option<Vec<String>>,
     /// Structured result summary emitted on completion: { summary, files:[{path,action,description}] }.
     /// Lets REST API consumers and the "Result" tab read the outcome without re-parsing logs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -289,6 +297,7 @@ async fn create_task(
         completed_at: None,
         workspace_path: payload.workspace_path.clone(),
         caller: payload.caller.clone(),
+        mcp_servers: payload.behavior.as_ref().and_then(|b| b.mcp_servers.clone()),
         result_summary: None,
         logs: vec![],
     };
@@ -521,7 +530,8 @@ async fn delete_task_history(
                     e.get("id").and_then(|v| v.as_str()) != Some(&id)
                 });
                 if let Ok(json) = serde_json::to_string_pretty(&history) {
-                    let _ = std::fs::write(&state.history_path, json);
+                    // Atomic: a truncated write here would wipe the whole history.
+                    let _ = crate::write_atomic(&state.history_path, json.as_bytes());
                 }
             }
         }
@@ -574,7 +584,7 @@ async fn continue_task(
     // agent still sees which requests were already completed, in order.
     // AgentController labels these as "[Completed request]" and pins the NEW
     // message as the current goal.
-    let (workspace, caller, chat_context) = {
+    let (workspace, caller, chat_context, mcp_servers) = {
         let tasks = state.tasks.lock().unwrap();
         let task = tasks.get(&id)
             .ok_or((StatusCode::NOT_FOUND, "task not found".to_string()))?;
@@ -624,7 +634,7 @@ async fn continue_task(
         if ctx.is_empty() {
             ctx.push(serde_json::json!({ "role": "user", "content": task.prompt.clone() }));
         }
-        (task.workspace_path.clone(), task.caller.clone(), ctx)
+        (task.workspace_path.clone(), task.caller.clone(), ctx, task.mcp_servers.clone())
     };
 
     // Re-open the task and create a fresh broadcast channel (the previous one was
@@ -639,12 +649,29 @@ async fn continue_task(
     let (tx, _rx) = broadcast::channel(100);
     state.task_senders.lock().unwrap().insert(id.clone(), tx);
 
+    // Carry the task's original MCP scope into the continuation. The task UI
+    // sends an explicit [] (no MCP servers) when every checkbox is unchecked;
+    // dropping it here would re-enable ALL servers for the continuation — and
+    // a server that connected mid-task would leak its tools into later turns.
+    // (The same [] must reach AgentController's setMcpServerFilter → empty Set.)
+    let behavior = mcp_servers.as_ref().map(|servers| AgentBehavior {
+        mode: None,
+        system_prompt: None,
+        enabled_tools: None,
+        max_iterations: None,
+        response_format: None,
+        extra_instructions: None,
+        mcp_servers: Some(servers.clone()),
+        mcp_context: None,
+        intent: None,
+    });
+
     let run_payload = RunTaskPayload {
         task_id: id.clone(),
         prompt: payload.message,
         workspace_path: workspace,
         context: None,
-        behavior: None,
+        behavior,
         images: payload.images,
         chat_context: Some(chat_context),
         caller,
@@ -1065,5 +1092,91 @@ mod cost_tests {
     #[test]
     fn zero_usage_costs_nothing() {
         assert_eq!(cost_of(&usage(0, 0, 0, 0), RATES), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod continue_behavior_tests {
+    use super::*;
+
+    /// The continuation must carry the task's original MCP scope verbatim,
+    /// including an EXPLICIT empty list (the task UI sends [] when every MCP
+    /// checkbox is unchecked). Omitting it would re-enable ALL servers on the
+    /// continuation — and one connecting mid-task would leak its tools in.
+    #[test]
+    fn an_empty_mcp_scope_is_preserved_not_treated_as_all_servers() {
+        let task_mcp_servers = Some(vec![]);
+        let behavior = task_mcp_servers.as_ref().map(|servers| AgentBehavior {
+            mode: None,
+            system_prompt: None,
+            enabled_tools: None,
+            max_iterations: None,
+            response_format: None,
+            extra_instructions: None,
+            mcp_servers: Some(servers.clone()),
+            mcp_context: None,
+            intent: None,
+        });
+        let behavior = behavior.expect("an explicit [] must produce a Some behavior");
+        assert_eq!(behavior.mcp_servers, Some(vec![]));
+        // Round-trips through JSON the way the run-task event payload will.
+        let json = serde_json::to_value(&behavior).unwrap();
+        assert_eq!(json["mcp_servers"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn a_named_scope_is_preserved_too() {
+        let task_mcp_servers = Some(vec!["backlog".to_string()]);
+        let behavior = task_mcp_servers.as_ref().map(|servers| AgentBehavior {
+            mode: None,
+            system_prompt: None,
+            enabled_tools: None,
+            max_iterations: None,
+            response_format: None,
+            extra_instructions: None,
+            mcp_servers: Some(servers.clone()),
+            mcp_context: None,
+            intent: None,
+        });
+        let json = serde_json::to_value(behavior.unwrap()).unwrap();
+        assert_eq!(json["mcp_servers"], serde_json::json!(["backlog"]));
+    }
+
+    /// TaskInfo persistence: an empty MCP scope must survive the JSON round-trip
+    /// that task_history.json performs (old history without the field loads as None).
+    #[test]
+    fn task_info_round_trips_the_mcp_scope() {
+        let t = TaskInfo {
+            id: "t1".into(),
+            prompt: "p".into(),
+            status: "completed".into(),
+            progress: 1.0,
+            token_usage: TokenUsage::default(),
+            model_usage: HashMap::new(),
+            started_at: "2026-01-01T00:00:00Z".into(),
+            completed_at: Some("2026-01-01T00:01:00Z".into()),
+            workspace_path: Some("C:/ws".into()),
+            caller: Some("NewTask".into()),
+            mcp_servers: Some(vec![]),
+            result_summary: None,
+            logs: vec![],
+        };
+        let json = serde_json::to_value(&t).unwrap();
+        assert_eq!(json["mcp_servers"], serde_json::json!([]));
+        let back: TaskInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(back.mcp_servers, Some(vec![]));
+    }
+
+    #[test]
+    fn old_history_without_the_field_loads_as_none() {
+        let json = serde_json::json!({
+            "id": "old", "prompt": "p", "status": "completed", "progress": 1.0,
+            "token_usage": { "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0 },
+            "started_at": "2026-01-01T00:00:00Z", "completed_at": null,
+            "workspace_path": "C:/ws", "caller": "NewTask",
+            "result_summary": null, "logs": []
+        });
+        let t: TaskInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(t.mcp_servers, None);
     }
 }

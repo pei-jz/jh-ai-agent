@@ -46,8 +46,21 @@ const SUBAGENT_REVIEW_MODES = new Set(['off', 'on']);
 const MEMORY_RECALL_MODES = new Set(['off', 'on', 'auto']);
 const PHASE_ROUTING_MODES = new Set(['off', 'on']);
 
-/** Share of sessions held back as the control group under 'auto'. */
-export const CONTROL_GROUP_SHARE = 0.1;
+/**
+ * Share of sessions held back as the control group under 'auto'.
+ *
+ * 0.5, not the 0.1 this started at. The control arm is the bottleneck of the
+ * whole comparison, and 0.1 made it a bottleneck ten runs wide: with the
+ * exploration cost measured on this workspace (mean 22.1, sd 13.1), detecting a
+ * 25% improvement needs ~89 runs per arm, which at a 10% control share is ~890
+ * runs total. At 0.5 it is ~178 — five times sooner, because the requirement is
+ * set by the SMALLER arm and an even split is where that arm is largest.
+ *
+ * The cost is real and deliberate: half the runs will not see their memory.
+ * That is the price of finding out whether the memory is worth having. Set
+ * memoryRecall to 'on' in Settings to stop paying it and forgo the answer.
+ */
+export const CONTROL_GROUP_SHARE = 0.5;
 
 /**
  * Decide whether THIS run recalls memory.

@@ -77,6 +77,7 @@ export const TIMELINE_STYLES = `
     .tl-question::before,
     .tl-approval::before { background: var(--warning); border-color: var(--warning); }
     .tl-error::before { background: var(--error); border-color: var(--error); }
+    .tl-progress::before { background: var(--accent); border-color: var(--accent); }
 
     .tl-when { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-2); }
     .tl-clock { font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--text-tertiary); }
@@ -87,6 +88,7 @@ export const TIMELINE_STYLES = `
     }
     .tl-tag-step { background: var(--accent-glow-lg); color: var(--accent); }
     .tl-tag-note { background: var(--bg-tertiary); color: var(--text-tertiary); }
+    .tl-tag-progress { background: var(--accent-glow-lg); color: var(--accent); }
     .tl-tag-question, .tl-tag-approval { background: var(--warning-bg); color: var(--warning); }
     .tl-tag-deliverable, .tl-tag-final { background: var(--success-bg); color: var(--success); }
     .tl-tag-error { background: var(--error-bg); color: var(--error); }
@@ -129,6 +131,17 @@ export const TIMELINE_STYLES = `
     .tl-card-note { background: transparent; border-style: dashed; }
     .tl-note-label { font-size: var(--fs-2xs); color: var(--text-tertiary); margin-bottom: var(--space-1); }
     .tl-card-deliverable { border-color: var(--success); border-left-width: 3px; }
+    /* The task_progress checklist card — a plan the reader can watch fill in. */
+    .tl-card-progress { border-color: var(--accent); border-left-width: 3px; }
+    .tl-progress-row {
+        display: flex; align-items: baseline; gap: var(--space-2);
+        padding: 2px 0; font-size: var(--fs-sm); line-height: 1.4;
+    }
+    .tl-progress-row.is-done .tl-progress-title { color: var(--text-tertiary); text-decoration: line-through; }
+    .tl-progress-ic { flex-shrink: 0; color: var(--text-tertiary); }
+    .tl-progress-row.is-done .tl-progress-ic { color: var(--success); }
+    .tl-progress-id { font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--text-tertiary); flex-shrink: 0; }
+    .tl-progress-note { color: var(--text-tertiary); font-size: var(--fs-2xs); }
     .tl-card-h {
         display: flex; align-items: center; gap: var(--space-2);
         font-size: var(--fs-md); font-weight: 600; color: var(--success);
@@ -216,7 +229,7 @@ export const TIMELINE_STYLES = `
     /* A sibling of the story panel with its OWN scroll: a reference column that
        scrolls away with the content is not a reference column. */
     .mtl-insp {
-        flex: 0 0 264px; width: 264px;
+        flex: 0 0 var(--mpane-insp-w, 264px); width: var(--mpane-insp-w, 264px);
         display: flex; flex-direction: column;
         overflow-y: auto; overscroll-behavior: contain;
         background: var(--bg-secondary);
@@ -395,6 +408,12 @@ export const TIMELINE_STYLES = `
        reader can do something about it. Was an inline style.background set from
        JS; a class is the honest expression of a state. */
     .mdh-ctx-fill.is-danger { background: var(--error); }
+    /* The subtask-progress bar uses the accent colour (not the success→warning→
+       error gradient of the context gauge) so the two bars read as different
+       kinds of measurement. A 100% bar without a check still means "all checked
+       off" — the gradient would scream danger at a state that is just fine. */
+    .mdh-progress .mdh-ctx-fill { background: var(--accent); }
+    .mdh-progress .mdh-ctx-pct { color: var(--text-primary); }
     .mdh-ctx-pct {
         flex-shrink: 0; font-family: var(--font-mono);
         font-size: var(--fs-2xs); color: var(--text-secondary);

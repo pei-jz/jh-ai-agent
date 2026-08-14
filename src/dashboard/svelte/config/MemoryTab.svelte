@@ -32,6 +32,8 @@
         studyStatus = '',
         /** { files, symbols, edges, coverage[] } from the structural index. */
         indexStats = null,
+        /** compareArms() output + `rows` — the recall-on vs recall-off comparison. */
+        abStats = null,
         /** { text, generatedAt } — the generated orientation note. */
         overview = null,
         onSaveOverview = null,
@@ -52,6 +54,22 @@
 
     /** A fact with no `type` predates the layer split — it reads as semantic. */
     const factType = (f) => f.type || 'semantic';
+
+    // ── A/B readout ──────────────────────────────────────────────────────
+    // Deliberately shows how far the measurement is from being readable, not
+    // just its current numbers. The first thing anyone wants from a comparison
+    // is a verdict, and the honest state for most of its life is "not yet" —
+    // hiding that is how a delta from six runs gets treated as a result.
+    const num1 = (v) => (typeof v === 'number' && Number.isFinite(v) ? v.toFixed(1) : '—');
+    const pct = (v) => (typeof v === 'number' && Number.isFinite(v) ? `${Math.round(v * 100)}%` : '—');
+    const signed = (v) => (typeof v === 'number' && Number.isFinite(v) ? `${v > 0 ? '+' : ''}${v.toFixed(1)}` : '—');
+    /** Runs collected against runs required, clamped for the bar's width. */
+    const abProgress = $derived(() => {
+        const need = abStats?.needed?.perArm;
+        if (!need) return null;
+        const have = Math.min(abStats.on?.runs || 0, abStats.off?.runs || 0);
+        return { have, need, pctDone: Math.min(100, Math.round(have / need * 100)) };
+    });
 
     const OUTCOME = { success: '✅', error: '❌' };
     const outcomeIcon = (o) => OUTCOME[o] || '⚠️';
@@ -140,6 +158,52 @@
                 </div>
             {/if}
 
+            <!-- Is the memory helping? The rows come from every run; this is the
+                 only place they are read. Progress toward a readable answer is
+                 shown alongside the numbers because for most of the collection
+                 period the numbers should NOT be acted on. -->
+            {#if abStats?.rows}
+                <div class="cfg-mem-ab">
+                    <div class="cfg-mem-cov-h">
+                        {t('memory.ab.arms', {
+                            rows: abStats.rows, on: abStats.on?.runs || 0, off: abStats.off?.runs || 0,
+                        })}
+                    </div>
+                    {#if abProgress()}
+                        <div class="cfg-mem-cov-row">
+                            <span class="d">{t('memory.ab.progress')}</span>
+                            <span class="b"><i style={`width:${Math.max(2, abProgress().pctDone)}%`}></i></span>
+                            <span class="n">{abProgress().have}/{abProgress().need}</span>
+                        </div>
+                        <div class="cfg-mem-summary">
+                            {t('memory.ab.need', {
+                                mean: num1(abStats.needed.mean), sd: num1(abStats.needed.sd),
+                                perArm: abStats.needed.perArm,
+                            })}
+                        </div>
+                    {/if}
+                    {#if abStats.comparable}
+                        <div class="cfg-mem-ab-grid">
+                            <span>{t('memory.ab.exploration')}</span>
+                            <span>{num1(abStats.on?.explorationCost)} / {num1(abStats.off?.explorationCost)}</span>
+                            <span class:good={abStats.delta?.explorationCost < 0}>{signed(abStats.delta?.explorationCost)}</span>
+                            <span>{t('memory.ab.iterations')}</span>
+                            <span>{num1(abStats.on?.iterations)} / {num1(abStats.off?.iterations)}</span>
+                            <span class:good={abStats.delta?.iterations < 0}>{signed(abStats.delta?.iterations)}</span>
+                            <span>{t('memory.ab.follow')}</span>
+                            <span>{pct(abStats.followThrough?.on?.rate)} / {pct(abStats.followThrough?.baseline?.rate)}</span>
+                            <span class:good={abStats.followThrough?.lift > 0}>
+                                {abStats.followThrough?.lift === null || abStats.followThrough?.lift === undefined
+                                    ? '—' : pct(abStats.followThrough.lift)}
+                            </span>
+                        </div>
+                        <div class="cfg-mem-summary">{t('memory.ab.legend')}</div>
+                    {:else}
+                        <div class="cfg-mem-summary">{t('memory.ab.oneArm')}</div>
+                    {/if}
+                </div>
+            {/if}
+
             <!-- The orientation note. Shown and editable because it is the ONLY
                  memory here that is inferred rather than observed: it rides in
                  every prompt, so a wrong sentence in it is repeated on every
@@ -159,7 +223,13 @@
                         {/if}
                     </div>
                     {#if editingOverview}
-                        <textarea class="input cfg-mem-ov-edit" rows="8" bind:value={overviewDraft}></textarea>
+                        <!-- Shown only while editing. The generator can count
+                             naming rules off the file listing, but the things
+                             worth adding by hand — terminology, boundaries that
+                             are policy rather than structure — are invisible to
+                             it, and nothing here said so. -->
+                        <div class="cfg-mem-summary">{@html t('memory.overview.editHint')}</div>
+                        <textarea class="input cfg-mem-ov-edit" rows="10" bind:value={overviewDraft}></textarea>
                     {:else}
                         <pre class="cfg-mem-ov-text">{overview.text}</pre>
                         {#if overview.generatedAt}

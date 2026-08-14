@@ -192,9 +192,13 @@ export class CodeIndexClient {
         return await this._invoke('index_put_files', { workspace: this.workspacePath, files });
     }
 
-    async prune(livePaths) {
+    async prune(livePaths, { truncated = false } = {}) {
         if (!this.enabled) return 0;
-        try { return await this._invoke('index_prune', { workspace: this.workspacePath, livePaths }); }
+        try {
+            return await this._invoke('index_prune', {
+                workspace: this.workspacePath, livePaths, truncated,
+            });
+        }
         catch (_) { return 0; }
     }
 

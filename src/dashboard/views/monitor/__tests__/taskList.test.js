@@ -52,6 +52,13 @@ describe('filterTasks', () => {
         expect(filterTasks(tasks, { status: 'all' })).toHaveLength(2);
     });
 
+    it('matches ANY status in an array (button-bar multi-select)', () => {
+        const t2 = [task('a', { status: 'running' }), task('b', { status: 'failed' }), task('c', { status: 'completed' })];
+        expect(filterTasks(t2, { status: ['running', 'failed'] }).map(t => t.id)).toEqual(['a', 'b']);
+        expect(filterTasks(t2, { status: [] })).toHaveLength(3);          // empty array = no filter
+        expect(filterTasks(t2, { status: ['completed'] }).map(t => t.id)).toEqual(['c']);
+    });
+
     it('combines the two', () => {
         expect(filterTasks(tasks, { search: 'abc', status: 'running' })).toHaveLength(0);
     });

@@ -75,6 +75,12 @@
 
     const toggleCollapsed = () => onToggleCollapse?.(item.id);
 
+    /** Status icon for one task_progress row — drawn, not emoji, like every
+        other marker in the story (emoji render differently per machine). */
+    const progressIcon = (status) => ({
+        pending: 'circle', in_progress: 'pulse', completed: 'check', blocked: 'alert',
+    }[status] || 'circle');
+
     /**
      * A card with a foldable header. When the card belongs to an exchange, folding
      * goes through the exchange's state so it survives the next render; a
@@ -206,6 +212,33 @@
     <div class="tl-card tl-card-note">
         <div class="tl-note-label">The agent's note</div>
         <div class="rv-summary chat-md">{@html renderMarkdown(item.text)}</div>
+    </div>
+
+{:else if item.kind === 'task_progress'}
+    <!-- The agent's subtask checklist, as its own chapter. Unlike a step, it
+         folds on its OWN — clicking the header toggles just this card via the
+         model's collapsed flag (onToggleCollapse), never the exchange's working.
+         The header always shows the live tally so a folded card still says how
+         far the plan got. -->
+    {@const done = (item.items || []).filter(t => t.status === 'completed').length}
+    {@const total = (item.items || []).length}
+    <div class="tl-card tl-card-progress">
+        <div class="tl-card-h tl-fold-h" role="button" tabindex="0"
+            onclick={toggleCollapsed}
+            onkeydown={(e) => { if (e.key === 'Enter') toggleCollapsed(); }}>
+            {@html icon('steps')} task_progress ({done}/{total} complete)
+            <span class="tl-card-chev">▼</span>
+        </div>
+        <div class="tl-card-body tl-progress-body">
+            {#each (item.items || []) as t (t.id)}
+                <div class="tl-progress-row" class:is-done={t.status === 'completed'}>
+                    <span class="tl-progress-ic">{@html icon(progressIcon(t.status))}</span>
+                    <span class="tl-progress-id">[{t.id}]</span>
+                    <span class="tl-progress-title">{t.title}</span>
+                    {#if t.note}<span class="tl-progress-note">({t.note})</span>{/if}
+                </div>
+            {/each}
+        </div>
     </div>
 
 {:else if item.kind === 'run'}

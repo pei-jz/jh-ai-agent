@@ -409,6 +409,12 @@ export const OVERVIEW_STYLES = `
 .ds-st-cut:hover { color: var(--text-primary); border-color: var(--accent); }
 .ds-st-cut.is-on { color: var(--accent); border-color: var(--accent); background: var(--accent-glow); }
 
+/* Visual divider between the period and status condition groups. */
+.ds-st-sep {
+    width: 1px; align-self: stretch; margin: 2px 4px;
+    background: var(--border-light);
+}
+
 /* One row per bucket: label · proportional bar · tokens · cost. */
 .ds-st-list { padding: 4px 11px 10px; display: flex; flex-direction: column; gap: 5px; }
 .ds-st-row { display: flex; align-items: center; gap: 8px; font-size: var(--fs-xs); }
@@ -429,5 +435,48 @@ export const OVERVIEW_STYLES = `
     width: 62px; flex-shrink: 0; text-align: right;
     font-family: var(--font-mono); font-size: var(--fs-xs); font-weight: 600;
     color: var(--text-primary); font-variant-numeric: tabular-nums;
+}
+
+/* Model × (fresh in / cache / out) split — the same ↑⚡↓ notation as the
+   Monitor inspector, so a number read here means the same thing there. */
+.ds-st-mlist { gap: 2px; }
+.ds-st-mrow {
+    display: flex; align-items: baseline; gap: 8px;
+    padding: 2px 0; font-size: var(--fs-2xs);
+}
+.ds-st-mrow .ds-st-label { width: 110px; font-size: var(--fs-xs); }
+.ds-st-mtok {
+    flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; font-family: var(--font-mono); color: var(--text-secondary);
+}
+.ds-st-mrow .ds-st-tok { width: 76px; text-align: right; }
+
+/* The task sample under the breakdown — one row per task, tapping through
+   to Monitor. Same queue-row look as the left column. */
+.ds-st-tasks { padding: 2px 6px 8px; display: flex; flex-direction: column; }
+.ds-st-task {
+    display: flex; align-items: center; gap: 8px;
+    padding: 5px 5px; border-radius: 4px;
+    color: var(--text-secondary); text-decoration: none;
+}
+.ds-st-task:hover { background: var(--bg-hover); }
+.ds-st-task .grow {
+    flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    color: var(--text-primary); font-size: var(--fs-xs);
+}
+.ds-st-task-tok {
+    font-family: var(--font-mono); font-size: 9px; color: var(--text-tertiary);
+}
+.ds-st-task-models {
+    color: var(--text-tertiary); opacity: 0.75;
+}
+.ds-st-task-cost {
+    font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+    color: var(--text-secondary); font-variant-numeric: tabular-nums;
+    min-width: 44px; text-align: right;
+}
+.ds-st-task-when {
+    font-family: var(--font-mono); font-size: 9px; color: var(--text-tertiary);
+    min-width: 34px; text-align: right;
 }
 `;

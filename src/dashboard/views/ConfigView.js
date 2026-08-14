@@ -75,6 +75,9 @@ export class ConfigView {
         this.memoryFacts = null;
         this.memoryEpisodes = null;
         this.memoryCards = null;
+        this.memoryOverview = null;
+        /** compareArms() over .agent/trace/metrics.jsonl — null until a run exists. */
+        this.abStats = null;
         this.showModal = false;
         this.editingInstance = null; // null if adding new
         // Test-connection result for the modal: {state, message} or null.
@@ -354,9 +357,11 @@ export class ConfigView {
                     if (!this.memoryWorkspace) { alert('Please enter a workspace path.'); return; }
                     await this.loadMemoryData();
                     await this._loadIndexStats();
+                    await this._loadAbStats();
                     this._syncListTabs();
                 },
                 indexStats: this.indexStats || null,
+                abStats: this.abStats || null,
                 overview: this.memoryOverview || null,
                 onSaveOverview: (text) => this._saveOverview(text),
                 studying: !!this._studying,
@@ -1215,7 +1220,10 @@ export class ConfigView {
             // the user is expected to read.
             this._studyStatus = t('memory.study.indexed', {
                 files: res.files, symbols: res.symbols, edges: res.edges,
-            }) + (res.pruned ? t('memory.study.dropped', { count: res.pruned }) : '');
+            }) + (res.pruned ? t('memory.study.dropped', { count: res.pruned }) : '')
+                + (res.truncated || res.omitted
+                    ? ' ' + t('memory.study.capped', { total: res.total || res.files + (res.omitted || 0), omitted: res.omitted || 0 })
+                    : '');
             this._syncListTabs();
 
             // One-time migration: the first version of this pass wrote a card per
@@ -1263,8 +1271,42 @@ export class ConfigView {
     }
 
     /**
+     * Read `.agent/trace/metrics.jsonl` and compare the two arms.
+     *
+     * Without this the comparison exists only as a function nobody calls: the
+     * rows accumulate on disk and the question they were collected to answer
+     * ("is recall helping?") can only be answered by someone writing a script.
+     * A memory layer whose evaluation is that inconvenient does not get
+     * evaluated — which is the failure mode the arms were introduced against.
+     */
+    async _loadAbStats() {
+        try {
+            const { compareArms, parseMetrics, runsNeeded } =
+                await import('../../modules/ai/memory/SessionMetrics.js');
+            const text = await invoke('read_file', { path: `${this.memoryWorkspace}/.agent/trace/metrics.jsonl` });
+            const rows = parseMetrics(text);
+            this.abStats = rows.length
+                ? { ...compareArms(rows), rows: rows.length, needed: runsNeeded(rows) }
+                : null;
+        } catch (_) {
+            this.abStats = null; // no runs recorded yet
+        }
+    }
+
+    /**
      * Summarise the structure the study pass just mapped, and store it as the
      * standing orientation note (`.agent/memory/overview.md`).
+     *
+     * The note is TWO layers (proposal A/B):
+     *   - measured: the naming rules, counted off the file listing (no model).
+     *     Stored verbatim in the note's front matter every pass, so it can never
+     *     drift from the tree the index actually saw — refreshing it costs
+     *     nothing and needs no LLM.
+     *   - interpreted: the prose about what the project IS. Written by a model
+     *     ONLY when the stored prose is stale (30 days, or the workspace's HEAD
+     *     commit changed since it was written). The prose is the expensive,
+     *     fallible half; the measurements are the reliable, cheap half, and the
+     *     two must not be coupled to the same refresh clock.
      *
      * Best-effort: a failure here leaves the index — which is the expensive part
      * — intact. The note is markdown on disk precisely so the user can correct
@@ -1272,13 +1314,34 @@ export class ConfigView {
      */
     async _writeOverview(cards) {
         try {
-            const { structureDigest, buildOverviewPrompt, normalizeOverview } =
+            const { structureDigest, detectConventionsFull, buildOverviewPrompt, normalizeOverview, isOverviewStale } =
                 await import('../../modules/ai/memory/ProjectOverview.js');
-            const { writeOverview } = await import('../../modules/ai/memory/workspaceMemory.js');
+            const { writeOverview, readOverview } = await import('../../modules/ai/memory/workspaceMemory.js');
             const llmService = (await import('../../modules/ai/LLMService.js')).default;
 
             const areas = structureDigest(cards, { root: this.memoryWorkspace });
             if (!areas.length) return;
+            // Counted from the same paths, before the model sees anything. The
+            // model's job here is to phrase them, not to find them. This is the
+            // MEASURED layer: stored verbatim, refreshed every pass.
+            const measured = detectConventionsFull(cards, { root: this.memoryWorkspace });
+            const conventions = measured.rules;
+
+            // Only re-run the model when the stored prose is stale. The measured
+            // layer above is always fresh; the prose is the expensive half and
+            // must not be rewritten on every study pass.
+            const head = await this._headCommit();
+            const prev = await readOverview(this.memoryWorkspace, invoke);
+            const stale = isOverviewStale(prev, { now: Date.now(), head });
+            if (!stale && prev.text) {
+                // Fresh prose: just refresh the measurements (cheap) and keep the
+                // user's/previous prose untouched.
+                await writeOverview(this.memoryWorkspace, prev.text, invoke, prev.generatedAt, measured, head);
+                this.memoryOverview = { ...prev, conventions: measured, head };
+                this._studyStatus = t('memory.study.overviewRefreshed');
+                this._syncListTabs();
+                return;
+            }
 
             // While the LLM call runs, the status must say "creating…"; once it
             // lands it must say "created". The two must not stack, so the finished
@@ -1287,7 +1350,7 @@ export class ConfigView {
             this._syncListTabs();
 
             const name = String(this.memoryWorkspace).replace(/[\\/]+$/, '').split(/[\\/]/).pop();
-            const prompt = buildOverviewPrompt(areas, { projectName: name });
+            const prompt = buildOverviewPrompt(areas, { projectName: name, conventions });
             let raw = '';
             await llmService.generate(prompt, 'You write concise, factual orientation notes. Output bullets only.',
                 (chunk) => { raw += chunk; });
@@ -1295,12 +1358,12 @@ export class ConfigView {
             const text = normalizeOverview(raw);
             if (!text) return;
             const generatedAt = new Date().toISOString();
-            await writeOverview(this.memoryWorkspace, text, invoke, generatedAt);
+            await writeOverview(this.memoryWorkspace, text, invoke, generatedAt, measured, head);
             // Show it. Writing the file without refreshing what the panel holds
             // left the note invisible until someone pressed Load again — which
             // for a panel whose whole job is "read this and correct it" is the
             // same as not having written it.
-            this.memoryOverview = { text, generatedAt };
+            this.memoryOverview = { text, generatedAt, conventions: measured };
             // Replaces the "creating…" row — a finished action must not keep
             // reading as an in-flight one.
             this._studyStatus = t('memory.study.overviewDone');
@@ -1323,8 +1386,13 @@ export class ConfigView {
         if (!this.memoryWorkspace) return;
         try {
             const generatedAt = new Date().toISOString();
-            await writeOverview(this.memoryWorkspace, String(text || ''), invoke, generatedAt);
-            this.memoryOverview = { text: String(text || '').trim(), generatedAt };
+            const head = await this._headCommit();
+            const prev = await readOverview(this.memoryWorkspace, invoke);
+            // The user's edit is authoritative: the timestamp is refreshed and the
+            // stored measurements are kept as-is (a manual edit touches the prose,
+            // not the arithmetic).
+            await writeOverview(this.memoryWorkspace, String(text || ''), invoke, generatedAt, prev.conventions || null, head);
+            this.memoryOverview = { text: String(text || '').trim(), generatedAt, conventions: prev.conventions || null, head };
             this._syncListTabs();
         } catch (e) {
             console.warn('ConfigView: overview save failed:', e);
@@ -1357,6 +1425,15 @@ export class ConfigView {
         this.memoryFacts = facts;
         this.memoryEpisodes = episodes;
         this.memoryCards = cards;
+        // The orientation note is a separate file (.agent/memory/overview.md) that
+        // readWorkspaceMemory deliberately does not read. Skipping it left
+        // memoryOverview undefined after Load, so the Memory tab's "overview?.text"
+        // gate hid the note — it had been written, just never read back. readOverview
+        // never throws (missing file ⇒ empty), so this stays best-effort.
+        this.memoryOverview = await readOverview(this.memoryWorkspace, invoke);
+        if (this.memoryOverview?.generatedAt) {
+            this.memoryOverview.head = await this._headCommit();
+        }
     }
 
     async saveMemoryFacts() {

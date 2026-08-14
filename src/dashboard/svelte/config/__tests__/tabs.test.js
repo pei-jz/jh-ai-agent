@@ -463,6 +463,55 @@ describe('MemoryTab — index coverage', () => {
     });
 });
 
+// The A/B rows accumulate on every run and were, until this panel existed, read
+// by nobody: answering "is the memory helping?" meant writing a script against
+// metrics.jsonl. A measurement that inconvenient does not get looked at, which
+// is the outcome the control arm was introduced to avoid.
+describe('MemoryTab — A/B readout', () => {
+    const ab = {
+        rows: 41,
+        on: { runs: 37, iterations: 19, explorationCost: 22 },
+        off: { runs: 4, iterations: 21, explorationCost: 25 },
+        delta: { iterations: -2, explorationCost: -3 },
+        followThrough: { on: { rate: 0.6 }, baseline: { rate: 0.25 }, lift: 0.35 },
+        needed: { mean: 22.1, sd: 13.1, perArm: 89 },
+        comparable: true,
+    };
+
+    it('shows both arms and how far the comparison has to go', () => {
+        const el = mount(MemoryTab, { workspace: 'C:/ws', abStats: ab });
+        expect(el.textContent).toContain('37');
+        expect(el.textContent).toContain('89');
+    });
+
+    it('paces progress against the SMALLER arm, which is the binding one', () => {
+        // 37 recall runs are worth nothing without control runs to compare them
+        // to. Showing 37/89 here would read as 42% done when it is 4%.
+        const el = mount(MemoryTab, { workspace: 'C:/ws', abStats: ab });
+        expect(el.textContent).toContain('4/89');
+    });
+
+    it('reports follow-through against its baseline, not on its own', () => {
+        const el = mount(MemoryTab, { workspace: 'C:/ws', abStats: ab });
+        const grid = el.querySelector('.cfg-mem-ab-grid').textContent;
+        expect(grid).toContain('60% / 25%');
+        expect(grid).toContain('35%');
+    });
+
+    it('withholds every delta while one arm is empty', () => {
+        const el = mount(MemoryTab, {
+            workspace: 'C:/ws',
+            abStats: { ...ab, off: { runs: 0 }, comparable: false },
+        });
+        expect(el.querySelector('.cfg-mem-ab-grid')).toBe(null);
+    });
+
+    it('shows nothing before any run has been recorded', () => {
+        const el = mount(MemoryTab, { workspace: 'C:/ws', abStats: null });
+        expect(el.querySelector('.cfg-mem-ab')).toBe(null);
+    });
+});
+
 // The orientation note is the ONLY memory here that is inferred rather than
 // observed, and it rides in every prompt — so a wrong line in it is repeated on
 // every step until somebody reads it. Which requires being able to read it.

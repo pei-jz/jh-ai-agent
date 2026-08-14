@@ -184,24 +184,44 @@ describe('TaskList — filters', () => {
         expect(rows(mount({ tasks, search: 'evaluate' }))).toEqual(['a1']);
     });
 
-    it('offers every status, and reports a change', () => {
+    it('offers every status as a button, and reports a toggle', () => {
         const onStatusFilter = vi.fn();
         const el = mount({ tasks, onStatusFilter });
-        const select = el.querySelector('.mtask-status');
-        expect([...select.options].map(o => o.value))
-            .toEqual(['all', 'running', 'paused', 'completed', 'failed', 'aborted']);
-        select.value = 'running';
-        select.dispatchEvent(new Event('change', { bubbles: true }));
-        expect(onStatusFilter).toHaveBeenCalledWith('running');
+        const btns = [...el.querySelectorAll('.mtask-status-btn')];
+        expect(btns.map(b => b.textContent.trim()))
+            .toEqual(['running', 'paused', 'completed', 'failed', 'aborted']);
+        // First click on 'running' ADDS it to the (empty) selection.
+        const run = btns.find(b => b.textContent.trim() === 'running');
+        run.click();
+        expect(onStatusFilter).toHaveBeenCalledWith(['running']);
+    });
+
+    it('marks the selected statuses and reports multi-select', async () => {
+        const onStatusFilter = vi.fn();
+        // Real flow: MonitorView re-mounts TaskList with the new statusFilter prop
+        // after every onStatusFilter call, so emulate that with rerender.
+        const { container, rerender } = render(TaskList, {
+            props: { tasks, statusFilter: ['completed'], seenKeys: new Set(), collapsedKeys: new Set(), onStatusFilter },
+        });
+        const btns = () => [...container.querySelectorAll('.mtask-status-btn')];
+        expect(btns().find(b => b.textContent.trim() === 'completed').classList.contains('active')).toBe(true);
+        expect(btns().find(b => b.textContent.trim() === 'running').classList.contains('active')).toBe(false);
+        // Click a SECOND status — it joins, not replaces.
+        btns().find(b => b.textContent.trim() === 'running').click();
+        expect(onStatusFilter).toHaveBeenCalledWith(['completed', 'running']);
+        // Parent re-mounts with the joined selection; clicking the first one drops it.
+        await rerender({ tasks, statusFilter: ['completed', 'running'], seenKeys: new Set(), collapsedKeys: new Set(), onStatusFilter });
+        btns().find(b => b.textContent.trim() === 'completed').click();
+        expect(onStatusFilter).toHaveBeenCalledWith(['running']);
     });
 
     it('marks the active grouping and reports a switch', () => {
         const onGroupBy = vi.fn();
-        const el = mount({ tasks, groupBy: 'date', onGroupBy });
-        const [dateBtn, wsBtn] = el.querySelectorAll('.mgroup-btn');
-        expect(dateBtn.classList.contains('active')).toBe(true);
-        expect(wsBtn.classList.contains('active')).toBe(false);
-        wsBtn.click();
-        expect(onGroupBy).toHaveBeenCalledWith('workspace');
+        const el = mount({ tasks, groupBy: 'workspace', onGroupBy });
+        const [wsBtn, dateBtn] = el.querySelectorAll('.mgroup-btn');
+        expect(wsBtn.classList.contains('active')).toBe(true);
+        expect(dateBtn.classList.contains('active')).toBe(false);
+        dateBtn.click();
+        expect(onGroupBy).toHaveBeenCalledWith('date');
     });
 });
