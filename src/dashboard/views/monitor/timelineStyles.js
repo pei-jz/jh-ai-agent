@@ -118,6 +118,27 @@ export const TIMELINE_STYLES = `
         padding-bottom: var(--space-1);
     }
     .tl-request .tl-card-request { padding: var(--space-2) var(--space-3); cursor: pointer; }
+    /* The minimise toggle rides on the label row: the sticky request is tall
+       fixed furniture, and on a narrow window one click should shrink it to a
+       sliver so the story gets the room. Real <button>, styled as text. */
+    .tl-q-label { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
+    .tl-request-min {
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 16px; height: 16px; padding: 0; border: none; border-radius: 4px;
+        background: transparent; color: var(--text-tertiary); cursor: pointer;
+        opacity: 0; transition: opacity var(--transition-fast), background var(--transition-fast), color var(--transition-fast);
+    }
+    .tl-card-request:hover .tl-request-min { opacity: 1; }
+    .tl-request-min:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+    /* MINIMISED: one line, no fade — a bare sliver of the request. The label
+       stays (it is what the toggle sits on), the text clamps to a single line.
+       is-min beats is-open (both can be true if the user minimises while
+       expanded). */
+    .tl-request.is-min .tl-q-text {
+        display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 1;
+        overflow: hidden; -webkit-mask-image: none; mask-image: none;
+    }
+    .tl-request.is-min .tl-card-request { max-height: none; overflow: visible; }
     /* CLAMPED, not cut off. A max-height simply hid the rest with no way to get
        at it; a line clamp keeps the pinned header a predictable size AND opens
        on click. The fade says there is more without costing a row. */

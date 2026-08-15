@@ -168,8 +168,23 @@ const BASE_STYLES = `
                 }
                 .mtask-group-header:hover .mgroup-add { opacity: 1; }
                 .mgroup-add:hover { background: var(--accent); color: #fff; }
+                /* TaskList.svelte's mount host. It is the flex child that must
+                   grow to fill the pane; without an explicit flex:1/min-height:0
+                   the inner .mpanel-left-list's own scroll never gets a bounded
+                   height, so a long history overflows the pane instead of
+                   scrolling (overflow:hidden on .mpanel-left then clips it). */
+                #mtask-list {
+                    flex: 1;
+                    min-height: 0;
+                    display: flex;
+                    flex-direction: column;
+                    overflow: hidden;
+                }
+                .mtask-filter,
+                .mgroup-toggle { flex-shrink: 0; }
                 .mpanel-left-list {
                     flex: 1;
+                    min-height: 0;
                     overflow-y: auto;
                     padding: 6px;
                     display: flex;

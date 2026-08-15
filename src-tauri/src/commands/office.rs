@@ -645,7 +645,10 @@ impl CellStyle {
             f = f.set_align(fa);
         }
         if let Some(n) = &self.numfmt { f = f.set_num_format(n); }
-        if self.wrap { f = f.set_text_wrap(); }
+        // `wrap` is opt-in: the DEFAULT is no wrap (a spreadsheet's rows stay
+        // one line tall unless the caller explicitly asks for wrapping). Be
+        // explicit about it so a library default change can never flip it on.
+        if self.wrap { f = f.set_text_wrap(); } else { f = f.unset_text_wrap(); }
         f
     }
 }
@@ -787,7 +790,9 @@ pub async fn write_xlsx(
     }
 
     let mut book = Workbook::new();
-    let header = Format::new().set_bold();
+    // Header row: bold, but NOT wrapped — the default is off, and we keep it
+    // off explicitly so long header titles stay one line tall.
+    let header = Format::new().set_bold().unset_text_wrap();
 
     for (i, spec) in sheets.iter().enumerate() {
         let sheet = book.add_worksheet();

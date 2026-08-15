@@ -53,6 +53,8 @@ const PATHS = {
         <path d="M8.2 8.5v6M11.8 8.5v6"/>`,
     // Plus — create / add
     plus: `<path d="M10 4v12M4 10h12"/>`,
+    // Minus — minimise / collapse
+    minus: `<path d="M4 10h12"/>`,
     // Plug — generic connection / API
     plug: `<path d="M7 3v4M13 3v4M5.5 7h9v3a4.5 4.5 0 01-9 0z"/><path d="M10 14.5V17"/>`,
     // Sparkle — Gemini / "ask AI"

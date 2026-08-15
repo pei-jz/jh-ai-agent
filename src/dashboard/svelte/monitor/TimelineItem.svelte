@@ -72,6 +72,11 @@
     /** The clamped request text opens on click. Genuinely component-local: nothing
         outside cares, and the model has no opinion about it. */
     let requestOpen = $state(false);
+    /** Minimised to ONE line — the sticky request is fixed furniture above the
+        story, so on a narrow window the user must be able to shrink it to a
+        sliver and give the reading surface the room. Independent of `requestOpen`
+        (which chooses between 3 lines and the full text); `is-min` wins. */
+    let requestMin = $state(false);
 
     const toggleCollapsed = () => onToggleCollapse?.(item.id);
 
@@ -99,6 +104,7 @@
     class={itemClass(item)}
     class:collapsed
     class:is-open={requestOpen}
+    class:is-min={requestMin}
     data-item-id={item.id}
 >
 
@@ -135,10 +141,21 @@
         title="Fold or unfold this exchange's working"
         onclick={() => onToggleStory?.(item._ex, 'working')}></button>
     <div class="tl-card tl-card-request"
-        onclick={() => (requestOpen = !requestOpen)}
+        class:is-min={requestMin}
+        onclick={() => { if (requestMin) { requestMin = false; requestOpen = true; } else { requestOpen = !requestOpen; } }}
         role="button" tabindex="0"
-        onkeydown={(e) => { if (e.key === 'Enter') requestOpen = !requestOpen; }}>
-        <div class="tl-q-label">Your request</div>
+        onkeydown={(e) => { if (e.key === 'Enter') { if (requestMin) { requestMin = false; requestOpen = true; } else { requestOpen = !requestOpen; } } }}>
+        <div class="tl-q-label">
+            <span>Your request</span>
+            <!-- Minimise / restore: the sticky request is tall fixed furniture;
+                 this gives it a one-line sliver. stopPropagation so the toggle
+                 does not also flip the open/closed state. -->
+            <button type="button" class="tl-request-min"
+                title={requestMin ? 'Expand the request' : 'Minimise the request'}
+                onclick={(e) => { e.stopPropagation(); requestMin = !requestMin; if (!requestMin) requestOpen = true; }}>
+                {@html icon(requestMin ? 'plus' : 'minus')}
+            </button>
+        </div>
         <div class="tl-q-text">{item.text}</div>
         {#if item.images?.length}
             <div class="mrc-imgs">
