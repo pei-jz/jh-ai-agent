@@ -398,7 +398,14 @@ export function fmtReview(d) {
         const v = r.verdict || '?';
         const icon = v === 'pass' ? '✅' : v === 'fail' ? '❌' : '❔';
         const reason = r.reason ? ` <span style="opacity:.6">(${escapeHtml(r.reason)})</span>` : '';
-        return `<div class="mlog mlog-status"><span class="mlog-icon">🔎</span><span class="mlog-body"><strong>Review:</strong> ${icon} ${escapeHtml(String(v))}${reason}</span></div>`;
+        // The reviewer's ACTUAL words (problem / no-problem reasons), condensed.
+        // Prefer the pre-built summary; fall back to a short clip of the findings.
+        const rawBody = r.summary || String(r.findings || '').replace(/^FINDINGS\s*:\s*/i, '').trim();
+        const body = rawBody.length > 180 ? rawBody.slice(0, 179) + '…' : rawBody;
+        const bodyHtml = body
+            ? `<div style="margin-top:3px;font-size:11px;opacity:.85">${escapeHtml(body)}</div>`
+            : '';
+        return `<div class="mlog mlog-status"><span class="mlog-icon">🔎</span><span class="mlog-body"><strong>Review:</strong> ${icon} ${escapeHtml(String(v))}${reason}${bodyHtml}</span></div>`;
     }
 
 export function fmtTelemetry(d) {

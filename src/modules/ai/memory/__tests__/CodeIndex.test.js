@@ -129,6 +129,22 @@ describe('rendering', () => {
         expect(renderDeps([{ path: 'book.xlsx#Sheet2', kind: 'references' }], 'book.xlsx#Sheet1', 'out'))
             .toContain('[references]');
     });
+
+    it('annotates a transitive walk with hop distances', () => {
+        const out = renderDeps(
+            [{ path: 'util.js', kind: 'imports', depth: 1 }, { path: 'leaf.js', kind: 'imports', depth: 2 }],
+            'core.js', 'out', { depth: 3 });
+        expect(out).toContain('transitive, up to 3 hops');
+        expect(out).toContain('util.js (hop 1)');
+        expect(out).toContain('leaf.js (hop 2)');
+    });
+
+    it('keeps direct-neighbour output unchanged when no depth was asked', () => {
+        const out = renderDeps([{ path: 'util.js', kind: 'imports' }], 'core.js', 'out');
+        expect(out).toContain('- util.js');
+        expect(out).not.toContain('hop');
+        expect(out).not.toContain('transitive');
+    });
 });
 
 describe('CodeIndexClient', () => {
@@ -147,6 +163,25 @@ describe('CodeIndexClient', () => {
         await c.findSymbol('x', { kind: 'function', limit: 5 });
         expect(invoke).toHaveBeenCalledWith('index_find_symbol', {
             workspace: 'C:/ws', query: 'x', kind: 'function', limit: 5,
+        });
+    });
+
+    it('passes the depth hop count through to the backend', async () => {
+        const invoke = vi.fn(async () => [{ path: 'b.js', kind: 'imports', depth: 2 }]);
+        const c = new CodeIndexClient({ workspacePath: 'C:/ws', invoke });
+        const hits = await c.deps('a.js', { direction: 'in', limit: 10, depth: 3 });
+        expect(invoke).toHaveBeenCalledWith('index_deps', {
+            workspace: 'C:/ws', path: 'a.js', direction: 'in', limit: 10, depth: 3,
+        });
+        expect(hits[0].depth).toBe(2);
+    });
+
+    it('defaults to depth 1 (direct neighbours) when not asked', async () => {
+        const invoke = vi.fn(async () => []);
+        const c = new CodeIndexClient({ workspacePath: 'C:/ws', invoke });
+        await c.deps('a.js');
+        expect(invoke).toHaveBeenCalledWith('index_deps', {
+            workspace: 'C:/ws', path: 'a.js', direction: 'out', limit: 60, depth: 1,
         });
     });
 

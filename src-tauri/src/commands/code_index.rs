@@ -76,6 +76,11 @@ pub struct SymbolHit {
 pub struct DepHit {
     pub path: String,
     pub kind: String,
+    /// Hop distance from the queried node: 1 for a direct dependency, 2 for a
+    /// transitive one reached through one intermediate, and so on. Only present
+    /// when the caller asked for a transitive walk.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub depth: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -319,29 +324,112 @@ pub async fn index_find_symbol(
 ///
 /// The reverse direction is the one worth having: "what breaks if I change this"
 /// cannot be answered by reading the file, only by having looked at every other.
+///
+/// `depth` walks the graph transitively: `depth: 1` (default) is the direct
+/// neighbours, `depth: 2` also returns what those neighbours depend on (or what
+/// depends on them), and so on. This is the query that makes the graph a graph
+/// rather than a lookup table: "edit `core.js` — what else transitively
+/// depends on it" is answered here in one call instead of N round trips.
+///
+/// The walk is BFS with a visited set, so a diamond (`a → b, a → c, b → c`)
+/// reports `c` once, at its shortest hop. Each row carries its hop distance so
+/// the caller can tell direct dependencies from collateral ones.
 #[tauri::command]
 pub async fn index_deps(
     workspace: String,
     path: String,
     direction: Option<String>,
     limit: Option<usize>,
+    depth: Option<usize>,
     guard: State<'_, PathGuard>,
 ) -> Result<Vec<DepHit>, String> {
-    let lim = limit.unwrap_or(60).clamp(1, 500) as i64;
+    let lim = limit.unwrap_or(60).clamp(1, 500) as usize;
+    // `depth` is the hop count to walk: 1 (default) = direct neighbours, which
+    // is exactly the pre-transitive behaviour. 2 = also the neighbours of those
+    // neighbours — "what transitively depends on this". Capped: beyond 4 hops
+    // "what breaks" is noise, not signal.
+    let max_depth = depth.unwrap_or(1).max(1).min(4);
     let conn = open(&workspace, &guard)?;
     let reverse = direction.as_deref().unwrap_or("out") == "in";
-    let sql = if reverse {
-        "SELECT src, kind FROM edges WHERE dst = ?1 ORDER BY src LIMIT ?2"
+
+    // Follow ONLY the requested direction. For "out" (what X depends on) each
+    // step reads dst from src; for "in" (what depends on X) each step reads src
+    // from dst. Mixing the two would turn a dependency walk into a random graph
+    // stroll.
+    let step_sql = if reverse {
+        "SELECT src, kind FROM edges WHERE dst = ?1 ORDER BY src"
     } else {
-        "SELECT dst, kind FROM edges WHERE src = ?1 ORDER BY dst LIMIT ?2"
+        "SELECT dst, kind FROM edges WHERE src = ?1 ORDER BY dst"
     };
-    let mut st = conn.prepare(sql).map_err(|e| e.to_string())?;
-    let rows = st
-        .query_map(params![path, lim], |r| {
-            Ok(DepHit { path: r.get(0)?, kind: r.get(1)? })
-        })
-        .map_err(|e| e.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+
+    if max_depth == 1 {
+        // Fast path: direct neighbours only, identical to the pre-transitive
+        // answer (including the LIMIT, so existing callers keep bounded rows).
+        let sql = if reverse {
+            "SELECT src, kind FROM edges WHERE dst = ?1 ORDER BY src LIMIT ?2"
+        } else {
+            "SELECT dst, kind FROM edges WHERE src = ?1 ORDER BY dst LIMIT ?2"
+        };
+        let mut st = conn.prepare(sql).map_err(|e| e.to_string())?;
+        let rows = st
+            .query_map(params![path, lim as i64], |r| {
+                Ok(DepHit { path: r.get(0)?, kind: r.get(1)?, depth: None })
+            })
+            .map_err(|e| e.to_string())?;
+        return rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string());
+    }
+
+    let mut st = conn.prepare(step_sql).map_err(|e| e.to_string())?;
+    let mut neighbours = |node: &str| -> Result<Vec<(String, String)>, String> {
+        let rows = st
+            .query_map(params![node], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    };
+    walk_deps(&path, max_depth, lim, &mut neighbours)
+}
+
+/// BFS over a directed graph given by a neighbour function.
+///
+/// Pure (no DB access) so the traversal rules — direction-only following,
+/// cycle survival via a visited set, one row per node at its shortest hop,
+/// the depth/limit caps — are unit-testable without a database.
+fn walk_deps(
+    start: &str,
+    max_depth: usize,
+    limit: usize,
+    neighbours: &mut dyn FnMut(&str) -> Result<Vec<(String, String)>, String>,
+) -> Result<Vec<DepHit>, String> {
+    let mut out: Vec<DepHit> = Vec::new();
+    // The visited set keeps us from looping (`a imports b imports a`) and from
+    // reporting a node twice through different paths; a diamond reports each
+    // node once, at its shortest hop distance.
+    let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+    visited.insert(start.to_string());
+    let mut frontier: Vec<String> = vec![start.to_string()];
+    let mut hop = 0usize; // 0 = we are about to emit the direct neighbours (hop 1)
+
+    while hop < max_depth && !frontier.is_empty() && out.len() < limit {
+        let mut next: Vec<String> = Vec::new();
+        for node in &frontier {
+            let rows = neighbours(node)?;
+            for (neighbour, kind) in rows {
+                if visited.insert(neighbour.clone()) {
+                    out.push(DepHit { path: neighbour.clone(), kind, depth: Some(hop as i64 + 1) });
+                    next.push(neighbour);
+                    if out.len() >= limit {
+                        break;
+                    }
+                }
+            }
+            if out.len() >= limit {
+                break;
+            }
+        }
+        frontier = next;
+        hop += 1;
+    }
+    Ok(out)
 }
 
 /// Size and shape of the index — what the coverage read-out is built from.
@@ -463,5 +551,58 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM edges WHERE dst LIKE '%Sheet2'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 1);
+    }
+
+    /// A neighbour function over a static map, so the walk rules are tested
+    /// without a database: the map is the graph, `walk_deps` is the traversal.
+    fn graph<'a>(edges: &'a [(&'a str, &'a str)]) -> impl FnMut(&str) -> Result<Vec<(String, String)>, String> + 'a {
+        use std::collections::HashMap;
+        let mut m: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        for (src, dst) in edges {
+            m.entry(src.to_string()).or_default().push((dst.to_string(), "imports".to_string()));
+        }
+        move |node: &str| Ok(m.get(node).cloned().unwrap_or_default())
+    }
+
+    #[test]
+    fn transitive_walk_follows_direction_only_and_reports_hop_distance() {
+        // a → core → util → leaf. Walking "out" from `core` with depth 3 must
+        // return util (hop 1) and leaf (hop 2) — NOT a (that is the "in"
+        // direction, and a walk must not leak across it).
+        let mut g = graph(&[("a.js", "core.js"), ("core.js", "util.js"), ("util.js", "leaf.js")]);
+        let got = walk_deps("core.js", 3, 100, &mut g).unwrap();
+        let rendered: Vec<String> = got.iter().map(|d| format!("{}@{}", d.path, d.depth.unwrap())).collect();
+        assert_eq!(rendered, vec!["util.js@1", "leaf.js@2"]);
+        assert!(!got.iter().any(|d| d.path == "a.js"));
+    }
+
+    #[test]
+    fn transitive_walk_reports_each_node_once_at_its_shortest_hop() {
+        // Diamond: a → b, a → c, b → c. `c` is reachable at hop 1 (directly)
+        // and hop 2 (via b); it must appear once, at hop 1.
+        let mut g = graph(&[("a.js", "b.js"), ("a.js", "c.js"), ("b.js", "c.js")]);
+        let got = walk_deps("a.js", 3, 100, &mut g).unwrap();
+        let rendered: Vec<String> = got.iter().map(|d| format!("{}@{}", d.path, d.depth.unwrap())).collect();
+        assert_eq!(rendered, vec!["b.js@1", "c.js@1"]);
+    }
+
+    #[test]
+    fn transitive_walk_survives_cycles() {
+        // a ↔ b (a cycle). A depth-3 walk from `a` must terminate and report
+        // b once — the visited set, not the depth cap, is what stops it.
+        let mut g = graph(&[("a.js", "b.js"), ("b.js", "a.js")]);
+        let got = walk_deps("a.js", 3, 100, &mut g).unwrap();
+        let rendered: Vec<String> = got.iter().map(|d| format!("{}@{}", d.path, d.depth.unwrap())).collect();
+        assert_eq!(rendered, vec!["b.js@1"]);
+    }
+
+    #[test]
+    fn transitive_walk_respects_the_limit() {
+        // Three neighbours at hop 1; a limit of 2 must cut the walk short
+        // without touching the rest of the graph.
+        let mut g = graph(&[("a.js", "b.js"), ("a.js", "c.js"), ("a.js", "d.js"), ("b.js", "e.js")]);
+        let got = walk_deps("a.js", 3, 2, &mut g).unwrap();
+        assert_eq!(got.len(), 2);
+        assert!(got.iter().all(|d| d.path == "b.js" || d.path == "c.js" || d.path == "d.js"));
     }
 }

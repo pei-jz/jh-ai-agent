@@ -296,3 +296,30 @@ export function parseReviewVerdict(text) {
     // 5) Substantive report, nothing blocking → pass (never deadlock the implementer).
     return { verdict: 'pass', findings: extractFindings(s), reason: 'no-blocking-findings' };
 }
+
+/**
+ * Condense a reviewer's raw report into a couple of log lines, so the user
+ * sees WHAT the reviewer said (problem / no-problem reasons), not just the
+ * verdict. Prefers the FINDINGS: block; falls back to the first meaningful
+ * prose line. Always kept short — the full text still goes to the model.
+ */
+export function summarizeReview(verdict, findings) {
+    const raw = String(findings || '').replace(/^FINDINGS\s*:\s*/i, '').trim();
+    const lines = raw
+        .split(/\r?\n/)
+        .map(l => l.replace(/^[-*]\s+/, '').trim())
+        .filter(l => l && !/^(VERDICT|FINDINGS)\b/i.test(l));
+    const head = lines.length ? lines[0] : '';
+    const n = lines.length;
+    const summary = head
+        ? (n > 1 ? `${head}（他 ${n - 1} 件）` : head)
+        : (verdict === 'pass'
+            ? '問題なし — レビューアは変更を確認し、ブロッキングな指摘はありませんでした'
+            : '（レビュー文言なし — 判定のみ）');
+    // Cap INCLUDING the truncation marker, so the logged line never exceeds
+    // MAX chars total (clipText appends its own "…[truncated]" on top).
+    const MAX = 220;
+    const MARKER = '\n…[truncated]';
+    if (summary.length > MAX) return summary.slice(0, MAX - MARKER.length) + MARKER;
+    return summary;
+}

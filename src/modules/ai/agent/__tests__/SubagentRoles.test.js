@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
     SUBAGENT_ROLES, resolveRole, clipText, composeSubtaskPrompt,
-    buildReviewBrief, parseReviewVerdict, childTokenBudget,
+    buildReviewBrief, parseReviewVerdict, summarizeReview, childTokenBudget,
     isPathInScope, scopesOverlap, WRITE_ENFORCED_TOOLS, TESTER_WRITE_PATTERNS,
     SUBTASK_MAX_PARALLEL, SUBTASK_MAX_PER_RUN, SUBTASK_MAX_STEPS_CAP
 } from '../SubagentRoles.js';
@@ -143,6 +143,32 @@ describe('parseReviewVerdict', () => {
         expect(parseReviewVerdict('').verdict).toBe('unknown');
         expect(parseReviewVerdict(null).verdict).toBe('unknown');
         expect(parseReviewVerdict('ok').verdict).toBe('unknown');
+    });
+});
+
+describe('summarizeReview', () => {
+    it('prefers the FINDINGS block and strips markers', () => {
+        const s = summarizeReview('fail', 'VERDICT: FAIL\nFINDINGS:\n- [BUG] a.js:10 — off-by-one\n- [BUG] b.js:2 — null deref');
+        expect(s).toContain('[BUG] a.js:10 — off-by-one');
+        expect(s).toContain('他 1 件');
+    });
+    it('single finding → no count suffix', () => {
+        expect(summarizeReview('fail', 'FINDINGS:\n- [BUG] a.js:10 — off-by-one'))
+            .toBe('[BUG] a.js:10 — off-by-one');
+    });
+    it('no findings text on a pass → default all-clear line', () => {
+        expect(summarizeReview('pass', '')).toContain('問題なし');
+    });
+    it('no findings text on a fail → fallback line', () => {
+        expect(summarizeReview('fail', '')).toContain('レビュー文言なし');
+    });
+    it('keeps a plain prose report', () => {
+        const s = summarizeReview('pass', 'FINDINGS: none — the diff is correct and matches the criteria.');
+        expect(s).toContain('the diff is correct');
+    });
+    it('caps the summary length', () => {
+        const long = 'FINDINGS:\n- ' + 'x'.repeat(500);
+        expect(summarizeReview('pass', long).length).toBeLessThanOrEqual(220);
     });
 });
 

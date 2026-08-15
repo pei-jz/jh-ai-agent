@@ -373,18 +373,22 @@ export async function handleCodeDeps(ctx, args, onAgentStatus) {
     if (!target) return 'Error: code_deps requires "path" (the file to examine).';
     const direction = String(args?.direction || 'in').toLowerCase() === 'out' ? 'out' : 'in';
     const limit = Number.isFinite(args?.max_results) ? Math.max(1, Math.min(500, args.max_results)) : 60;
+    // Hop count: 1 = direct neighbours only (the pre-4a behaviour). 2+ walks
+    // the graph transitively — "what transitively depends on this". Capped at
+    // 4 by the backend; anything beyond that is noise.
+    const depth = Number.isFinite(args?.depth) ? Math.max(1, Math.min(4, Math.round(args.depth))) : 1;
 
     const idx = new CodeIndexClient({ workspacePath: ctx.workspacePath, invoke });
     if (!idx.enabled) return 'Error: code_deps needs a workspace.';
 
-    onAgentStatus?.(`Dependencies (${direction}): ${target}`);
+    onAgentStatus?.(`Dependencies (${direction}${depth > 1 ? `, ${depth} hops` : ''}): ${target}`);
     try {
         const resolved = ctx.resolvePath(target);
         // The index stores whatever path the study pass globbed. Try the resolved
         // form first, then the literal argument, so both spellings work.
-        let hits = await idx.deps(resolved, { direction, limit });
-        if (!hits.length && resolved !== target) hits = await idx.deps(target, { direction, limit });
-        return renderDeps(hits, target, direction);
+        let hits = await idx.deps(resolved, { direction, limit, depth });
+        if (!hits.length && resolved !== target) hits = await idx.deps(target, { direction, limit, depth });
+        return renderDeps(hits, target, direction, { depth });
     } catch (e) {
         return `Error: code_deps failed — ${e?.message || e}`;
     }
