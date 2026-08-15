@@ -72,6 +72,14 @@ const GIT_SAFE_SUB = new Set([
 ]);
 const GIT_DESTRUCTIVE_FLAG = /(^|\s)(-d|-D|--delete|-f|--force|--hard|--unset|--prune|-m|--move)\b/i;
 
+// ── Read-only VERSION probes ────────────────────────────────────────────────
+// `node --version`, `npm -v`, `git --version` … — these print a version string
+// and nothing else. They are pure reads, so they belong in the allow-list; a
+// missing entry only costs an extra confirmation, but version checks are exactly
+// what an agent does early in a task ("what toolchain does this workspace need?")
+// and re-prompting for them is pure friction.
+const VERSION_PROBE = /^(node|npm|npx|yarn|pnpm|bun|deno|python|python3|py|pip|pip3|git|java|javac|mvn|gradle|go|rustc|cargo|ruby|gem|php|composer|dotnet|psql|mysql|sqlite3|docker|docker-compose|terraform|kubectl|helm|aws|az|gcloud|gh)\s+(--version|-v|-V|--help|-h)\s*$/i;
+
 // Shell metacharacters that make static reasoning unsafe → never auto-'safe'.
 // (Redirection can overwrite files; ; && || chain arbitrary commands; $() `` eval.)
 const UNSAFE_SHELL = /[>`]|\$\(|&&|\|\||;/;
@@ -95,6 +103,8 @@ export function classifyCommand(cmd) {
     // 2) Safe = read-only, no risky shell metachars. Allow a pipeline where
     //    EVERY segment is itself a safe read-only command.
     if (UNSAFE_SHELL.test(c)) return 'normal';
+    // Version probes (single command + a --version/-v/-h flag) are pure reads.
+    if (VERSION_PROBE.test(c)) return 'safe';
     const segments = c.split('|');
     const allSafe = segments.every(seg => {
         const tok = firstToken(seg);

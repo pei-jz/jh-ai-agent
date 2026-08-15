@@ -11,7 +11,7 @@
 const PATH_TOOLS = new Set([
     'read_file', 'write_file', 'replace_lines', 'multi_replace_file_content',
     'delete_file', 'verify_syntax', 'create_artifact', 'update_artifact',
-    'read_office', 'write_xlsx', 'open_file',
+    'read_office', 'write_xlsx',
 ]);
 
 /** Tools that write, so the step can be marked as a change rather than a read. */

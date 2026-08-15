@@ -47,9 +47,29 @@ describe('classifyCommand — safe (read-only, may auto-run)', () => {
         'git diff',
         'git log --oneline',
         'git branch',
+        'node --version',
+        'node -v',
+        'npm --version',
+        'npm -v',
+        'npx --version',
+        'python --version',
+        'git --version',
+        'docker --version',
+        'psql --version',
     ];
     for (const c of safe) {
         it(`safe: ${c}`, () => expect(classifyCommand(c)).toBe('safe'));
+    }
+});
+
+describe('classifyCommand — version probes with extra args are NOT auto-safe', () => {
+    const notVersionProbe = [
+        'node -v foo',          // extra arg → not a pure version probe
+        'npm -v --global',      // flag with a value → not a pure probe
+        'node --version && ls', // chained → not auto-safe
+    ];
+    for (const c of notVersionProbe) {
+        it(`normal: ${c}`, () => expect(classifyCommand(c)).toBe('normal'));
     }
 });
 

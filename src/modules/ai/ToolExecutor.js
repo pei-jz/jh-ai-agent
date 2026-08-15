@@ -44,8 +44,8 @@ import { isPathInScope, WRITE_ENFORCED_TOOLS } from './agent/SubagentRoles.js';
 // calls the matching handler with exactly the args it expects. Each adapter
 // returns the handler's value/promise DIRECTLY (no extra await), so the
 // surrounding try/catch in executeTool behaves identically to the old switch.
-// open_file's tiny inline body lives here too; MCP/unknown tools fall through
-// to _dispatchMcpTool. Keep this in sync when adding/removing a built-in tool.
+// MCP/unknown tools fall through to _dispatchMcpTool. Keep this in sync when
+// adding/removing a built-in tool.
 const TOOL_HANDLERS = {
     list_files:  (ex, c) => handleListFiles(ex, c.args, c.onAgentStatus, c.resolvedPath),
     read_file:   (ex, c) => handleReadFile(ex, c.args, c.onAgentStatus, c.resolvedPath),
@@ -65,11 +65,6 @@ const TOOL_HANDLERS = {
     move_file:   (ex, c) => handleMoveFile(ex, c.args, c.onConfirm, c.onAgentStatus),
     write_file:  (ex, c) => handleWriteFile(ex, c.args, c.onConfirm, c.onAgentStatus, c.resolvedPath),
     run_command: (ex, c) => handleRunCommand(ex, c.args, c.onConfirm, c.onAgentStatus),
-    open_file:   (ex, c) => {
-        c.onAgentStatus?.(`Opening file in editor: ${c.resolvedPath}...`);
-        ex.onToolEvent?.('open_file', { path: c.resolvedPath });
-        return `Success: File ${c.resolvedPath} opened in client editor tab.`;
-    },
     multi_replace_file_content: (ex, c) => handleMultiReplace(ex, c.args, c.onConfirm, c.onAgentStatus),
     replace_lines:   (ex, c) => handleReplaceLines(ex, c.args, c.onConfirm, c.onAgentStatus),
     present_result:  (ex, c) => handlePresentResult(ex, c.args, c.onAgentStatus),
@@ -938,6 +933,9 @@ export class ToolExecutor {
             case 'write_file':
             case 'multi_replace_file_content':
             case 'replace_lines':
+            case 'write_xlsx':
+            case 'update_xlsx':
+            case 'write_docx':
                 return this._isWriteAllowed(pickPath()) ? 'Allow' : 'Ask';
             // Browser tools: side-effecting ones (navigate/click/type/eval) ask;
             // read-only ones (content/screenshot/close) follow isSafe → default Allow.
@@ -1193,7 +1191,7 @@ export class ToolExecutor {
 
         const rawPath = args.path || args.file_path || args.filepath || args.file || args.dir || args.directory;
 
-        const needsFilePath = ['read_file', 'write_file', 'open_file', 'multi_replace_file_content', 'replace_lines', 'delete_file'];
+        const needsFilePath = ['read_file', 'write_file', 'multi_replace_file_content', 'replace_lines', 'delete_file'];
         if (needsFilePath.includes(name) && (!rawPath || typeof rawPath !== 'string' || rawPath.trim() === '')) {
             return `Error: Missing required valid 'path' parameter for tool '${name}'.`;
         }

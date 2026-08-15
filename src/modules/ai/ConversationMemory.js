@@ -14,6 +14,23 @@ import { buildSummaryPrompt, parseSummary } from './memory/FactExtraction.js';
 const MEMORY_MIN_RELEVANCE = 0.08;
 
 /**
+ * Default episodic-memory injection policy (P2-1 A/B instrumentation).
+ * These are tunable at runtime via setEpisodeInjectionConfig so the recall
+ * path can be A/B-tested (e.g. 3 sessions vs 5, or a stricter relevance floor)
+ * without editing code — every injection records its decision + token cost in
+ * `_episodeInjectionStats` for comparison.
+ */
+const EPISODE_INJECTION_DEFAULTS = {
+    enabled: true,        // false → skip the episodic section entirely
+    minRelevance: MEMORY_MIN_RELEVANCE,
+    maxSessions: 3,       // how many past sessions may be injected
+    tokenBudget: 1200,    // soft token cap for the whole episodic section
+};
+
+/** Cap on how many injections we remember per session (for A/B stats). */
+const EPISODE_INJECTION_STATS_CAP = 500;
+
+/**
  * Standing budget for project RULES. Small on purpose: these are injected on
  * every step of every task regardless of relevance, so the cap is what keeps a
  * growing rulebook from crowding out the task-specific half.
@@ -37,6 +54,14 @@ class ConversationMemory {
         this.facts = [];          // [{ fact, date, sessionId, hits }]
         this.factsLoaded = false;
         this.maxFacts = 100;      // cap; least-relevant pruned on overflow
+
+        // ── Episodic-memory injection policy + A/B instrumentation (P2-1) ──
+        // The episodic section is the heaviest injected memory layer (past
+        // sessions, verbatim). `_episodePolicy` holds the tunable knobs;
+        // `_episodeInjectionStats` accumulates every injection decision so the
+        // effect of changing a knob can be MEASURED (A/B) rather than guessed.
+        this._episodePolicy = { ...EPISODE_INJECTION_DEFAULTS };
+        this._episodeInjectionStats = []; // [{ts, sessions, candidates, tokens, reason}]
 
         // ── History budget configuration ───────────────────────────────
         // Fraction of the model's context window that history (conversation +
@@ -713,6 +738,40 @@ ${list}`;
     _relevanceScore(entry, query) { return relevanceScore(entry, query); }
 
     /**
+     * Override the episodic-memory injection policy (P2-1 A/B knobs).
+     * @param {object} cfg - { enabled?, minRelevance?, maxSessions?, tokenBudget? }
+     */
+    setEpisodeInjectionConfig(cfg = {}) {
+        if (!cfg || typeof cfg !== 'object') return;
+        const p = this._episodePolicy;
+        if (typeof cfg.enabled === 'boolean') p.enabled = cfg.enabled;
+        if (Number.isFinite(cfg.minRelevance) && cfg.minRelevance >= 0) p.minRelevance = cfg.minRelevance;
+        if (Number.isFinite(cfg.maxSessions) && cfg.maxSessions >= 1) p.maxSessions = Math.floor(cfg.maxSessions);
+        if (Number.isFinite(cfg.tokenBudget) && cfg.tokenBudget >= 0) p.tokenBudget = cfg.tokenBudget;
+    }
+
+    /**
+     * A/B instrumentation snapshot: how many injections happened, how many
+     * candidates were filtered out, and the mean token cost. Lets a caller
+     * compare two policies (e.g. default vs maxSessions:5) after a few runs.
+     */
+    getEpisodeInjectionStats() {
+        const s = this._episodeInjectionStats;
+        if (s.length === 0) {
+            return { count: 0, filtered: 0, avgSessions: 0, avgTokens: 0 };
+        }
+        const total = s.reduce((a, e) => a + e.sessions, 0);
+        const totalTokens = s.reduce((a, e) => a + e.tokens, 0);
+        const filtered = s.reduce((a, e) => a + e.filtered, 0);
+        return {
+            count: s.length,
+            filtered,
+            avgSessions: total / s.length,
+            avgTokens: totalTokens / s.length,
+        };
+    }
+
+    /**
      * Returns a context string for injection into the AI system prompt.
      * @param {string} [currentQuery] - Optional current task text for relevance scoring.
      *   When provided, entries are ranked by relevance; the top-3 are injected.
@@ -725,22 +784,31 @@ ${list}`;
             return factsSection;
         }
 
+        const policy = this._episodePolicy;
+        // P2-1 A/B knob: the whole episodic section can be switched off, which
+        // isolates the contribution of FACT memory from past-session memory.
+        if (!policy.enabled) return factsSection;
+
         let selected;
+        let candidates = 0;
+        const totalCandidates = this.entries.length;
         if (currentQuery) {
             // Score all entries; keep only those clearing the relevance floor, then
-            // take the top 3. An unrelated task → 0 relevant sessions → no episodic
+            // take the top-N. An unrelated task → 0 relevant sessions → no episodic
             // memory injected (was: top-3 / recent-3 regardless of relevance, which
             // pulled unrelated same-workspace sessions into the prompt).
             const scored = this.entries
                 .map((e, idx) => ({ entry: e, score: this._relevanceScore(e, currentQuery), idx }))
-                .filter(s => s.score >= MEMORY_MIN_RELEVANCE);
+                .filter(s => s.score >= policy.minRelevance);
+            candidates = scored.length;
             scored.sort((a, b) => b.score - a.score || b.idx - a.idx);
-            selected = scored.slice(0, 3).map(s => s.entry);
+            selected = scored.slice(0, policy.maxSessions).map(s => s.entry);
             // Re-sort by date so the context reads chronologically.
             selected.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
         } else {
             // No query to judge against → recent sessions (unchanged).
-            selected = this.entries.slice(-3);
+            selected = this.entries.slice(-policy.maxSessions);
+            candidates = selected.length;
         }
 
         // Nothing relevant → skip the episodic section entirely (facts may still show).
@@ -758,7 +826,27 @@ ${list}`;
             return `[${e.date}] Q: ${cleanQuery}\nA: ${cleanSummary}`;
         }).join('\n---\n');
 
-        return `${factsSection}\n[Past Conversation Memory (Top ${selected.length} relevant sessions)]\n${memoryText}\n`;
+        const section = `[Past Conversation Memory (Top ${selected.length} relevant sessions)]\n${memoryText}\n`;
+
+        // P2-1 A/B instrumentation: record what this injection cost and how much
+        // it filtered, so a policy change can be judged on data.
+        try {
+            const tokens = tokenEstimator.estimateTokens(section);
+            const entry = {
+                ts: Date.now(),
+                sessions: selected.length,
+                candidates,
+                filtered: Math.max(0, totalCandidates - candidates),
+                tokens,
+                reason: 'inject',
+            };
+            this._episodeInjectionStats.push(entry);
+            if (this._episodeInjectionStats.length > EPISODE_INJECTION_STATS_CAP) {
+                this._episodeInjectionStats.splice(0, this._episodeInjectionStats.length - EPISODE_INJECTION_STATS_CAP);
+            }
+        } catch (_) { /* stats are best-effort; never break recall */ }
+
+        return `${factsSection}\n${section}`;
     }
 
     /**

@@ -457,6 +457,11 @@ describe('MemoryTab — index coverage', () => {
         expect(rows).toEqual(['src/modules', 'src/dashboard']);
     });
 
+    it('says that uncovered areas are answered by guessing', () => {
+        const el = mount(MemoryTab, { workspace: 'C:/ws', indexStats: stats });
+        expect(el.textContent).toMatch(/推測で答える|answering by guessing|guess/i);
+    });
+
     it('shows nothing at all before a study has run', () => {
         const el = mount(MemoryTab, { workspace: 'C:/ws', indexStats: { files: 0 } });
         expect(el.querySelector('.cfg-mem-cov')).toBe(null);

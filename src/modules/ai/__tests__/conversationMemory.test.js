@@ -133,8 +133,73 @@ describe('memory recall relevance', () => {
 });
 
 describe('getPromptContext', () => {
+    beforeEach(() => {
+        conversationMemory.loaded = true;
+        conversationMemory.factsLoaded = true;
+        conversationMemory.facts = [];
+        conversationMemory._episodeInjectionStats = [];
+        conversationMemory._episodePolicy = {
+            enabled: true, minRelevance: 0.08, maxSessions: 3, tokenBudget: 1200,
+        };
+    });
+
     it('returns a string even with no memory loaded', () => {
         expect(typeof conversationMemory.getPromptContext('anything')).toBe('string');
+    });
+
+    it('injects only sessions that clear the relevance floor', () => {
+        conversationMemory.entries = [
+            { topic: 'websocket reconnect', summary: 'fixed it', timestamp: 1 },
+            { topic: 'release notes', summary: 'wrote them', timestamp: 2 },
+        ];
+        const out = conversationMemory.getPromptContext('websocket reconnect');
+        expect(out).toContain('websocket reconnect');
+        expect(out).not.toContain('release notes');
+    });
+
+    it('records injection stats for A/B comparison', () => {
+        conversationMemory.entries = [
+            { topic: 'websocket reconnect', summary: 'fixed it', timestamp: 1 },
+            { topic: 'release notes', summary: 'wrote them', timestamp: 2 },
+        ];
+        conversationMemory.getPromptContext('websocket reconnect');
+        const s = conversationMemory.getEpisodeInjectionStats();
+        expect(s.count).toBe(1);
+        expect(s.filtered).toBe(1);   // one candidate dropped by relevance
+        expect(s.avgSessions).toBe(1); // one session injected
+        expect(s.avgTokens).toBeGreaterThan(0);
+    });
+
+    it('respects maxSessions knob (A/B variant B: more sessions)', () => {
+        conversationMemory.setEpisodeInjectionConfig({ maxSessions: 5 });
+        conversationMemory.entries = [
+            { topic: 'websocket reconnect', summary: 'fixed it', timestamp: 1 },
+            { topic: 'websocket', summary: 'more', timestamp: 2 },
+            { topic: 'websocket2', summary: 'more2', timestamp: 3 },
+            { topic: 'websocket3', summary: 'more3', timestamp: 4 },
+            { topic: 'unrelated', summary: 'no', timestamp: 5 },
+        ];
+        const out = conversationMemory.getPromptContext('websocket reconnect');
+        // 4 of 5 entries clear the floor; the knob allows 5 → all 4 injected.
+        expect(out.match(/Outcome summary/g)).toHaveLength(4);
+    });
+
+    it('enabled:false drops the episodic section entirely (A/B baseline)', () => {
+        conversationMemory.setEpisodeInjectionConfig({ enabled: false });
+        conversationMemory.entries = [
+            { topic: 'websocket reconnect', summary: 'fixed it', timestamp: 1 },
+        ];
+        const out = conversationMemory.getPromptContext('websocket reconnect');
+        expect(out).not.toContain('Past Conversation Memory');
+    });
+
+    it('stats survive policy switches and cap at the buffer limit', () => {
+        conversationMemory.entries = [{ topic: 'x', summary: 'y', timestamp: 1 }];
+        for (let i = 0; i < 3; i++) conversationMemory.getPromptContext('x');
+        conversationMemory.setEpisodeInjectionConfig({ maxSessions: 2 });
+        for (let i = 0; i < 2; i++) conversationMemory.getPromptContext('x');
+        const s = conversationMemory.getEpisodeInjectionStats();
+        expect(s.count).toBe(5);
     });
 });
 

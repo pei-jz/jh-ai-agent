@@ -234,6 +234,7 @@ export const ja = {
     'memory.study.indexed': '{files} ファイルを索引化 · シンボル {symbols} 件 · 依存 {edges} 件',
     'memory.study.capped': '⚠ ソースファイルは合計 {total} 件、今回 {omitted} 件は索引対象外（上限）— 再度「学習」でさらに網羅できます。',
     'memory.index.summary': '索引: {files} ファイル · シンボル {symbols} · 依存 {edges}',
+    'memory.index.guessHint': '行の無い領域はエージェントが推測で答える領域です — 結果を信じる前に検証することをおすすめします。',
     'memory.ab.arms': '効果測定: 記録済み {rows} 実行 · 想起あり {on} / 対照 {off}',
     'memory.ab.progress': '群あたりの実行数',
     'memory.ab.need': '探索コストは平均 {mean} ステップ、ばらつきは ±{sd} です。このため 25% の改善をノイズと区別するには各群およそ {perArm} 実行が必要になります。数字が大きいのはこのばらつきが理由です。',
