@@ -16,6 +16,29 @@ use serde::Serialize;
 use std::path::Path;
 use crate::path_guard::PathGuard;
 
+/// Split a comma-separated glob list WITHOUT splitting inside brace groups
+/// (`{a,b}`) — so `"*.{js,ts},src/**/*.rs"` yields `["*.{js,ts}", "src/**/*.rs"]`.
+/// Commas inside braces are part of the alternation syntax, not list separators.
+fn split_glob_list(s: &str) -> Vec<String> {
+    let mut parts: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut depth: usize = 0;
+    for c in s.chars() {
+        match c {
+            '{' => { depth += 1; cur.push(c); }
+            '}' => { depth = depth.saturating_sub(1); cur.push(c); }
+            ',' if depth == 0 => { parts.push(std::mem::take(&mut cur)); }
+            _ => cur.push(c),
+        }
+    }
+    parts.push(cur);
+    parts
+        .into_iter()
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect()
+}
+
 // ── grep_search ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize)]
@@ -75,8 +98,8 @@ pub async fn grep_search(
     // Optional file-pattern filter (comma-separated globs).
     let glob_set = if let Some(g) = include_glob.as_ref().filter(|s| !s.trim().is_empty()) {
         let mut builder = GlobSetBuilder::new();
-        for piece in g.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
-            let glob = Glob::new(piece)
+        for piece in split_glob_list(g) {
+            let glob = Glob::new(&piece)
                 .map_err(|e| format!("Invalid include_glob '{}': {}", piece, e))?;
             builder.add(glob);
         }
@@ -272,6 +295,50 @@ pub async fn glob_files(
     }
 
     Ok(GlobResult { files, truncated })
+}
+
+// ── tests ────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_keeps_brace_groups_intact() {
+        // A plain comma list still splits.
+        assert_eq!(split_glob_list("*.js, *.ts"), vec!["*.js", "*.ts"]);
+        // Commas INSIDE braces must NOT split — this is the common
+        // `*.{js,ts,rs,json,md,svelte}` form that used to break.
+        assert_eq!(
+            split_glob_list("*.{js,ts,rs,json,md,svelte}"),
+            vec!["*.{js,ts,rs,json,md,svelte}"]
+        );
+        // Mixed: brace group first, then another pattern.
+        assert_eq!(
+            split_glob_list("*.{js,ts},src/**/*.rs"),
+            vec!["*.{js,ts}", "src/**/*.rs"]
+        );
+        // Unbalanced brace: no crash, treated as one piece.
+        assert_eq!(split_glob_list("*.{js,ts"), vec!["*.{js,ts"]);
+        // Empty pieces are dropped.
+        assert_eq!(split_glob_list(""), Vec::<String>::new());
+        assert_eq!(split_glob_list(",, *.js ,"), vec!["*.js"]);
+    }
+
+    #[test]
+    fn globset_accepts_brace_alternation() {
+        // globset natively supports `{a,b}` alternation — prove the common
+        // include_glob form is a VALID glob, not something we must expand.
+        let g = Glob::new("*.{js,ts,rs,json,md,svelte}").expect("brace glob compiles");
+        let m = g.compile_matcher();
+        assert!(m.is_match("index.js"));
+        assert!(m.is_match("lib.ts"));
+        assert!(m.is_match("main.rs"));
+        assert!(m.is_match("cfg.json"));
+        assert!(m.is_match("README.md"));
+        assert!(m.is_match("App.svelte"));
+        assert!(!m.is_match("index.py"));
+    }
 }
 
 // ── delete_file ───────────────────────────────────────────────────────────────

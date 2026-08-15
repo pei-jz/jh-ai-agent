@@ -28,6 +28,7 @@
 -->
 <script>
     import { icon } from '../../utils/icons.js';
+    import { t } from '../../../i18n/index.js';
     import {
         chapterTag, chapterKind, deliverableLabel, toolChipList, itemClass,
         spanOf, spanLabel, wordCount,
@@ -65,6 +66,27 @@
     let picked = $state([]);
     const togglePick = (opt, on) => {
         picked = on ? [...picked, opt] : picked.filter(p => p !== opt);
+    };
+
+    /**
+     * Plan-revision input state. The approval card's ✏️ option ("Request
+     * changes") does NOT send the option text verbatim — that would read to the
+     * agent as "修正したい" and the continuation would just start editing.
+     * Instead it opens this textarea; the typed revision is sent as the answer
+     * with an explicit marker so the agent RE-PRESENTS the plan for a second
+     * approval.
+     */
+    let revising = $state(false);
+    let revisionText = $state('');
+    const isReviseOption = (opt) => String(opt || '').startsWith('✏️');
+    const pickOption = (opt) => {
+        if (isReviseOption(opt)) { revising = true; revisionText = ''; return; }
+        onAnswer?.(opt);
+    };
+    const submitRevision = () => {
+        const txt = revisionText.trim();
+        if (!txt) return;
+        onAnswer?.(`✏️ 計画修正: ${txt}`);
     };
 
     // Read, never owned — see the note above.
@@ -331,7 +353,7 @@
         {@const opts = item.options || []}
         <div class="mask-box is-open">
             <div class="mask-q">{@html icon('question')} {item.text}</div>
-            {#if opts.length}
+            {#if opts.length && !revising}
                 <div class="mask-opts" class:is-multi={item.multi}>
                     {#each opts as o, i (i)}
                         {#if item.multi}
@@ -342,20 +364,39 @@
                             </label>
                         {:else}
                             <button class="btn mask-opt" data-ans={o}
-                                onclick={() => onAnswer?.(o)}>{o}</button>
+                                onclick={() => pickOption(o)}>{o}</button>
                         {/if}
                     {/each}
                 </div>
             {/if}
-            {#if item.multi && opts.length}
+            {#if item.multi && opts.length && !revising}
                 <div class="mask-actions">
                     <button class="btn btn-primary btn-sm mask-submit"
                         onclick={() => { if (picked.length) onAnswer?.(picked.join(', ')); }}
                     >Submit</button>
                 </div>
             {/if}
+            {#if revising}
+                <!-- Plan revision input: the user picked the ✏️ option and now
+                     types WHAT they want changed. The typed text — not the option
+                     label — is what gets sent, so the agent sees a real revision
+                     instruction instead of "修正したい". -->
+                <div class="mask-revise">
+                    <div class="mask-revise-label">✏️ {t('plan.revise.label')}</div>
+                    <textarea class="mask-revise-input" rows="3"
+                        placeholder={t('plan.revise.placeholder')}
+                        bind:value={revisionText}></textarea>
+                    <div class="mask-actions">
+                        <button type="button" class="btn btn-sm mask-revise-cancel"
+                            onclick={() => { revising = false; revisionText = ''; }}>Cancel</button>
+                        <button type="button" class="btn btn-primary btn-sm mask-revise-submit"
+                            onclick={submitRevision}>{t('plan.revise.submit')}</button>
+                    </div>
+                </div>
+            {/if}
             <div class="mask-hint">
-                {#if !opts.length}Answer in the box below
+                {#if revising}{t('plan.revise.placeholder')}
+                {:else if !opts.length}Answer in the box below
                 {:else if item.multi}Select any that apply and submit, or type an answer below
                 {:else}Click to answer, or type one below{/if}
             </div>

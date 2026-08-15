@@ -247,4 +247,13 @@ export const ja = {
     'memory.overview.save': '保存',
     'memory.overview.editHint': 'このノートは<strong>毎回の実行の全ステップ</strong>に入ります。<br>各行の判断基準は「正しいか」ではなく、<strong>「知らなかったらエージェントが見当違いの場所を探すか」</strong>です。<br><br>手で足す価値があるものを優先順に:<ul style="margin:6px 0 0 18px;padding:0;line-height:1.7;"><li><strong>命名・接頭辞の規則</strong>（当てずっぽうの検索を一撃に変える）</li><li><strong>用語の対応</strong>（識別子と、コメントやデータの言語が違う場合。検索が静かに失敗します）</li><li><strong>構造ではなく方針としての境界</strong>（「batch から web を呼ばない」「legacy/ は参照のみ」）</li></ul>書かないもの: ディレクトリ構造、ファイルやテーブルの一覧、プロジェクトの目的。<br>前二つは索引のほうが正確に答えられ、三つ目はエージェントの行動を何も変えません。',
     'memory.overview.generated': '{at} 生成。毎回のプロンプトに入るため、誤った記述は全ステップで繰り返されます。',
+
+    // ── Plan approval (plan-first gate) ──
+    'plan.approve.question': 'この計画で実装を進めてよろしいですか？\n\n承認する場合は「はい、この計画で進めてください」を選んでください。\n計画を修正したい場合は「✏️ 修正を指示する」を選び、修正内容を入力してください。',
+    'plan.approve.yes': 'はい、この計画で進めてください',
+    'plan.approve.revise': '✏️ 修正を指示する',
+    'plan.revise.placeholder': '修正内容を入力してください（例: 変更対象ファイルを絞る / 手順を追加する）…',
+    'plan.revise.submit': 'この修正で計画を更新',
+    'plan.revise.prompt': '計画を修正して再提示してください。修正内容を反映し、承認を再度求めます。',
+    'plan.revise.label': '計画の修正',
 };

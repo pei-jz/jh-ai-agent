@@ -71,6 +71,59 @@ export function safeParseJSON(str) {
 }
 
 /**
+ * Normalize a single tool-call entry into the canonical { name, args } shape.
+ *
+ * Handles the OpenAI/DeepSeek-style NATIVE tool-call format that providers
+ * return inside a JSON envelope — { id, type, function: { name, arguments } }
+ * where `arguments` is a JSON STRING — as well as the flattened variants
+ * ({ function: { name, args } } and plain { name, args }). Simple Chat
+ * (ChatView) parses `res.content` with extractToolCall(); when DeepSeek answers
+ * the JSON-envelope prompt with a native-shaped envelope, the `function` key
+ * was previously invisible to the parser, so tool_calls came back empty and the
+ * turn died with a thought-only "no tool calls" reply.
+ *
+ * Returns null when the entry has no usable name.
+ */
+export function normalizeToolCallEntry(tc) {
+    if (!tc || typeof tc !== 'object') return null;
+    const fn = tc.function && typeof tc.function === 'object' ? tc.function : tc;
+    const name = fn.name || tc.name;
+    if (!name) return null;
+    let args = fn.arguments ?? fn.args ?? tc.args ?? {};
+    if (typeof args === 'string') {
+        const s = args.trim();
+        if (s === '') {
+            args = {};
+        } else {
+            try {
+                args = safeParseJSON(s);
+            } catch (e) {
+                // Keep the raw string — the tool executor will surface a clear
+                // error and the model can react instead of the call vanishing.
+                args = s;
+            }
+        }
+    }
+    if (args == null || typeof args !== 'object') args = {};
+    return { name, args };
+}
+
+/**
+ * Normalize a tool_calls array (or single object) in place of raw entries,
+ * filtering out entries without a usable name.
+ */
+function normalizeToolCallsArray(toolCalls) {
+    if (Array.isArray(toolCalls)) {
+        return toolCalls.map(normalizeToolCallEntry).filter(Boolean);
+    }
+    if (typeof toolCalls === 'object' && toolCalls && (toolCalls.name || toolCalls.function?.name)) {
+        const norm = normalizeToolCallEntry(toolCalls);
+        return norm ? [norm] : [];
+    }
+    return [];
+}
+
+/**
  * Strip a SINGLE outermost ``` … ``` code fence wrapping the whole payload,
  * leaving any INNER fences intact. Anchored to the start/end of the (trimmed)
  * input and greedy, so it spans to the LAST closing fence — used so a JSON
@@ -180,8 +233,8 @@ export function extractToolCall(text) {
                     if (data && (data.thought || data.tool_calls)) {
                         if (data.thought && !results.thought) results.thought = data.thought;
                         if (data.tool_calls) {
-                            if (Array.isArray(data.tool_calls)) results.tool_calls.push(...data.tool_calls);
-                            else if (typeof data.tool_calls === 'object' && data.tool_calls.name) results.tool_calls.push(data.tool_calls);
+                            const normCalls = normalizeToolCallsArray(data.tool_calls);
+                            if (normCalls.length > 0) results.tool_calls.push(...normCalls);
                         }
                     }
                 } catch (_) { /* fall through to the block-regex / brace strategies */ }
@@ -202,11 +255,8 @@ export function extractToolCall(text) {
                 else if (typeof results.thought === 'object' && typeof data.thought === 'object') Object.assign(results.thought, data.thought);
             }
             if (data.tool_calls) {
-                if (Array.isArray(data.tool_calls)) {
-                    results.tool_calls.push(...data.tool_calls);
-                } else if (typeof data.tool_calls === 'object' && data.tool_calls.name) {
-                    results.tool_calls.push(data.tool_calls);
-                }
+                const normCalls = normalizeToolCallsArray(data.tool_calls);
+                if (normCalls.length > 0) results.tool_calls.push(...normCalls);
             }
         } catch (e) {
             const fallbackCalls = extractAllPossibleToolCalls(rawContent);
@@ -225,8 +275,18 @@ export function extractToolCall(text) {
                     parsedWhole = true;
                     if (data.thought) results.thought = data.thought;
                     if (data.tool_calls) {
-                        if (Array.isArray(data.tool_calls)) results.tool_calls.push(...data.tool_calls);
-                        else if (typeof data.tool_calls === 'object' && data.tool_calls.name) results.tool_calls.push(data.tool_calls);
+                        const normCalls = normalizeToolCallsArray(data.tool_calls);
+                        if (normCalls.length > 0) results.tool_calls.push(...normCalls);
+                    }
+                } else if (data && typeof data === 'object' && (data.function?.name || data.name)) {
+                    // Bare NATIVE single tool call without a tool_calls envelope:
+                    // {id, type: 'function', function: {name, arguments}}. DeepSeek
+                    // emits this shape; previously invisible to the {name,args}-
+                    // oriented parser, so Simple Chat ended the turn as plain text.
+                    const norm = normalizeToolCallEntry(data);
+                    if (norm) {
+                        parsedWhole = true;
+                        results.tool_calls.push(norm);
                     }
                 }
             } catch (e) {}
@@ -241,8 +301,8 @@ export function extractToolCall(text) {
                     if (data && (data.thought || data.tool_calls)) {
                         if (data.thought) results.thought = data.thought;
                         if (data.tool_calls) {
-                            if (Array.isArray(data.tool_calls)) results.tool_calls.push(...data.tool_calls);
-                            else if (typeof data.tool_calls === 'object' && data.tool_calls.name) results.tool_calls.push(data.tool_calls);
+                            const normCalls = normalizeToolCallsArray(data.tool_calls);
+                            if (normCalls.length > 0) results.tool_calls.push(...normCalls);
                         }
                     }
                 } catch (e) {}

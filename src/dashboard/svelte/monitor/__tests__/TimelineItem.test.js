@@ -285,6 +285,66 @@ describe('TimelineItem — ask', () => {
         expect(el.textContent).toContain('A');
         expect(el.querySelectorAll('.mask-opt')).toHaveLength(0);
     });
+
+    // ── Plan-revision option (the ✏️ "Request changes" choice) ────────────
+    const approveAsk = {
+        id: 'i4r', kind: 'ask', text: 'Shall I proceed?',
+        options: ['Yes, proceed', '✏️ Request changes'],
+    };
+
+    it('a NORMAL option is sent verbatim', () => {
+        const onAnswer = vi.fn();
+        mountItem(approveAsk, { onAnswer }).querySelectorAll('.mask-opt')[0].click();
+        expect(onAnswer).toHaveBeenCalledWith('Yes, proceed');
+    });
+
+    it('the ✏️ option opens a revision input instead of answering', async () => {
+        const onAnswer = vi.fn();
+        const el = mountItem(approveAsk, { onAnswer });
+        el.querySelectorAll('.mask-opt')[1].click();
+        await tick();
+        expect(onAnswer).not.toHaveBeenCalled();            // NOT sent verbatim
+        expect(el.querySelector('.mask-revise')).not.toBe(null);
+        expect(el.querySelector('.mask-revise-input')).not.toBe(null);
+    });
+
+    it('submits the typed revision (not the option label) as the answer', async () => {
+        const onAnswer = vi.fn();
+        const el = mountItem(approveAsk, { onAnswer });
+        el.querySelectorAll('.mask-opt')[1].click();
+        await tick();
+        const ta = el.querySelector('.mask-revise-input');
+        ta.value = 'narrow the files to touch';
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+        await tick();
+        el.querySelector('.mask-revise-submit').click();
+        expect(onAnswer).toHaveBeenCalledTimes(1);
+        // The answer carries the ✏️ marker AND the typed text, so the agent can
+        // distinguish a revision request from an approval.
+        expect(onAnswer.mock.calls[0][0]).toContain('✏️');
+        expect(onAnswer.mock.calls[0][0]).toContain('narrow the files to touch');
+    });
+
+    it('does not submit an empty revision', async () => {
+        const onAnswer = vi.fn();
+        const el = mountItem(approveAsk, { onAnswer });
+        el.querySelectorAll('.mask-opt')[1].click();
+        await tick();
+        el.querySelector('.mask-revise-submit').click();
+        expect(onAnswer).not.toHaveBeenCalled();
+    });
+
+    it('Cancel closes the revision input and restores the choices', async () => {
+        const onAnswer = vi.fn();
+        const el = mountItem(approveAsk, { onAnswer });
+        el.querySelectorAll('.mask-opt')[1].click();
+        await tick();
+        el.querySelector('.mask-revise-cancel').click();
+        await tick();
+        expect(el.querySelector('.mask-revise')).toBe(null);
+        expect(el.querySelectorAll('.mask-opt')).toHaveLength(2);
+        expect(onAnswer).not.toHaveBeenCalled();
+    });
 });
 
 describe('TimelineItem — deliverables and the final answer', () => {

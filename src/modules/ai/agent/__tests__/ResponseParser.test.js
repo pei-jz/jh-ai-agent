@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
     safeParseJSON, extractToolCall, extractAllPossibleToolCalls, extractInvokeToolCalls,
-    extractFunctionTagToolCalls,
+    extractFunctionTagToolCalls, normalizeToolCallEntry,
     extractThoughtFromMalformedText, cleanFinalResponse, stripReActPreamble, stripOuterCodeFence
 } from '../ResponseParser.js';
 
@@ -190,6 +190,57 @@ describe('extractToolCall', () => {
         expect(got).toContain('```java');          // code block survived
         expect(got).toContain('class S');           // body survived
         expect(got).toContain('### まとめ');         // content AFTER the code block survived
+    });
+
+    it('normalizes OpenAI/DeepSeek-style native tool_calls (function.arguments as JSON string)', () => {
+        // DeepSeek answers the JSON-envelope prompt with a NATIVE-shaped envelope:
+        // {tool_calls: [{id, type, function: {name, arguments: "{...}"}}]}. Simple
+        // Chat parsed this as thought-only and ended the turn without executing.
+        const envelope = {
+            thought: '調べます。',
+            tool_calls: [
+                { id: 'call_abc123', type: 'function', function: { name: 'web_search', arguments: JSON.stringify({ query: 'hello' }) } }
+            ]
+        };
+        const r = extractToolCall(JSON.stringify(envelope));
+        expect(r.thought).toBe('調べます。');
+        expect(r.tool_calls).toHaveLength(1);
+        expect(r.tool_calls[0]).toEqual({ name: 'web_search', args: { query: 'hello' } });
+    });
+
+    it('normalizes a bare native single tool call without a tool_calls envelope', () => {
+        // Some DeepSeek responses drop the envelope and emit the raw native call.
+        const txt = JSON.stringify({
+            id: 'call_9', type: 'function',
+            function: { name: 'fetch_url', arguments: JSON.stringify({ url: 'https://x.example' }) }
+        });
+        const r = extractToolCall(txt);
+        expect(r).not.toBeNull();
+        expect(r.tool_calls).toEqual([{ name: 'fetch_url', args: { url: 'https://x.example' } }]);
+    });
+
+    it('normalizes native tool calls inside a json code block envelope', () => {
+        const envelope = {
+            thought: 't',
+            tool_calls: [
+                { id: 'c1', type: 'function', function: { name: 'read_file', arguments: JSON.stringify({ path: 'a.js' }) } }
+            ]
+        };
+        const txt = '```json\n' + JSON.stringify(envelope) + '\n```';
+        const r = extractToolCall(txt);
+        expect(r.tool_calls).toEqual([{ name: 'read_file', args: { path: 'a.js' } }]);
+    });
+
+    it('handles empty-string arguments in a native tool call', () => {
+        const txt = '{"thought":"t","tool_calls":[{"id":"c2","type":"function","function":{"name":"list_files","arguments":""}}]}';
+        const r = extractToolCall(txt);
+        expect(r.tool_calls).toEqual([{ name: 'list_files', args: {} }]);
+    });
+
+    it('normalizeToolCallEntry returns null for unusable entries', () => {
+        expect(normalizeToolCallEntry(null)).toBeNull();
+        expect(normalizeToolCallEntry({})).toBeNull();
+        expect(normalizeToolCallEntry({ type: 'function', function: {} })).toBeNull();
     });
 });
 
