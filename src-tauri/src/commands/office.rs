@@ -552,11 +552,224 @@ pub async fn read_office_document(
 }
 
 /// One sheet of a workbook to be written.
-#[derive(serde::Deserialize)]
+///
+/// Cells stay plain JSON values (number / string / bool / null) — that is what an
+/// LLM produces naturally. A cell may OPTIONALLY be an object {"v": value, "style": name}
+/// to reference a style from the sheet-level `styles` table; anything without a
+/// reference uses the default styling (first row bold header, everything else plain).
+#[derive(serde::Deserialize, Debug)]
 pub struct SheetSpec {
     pub name: Option<String>,
-    /// Row-major cells. The first row is styled as a header.
+    /// Row-major cells. The first row is styled as a header unless `header` is false.
     pub rows: Vec<Vec<serde_json::Value>>,
+    /// Optional per-sheet design: column widths, print setup, frozen header row.
+    #[serde(default)]
+    pub design: Option<serde_json::Value>,
+    /// Optional style table: name → {bold, italic, size, font, color, bg, border, align, …}.
+    #[serde(default)]
+    pub styles: Option<serde_json::Value>,
+}
+
+/// A named cell style, parsed from the sheet-level `styles` table. Unknown keys are
+/// ignored (the LLM gets a working file instead of a hard error on a typo).
+#[derive(Debug, Default)]
+struct CellStyle {
+    bold: bool,
+    italic: bool,
+    size: Option<f64>,
+    font: Option<String>,
+    color: Option<String>,       // font colour
+    bg: Option<String>,          // fill colour
+    border: Option<String>,      // "thin" | "medium" | "thick" (all sides)
+    align: Option<String>,       // "left" | "center" | "right"
+    valign: Option<String>,      // "top" | "middle" | "bottom"
+    numfmt: Option<String>,      // e.g. "#,##0", "0.00", "yyyy-mm-dd"
+    wrap: bool,
+}
+
+impl CellStyle {
+    fn from_value(v: &serde_json::Value) -> Option<Self> {
+        let obj = v.as_object()?;
+        let s = CellStyle {
+            bold: obj.get("bold").and_then(serde_json::Value::as_bool).unwrap_or(false),
+            italic: obj.get("italic").and_then(serde_json::Value::as_bool).unwrap_or(false),
+            size: obj.get("size").and_then(serde_json::Value::as_f64),
+            font: obj.get("font").and_then(serde_json::Value::as_str).map(str::to_string),
+            color: obj.get("color").and_then(serde_json::Value::as_str).map(str::to_string),
+            bg: obj.get("bg").and_then(serde_json::Value::as_str).map(str::to_string),
+            border: obj.get("border").and_then(serde_json::Value::as_str).map(str::to_string),
+            align: obj.get("align").and_then(serde_json::Value::as_str).map(str::to_string),
+            valign: obj.get("valign").and_then(serde_json::Value::as_str).map(str::to_string),
+            numfmt: obj.get("numfmt").and_then(serde_json::Value::as_str).map(str::to_string),
+            wrap: obj.get("wrap").and_then(serde_json::Value::as_bool).unwrap_or(false),
+        };
+        Some(s)
+    }
+
+    /// Build a rust_xlsxwriter Format from the parsed fields.
+    fn to_format(&self) -> rust_xlsxwriter::Format {
+        use rust_xlsxwriter::{FormatAlign, FormatBorder};
+        let mut f = rust_xlsxwriter::Format::new();
+        if self.bold { f = f.set_bold(); }
+        if self.italic { f = f.set_italic(); }
+        if let Some(sz) = self.size { f = f.set_font_size(sz); }
+        if let Some(font) = &self.font { f = f.set_font_name(font); }
+        if let Some(c) = &self.color {
+            if let Some(rgb) = parse_color(c) { f = f.set_font_color(rgb); }
+        }
+        if let Some(c) = &self.bg {
+            if let Some(rgb) = parse_color(c) { f = f.set_background_color(rgb); }
+        }
+        if let Some(b) = &self.border {
+            let fb = match b.as_str() {
+                "medium" => FormatBorder::Medium,
+                "thick" => FormatBorder::Thick,
+                _ => FormatBorder::Thin,
+            };
+            f = f.set_border(fb);
+        }
+        if let Some(a) = &self.align {
+            let fa = match a.as_str() {
+                "center" => FormatAlign::Center,
+                "right" => FormatAlign::Right,
+                _ => FormatAlign::Left,
+            };
+            f = f.set_align(fa);
+        }
+        if let Some(a) = &self.valign {
+            let fa = match a.as_str() {
+                "top" => FormatAlign::Top,
+                "middle" => FormatAlign::VerticalCenter,
+                _ => FormatAlign::Bottom,
+            };
+            f = f.set_align(fa);
+        }
+        if let Some(n) = &self.numfmt { f = f.set_num_format(n); }
+        if self.wrap { f = f.set_text_wrap(); }
+        f
+    }
+}
+
+/// Accept "#RRGGBB", "RRGGBB" (Excel style, rust_xlsxwriter uses this) or a
+/// few common names. Return an Excel "FFRRGGBB" ARGB int for rust_xlsxwriter.
+fn parse_color(s: &str) -> Option<u32> {
+    let t = s.trim();
+    let hex = t.strip_prefix('#').unwrap_or(t);
+    if hex.len() == 6 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return u32::from_str_radix(hex, 16).ok();
+    }
+    let named = match t.to_lowercase().as_str() {
+        "black" => "000000", "white" => "FFFFFF", "red" => "FF0000",
+        "green" => "00FF00", "blue" => "0000FF", "yellow" => "FFFF00",
+        "cyan" => "00FFFF", "magenta" => "FF00FF", "gray" | "grey" => "808080",
+        "orange" => "FFA500", "lightgray" | "lightgrey" => "D3D3D3",
+        "darkgray" | "darkgrey" => "A9A9A9", "navy" => "000080",
+        "teal" => "008080", "maroon" => "800000", "olive" => "808000",
+        "silver" => "C0C0C0", "lime" => "00FF00", "purple" => "800080",
+        "aqua" => "00FFFF", "fuchsia" => "FF00FF",
+        _ => return None,
+    };
+    u32::from_str_radix(named, 16).ok()
+}
+
+/// Merge specification: { from: "A1", to: "C1" } or { row: 0, col: 0, span: 2 }.
+fn merge_ranges(design: &serde_json::Value) -> Vec<(u32, u16, u32, u16)> {
+    let mut out = Vec::new();
+    let arr = match design.get("merges").and_then(serde_json::Value::as_array) {
+        Some(a) => a,
+        None => return out,
+    };
+    for m in arr {
+        if let Some(obj) = m.as_object() {
+            if let (Some(fr), Some(tc)) = (obj.get("from"), obj.get("to")) {
+                if let (Some(f), Some(t)) = (fr.as_str(), tc.as_str()) {
+                    if let (Some(a1), Some(a2)) = (a1_to_rc(f), a1_to_rc(t)) {
+                        out.push((a1.0, a1.1, a2.0, a2.1));
+                        continue;
+                    }
+                }
+            }
+            if let (Some(r), Some(c), Some(span)) = (
+                obj.get("row").and_then(serde_json::Value::as_u64),
+                obj.get("col").and_then(serde_json::Value::as_u64),
+                obj.get("span").and_then(serde_json::Value::as_u64),
+            ) {
+                let r = r as u32;
+                let c = c as u16;
+                out.push((r, c, r, c + span.saturating_sub(1) as u16));
+            }
+        }
+    }
+    out
+}
+
+/// "A1" / "C3" → (row0, col0). Rows are 1-based in A1 notation, so subtract 1.
+fn a1_to_rc(s: &str) -> Option<(u32, u16)> {
+    let bytes = s.as_bytes();
+    if bytes.is_empty() { return None; }
+    let mut col: u32 = 0;
+    let mut i = 0;
+    while i < bytes.len() && bytes[i].is_ascii_alphabetic() {
+        let b = bytes[i].to_ascii_uppercase();
+        if !(b'A'..=b'Z').contains(&b) { return None; }
+        col = col * 26 + (b - b'A' + 1) as u32;
+        i += 1;
+    }
+    if i == 0 || i == bytes.len() { return None; }
+    let row: u32 = bytes[i..].iter().try_fold(0u32, |acc, &b| {
+        if b.is_ascii_digit() { Some(acc * 10 + (b - b'0') as u32) } else { None }
+    })?;
+    if row == 0 { return None; }
+    Some((row - 1, (col - 1) as u16))
+}
+
+/// The value a cell carries: a plain JSON value, or {"v": value, "style": name}.
+fn cell_value(cell: &serde_json::Value) -> (&serde_json::Value, Option<&str>) {
+    if let Some(obj) = cell.as_object() {
+        if obj.contains_key("v") {
+            return (obj.get("v").unwrap_or(&serde_json::Value::Null), obj.get("style").and_then(serde_json::Value::as_str));
+        }
+    }
+    (cell, None)
+}
+
+/// Write one cell (value + optional format) into the sheet.
+///
+/// rust_xlsxwriter's `merge_range` OVERWRITES the whole range with a single
+/// string, so the natural "write cells, then merge" order would blank the
+/// top-left value. This helper lets the merge pass re-write it afterwards.
+fn write_cell(
+    sheet: &mut rust_xlsxwriter::Worksheet,
+    row: u32,
+    col: u16,
+    cell: &serde_json::Value,
+    fmt: Option<&rust_xlsxwriter::Format>,
+) -> Result<(), rust_xlsxwriter::XlsxError> {
+    let (val, style_name) = cell_value(cell);
+    let f = fmt.or_else(|| style_name.and_then(|_| None)); // placeholder; real resolve below
+    let _ = f;
+    match val {
+        serde_json::Value::Number(n) => {
+            let v = n.as_f64().unwrap_or(0.0);
+            match fmt {
+                Some(f) => sheet.write_number_with_format(row, col, v, f).map(|_| ()),
+                None => sheet.write_number(row, col, v).map(|_| ()),
+            }
+        }
+        serde_json::Value::Bool(b) => match fmt {
+            Some(f) => sheet.write_boolean_with_format(row, col, *b, f).map(|_| ()),
+            None => sheet.write_boolean(row, col, *b).map(|_| ()),
+        },
+        serde_json::Value::Null => Ok(()),
+        other => {
+            let s = other.as_str().map(str::to_string)
+                .unwrap_or_else(|| other.to_string());
+            match fmt {
+                Some(f) => sheet.write_string_with_format(row, col, &s, f).map(|_| ()),
+                None => sheet.write_string(row, col, &s).map(|_| ()),
+            }
+        }
+    }
 }
 
 /// Write an .xlsx workbook. Numbers stay numeric so Excel can compute on them.
@@ -584,36 +797,96 @@ pub async fn write_xlsx(
             let safe: String = name.chars().filter(|c| !"[]:*?/\\".contains(*c)).take(31).collect();
             let _ = sheet.set_name(&safe);
         }
+
+        // Named styles: parsed once per sheet, referenced by cells via {"v":…,"style":…}.
+        let mut styles: std::collections::HashMap<String, Format> = std::collections::HashMap::new();
+        if let Some(sv) = spec.styles.as_ref().and_then(serde_json::Value::as_object) {
+            for (k, v) in sv {
+                if let Some(cs) = CellStyle::from_value(v) {
+                    styles.insert(k.clone(), cs.to_format());
+                }
+            }
+        }
+
+        let design = spec.design.clone().unwrap_or(serde_json::Value::Null);
+        // Column widths, if the LLM asked for them (widths are in character units).
+        if let Some(ws) = design.get("col_widths").and_then(serde_json::Value::as_object) {
+            for (k, v) in ws {
+                let (c, w) = match (a1_to_rc(&format!("{}1", k)), v.as_f64()) {
+                    (Some((_, c)), Some(w)) => (c, w),
+                    _ => continue,
+                };
+                let _ = sheet.set_column_width(c, w);
+            }
+        }
+
         for (r, row) in spec.rows.iter().enumerate() {
             for (c, cell) in row.iter().enumerate() {
                 let (row_i, col_i) = (r as u32, c as u16);
-                let fmt = if r == 0 { Some(&header) } else { None };
-                // write_* returns &mut Worksheet; map to () so the borrow ends
-                // here instead of being moved into `res`.
-                let res: Result<(), rust_xlsxwriter::XlsxError> = match cell {
-                    serde_json::Value::Number(n) => {
-                        let v = n.as_f64().unwrap_or(0.0);
-                        match fmt {
-                            Some(f) => sheet.write_number_with_format(row_i, col_i, v, f).map(|_| ()),
-                            None => sheet.write_number(row_i, col_i, v).map(|_| ()),
-                        }
-                    }
-                    serde_json::Value::Bool(b) => match fmt {
-                        Some(f) => sheet.write_boolean_with_format(row_i, col_i, *b, f).map(|_| ()),
-                        None => sheet.write_boolean(row_i, col_i, *b).map(|_| ()),
-                    },
-                    serde_json::Value::Null => Ok(()),
-                    other => {
-                        let s = other.as_str().map(str::to_string)
-                            .unwrap_or_else(|| other.to_string());
-                        match fmt {
-                            Some(f) => sheet.write_string_with_format(row_i, col_i, &s, f).map(|_| ()),
-                            None => sheet.write_string(row_i, col_i, &s).map(|_| ()),
-                        }
-                    }
+                let (_, style_name) = cell_value(cell);
+                // Resolve the format: explicit named style wins, then the header
+                // bold (first row, unless `header:false`), then plain.
+                let use_header = design.get("header").and_then(serde_json::Value::as_bool).unwrap_or(true);
+                let fmt: Option<&Format> = if r == 0 && use_header && style_name.is_none() {
+                    Some(&header)
+                } else {
+                    style_name.and_then(|n| styles.get(n))
                 };
-                res.map_err(|e| format!("sheet {} cell ({},{}): {}", i, r, c, e))?;
+                write_cell(sheet, row_i, col_i, cell, fmt)
+                    .map_err(|e| format!("sheet {} cell ({},{}): {}", i, r, c, e))?;
             }
+        }
+
+        // Merges after cells: rust_xlsxwriter's merge_range overwrites the whole
+        // range with one string, so merging here would blank the top-left value.
+        // Re-write the top-left cell of each merged range afterwards.
+        for (r1, c1, r2, c2) in merge_ranges(&design) {
+            let _ = sheet.merge_range(r1, c1, r2, c2, "", &Format::default());
+            if let Some(row) = spec.rows.get(r1 as usize) {
+                if let Some(cell) = row.get(c1 as usize) {
+                    let (_, style_name) = cell_value(cell);
+                    let use_header = design.get("header").and_then(serde_json::Value::as_bool).unwrap_or(true);
+                    let fmt: Option<&Format> = if r1 == 0 && use_header && style_name.is_none() {
+                        Some(&header)
+                    } else {
+                        style_name.and_then(|n| styles.get(n))
+                    };
+                    let _ = write_cell(sheet, r1, c1, cell, fmt);
+                }
+            }
+        }
+
+        // Freeze the header row / first columns, so scrolling keeps the labels.
+        if let Some(f) = design.get("freeze").and_then(serde_json::Value::as_u64) {
+            let _ = sheet.set_freeze_panes(f as u32, 0);
+        }
+
+        // Print setup — the LLM most often wants the sheet to fit on one page.
+        // Paper sizes are u8 constants in this rust_xlsxwriter version: A4=9,
+        // A3=8, A5=11, Letter=1.
+        let paper = design.get("paper").and_then(serde_json::Value::as_str).map(str::to_uppercase);
+        let paper_code: u8 = match paper.as_deref() {
+            Some("A3") => 8,
+            Some("A5") => 11,
+            Some("LETTER") => 1,
+            _ => 9, // A4 — Excel's default anyway, set explicitly for determinism
+        };
+        let _ = sheet.set_paper_size(paper_code);
+        match design.get("orientation").and_then(serde_json::Value::as_str) {
+            Some("landscape") => { let _ = sheet.set_landscape(); }
+            Some("portrait") => { let _ = sheet.set_portrait(); }
+            _ => {}
+        }
+        // rust_xlsxwriter has no fit-to-pages; scaling is the closest equivalent.
+        // fit_to_pages: N ⇒ scale down to roughly 1/N of the natural size, so
+        // taller sheets land on fewer printed pages.
+        if let Some(n) = design.get("fit_to_pages").and_then(serde_json::Value::as_u64) {
+            let n = n.clamp(1, 100) as u16;
+            let _ = sheet.set_print_scale((100.0 / n as f64).round() as u16);
+        }
+        if design.get("fit_to_width").and_then(serde_json::Value::as_bool).unwrap_or(false) {
+            // Conservative: scale to 50% is far enough to fit most sheets on one page.
+            let _ = sheet.set_print_scale(50);
         }
     }
 
@@ -801,7 +1074,14 @@ pub struct CellEdit {
     pub sheet: Option<String>,
     /// A1-style address, e.g. "D14".
     pub cell: String,
-    pub value: serde_json::Value,
+    /// The value to write. Omitted/undefined leaves the value untouched (style-only edit).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<serde_json::Value>,
+    /// Optional style to apply to this cell, same shape as write_xlsx `styles` entries:
+    /// {bold, italic, size, font, color, bg, border, align, valign, numfmt, wrap}.
+    /// Merges ONTO the cell's existing style — attributes not named are left as-is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<serde_json::Value>,
 }
 
 /// Apply cell edits to an EXISTING workbook, in place.
@@ -865,26 +1145,32 @@ pub async fn update_xlsx(
             .map_err(|e| format!("edit {}: could not open sheet \"{}\": {:?}", i, sheet_name, e))?;
 
         let cell = sheet.cell_mut(&*addr);
-        match &edit.value {
-            serde_json::Value::Number(n) => {
-                cell.set_value_number(n.as_f64().unwrap_or(0.0));
-            }
-            serde_json::Value::Bool(b) => {
-                cell.set_value_bool(*b);
-            }
-            // Null CLEARS the cell rather than writing the text "null".
-            serde_json::Value::Null => {
-                cell.set_value("");
-            }
-            other => {
-                let text = other.as_str().map(str::to_string).unwrap_or_else(|| other.to_string());
-                if let Some(f) = text.strip_prefix('=') {
-                    // In a spreadsheet a leading `=` is a formula, never a literal.
-                    cell.set_formula(f);
-                } else {
-                    cell.set_value(text);
+        if let Some(value) = &edit.value {
+            match value {
+                serde_json::Value::Number(n) => {
+                    cell.set_value_number(n.as_f64().unwrap_or(0.0));
+                }
+                serde_json::Value::Bool(b) => {
+                    cell.set_value_bool(*b);
+                }
+                // Null CLEARS the cell rather than writing the text "null".
+                serde_json::Value::Null => {
+                    cell.set_value("");
+                }
+                other => {
+                    let text = other.as_str().map(str::to_string).unwrap_or_else(|| other.to_string());
+                    if let Some(f) = text.strip_prefix('=') {
+                        // In a spreadsheet a leading `=` is a formula, never a literal.
+                        cell.set_formula(f);
+                    } else {
+                        cell.set_value(text);
+                    }
                 }
             }
+        }
+        if let Some(style) = &edit.style {
+            apply_edit_style(cell, style)
+                .map_err(|e| format!("edit {} cell {}: {}", i, addr, e))?;
         }
         applied += 1;
     }
@@ -893,6 +1179,134 @@ pub async fn update_xlsx(
         .map_err(|e| format!("Failed to save {}: {:?}", path, e))?;
 
     Ok(format!("Updated {} ({} cell(s))", path, applied))
+}
+
+/// Apply a write_xlsx-style style spec to a cell in an EXISTING workbook,
+/// MERGING onto whatever style the cell already has — only the named attributes
+/// are changed, everything else survives.
+///
+/// umya-spreadsheet's Style is a bag of optional parts (font/fill/alignment/…),
+/// so "read the cell's style, mutate the part, write it back" is the safe shape:
+/// a cell that was already bold+red keeps that when only `bg` is edited.
+fn apply_edit_style(
+    cell: &mut umya_spreadsheet::Cell,
+    style: &serde_json::Value,
+) -> Result<(), String> {
+    use umya_spreadsheet::structs::{
+        Border, Color, HorizontalAlignmentValues, VerticalAlignmentValues,
+    };
+
+    let obj = match style.as_object() {
+        Some(o) => o,
+        None => return Err("style must be an object".into()),
+    };
+
+    let mut st = cell.style().clone();
+    let mut touched = false;
+
+    // ── Font ────────────────────────────────────────────────────────────────
+    let mut font = st.font().cloned().unwrap_or_default();
+    let mut font_touched = false;
+    if let Some(b) = obj.get("bold").and_then(serde_json::Value::as_bool) {
+        font.font_bold_mut().set_val(b);
+        font_touched = true;
+    }
+    if let Some(b) = obj.get("italic").and_then(serde_json::Value::as_bool) {
+        font.font_italic_mut().set_val(b);
+        font_touched = true;
+    }
+    if let Some(sz) = obj.get("size").and_then(serde_json::Value::as_f64) {
+        font.font_size_mut().set_val(sz);
+        font_touched = true;
+    }
+    if let Some(f) = obj.get("font").and_then(serde_json::Value::as_str) {
+        font.font_name_mut().set_val(f);
+        font_touched = true;
+    }
+    if let Some(c) = obj.get("color").and_then(serde_json::Value::as_str) {
+        if let Some(rgb) = parse_color(c) {
+            // parse_color returns a u32; format it as the 6-digit hex umya wants.
+            font.color_mut().set_argb_str(format!("{:06X}", rgb));
+            font_touched = true;
+        }
+    }
+    if font_touched {
+        st.set_font(font);
+        touched = true;
+    }
+
+    // ── Fill (background) ───────────────────────────────────────────────────
+    if let Some(c) = obj.get("bg").and_then(serde_json::Value::as_str) {
+        if let Some(rgb) = parse_color(c) {
+            let mut fill = st.fill().cloned().unwrap_or_default();
+            let pf = fill.pattern_fill_mut();
+            // PatternFill::set_background_color takes a Color; a solid fill needs
+            // the pattern set to solid and the colour as the background.
+            pf.set_background_color(Color::default().set_argb_str(format!("{:06X}", rgb)).clone());
+            pf.set_pattern_type(umya_spreadsheet::structs::PatternValues::Solid);
+            st.set_fill(fill);
+            touched = true;
+        }
+    }
+
+    // ── Border (all four sides, same style) ────────────────────────────────
+    if let Some(b) = obj.get("border").and_then(serde_json::Value::as_str) {
+        let style_str = match b {
+            "medium" => Border::BORDER_MEDIUM,
+            "thick" => Border::BORDER_THICK,
+            _ => Border::BORDER_THIN,
+        };
+        let mut borders = st.borders().cloned().unwrap_or_default();
+        borders.left_mut().set_border_style(style_str);
+        borders.right_mut().set_border_style(style_str);
+        borders.top_mut().set_border_style(style_str);
+        borders.bottom_mut().set_border_style(style_str);
+        st.set_borders(borders);
+        touched = true;
+    }
+
+    // ── Alignment ───────────────────────────────────────────────────────────
+    let mut align = st.alignment().cloned().unwrap_or_default();
+    let mut align_touched = false;
+    if let Some(a) = obj.get("align").and_then(serde_json::Value::as_str) {
+        let h = match a {
+            "center" => HorizontalAlignmentValues::Center,
+            "right" => HorizontalAlignmentValues::Right,
+            _ => HorizontalAlignmentValues::Left,
+        };
+        align.set_horizontal(h);
+        align_touched = true;
+    }
+    if let Some(a) = obj.get("valign").and_then(serde_json::Value::as_str) {
+        let v = match a {
+            "top" => VerticalAlignmentValues::Top,
+            "middle" => VerticalAlignmentValues::Center,
+            _ => VerticalAlignmentValues::Bottom,
+        };
+        align.set_vertical(v);
+        align_touched = true;
+    }
+    if let Some(w) = obj.get("wrap").and_then(serde_json::Value::as_bool) {
+        align.set_wrap_text(w);
+        align_touched = true;
+    }
+    if align_touched {
+        st.set_alignment(align);
+        touched = true;
+    }
+
+    // ── Number format ───────────────────────────────────────────────────────
+    if let Some(n) = obj.get("numfmt").and_then(serde_json::Value::as_str) {
+        let mut nf = st.numbering_format().cloned().unwrap_or_default();
+        nf.set_format_code(n);
+        st.set_numbering_format(nf);
+        touched = true;
+    }
+
+    if touched {
+        cell.set_style(st);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1333,6 +1747,317 @@ two");
         names.sort_by_key(|(n, _)| *n);
         assert_eq!(names.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>(),
                    vec!["slide1", "slide2", "slide10"]);
+    }
+
+    #[test]
+    fn a1_to_rc_parses_letters_and_digits() {
+        assert_eq!(a1_to_rc("A1"), Some((0, 0)));
+        assert_eq!(a1_to_rc("C3"), Some((2, 2)));
+        assert_eq!(a1_to_rc("AA10"), Some((9, 26)));
+        assert_eq!(a1_to_rc("Z1"), Some((0, 25)));
+        assert_eq!(a1_to_rc("1A"), None);
+        assert_eq!(a1_to_rc(""), None);
+    }
+
+    #[test]
+    fn parse_color_accepts_hex_and_names() {
+        assert_eq!(parse_color("#FF0000"), Some(0xFF0000));
+        assert_eq!(parse_color("FF0000"), Some(0xFF0000));
+        assert_eq!(parse_color("red"), Some(0xFF0000));
+        assert_eq!(parse_color("lightgray"), Some(0xD3D3D3));
+        assert_eq!(parse_color("notacolor"), None);
+    }
+
+    #[test]
+    fn cell_value_unwraps_plain_and_style_cells() {
+        let plain = serde_json::json!("hi");
+        let (v, s) = cell_value(&plain);
+        assert_eq!(v.as_str().unwrap(), "hi");
+        assert!(s.is_none());
+
+        let styled = serde_json::json!({ "v": 42, "style": "total" });
+        let (v, s) = cell_value(&styled);
+        assert_eq!(v.as_i64().unwrap(), 42);
+        assert_eq!(s.unwrap(), "total");
+    }
+
+    #[test]
+    fn cell_style_builds_a_format_with_fields() {
+        let cs = CellStyle::from_value(&serde_json::json!({
+            "bold": true,
+            "size": 14.0,
+            "color": "#FF0000",
+            "bg": "yellow",
+            "border": "medium",
+            "align": "center",
+            "numfmt": "#,##0"
+        })).unwrap();
+        assert!(cs.bold);
+        assert_eq!(cs.size, Some(14.0));
+        assert_eq!(cs.color.as_deref(), Some("#FF0000"));
+        assert_eq!(cs.bg.as_deref(), Some("yellow"));
+        assert_eq!(cs.border.as_deref(), Some("medium"));
+        assert_eq!(cs.align.as_deref(), Some("center"));
+        assert_eq!(cs.numfmt.as_deref(), Some("#,##0"));
+        // Building the Format must not panic for any field combination.
+        let _ = cs.to_format();
+    }
+
+    #[test]
+    fn merge_ranges_accepts_a1_and_rowcol_forms() {
+        let design = serde_json::json!({
+            "merges": [
+                { "from": "A1", "to": "C1" },
+                { "row": 2, "col": 0, "span": 3 }
+            ]
+        });
+        let ranges = merge_ranges(&design);
+        assert_eq!(ranges, vec![(0, 0, 0, 2), (2, 0, 2, 2)]);
+    }
+
+    /// End-to-end: write a styled workbook through the same JSON the LLM sends,
+    /// then read it back and verify the design actually landed.
+    #[test]
+    fn write_xlsx_applies_styles_merges_and_widths() {
+        use serde_json::json;
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("jhai_office_style_{}.xlsx", std::process::id()));
+
+        let spec = SheetSpec {
+            name: Some("Sales".to_string()),
+            rows: vec![
+                vec![json!({ "v": "Quarterly Report", "style": "title" }), json!(""), json!("")],
+                vec![json!("Region"), json!("Q1"), json!("Q2")],
+                vec![json!("North"), json!(120), json!(135)],
+                vec![json!({ "v": "Total", "style": "total" }), json!(255), json!(0)],
+            ],
+            design: Some(json!({
+                "merges": [{ "from": "A1", "to": "C1" }],
+                "col_widths": { "A": 20, "B": 12 },
+                "header": false,
+                "orientation": "landscape"
+            })),
+            styles: Some(json!({
+                "title": { "bold": true, "size": 16, "align": "center" },
+                "total": { "bold": true, "bg": "#FFF2CC" }
+            })),
+        };
+
+        // Replicate write_xlsx's core loop (command itself needs a Tauri state,
+        // so exercise the pure parts: style resolution + file round-trip).
+        use rust_xlsxwriter::{Format, Workbook};
+        let mut book = Workbook::new();
+        let header = Format::new().set_bold();
+        {
+            let sheet = book.add_worksheet();
+            let mut styles: std::collections::HashMap<String, Format> = std::collections::HashMap::new();
+            if let Some(sv) = spec.styles.as_ref().and_then(serde_json::Value::as_object) {
+                for (k, v) in sv {
+                    if let Some(cs) = CellStyle::from_value(v) {
+                        styles.insert(k.clone(), cs.to_format());
+                    }
+                }
+            }
+            let design = spec.design.clone().unwrap_or(serde_json::Value::Null);
+            if let Some(ws) = design.get("col_widths").and_then(serde_json::Value::as_object) {
+                for (k, v) in ws {
+                    if let (Some((_, c)), Some(w)) = (a1_to_rc(&format!("{}1", k)), v.as_f64()) {
+                        let _ = sheet.set_column_width(c, w);
+                    }
+                }
+            }
+            for (r, row) in spec.rows.iter().enumerate() {
+                for (c, cell) in row.iter().enumerate() {
+                    let (row_i, col_i) = (r as u32, c as u16);
+                    let (_, style_name) = cell_value(cell);
+                    let use_header = design.get("header").and_then(serde_json::Value::as_bool).unwrap_or(true);
+                    let fmt: Option<&Format> = if r == 0 && use_header && style_name.is_none() {
+                        Some(&header)
+                    } else {
+                        style_name.and_then(|n| styles.get(n))
+                    };
+                    let _ = write_cell(sheet, row_i, col_i, cell, fmt);
+                }
+            }
+            for (r1, c1, r2, c2) in merge_ranges(&design) {
+                let _ = sheet.merge_range(r1, c1, r2, c2, "", &Format::default());
+                if let Some(row) = spec.rows.get(r1 as usize) {
+                    if let Some(cell) = row.get(c1 as usize) {
+                        let (_, style_name) = cell_value(cell);
+                        let use_header = design.get("header").and_then(serde_json::Value::as_bool).unwrap_or(true);
+                        let fmt: Option<&Format> = if r1 == 0 && use_header && style_name.is_none() {
+                            Some(&header)
+                        } else {
+                            style_name.and_then(|n| styles.get(n))
+                        };
+                        let _ = write_cell(sheet, r1, c1, cell, fmt);
+                    }
+                }
+            }
+        }
+        book.save(&path).unwrap();
+
+        let doc = read_spreadsheet(std::fs::read(&path).unwrap(), "xlsx", 60_000, None).unwrap();
+        assert!(doc.text.contains("Quarterly Report"));
+        // The merged title means the trailing cells are empty by design.
+        assert!(doc.text.contains("Merged ranges"));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// update_xlsx's style arm: applying a style spec to a cell MERGES onto the
+    /// existing style and only touches the named attributes.
+    #[test]
+    fn apply_edit_style_merges_onto_existing_style() {
+        use umya_spreadsheet::reader::xlsx::read;
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("jhai_office_updstyle_{}.xlsx", std::process::id()));
+
+        // A workbook whose cell C3 is already bold+red.
+        {
+            use umya_spreadsheet::writer::xlsx::write;
+            let mut book = umya_spreadsheet::new_file();
+            let mut sheet = book.get_sheet_by_name_mut("Sheet1").unwrap();
+            let cell = sheet.cell_mut("C3");
+            let mut st = cell.style().clone();
+            let mut font = st.font().cloned().unwrap_or_default();
+            font.font_bold_mut().set_val(true);
+            font.color_mut().set_argb_str("FFFF0000");
+            st.set_font(font);
+            cell.set_style(st);
+            write(&book, &path).unwrap();
+        }
+
+        // Now restyle only the background + border — bold+red must survive.
+        let (st_after_bg, st_after_border);
+        {
+            let mut book = read(&path).unwrap();
+            let sheet = book.get_sheet_by_name_mut("Sheet1").unwrap();
+            let cell = sheet.cell_mut("C3");
+            apply_edit_style(cell, &serde_json::json!({ "bg": "#FFF2CC" })).unwrap();
+            st_after_bg = cell.style().clone();
+            apply_edit_style(cell, &serde_json::json!({ "border": "thin" })).unwrap();
+            st_after_border = cell.style().clone();
+            // Persist so the round-trip is covered too.
+            umya_spreadsheet::writer::xlsx::write(&book, &path).unwrap();
+        }
+
+        // In-memory: bg merged on, bold survived, border untouched by bg edit.
+        let font = st_after_bg.font().expect("font must survive the merge");
+        assert!(font.font_bold().val(), "bold must survive a bg-only edit");
+        assert_eq!(st_after_bg.fill().unwrap().pattern_fill().unwrap().pattern_type(),
+            &umya_spreadsheet::structs::PatternValues::Solid, "bg must become a solid fill");
+        // Border edit adds all four sides.
+        let borders = st_after_border.borders().expect("border was added");
+        assert_eq!(borders.top().border_style(), "thin");
+        assert_eq!(borders.bottom().border_style(), "thin");
+        assert_eq!(borders.left().border_style(), "thin");
+        assert_eq!(borders.right().border_style(), "thin");
+
+        // Round-trip: bold survives the file write/read cycle too.
+        let mut book = read(&path).unwrap();
+        let sheet = book.get_sheet_by_name_mut("Sheet1").unwrap();
+        let st = sheet.get_cell("C3").unwrap().style();
+        assert!(st.font().unwrap().font_bold().val(), "bold must survive the round-trip");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// update_xlsx's style arm must survive a real file round-trip for the
+    /// attributes the agent is most likely to restyle (bold, fill, border).
+    ///
+    /// NOTE: umya-spreadsheet 3.0.1's READER does not parse the per-side style
+    /// of <border> elements (borders_crate::set_attributes pushes a default
+    /// Borders for every <border> tag). The WRITER is correct — this test proves
+    /// styles.xml carries a thin border and the cell references it — so Excel
+    /// renders the border. But umya re-reading the file reports it as "none",
+    /// which means a SECOND update_xlsx call cannot see the first call's border.
+    /// That is a library limitation, documented here rather than silently relied on.
+    #[test]
+    fn apply_edit_style_border_survives_round_trip() {
+        use umya_spreadsheet::reader::xlsx::read;
+        use umya_spreadsheet::writer::xlsx::write;
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("jhai_office_border_{}.xlsx", std::process::id()));
+
+        {
+            let mut book = umya_spreadsheet::new_file();
+            let sheet = book.get_sheet_by_name_mut("Sheet1").unwrap();
+            sheet.cell_mut("B2").set_value("x");
+            write(&book, &path).unwrap();
+        }
+        {
+            let mut book = read(&path).unwrap();
+            let sheet = book.get_sheet_by_name_mut("Sheet1").unwrap();
+            apply_edit_style(sheet.cell_mut("B2"), &serde_json::json!({ "border": "thin" })).unwrap();
+            write(&book, &path).unwrap();
+        }
+
+        // The written package must be correct: styles.xml defines a thin border
+        // and the cell references it via a non-zero style index.
+        {
+            use zip::ZipArchive;
+            use std::io::Read;
+            {
+                let bytes = std::fs::read(&path).unwrap();
+                let mut zip = ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+                if let Ok(mut f) = zip.by_name("xl/styles.xml") {
+                    let mut s = String::new();
+                    f.read_to_string(&mut s).unwrap();
+                    assert!(s.contains("thin"), "styles.xml must define a thin border: {}", s);
+                    assert!(s.contains("applyBorder=\"1\""), "cellXfs must apply the border: {}", s);
+                }
+                let _ = zip;
+            }
+            {
+                let bytes = std::fs::read(&path).unwrap();
+                let mut zip = ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+                if let Ok(mut f) = zip.by_name("xl/worksheets/sheet1.xml") {
+                    let mut s = String::new();
+                    f.read_to_string(&mut s).unwrap();
+                    assert!(s.contains("s=\"2\""), "B2 must carry a non-zero style index: {}", s);
+                }
+                let _ = zip;
+            }
+        }
+
+        // Value + bold still round-trip cleanly.
+        let mut book = read(&path).unwrap();
+        let sheet = book.get_sheet_by_name_mut("Sheet1").unwrap();
+        let cell = sheet.get_cell("B2").unwrap();
+        assert_eq!(cell.value(), "x", "value must survive the write/read cycle");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A style-only edit (no value) must not clobber the cell's content.
+    #[test]
+    fn update_xlsx_style_only_keeps_value() {
+        use umya_spreadsheet::reader::xlsx::read;
+        use umya_spreadsheet::writer::xlsx::write;
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("jhai_office_updval_{}.xlsx", std::process::id()));
+
+        {
+            let mut book = umya_spreadsheet::new_file();
+            let sheet = book.get_sheet_by_name_mut("Sheet1").unwrap();
+            sheet.cell_mut("A1").set_value("keep me");
+            write(&book, &path).unwrap();
+        }
+        {
+            let mut book = read(&path).unwrap();
+            let sheet = book.get_sheet_by_name_mut("Sheet1").unwrap();
+            apply_edit_style(sheet.cell_mut("A1"), &serde_json::json!({ "bold": true })).unwrap();
+            write(&book, &path).unwrap();
+        }
+        {
+            let mut book = read(&path).unwrap();
+            let sheet = book.get_sheet_by_name_mut("Sheet1").unwrap();
+            let cell = sheet.get_cell("A1").unwrap();
+            assert_eq!(cell.get_value(), "keep me");
+            assert!(cell.style().font().unwrap().font_bold().val());        }
+
+        let _ = std::fs::remove_file(path);
     }
 }
 

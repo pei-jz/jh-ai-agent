@@ -1458,6 +1458,39 @@ describe('buildTimeline — a reopened task must not re-ask a dead question', ()
     });
 });
 
+describe('buildTimeline — confirm_request', () => {
+    const confirmReq = (ts = '2026-07-01T00:00:00Z') => ({
+        event: 'confirm_request', timestamp: ts,
+        data: { confirmId: 'conf_1', type: 'command_confirm', command: 'rm -rf x', message: 'x', risk: 'dangerous', allowAlways: false },
+    });
+    const running = (ts = '2026-07-01T00:00:01Z') => ({
+        event: 'status', timestamp: ts,
+        data: { status: 'running', message: '⚙ Running: read_file…' },
+    });
+    const complete = (ts = '2026-07-01T00:00:02Z') => ({
+        event: 'complete', timestamp: ts,
+        data: { resultSummary: { request: 'r', summary: 's' } },
+    });
+
+    it('replays a pending command approval into the story', () => {
+        // A task reloaded WHILE parked on an approval must re-show the card.
+        const tl = buildTimeline([running(), confirmReq()], {});
+        expect(kinds(tl)).toContain('confirm');
+    });
+
+    it('keeps the approval card when the run is still running', () => {
+        const tl = buildTimeline([confirmReq(), running('2026-07-01T00:00:03Z')], {});
+        const conf = tl.items.find(i => i.kind === 'confirm');
+        expect(conf).toBeTruthy();
+        expect(conf.resolved).toBe(false);
+    });
+
+    it('drops the card once the run completed (approval is history)', () => {
+        const tl = buildTimeline([confirmReq(), running(), complete()], {});
+        expect(kinds(tl)).not.toContain('confirm');
+    });
+});
+
 describe('closeAsk', () => {
     it('closes without claiming an answer', () => {
         const tl = new TaskTimeline();

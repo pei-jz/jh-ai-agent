@@ -547,6 +547,16 @@ pub fn run() {
                                             task.result_summary = Some(rs.clone());
                                         }
                                     }
+                                    // Persist per-file before/after content so a task loaded
+                                    // from HISTORY can still re-open its diffs (the WS packet
+                                    // reaches live clients, but only this field survives to disk).
+                                    if let Some(mf) = ws_packet["data"].get("modifiedFiles") {
+                                        if !mf.is_null() {
+                                            task.modified_files = mf.as_array()
+                                                .cloned()
+                                                .unwrap_or_default();
+                                        }
+                                    }
                                 }
                                 "error" => {
                                     task.status = "failed".to_string();
@@ -831,6 +841,7 @@ mod history_persistence_tests {
             caller: Some("NewTask".to_string()),
             mcp_servers: None,
             result_summary: None,
+            modified_files: vec![],
             logs: vec![],
         }
     }
