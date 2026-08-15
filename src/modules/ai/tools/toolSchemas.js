@@ -98,7 +98,7 @@ export const TOOL_DEFINITIONS = [
     {
         name: 'update_xlsx',
         isSafe: false,
-        description: 'EDIT specific cells of an EXISTING .xlsx in place, keeping every formula, format and untouched sheet. Address cells the A1 way (e.g. "D14") — read_office prints the column letters and row numbers you need. A string value starting with "=" is written as a formula. null clears the cell. Use write_xlsx to create a NEW workbook; use this to update a ledger or form you must not rebuild.',
+        description: 'EDIT specific cells of an EXISTING .xlsx in place, keeping every formula, format and untouched sheet. Address cells the A1 way (e.g. "D14") — read_office prints the column letters and row numbers you need. A string value starting with "=" is written as a formula. null clears the cell. Omit `value` and pass only `style` to restyle a cell without touching its content; the style merges onto the cell\'s existing format. Use write_xlsx to create a NEW workbook; use this to update a ledger or form you must not rebuild.',
         parameters: {
             type: 'object',
             properties: {
@@ -111,9 +111,27 @@ export const TOOL_DEFINITIONS = [
                         properties: {
                             sheet: { type: ['string', 'null'], description: 'Sheet name; null = the first sheet.' },
                             cell: { type: 'string', description: 'A1-style address, e.g. "D14".' },
-                            value: { description: 'Number, string, boolean, or null to clear. A string starting with "=" becomes a formula.' }
+                            value: { description: 'Number, string, boolean, or null to clear. A string starting with "=" becomes a formula. Omit to leave the value untouched (style-only edit).' },
+                            style: {
+                                type: 'object',
+                                description: 'Optional style to apply to the cell, same shape as write_xlsx `styles` entries. Merges onto the cell\'s existing style — only the named attributes change. Keys: bold, italic, size, font, color, bg, border ("thin"|"medium"|"thick"), align ("left"|"center"|"right"), valign ("top"|"middle"|"bottom"), numfmt, wrap.',
+                                properties: {
+                                    bold: { type: 'boolean' },
+                                    italic: { type: 'boolean' },
+                                    size: { type: 'number' },
+                                    font: { type: 'string' },
+                                    color: { type: 'string' },
+                                    bg: { type: 'string' },
+                                    border: { type: 'string', enum: ['thin', 'medium', 'thick'] },
+                                    align: { type: 'string', enum: ['left', 'center', 'right'] },
+                                    valign: { type: 'string', enum: ['top', 'middle', 'bottom'] },
+                                    numfmt: { type: 'string' },
+                                    wrap: { type: 'boolean' }
+                                },
+                                additionalProperties: false
+                            }
                         },
-                        required: ['sheet', 'cell', 'value'],
+                        required: ['sheet', 'cell'],
                         additionalProperties: false
                     }
                 }
@@ -125,7 +143,7 @@ export const TOOL_DEFINITIONS = [
     {
         name: 'write_xlsx',
         isSafe: false,
-        description: 'Create an .xlsx workbook. Provide sheets as rows of cells; the FIRST row of each sheet is styled as a header. Numbers stay numeric so Excel can compute on them. Use this when the user asks for a spreadsheet deliverable.',
+        description: 'Create an .xlsx workbook. Provide sheets as rows of cells; the FIRST row of each sheet is styled as a header by default. Numbers stay numeric so Excel can compute on them. Use this when the user asks for a spreadsheet deliverable.\n\nOptional per-sheet design (see `design`): col_widths, merges, freeze, header, orientation, paper, fit_to_width, fit_to_pages. Optional named styles (see `styles`): reference a style from a cell as {"v": value, "style": "name"}.',
         parameters: {
             type: 'object',
             properties: {
@@ -139,8 +157,44 @@ export const TOOL_DEFINITIONS = [
                             name: { type: ['string', 'null'], description: 'Sheet name (max 31 chars).' },
                             rows: {
                                 type: 'array',
-                                description: 'Row-major cells; first row is the header.',
+                                description: 'Row-major cells. Each cell is a plain value (number/string/bool/null) or an object {"v": value, "style": "styleName"} referencing a style from `styles`. First row is the header unless design.header is false.',
                                 items: { type: 'array', items: {} }
+                            },
+                            design: {
+                                type: 'object',
+                                description: 'Optional per-sheet design. Keys: header (bool, default true), col_widths (object: column letter → width in chars, e.g. {"A": 12, "B": 20}), merges (array of {from: "A1", to: "C1"} or {row, col, span}), freeze (int: rows to freeze), orientation ("landscape"|"portrait"), paper ("A3"|"A4"|"A5"|"LETTER"), fit_to_width (bool: scale to fit page width), fit_to_pages (int ≥1: scale to roughly N pages).',
+                                properties: {
+                                    header: { type: 'boolean' },
+                                    col_widths: { type: 'object', additionalProperties: { type: 'number' } },
+                                    merges: { type: 'array', items: {} },
+                                    freeze: { type: 'integer' },
+                                    orientation: { type: 'string', enum: ['landscape', 'portrait'] },
+                                    paper: { type: 'string', enum: ['A3', 'A4', 'A5', 'LETTER'] },
+                                    fit_to_width: { type: 'boolean' },
+                                    fit_to_pages: { type: 'integer', minimum: 1 }
+                                },
+                                additionalProperties: true
+                            },
+                            styles: {
+                                type: 'object',
+                                description: 'Optional named styles: { name: {bold, italic, size, font, color, bg, border, align, valign, numfmt, wrap} }. Referenced from cells as {"v": value, "style": "name"}.',
+                                additionalProperties: {
+                                    type: 'object',
+                                    properties: {
+                                        bold: { type: 'boolean' },
+                                        italic: { type: 'boolean' },
+                                        size: { type: 'number' },
+                                        font: { type: 'string' },
+                                        color: { type: 'string', description: 'Font colour: #RRGGBB or named (red, blue, …).' },
+                                        bg: { type: 'string', description: 'Fill colour: #RRGGBB or named.' },
+                                        border: { type: 'string', enum: ['thin', 'medium', 'thick'] },
+                                        align: { type: 'string', enum: ['left', 'center', 'right'] },
+                                        valign: { type: 'string', enum: ['top', 'middle', 'bottom'] },
+                                        numfmt: { type: 'string', description: 'Number format, e.g. "#,##0", "0.00", "yyyy-mm-dd".' },
+                                        wrap: { type: 'boolean' }
+                                    },
+                                    additionalProperties: false
+                                }
                             }
                         },
                         required: ['name', 'rows'],

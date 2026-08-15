@@ -1991,6 +1991,18 @@ export class MonitorView {
         // other.
         const task = (this.tasks || []).find(t => t.id === this.selectedTaskId);
         this._timeline = buildTimeline(this.logs, { prompt: task?.prompt });
+
+        // Replayed confirm items carry only the confirmId (see buildTimeline);
+        // the live path pushed full _fmtConfirm markup through _showTaskConfirm.
+        // Render the real card for any that survive as still-pending, so a task
+        // reloaded while parked on an approval shows the actual Approve/Reject
+        // card in the story — not a placeholder.
+        for (const item of this._timeline.items) {
+            if (item.kind !== 'confirm') continue;
+            const cid = item.payload?.confirmId;
+            const src = (this.logs || []).find(l => l.event === 'confirm_request' && l.data?.confirmId === cid)?.data;
+            if (src) item.text = this._fmtConfirm(src, 'confirm-task');
+        }
     }
 
     /**

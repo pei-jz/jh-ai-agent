@@ -135,4 +135,36 @@ describe('update_xlsx', () => {
         const out = await handleUpdateXlsx(makeCtx(), { path: 'C:/b.xlsx', edits });
         expect(out).toContain('file is locked');
     });
+
+    it('passes a style-only edit through and shows it in the confirmation', async () => {
+        invoke.mockResolvedValue('Updated C:/b.xlsx (1 cell(s))');
+        const styleEdits = [{ cell: 'D14', style: { bold: true, bg: '#FFF2CC' } }];
+        const ctx = makeCtx();
+        await handleUpdateXlsx(ctx, { path: 'C:/b.xlsx', edits: styleEdits });
+        expect(invoke).toHaveBeenCalledWith('update_xlsx', { path: 'C:/b.xlsx', edits: styleEdits });
+        const msg = ctx.confirms[0].message;
+        expect(msg).toContain('D14');
+        expect(msg).toContain('style');
+    });
+
+    it('shows both value and style when an edit carries both', async () => {
+        const ctx = makeCtx();
+        await handleUpdateXlsx(ctx, {
+            path: 'C:/b.xlsx',
+            edits: [{ cell: 'E1', value: 42, style: { numfmt: '#,##0' } }],
+        });
+        const msg = ctx.confirms[0].message;
+        expect(msg).toContain('E1 = 42');
+        expect(msg).toContain('style');
+    });
+
+    it('rejects an edit that changes nothing (no value, no style)', async () => {
+        const out = await handleUpdateXlsx(makeCtx(), {
+            path: 'C:/b.xlsx',
+            edits: [{ cell: 'A1' }, { cell: 'B1', value: 1 }],
+        });
+        expect(out).toContain('edit 0');
+        expect(out).toContain('changes nothing');
+        expect(invoke).not.toHaveBeenCalled();
+    });
 });

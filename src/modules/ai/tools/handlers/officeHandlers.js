@@ -56,7 +56,12 @@ export async function handleWriteXlsx(ctx, args, onConfirm, onAgentStatus) {
     if (!path) return "Error: write_xlsx requires a 'path' parameter.";
     const sheets = Array.isArray(args?.sheets) ? args.sheets : null;
     if (!sheets || sheets.length === 0) {
-        return 'Error: write_xlsx requires "sheets": [{ name?, rows: [[cell, …], …] }]. The first row of each sheet is styled as a header.';
+        return 'Error: write_xlsx requires "sheets": [{ name?, rows: [[cell, …], …], design?, styles? }]. The first row of each sheet is styled as a header by default.';
+    }
+    // Guard against malformed sheet structures before spending a confirmation.
+    const badSheet = sheets.findIndex(s => !s || !Array.isArray(s.rows) || s.rows.length === 0);
+    if (badSheet >= 0) {
+        return `Error: write_xlsx sheet ${badSheet} has no "rows" array (each sheet needs at least one row). Got ${JSON.stringify(sheets[badSheet])}`;
     }
     // Writing a file is a mutation — same confirmation path as write_file.
     const ok = await ctx._confirmUnsafe(false, onConfirm, {
@@ -123,15 +128,25 @@ export async function handleUpdateXlsx(ctx, args, onConfirm, onAgentStatus) {
     if (!path) return "Error: update_xlsx requires a 'path' parameter.";
     const edits = Array.isArray(args?.edits) ? args.edits : null;
     if (!edits || edits.length === 0) {
-        return 'Error: update_xlsx requires "edits": [{ sheet?, cell: "D14", value }]. Use read_office first — it prints the column letters and row numbers.';
+        return 'Error: update_xlsx requires "edits": [{ sheet?, cell: "D14", value?, style? }]. Use read_office first — it prints the column letters and row numbers.';
     }
     const bad = edits.findIndex(e => !e || typeof e.cell !== 'string' || !/^[A-Za-z]+[0-9]+$/.test(e.cell.trim()));
     if (bad >= 0) {
         return `Error: update_xlsx edit ${bad} has no valid A1 cell address (got ${JSON.stringify(edits[bad]?.cell)}). Addresses look like "D14".`;
     }
+    const empty = edits.findIndex(e => e.value === undefined && !e.style);
+    if (empty >= 0) {
+        return `Error: update_xlsx edit ${empty} changes nothing — give it a "value" or a "style" (got ${JSON.stringify(edits[empty])}).`;
+    }
 
     const preview = edits.slice(0, 8)
-        .map(e => `${e.sheet ? `${e.sheet}!` : ''}${e.cell} = ${JSON.stringify(e.value)}`)
+        .map(e => {
+            const where = `${e.sheet ? `${e.sheet}!` : ''}${e.cell}`;
+            const bits = [];
+            if (e.value !== undefined) bits.push(`= ${JSON.stringify(e.value)}`);
+            if (e.style) bits.push(`style ${JSON.stringify(e.style)}`);
+            return `${where} ${bits.join(' ')}`;
+        })
         .join('\n');
     const more = edits.length > 8 ? `\n… and ${edits.length - 8} more` : '';
     const ok = await ctx._confirmUnsafe(false, onConfirm, {

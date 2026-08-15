@@ -107,6 +107,26 @@ describe('write_xlsx', () => {
         expect(invoke).not.toHaveBeenCalled();
     });
 
+    it('rejects a sheet missing its rows array', async () => {
+        const out = await handleWriteXlsx(ctx(), { path: 'o.xlsx', sheets: [{ name: 'S' }] });
+        expect(out).toContain('no "rows"');
+        expect(out).toContain('sheet 0');
+        expect(invoke).not.toHaveBeenCalled();
+    });
+
+    it('passes design and styles through to the backend', async () => {
+        invoke.mockResolvedValue('Wrote o.xlsx (1 sheet(s), 2 rows)');
+        const c = ctx();
+        const sheets = [{
+            name: 'S',
+            rows: [[{ v: 'Title', style: 'title' }, ''], ['a', 1]],
+            design: { merges: [{ from: 'A1', to: 'B1' }], col_widths: { A: 20 } },
+            styles: { title: { bold: true } },
+        }];
+        await handleWriteXlsx(c, { path: 'o.xlsx', sheets });
+        expect(invoke).toHaveBeenCalledWith('write_xlsx', { path: 'o.xlsx', sheets });
+    });
+
     it('does not write when the user declines', async () => {
         const c = ctx();
         c._confirmUnsafe = vi.fn(async () => false);

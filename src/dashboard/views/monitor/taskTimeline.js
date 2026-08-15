@@ -661,6 +661,13 @@ export function buildTimeline(logs, opts = {}) {
             tl.pushTaskProgress(d.items);
         } else if (l.event === 'ask' || (l.event === 'status' && d.status === 'waiting')) {
             tl.pushAsk({ text: d.message, options: d.options, multi: d.multiSelect });
+        } else if (l.event === 'confirm_request' && d.confirmId) {
+            // A pending command/file approval is part of the story: re-opening a
+            // task parked on an approval must re-show the card (the live path
+            // calls _showTaskConfirm directly; this is the replay twin). The
+            // real markup is rendered by the view via _fmtConfirm; here we only
+            // carry the confirmId so the two surfaces stay consistent.
+            tl.pushConfirm(`<!--confirm:${d.confirmId}-->`, { confirmId: d.confirmId });
         }
 
         // The run RESUMED after a question — so the user answered it. (The answer
@@ -709,6 +716,19 @@ export function buildTimeline(logs, opts = {}) {
             // Keep the request ahead of any live trace already collected.
             tl._items = [req, ...tl._items.filter(i => i !== req)];
         }
+    }
+
+    // A confirm_request that was followed by further work was ANSWERED (the agent
+    // cannot proceed past an approval without one). Keeping the card would show a
+    // resolved approval as still pending — the exact stale-card confusion. The
+    // same answered-check the live flush (_flushReplay) applies: only a trailing
+    // confirm_request with NO later tool/log/complete activity is genuinely
+    // pending and stays in the story.
+    const lastConfirm = findLastIndex(logs, l => l?.event === 'confirm_request');
+    if (lastConfirm >= 0) {
+        const after = logs.slice(lastConfirm + 1);
+        const answered = after.some(l => l?.event === 'tool_call' || l?.event === 'log' || l?.event === 'complete');
+        if (answered) tl.resolveConfirm();
     }
     return tl;
 }

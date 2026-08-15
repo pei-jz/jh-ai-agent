@@ -1047,3 +1047,103 @@ describe('chapter jump scrolls ONLY the story panel', () => {
         expect(scrollTo).not.toHaveBeenCalled();
     });
 });
+
+// The Story view shows pending approvals (🛡 Command Approval) as timeline cards.
+// The LIVE path pushes them via _showTaskConfirm, but a task rebuilt from stored
+// logs (reload / task re-selection / completion rebuild) goes through
+// buildTimeline — which used to ignore confirm_request entirely, so the card
+// silently vanished from the Story while Raw Log still showed it.
+describe('Story rebuild restores a pending approval card', () => {
+    const page = () => {
+        document.body.innerHTML = '<div id="task-timeline"></div>';
+        v.tasks = [task('t1')];
+        v.selectedTaskId = 't1';
+        v._renderResultPanel();
+    };
+
+    const confirmLog = (cid = 'conf_9', over = {}) => ({
+        event: 'confirm_request', timestamp: '2026-07-01T00:00:00Z',
+        data: {
+            confirmId: cid, type: 'command_confirm',
+            command: 'git push --force', message: 'AI wants to run this terminal command:',
+            risk: 'dangerous', allowAlways: false, ...over,
+        },
+    });
+
+    it('replaying logs with a pending approval re-renders the 🛡 card', async () => {
+        page();
+        v.logs = [
+            { event: 'status', timestamp: '2026-07-01T00:00:00Z', data: { status: 'running', message: 'Thinking... (step 1)' } },
+            confirmLog(),
+        ];
+        v._rebuildResultSummaries();
+        v._renderResultPanel();
+        await tick();
+
+        const timeline = document.getElementById('task-timeline');
+        expect(timeline.textContent).toContain('🛡 Command Approval');
+        expect(timeline.textContent).toContain('git push --force');
+        expect(timeline.querySelector('.btn-approve')).not.toBe(null);
+        expect(timeline.querySelector('.btn-reject')).not.toBe(null);
+    });
+
+    it('an approval followed by tool activity is NOT resurrected (it was answered)', async () => {
+        page();
+        v.logs = [
+            { event: 'status', timestamp: '2026-07-01T00:00:00Z', data: { status: 'running', message: 'Thinking... (step 1)' } },
+            confirmLog('conf_10'),
+            { event: 'tool_call', timestamp: '2026-07-01T00:00:02Z', data: { name: 'run_command', args: {} } },
+        ];
+        v._rebuildResultSummaries();
+        v._renderResultPanel();
+        await tick();
+
+        expect(document.getElementById('task-timeline').textContent).not.toContain('🛡 Command Approval');
+    });
+});
+
+describe('live approval card renders in the Story (the _showTaskConfirm path)', () => {
+    const page = () => {
+        document.body.innerHTML = '<div id="task-timeline"></div>';
+        v.tasks = [task('t1')];
+        v.selectedTaskId = 't1';
+        v._renderResultPanel();
+    };
+
+    it('a live confirm_request shows the 🛡 card with working buttons', async () => {
+        page();
+        v._showTaskConfirm({
+            confirmId: 'conf_live_1', type: 'command_confirm',
+            command: 'Remove-Item -Recurse tmp', message: 'AI wants to run this terminal command:',
+            risk: 'dangerous', allowAlways: false,
+        });
+        await tick();
+
+        const timeline = document.getElementById('task-timeline');
+        expect(timeline.textContent).toContain('🛡 Command Approval');
+        expect(timeline.textContent).toContain('Remove-Item -Recurse tmp');
+        expect(timeline.querySelector('[data-confirm-card="conf_live_1"]')).not.toBe(null);
+    });
+
+    it('survives a subsequent _rebuildResultSummaries() (e.g. completion) as long as it is still pending', async () => {
+        // The rebuild used to wipe the card because buildTimeline ignored
+        // confirm_request entirely — the exact regression being fixed.
+        page();
+        const live = {
+            confirmId: 'conf_live_2', type: 'command_confirm',
+            command: 'git push --force', message: 'AI wants to run this terminal command:',
+            risk: 'dangerous', allowAlways: false,
+        };
+        v._showTaskConfirm(live);
+        v.logs = [
+            { event: 'status', timestamp: '2026-07-01T00:00:00Z', data: { status: 'running', message: 'Thinking... (step 1)' } },
+            { event: 'confirm_request', timestamp: '2026-07-01T00:00:00Z', data: live },
+        ];
+        v._rebuildResultSummaries();
+        v._renderResultPanel();
+        await tick();
+
+        expect(document.getElementById('task-timeline').textContent).toContain('🛡 Command Approval');
+        expect(document.getElementById('task-timeline').textContent).toContain('git push --force');
+    });
+});

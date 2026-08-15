@@ -49,6 +49,11 @@ pub struct TaskInfo {
     /// Lets REST API consumers and the "Result" tab read the outcome without re-parsing logs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_summary: Option<serde_json::Value>,
+    /// Per-file before/after content emitted on completion: [{path, original, current}].
+    /// Persisted so the editor can re-open a diff for a task loaded from HISTORY
+    /// (live tasks already carry it on the WS `complete` event).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modified_files: Vec<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub logs: Vec<serde_json::Value>,
 }
@@ -299,6 +304,7 @@ async fn create_task(
         caller: payload.caller.clone(),
         mcp_servers: payload.behavior.as_ref().and_then(|b| b.mcp_servers.clone()),
         result_summary: None,
+        modified_files: vec![],
         logs: vec![],
     };
     
@@ -1159,6 +1165,7 @@ mod continue_behavior_tests {
             caller: Some("NewTask".into()),
             mcp_servers: Some(vec![]),
             result_summary: None,
+            modified_files: vec![],
             logs: vec![],
         };
         let json = serde_json::to_value(&t).unwrap();
@@ -1178,5 +1185,38 @@ mod continue_behavior_tests {
         });
         let t: TaskInfo = serde_json::from_value(json).unwrap();
         assert_eq!(t.mcp_servers, None);
+        // Old history has no modified_files → defaults to empty (no panic).
+        assert!(t.modified_files.is_empty());
+    }
+
+    /// TaskInfo persistence: the diff content must survive the JSON round-trip
+    /// that task_history.json performs, so a task loaded from HISTORY can still
+    /// re-open its per-file diffs.
+    #[test]
+    fn task_info_round_trips_modified_files() {
+        let t = TaskInfo {
+            id: "t1".into(),
+            prompt: "p".into(),
+            status: "completed".into(),
+            progress: 1.0,
+            token_usage: TokenUsage::default(),
+            model_usage: HashMap::new(),
+            started_at: "2026-01-01T00:00:00Z".into(),
+            completed_at: Some("2026-01-01T00:01:00Z".into()),
+            workspace_path: Some("C:/ws".into()),
+            caller: Some("NewTask".into()),
+            mcp_servers: None,
+            result_summary: None,
+            modified_files: vec![
+                serde_json::json!({"path": "C:/ws/a.js", "original": "old", "current": "new"})
+            ],
+            logs: vec![],
+        };
+        let json = serde_json::to_value(&t).unwrap();
+        let back: TaskInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(back.modified_files.len(), 1);
+        assert_eq!(back.modified_files[0]["path"], "C:/ws/a.js");
+        assert_eq!(back.modified_files[0]["original"], "old");
+        assert_eq!(back.modified_files[0]["current"], "new");
     }
 }
