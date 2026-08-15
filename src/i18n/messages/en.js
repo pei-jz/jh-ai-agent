@@ -232,6 +232,7 @@ export const en = {
     'memory.study.indexed': 'Indexed {files} files · {symbols} symbols · {edges} dependencies',
     'memory.study.capped': '⚠ {total} source files found, {omitted} not indexed this pass — run Study again to cover more.',
     'memory.index.summary': 'Index: {files} files · {symbols} symbols · {edges} dependencies',
+    'memory.index.guessHint': 'Areas with no rows are ones the agent answers by guessing — a good reason to trust a result only after verifying it.',
     'memory.ab.arms': 'Effect measurement: {rows} runs recorded · {on} with recall, {off} control',
     'memory.ab.progress': 'runs per arm',
     'memory.ab.need': 'Exploration cost averages {mean} steps with a spread of ±{sd}, so telling a 25% improvement from noise needs about {perArm} runs in EACH arm. That spread is why the number is this large.',

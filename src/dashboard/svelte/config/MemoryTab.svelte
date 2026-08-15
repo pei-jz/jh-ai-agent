@@ -155,6 +155,10 @@
                             <span class="n">{c.files}</span>
                         </div>
                     {/each}
+                    <!-- What the index does NOT have: an area with no rows is one
+                         where the agent answers by guessing. Say that out loud so
+                         the panel reads as a trust meter, not a metric. -->
+                    <div class="cfg-hint cfg-mem-guess">{t('memory.index.guessHint')}</div>
                 </div>
             {/if}
 

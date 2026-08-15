@@ -4,6 +4,7 @@
 // ConversationMemory.
 
 import { relevanceScore, textUnits } from './MemoryScoring.js';
+import { HALF_LIFE_DAYS } from './CardStore.js';
 
 const norm = (s) => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
 // Comparable units (latin words + CJK char bigrams). The previous \W+ word split
@@ -130,7 +131,8 @@ export function mergeFacts(facts, newFacts, sessionId = null, category = '') {
 
 /**
  * Retention score for pruning: hit count decayed by age with a 90-day
- * half-life. A fact reaffirmed often stays; one never re-referenced fades.
+ * half-life (HALF_LIFE_DAYS, shared with CardStore — one decay model for
+ * all memory). A fact reaffirmed often stays; one never re-referenced fades.
  *
  * Weighted by layer since the split: an episodic fact is still on probation, so
  * it is the first thing dropped when the store overflows — the alternative is a
@@ -140,7 +142,7 @@ const TYPE_WEIGHT = { semantic: 1, procedural: 1, episodic: 0.6 };
 
 export function retentionScore(f, now = Date.now()) {
     const ageDays = Math.max(0, (now - (f.timestamp || 0)) / 86_400_000);
-    return (f.hits || 1) * (TYPE_WEIGHT[factType(f)] ?? 1) * Math.pow(0.5, ageDays / 90);
+    return (f.hits || 1) * (TYPE_WEIGHT[factType(f)] ?? 1) * Math.pow(0.5, ageDays / HALF_LIFE_DAYS);
 }
 
 /**

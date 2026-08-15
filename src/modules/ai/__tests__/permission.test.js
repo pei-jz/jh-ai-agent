@@ -83,6 +83,18 @@ describe('ToolExecutor.getPermissionLevel', () => {
     expect(toolExecutor.getPermissionLevel('move_file', { from: 'a.js', to: 'C:/other/b.js' })).toBe('Ask');
   });
 
+  it('fail-closed: write_xlsx/update_xlsx/write_docx outside the workspace are Ask', () => {
+    // These three write an arbitrary file path; they must NOT fall through to
+    // the default Allow. In-workspace stays Allow (no prompt); out-of-workspace
+    // requires confirmation.
+    expect(toolExecutor.getPermissionLevel('write_xlsx', { path: 'out/report.xlsx' })).toBe('Allow');
+    expect(toolExecutor.getPermissionLevel('write_xlsx', { path: 'C:/other/report.xlsx' })).toBe('Ask');
+    expect(toolExecutor.getPermissionLevel('update_xlsx', { path: 'ledger.xlsx' })).toBe('Allow');
+    expect(toolExecutor.getPermissionLevel('update_xlsx', { path: 'D:/ledger.xlsx' })).toBe('Ask');
+    expect(toolExecutor.getPermissionLevel('write_docx', { path: 'doc.docx' })).toBe('Allow');
+    expect(toolExecutor.getPermissionLevel('write_docx', { path: 'C:/outside/doc.docx' })).toBe('Ask');
+  });
+
   it('denies tools disabled by the per-session allowlist, except finish_task', () => {
     toolExecutor._toolAllowlist = new Set(['read_file']);
     expect(toolExecutor.getPermissionLevel('write_file', { path: 'src/a.js' })).toBe('Deny');
