@@ -636,3 +636,70 @@ describe('result deliverable resolution', () => {
         expect(typeof res.resultSummary.answer).toBe('string');
     });
 });
+
+describe('agent loop — sub-agent review gate (Step-1 review)', () => {
+    // The review gate runs an isolated reviewer sub-agent on the run's file
+    // changes before finish. Its verdict + the reviewer's ACTUAL words must be
+    // surfaced in the log (REVIEW entry with summary), and a FAIL must bounce
+    // the task back to the implementer.
+    const REVIEW_ON = { subagent_review: 'on' };
+    // A substantive finish summary counts as a deliverable so the run reaches
+    // the review gate.
+    const SUBSTANTIVE = '結論: '.padEnd(500, '詳細');
+
+    it('logs the reviewer report summary on a PASS', async () => {
+        const h = makeHarness({
+            config: REVIEW_ON,
+            caller: 'NewTask',
+            script: [
+                toolStep('write_file', { path: 'src/a.js', content: 'x' }),
+                finishStep(SUBSTANTIVE),
+            ],
+        });
+        const agent = await h.build();
+        // Reviewer returns a substantive PASS report (no VERDICT block → the
+        // robustness tier still resolves to pass).
+        agent._runSubtask = vi.fn(async () =>
+            'I inspected the diff. FINDINGS: none — the change matches the criteria and has no bugs.');
+        await agent.run('fix the bug', '.', null, (e) => h.state.events.push(e), null, null, [], (l) => h.state.events.push({ event: 'log', log: l }));
+        const reviewLog = h.state.events.map(e => e.log).find(l => l && l.method === 'REVIEW');
+        expect(reviewLog).toBeTruthy();
+        expect(reviewLog.response.verdict).toBe('pass');
+        // The reviewer's words (not just the verdict) reach the log.
+        expect(reviewLog.response.summary).toContain('no bugs');
+        expect(h.sawMessage(/レビューPASS/)).toBe(true);
+    });
+
+    it('bounces the task back with the findings on a FAIL', async () => {
+        const h = makeHarness({
+            config: REVIEW_ON,
+            caller: 'NewTask',
+            script: [
+                toolStep('write_file', { path: 'src/a.js', content: 'x' }),
+                finishStep(SUBSTANTIVE),
+                // After the bounce the implementer retries finish_task.
+                finishStep(SUBSTANTIVE),
+            ],
+        });
+        const agent = await h.build();
+        agent._runSubtask = vi.fn(async () =>
+            'VERDICT: FAIL\nFINDINGS:\n- [BUG] src/a.js:10 — off-by-one in the loop bound');
+        await agent.run('fix the bug', '.', null, (e) => h.state.events.push(e), null, null, [], (l) => h.state.events.push({ event: 'log', log: l }));
+        // The run went through the review gate twice: first FAIL (bounce), then
+        // PASS on the retry.
+        const reviewLogs = h.state.events.map(e => e.log).filter(l => l && l.method === 'REVIEW');
+        expect(reviewLogs.length).toBeGreaterThanOrEqual(1);
+        const firstFail = reviewLogs[0];
+        expect(firstFail.response.verdict).toBe('fail');
+        // The reviewer's actual finding text is in the log summary.
+        expect(firstFail.response.summary).toContain('[BUG] src/a.js:10 — off-by-one');
+        expect(h.sawMessage(/レビュー指摘あり/)).toBe(true);
+        // And the agent was told to fix, not to finish: the FAIL findings went
+        // into the next user turn.
+        const bounced = h.state.histories.find(hist =>
+            JSON.stringify(hist).includes('[Sub-agent Review — FAIL]'));
+        expect(bounced).toBeTruthy();
+        // The task ultimately completed (retry passed review).
+        expect(h.toolCalls.filter(c => c.name === 'finish_task').length).toBeGreaterThanOrEqual(2);
+    });
+});

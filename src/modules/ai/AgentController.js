@@ -21,7 +21,8 @@ import { buildRecoveryHint } from './agent/RecoveryHints.js';
 import {
     resolveRole, composeSubtaskPrompt, buildReviewBrief, parseReviewVerdict, clipText, childTokenBudget,
     scopesOverlap, WRITE_ENFORCED_TOOLS, TESTER_WRITE_PATTERNS,
-    SUBTASK_MAX_PARALLEL, SUBTASK_MAX_PER_RUN, SUBTASK_REPORT_MAX_CHARS, SUBTASK_MAX_STEPS_CAP
+    SUBTASK_MAX_PARALLEL, SUBTASK_MAX_PER_RUN, SUBTASK_REPORT_MAX_CHARS, SUBTASK_MAX_STEPS_CAP,
+    summarizeReview
 } from './agent/SubagentRoles.js';
 import { stopReason, stopNotice, stopStatusMessage } from './agent/stopReason.js';
 // Step 0 of the memory plan: record what each tool call did, with a normalized
@@ -1626,9 +1627,16 @@ export class AgentController {
                             { workspacePath, onAgentStatus, onConfirm, onLog, abortSignal, safety }
                         );
                         const { verdict, findings, reason } = parseReviewVerdict(String(reportText || ''));
+                        // Always surface the reviewer's ACTUAL report in the log (both
+                        // pass and fail), condensed to a couple of lines so the user
+                        // can see WHAT the reviewer said, not just the verdict. The
+                        // full text still goes to the model (fail: as the bounce
+                        // message; pass: findings are informational).
+                        const reviewSummary = summarizeReview(verdict, findings);
+                        if (onLog) { try { onLog({ method: 'REVIEW', status: 200, stepLabel: '🔎 Review Verdict', response: { verdict, reason, findings: String(findings).slice(0, 2000), summary: reviewSummary } }); } catch (_) {} }
                         if (verdict === 'fail') {
                             this.toolExecutor.resetTaskCompleted?.();
-                            onAgentStatus?.({ event: 'status', status: 'running', message: '🔎 レビュー指摘あり — 修正のため差し戻し / Review FAIL — sent back for fixes' });
+                            onAgentStatus?.({ event: 'status', status: 'running', message: `🔎 レビュー指摘あり — 修正のため差し戻し / Review FAIL — sent back for fixes\n${reviewSummary}` });
                             // Applying the reviewer's findings is execution, not
                             // review: back to the fast tier so a bounced task does
                             // not finish the rest of its run on the deep model.
@@ -1648,7 +1656,6 @@ export class AgentController {
                             ? '🔎 レビューPASS ✅'
                             : '🔎 レビューPASS ✅（VERDICT明記なし — 指摘なしと判定）';
                         onAgentStatus?.({ event: 'status', status: 'running', message: verdict === 'pass' ? passMsg : '🔎 レビュー結果を取得できず（空レポート）— 完了を続行' });
-                        if (onLog) { try { onLog({ method: 'REVIEW', status: 200, stepLabel: '🔎 Review Verdict', response: { verdict, reason, findings: String(findings).slice(0, 2000) } }); } catch (_) {} }
                     } else if (!this._isSubagent && !this._reviewDone && safety.subagentReview === 'on'
                         && !modelReliableForReview && hasReviewableChanges) {
                         // Review is ON and there ARE code changes, but the model is in

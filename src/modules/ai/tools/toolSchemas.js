@@ -226,15 +226,16 @@ export const TOOL_DEFINITIONS = [
     {
         name: 'code_deps',
         isSafe: true,
-        description: 'Which files DEPEND ON a file (direction "in"), or which files it depends on ("out"). Answers "what breaks if I change this" — a question grep cannot answer, because it needs every other file to have been read. Requires the workspace to have been studied (Settings → Memory → Study).',
+        description: 'Which files DEPEND ON a file (direction "in"), or which files it depends on ("out"). Answers "what breaks if I change this" — a question grep cannot answer, because it needs every other file to have been read. Requires the workspace to have been studied (Settings → Memory → Study). Set depth > 1 to walk the graph transitively ("what transitively depends on this") — each row then carries its hop distance.',
         parameters: {
             type: 'object',
             properties: {
-                path: { type: 'string', description: 'File to examine, e.g. "src/modules/ai/memory/CardStore.js".' },
+                path: { type: 'string', description: 'File to examine, e.g. "src/modules/ai/memory/CardStore.js" (or a sheet node "book.xlsx#Sheet1" — formula references are indexed too).' },
                 direction: { type: ['string', 'null'], description: '"in" = what depends on this (default). "out" = what this depends on.' },
+                depth: { type: ['integer', 'null'], description: 'Hop count to walk. 1 = direct neighbours only (default). 2 = also what those depend on, transitively. Max 4.' },
                 max_results: { type: ['integer', 'null'], description: 'Optional. Default 60, max 500.' }
             },
-            required: ['path', 'direction', 'max_results'],
+            required: ['path', 'direction', 'depth', 'max_results'],
             additionalProperties: false
         }
     },

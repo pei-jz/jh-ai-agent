@@ -120,7 +120,7 @@ export function renderSymbolHits(hits, query) {
 }
 
 /** Render a dependency answer. */
-export function renderDeps(hits, path, direction) {
+export function renderDeps(hits, path, direction, { depth } = {}) {
     const rows = Array.isArray(hits) ? hits : [];
     const heading = direction === 'in'
         ? `Files that depend on ${path}`
@@ -129,7 +129,14 @@ export function renderDeps(hits, path, direction) {
         return `${heading}: none recorded. `
             + '(Only relative imports within this project are indexed, and only for files the study pass has read.)';
     }
-    return `${heading} (${rows.length}):\n${rows.map(h => `- ${h.path}${h.kind !== 'imports' ? ` [${h.kind}]` : ''}`).join('\n')}`;
+    const depthNote = depth && depth > 1
+        ? ` (transitive, up to ${depth} hops)`
+        : '';
+    const lines = rows.map(h => {
+        const hop = h.depth ? ` (hop ${h.depth})` : '';
+        return `- ${h.path}${h.kind !== 'imports' ? ` [${h.kind}]` : ''}${hop}`;
+    });
+    return `${heading}${depthNote} (${rows.length}):\n${lines.join('\n')}`;
 }
 
 /**
@@ -209,10 +216,10 @@ export class CodeIndexClient {
         }) || [];
     }
 
-    async deps(path, { direction = 'out', limit = 60 } = {}) {
+    async deps(path, { direction = 'out', limit = 60, depth = 1 } = {}) {
         if (!this.enabled) return [];
         return await this._invoke('index_deps', {
-            workspace: this.workspacePath, path, direction, limit,
+            workspace: this.workspacePath, path, direction, limit, depth,
         }) || [];
     }
 
