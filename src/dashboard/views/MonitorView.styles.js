@@ -1033,6 +1033,19 @@ const BASE_STYLES = `
                 .mask-check { display: flex; align-items: center; gap: 7px; font-size: var(--fs-sm); color: var(--text-primary); cursor: pointer; }
                 .mask-actions { margin-top: 8px; }
                 .mask-hint { margin-top: 8px; font-size: var(--fs-xs); color: var(--text-tertiary); }
+                /* Plan-revision input (the ✏️ option on the approval card). */
+                .mask-revise { margin-top: 10px; }
+                .mask-revise-label { font-size: var(--fs-sm); font-weight: 600; color: var(--text-primary); margin-bottom: 6px; }
+                .mask-revise-input {
+                    width: 100%; min-height: 64px; resize: vertical;
+                    background: var(--bg-secondary); color: var(--text-primary);
+                    border: 1px solid var(--border-focus); border-radius: 6px;
+                    padding: 8px 10px; font-size: var(--fs-sm); line-height: 1.5;
+                    box-sizing: border-box;
+                }
+                .mask-revise-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-glow, rgba(90,150,255,0.25)); }
+                .mask-revise .mask-actions { display: flex; gap: 8px; justify-content: flex-end; }
+                .mask-revise-cancel { background: var(--bg-tertiary); border: 1px solid var(--border); color: var(--text-secondary); }
 
                 /* Steering input */
                 .msteering-wrapper {

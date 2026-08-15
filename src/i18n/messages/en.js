@@ -245,4 +245,13 @@ export const en = {
     'memory.overview.save': 'Save',
     'memory.overview.editHint': 'This note rides in <strong>every step of every run</strong>, so the test for a line is not "is it true" but <strong>"would not knowing it make the agent search in the wrong place"</strong>.<br><br>Worth adding by hand, in this order:<ul style="margin:6px 0 0 18px;padding:0;line-height:1.7;"><li><strong>naming and prefix rules</strong> (what turns a blind search into a direct hit)</li><li><strong>terminology</strong> (identifiers in one language, comments or data in another — searches fail silently on this)</li><li><strong>boundaries that are policy, not structure</strong> ("batch must not call web", "legacy/ is read-only")</li></ul>Leave out: directory trees, file or table inventories, and what the project is for — the first two are what the index answers better, and the third changes nothing the agent does.',
     'memory.overview.generated': 'Generated {at}. In every prompt, so a wrong line here is repeated on every step.',
+
+    // ── Plan approval (plan-first gate) ──
+    'plan.approve.question': 'Shall I proceed with this plan?\n\nTo approve, choose “Yes, proceed with this plan”.\nTo revise the plan, choose “✏️ Request changes” and type what you want changed.',
+    'plan.approve.yes': 'Yes, proceed with this plan',
+    'plan.approve.revise': '✏️ Request changes',
+    'plan.revise.placeholder': 'Type the changes you want (e.g. narrow the files to touch / add steps)…',
+    'plan.revise.submit': 'Update the plan with these changes',
+    'plan.revise.prompt': 'Revise the plan and re-present it. Reflect the requested changes and ask for approval again.',
+    'plan.revise.label': 'Plan revision',
 };

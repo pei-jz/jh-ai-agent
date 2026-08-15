@@ -1,3 +1,4 @@
+import { planApprovalQuestion, isPlanRevision, stripPlanRevisionMarker } from './agent/PlanFirstApproval.js';
 import llmService from './LLMService.js';
 import { ToolExecutor } from './ToolExecutor.js';
 import { contextBuilder, ContextBuilder } from './ContextBuilder.js';
@@ -299,16 +300,37 @@ export class AgentController {
         const planMode = safety.planMode || 'auto';
         const isFreshTurn = !Array.isArray(chatContext) || chatContext.length === 0;
         const planBypass = /計画(は)?(不要|いらない|なし)|そのまま実装|プラン不要|no\s*plan|skip\s*plan|just\s*implement/i.test(String(prompt || ''));
+        // A continuation whose latest message is a plan-revision request (the
+        // user picked the ✏️ "Request changes" option on the approval card and typed
+        // what they want changed) must RE-OPEN the plan-first gate: the run should
+        // revise the plan and re-present it — NOT dive straight into editing.
+        // Without this, any continuation (chatContext present) silently proceeds to
+        // implement, which is exactly the reported "修正したいでも実装される".
+        // NOTE: the revision text arrives as the new `prompt` (continue_task passes
+        // the user's reply as prompt and rebuilds chatContext from PAST completes),
+        // so it is looked for in `prompt`, with a fallback to the last user turn
+        // of chatContext for callers that attach the reply there instead.
+        const lastUserMsg = isFreshTurn ? '' : String([...chatContext].reverse().find(m => m?.role === 'user' && m?.content)?.content || '');
+        const isPlanRevisionTurn = !isFreshTurn && (isPlanRevision(String(prompt || '')) || isPlanRevision(lastUserMsg));
+        // The revision text itself (what the user typed) is passed to the agent so
+        // it can revise the plan accordingly — stripped of any prefix markers.
+        this._planRevisionText = isPlanRevisionTurn
+            ? stripPlanRevisionMarker(String(prompt || ''))
+                || stripPlanRevisionMarker(lastUserMsg)
+            : '';
         // Only callers with a HUMAN watching in real time can approve a plan.
         // 'Schedule' is in INTERACTIVE_CALLERS (full toolset) but runs UNATTENDED,
         // so it must NOT plan-gate (ask_user would pause forever).
         const PLAN_FIRST_CALLERS = new Set(['DirectChat', 'NewTask']);
+        // A plan-revision turn ALWAYS re-opens the gate regardless of complexity
+        // scoring — the plan is already on the table; the user just wants it
+        // changed, and re-presenting it needs the same protected planning phase.
         this._planFirstActive = planMode !== 'off'
             && PLAN_FIRST_CALLERS.has(this.caller)
             && !this._isSubagent
-            && isFreshTurn
+            && (isFreshTurn || isPlanRevisionTurn)
             && !planBypass
-            && (planMode === 'always' || shouldPlanFirst(prompt));
+            && (planMode === 'always' || isPlanRevisionTurn || shouldPlanFirst(prompt));
         this._planApproved = !this._planFirstActive;
         if (this._planFirstActive) {
             onAgentStatus?.({ event: 'status', status: 'running', message: '📋 計画優先モード — まず計画を提示し承認を得ます / Plan-first: proposing a plan for approval' });
@@ -763,16 +785,25 @@ export class AgentController {
 
             // First-iteration planning injection.
             if (iteration === 1 && this._planFirstActive) {
+                const pa = planApprovalQuestion();
+                const revisionNote = (this._planRevisionText && this._planRevisionText.length > 0)
+                    ? `\nThe user asked you to REVISE the plan. Their requested changes:\n${this._planRevisionText}\n` +
+                      'Revise the plan to incorporate these changes and re-present it for approval. Do NOT edit any files yet.'
+                    : '';
                 // Plan-First: deliver a concrete plan + get approval BEFORE editing.
                 history.push({
                     role: 'user',
                     content: '[Plan-First — approval required]\n' +
                         'This is a complex task. Editing files and running commands are BLOCKED by the system until the user approves your plan.\n' +
+                        (this._planRevisionText
+                            ? 'You previously presented a plan that the user wants revised. Incorporate their changes and re-present the revised plan.\n'
+                            : '') +
                         'Do this now:\n' +
                         '1. Investigate as needed with READ-ONLY tools (read_file / grep_search / glob / list_files) to make the plan concrete and correct.\n' +
                         '2. Deliver the plan with `present_result(kind:"markdown", ...)` using EXACTLY these sections:\n' +
                         '   ## ゴール\n   ## 変更対象ファイル (list each file + what changes)\n   ## アプローチ\n   ## リスク・確認事項\n   ## テスト方法\n' +
-                        '3. Then call `ask_user(question:"この計画で実装を進めてよろしいですか？修正があれば教えてください。", context:<one-line plan gist>, options:["はい、実装して","修正したい"], multi_select:false)` and STOP.\n' +
+                        '3. Then call `ask_user(question:' + JSON.stringify(pa.question) + ', context:<one-line plan gist>, options:' + JSON.stringify(pa.options) + ', multi_select:false)` and STOP.\n' +
+                        revisionNote + '\n' +
                         'The user\'s reply arrives as your next turn; after approval the edit/command tools are unblocked. Do NOT attempt any edit or command before then.'
                 });
             } else if (iteration === 1 && this._looksComplex(prompt)) {
@@ -1260,12 +1291,13 @@ export class AgentController {
                     });
                     if (gated.length > 0) {
                         const names = [...new Set(gated.map(g => g.name))].join(', ');
+                        const pa = planApprovalQuestion();
                         onAgentStatus?.({ event: 'status', status: 'running', message: `📋 計画承認待ち — 編集/コマンドをブロック中 (${names})` });
                         history.push({ role: 'assistant', content: response });
                         history.push({
                             role: 'user',
                             content: `[Plan-First — blocked] The tool(s) ${names} are disabled until the user approves your plan. Do NOT retry them now.\n` +
-                                `First outline what you intend to do with present_result(kind:"markdown"), then call ask_user(question:"この方針で進めてよろしいですか？修正があれば教えてください。", context:<one-line gist>, options:["はい、進めて","修正したい"], multi_select:false) and STOP.
+                                `First outline what you intend to do with present_result(kind:"markdown"), then call ask_user(question:${JSON.stringify(pa.question)}, context:<one-line gist>, options:${JSON.stringify(pa.options)}, multi_select:false) and STOP.
 ` +
                                 `Keep the outline SHORT and proportional to the task — a few lines for a small change. Cover what you will change and how; add scope, risks or a test approach ONLY if they genuinely matter here. Do not pad it with empty headings.
 ` +

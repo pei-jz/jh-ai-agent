@@ -164,6 +164,22 @@ describe('agent loop — plan-first gate', () => {
         await h.run('はい、実装して', { chatContext: [{ role: 'user', content: 'prior' }] });
         expect(h.toolCalls.map(c => c.name)).toContain('write_file');
     });
+
+    it('a REVISION reply re-opens the gate — the plan is re-presented, not implemented', async () => {
+        // The reported bug: picking "修正したい" (request changes) sent the option
+        // text as the continuation, and because any continuation used to proceed
+        // straight to editing, the agent started implementing instead of revising
+        // the plan. A revision turn must BLOCK edits again until the revised plan
+        // is approved.
+        const h = makeHarness({
+            caller: 'NewTask',
+            config: { plan_mode: 'always' },
+            script: [toolStep('write_file', { path: 'a.js', content: 'x' }), finishStep()],
+        });
+        await h.run('✏️ 計画修正: 変更対象ファイルを絞ってください', { chatContext: [{ role: 'user', content: 'prior' }] });
+        expect(h.toolCalls.map(c => c.name)).not.toContain('write_file');
+        expect(h.sawMessage(/計画承認待ち|Plan-first|計画優先/)).toBe(true);
+    });
 });
 
 describe('agent loop — external-app (WS) MCP tool exclusion', () => {
