@@ -79,6 +79,40 @@ describe('TimelineItem — request', () => {
         expect(el.querySelector('img')).toBe(null);
         expect(el.textContent).toContain('<img src=x onerror=1>');
     });
+
+    it('minimises the request to one line and restores it', async () => {
+        const el = mountItem(req);
+        const row = el.querySelector('.tl-chapter');
+        const btn = el.querySelector('.tl-request-min');
+        btn.click();
+        await tick();
+        expect(row.classList.contains('is-min')).toBe(true);
+        // Restore: expands to the open (full) state.
+        btn.click();
+        await tick();
+        expect(row.classList.contains('is-min')).toBe(false);
+        expect(row.classList.contains('is-open')).toBe(true);
+    });
+
+    it('the minimise toggle does NOT flip the open/closed state', async () => {
+        const el = mountItem(req);
+        const row = el.querySelector('.tl-chapter');
+        el.querySelector('.tl-request-min').click();
+        await tick();
+        expect(row.classList.contains('is-open')).toBe(false);
+    });
+
+    it('clicking a minimised card restores and opens it', async () => {
+        const el = mountItem(req);
+        const row = el.querySelector('.tl-chapter');
+        el.querySelector('.tl-request-min').click();
+        await tick();
+        expect(row.classList.contains('is-min')).toBe(true);
+        el.querySelector('.tl-card-request').click();
+        await tick();
+        expect(row.classList.contains('is-min')).toBe(false);
+        expect(row.classList.contains('is-open')).toBe(true);
+    });
 });
 
 describe('TimelineItem — reasoning step', () => {

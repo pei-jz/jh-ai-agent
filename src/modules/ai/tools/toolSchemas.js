@@ -114,7 +114,7 @@ export const TOOL_DEFINITIONS = [
                             value: { description: 'Number, string, boolean, or null to clear. A string starting with "=" becomes a formula. Omit to leave the value untouched (style-only edit).' },
                             style: {
                                 type: 'object',
-                                description: 'Optional style to apply to the cell, same shape as write_xlsx `styles` entries. Merges onto the cell\'s existing style — only the named attributes change. Keys: bold, italic, size, font, color, bg, border ("thin"|"medium"|"thick"), align ("left"|"center"|"right"), valign ("top"|"middle"|"bottom"), numfmt, wrap.',
+                                description: 'Optional style to apply to the cell, same shape as write_xlsx `styles` entries. Merges onto the cell\'s existing style — only the named attributes change. Keys: bold, italic, size, font, color, bg, border ("thin"|"medium"|"thick"), align ("left"|"center"|"right"), valign ("top"|"middle"|"bottom"), numfmt, wrap. wrap defaults to OFF.',
                                 properties: {
                                     bold: { type: 'boolean' },
                                     italic: { type: 'boolean' },
@@ -191,7 +191,7 @@ export const TOOL_DEFINITIONS = [
                                         align: { type: 'string', enum: ['left', 'center', 'right'] },
                                         valign: { type: 'string', enum: ['top', 'middle', 'bottom'] },
                                         numfmt: { type: 'string', description: 'Number format, e.g. "#,##0", "0.00", "yyyy-mm-dd".' },
-                                        wrap: { type: 'boolean' }
+                                        wrap: { type: 'boolean', description: 'Wrap text within the cell. DEFAULT IS OFF — set true only when a long text MUST wrap. Omit to keep no-wrap.' }
                                     },
                                     additionalProperties: false
                                 }
