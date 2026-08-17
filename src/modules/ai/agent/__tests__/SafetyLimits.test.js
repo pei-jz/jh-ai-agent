@@ -78,15 +78,23 @@ describe('normalizeSafetyLimits', () => {
 
     it('validates memory_recall (on/off/auto), defaulting on bad input', () => {
         expect(normalizeSafetyLimits({ memory_recall: 'off' }).memoryRecall).toBe('off');
-        expect(normalizeSafetyLimits({ memory_recall: 'on' }).memoryRecall).toBe('on');
-        expect(normalizeSafetyLimits({ memory_recall: 'sometimes' }).memoryRecall).toBe('auto');
+        expect(normalizeSafetyLimits({ memory_recall: 'auto' }).memoryRecall).toBe('auto');
+        expect(normalizeSafetyLimits({ memory_recall: 'sometimes' }).memoryRecall).toBe('on');
     });
 
-    it('MEASURES by default — a small share of runs is the control group', () => {
-        // 'on' cannot answer whether recall helps, and a memory layer nobody can
-        // evaluate is the failure this design is arranged against.
-        expect(normalizeSafetyLimits({}).memoryRecall).toBe('auto');
-        expect(SAFETY_DEFAULTS.memoryRecall).toBe('auto');
+    it('RECALLS by default — the measurement is opt-in', () => {
+        // This defaulted to 'auto', which withholds memory from half of all runs
+        // to build a control group. Sound statistics, but not something to run
+        // silently on a user who just wants the agent to work: they are told the
+        // workspace learned something and then, on a coin flip, do not get it.
+        expect(normalizeSafetyLimits({}).memoryRecall).toBe('on');
+        expect(SAFETY_DEFAULTS.memoryRecall).toBe('on');
+    });
+
+    it('a run under the default arm actually recalls', () => {
+        // The default must not depend on the coin flip at all.
+        const alwaysControl = () => 0;
+        expect(resolveRecallArm(SAFETY_DEFAULTS.memoryRecall, alwaysControl)).toBe(true);
     });
 
     // Phase routing changes WHICH MODEL answers, mid-task. That is not a change

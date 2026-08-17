@@ -11,6 +11,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { extractSymbolsBest, matchSymbols, formatSymbols, languageOf } from '../SymbolIndex.js';
 import { configureTreeSitter } from '../TreeSitterSymbols.js';
+import { distinctiveToken, escapeRegex, suggestNames } from '../searchFallback.js';
 import { CodeIndexClient, renderSymbolHits, renderDeps } from '../../memory/CodeIndex.js';
 
 // Enable the tree-sitter backend once, lazily: the grammars are ~2MB of wasm
@@ -59,8 +60,32 @@ export async function handleListFiles(ctx, args, onAgentStatus, resolvedPath) {
     return lines.join('\n');
 }
 
-/** read_file — slice + line-number a file, with session-cache + re-read nudge. */
+/** Most files one read_file call may fetch. */
+export const READ_MANY_MAX_FILES = 20;
+/** Total characters a batch read may return before the rest are summarised out. */
+export const READ_MANY_MAX_CHARS = 400_000;
+
+/**
+ * read_file — one file, or several in one call.
+ *
+ * The batch form exists because investigation was the loop's most expensive
+ * phase for the silliest reason: the model knew it needed five files and had to
+ * spend five round trips saying so. Each trip re-sends the whole system prompt
+ * and history, so N files cost N full requests rather than one.
+ *
+ * A failure on one path does NOT fail the batch. That is the property that makes
+ * batching safe to prefer: if one path in five is wrong, an all-or-nothing call
+ * would throw away four good reads and the model would fall back to reading them
+ * one at a time — the exact behaviour this is meant to replace.
+ */
 export async function handleReadFile(ctx, args, onAgentStatus, resolvedPath) {
+    const many = Array.isArray(args?.paths)
+        ? args.paths.filter(p => typeof p === 'string' && p.trim())
+        : [];
+    if (many.length > 0) {
+        return handleReadMany(ctx, many, args, onAgentStatus);
+    }
+
     onAgentStatus?.(`Reading file: ${resolvedPath}...`);
     const readRes = await ctx._readFileSmart(resolvedPath);
     if (!readRes.ok) return readRes.error;
@@ -134,6 +159,172 @@ export async function handleReadFile(ctx, args, onAgentStatus, resolvedPath) {
     return pathNote + reReadNote + header + numbered + footer;
 }
 
+/**
+ * The batch arm of read_file.
+ *
+ * Reads run CONCURRENTLY — they are independent `invoke` round trips, and doing
+ * them in sequence would give back most of what batching just saved.
+ */
+async function handleReadMany(ctx, rawPaths, args, onAgentStatus) {
+    // De-duplicate first: a model listing the same file twice should not be
+    // charged for it twice, and the re-read nudge would fire on its own request.
+    const unique = [...new Set(rawPaths.map(p => p.trim()))];
+    const over = unique.length - READ_MANY_MAX_FILES;
+    const paths = unique.slice(0, READ_MANY_MAX_FILES);
+
+    onAgentStatus?.(`Reading ${paths.length} files...`);
+
+    const limit = Number.isFinite(args?.limit) && args.limit >= 1
+        ? Math.floor(args.limit) : 2000;
+
+    const results = await Promise.all(paths.map(async (p) => {
+        const resolved = ctx.resolvePath(p);
+        const res = await ctx._readFileSmart(resolved);
+        if (!res.ok) return { path: p, error: res.error };
+        return { path: p, resolved: res.path, content: res.content, note: res.note || '' };
+    }));
+
+    const sections = [];
+    const failed = [];
+    let budget = READ_MANY_MAX_CHARS;
+    let truncatedFiles = 0;
+
+    for (const r of results) {
+        if (r.error) {
+            // Inline, not fatal — the other files in the batch still come back.
+            failed.push(`${r.path}: ${r.error.replace(/^Error:\s*/, '')}`);
+            continue;
+        }
+
+        // Same session-cache bookkeeping as a single read, so a batched read
+        // counts for re-read suppression and for compaction restore.
+        if (ctx._fileCache) {
+            const normPath = r.resolved.replace(/\\/g, '/');
+            const existing = ctx._fileCache.get(normPath);
+            ctx._fileCache.set(normPath, {
+                content: r.content,
+                readCount: (existing?.readCount || 0) + 1,
+                readAt: Date.now(),
+                editedAt: existing?.editedAt || null,
+            });
+        }
+
+        const allLines = r.content.split('\n');
+        const total = allLines.length;
+        const shown = Math.min(total, limit);
+        const numWidth = String(shown).length;
+        const numbered = allLines.slice(0, shown)
+            .map((line, i) => `${String(i + 1).padStart(numWidth, ' ')}\t${line}`)
+            .join('\n');
+
+        const head = shown === total
+            ? `--- ${r.resolved} (${total} lines) ---`
+            : `--- ${r.resolved} (showing lines 1-${shown} of ${total}) ---`;
+        const tail = shown < total
+            ? `\n... [${total - shown} more lines — read_file with path="${r.resolved}", offset=${shown + 1}]`
+            : '';
+        const section = `${r.note}${head}\n${numbered}${tail}`;
+
+        if (section.length > budget) {
+            // Stop cleanly at the budget rather than returning a prompt the
+            // model cannot fit: say which files were dropped so it can ask again.
+            truncatedFiles = results.length - sections.length - failed.length;
+            break;
+        }
+        budget -= section.length;
+        sections.push(section);
+    }
+
+    const parts = [`Read ${sections.length} of ${paths.length} file(s).`];
+    if (over > 0) {
+        parts.push(`[${over} path(s) beyond the ${READ_MANY_MAX_FILES}-file cap were not read — call again for the rest.]`);
+    }
+    if (truncatedFiles > 0) {
+        parts.push(`[${truncatedFiles} file(s) omitted: the batch hit the ${READ_MANY_MAX_CHARS.toLocaleString()}-character cap. Read them in a follow-up call.]`);
+    }
+    if (failed.length > 0) {
+        parts.push(`[${failed.length} could not be read]\n` + failed.map(f => `  - ${f}`).join('\n'));
+    }
+    return parts.join('\n') + '\n\n' + sections.join('\n\n');
+}
+
+/**
+ * What to do when a grep found nothing.
+ *
+ * The old answer was one line — "No matches" — which is where an investigation
+ * stalls: the model has to invent the next query with no new information, and a
+ * weaker one just re-runs the same search or falls back to reading files one at
+ * a time. So we spend at most two more greps walking the ladder a careful
+ * engineer would walk anyway:
+ *
+ *   1. the same pattern, case-insensitively   (a capitalisation slip)
+ *   2. the most distinctive WORD of the identifier, case-insensitively
+ *      (`supportsNativeTools` → `Native`: a rename, a typo, or the wrong half
+ *       of a name remembered)
+ *
+ * Relaxed hits are labelled with the pattern that actually produced them. A
+ * result the model mistakes for its own query would be worse than none.
+ * Both retries only run on the zero-result path, so a normal search costs the
+ * same as before.
+ */
+async function grepZeroResultLadder(ctx, args, searchRoot, filesSearched) {
+    const base = {
+        path: searchRoot,
+        includeGlob: args.include_glob || null,
+        maxResults: Number.isFinite(args.max_results) ? args.max_results : null,
+        contextLines: Number.isFinite(args.context_lines) ? args.context_lines : null,
+    };
+    const render = (matches, pattern, note) => {
+        const lines = matches.map(m => `${m.file}:${m.line}: ${m.text}`);
+        return `${note}\nFound ${matches.length} match(es) for /${pattern}/:\n${lines.join('\n')}`;
+    };
+    const tried = [`/${args.pattern}/${args.case_insensitive ? ' (case-insensitive)' : ''}`];
+
+    // 1. Case-insensitive — skipped when the caller already asked for it.
+    if (!args.case_insensitive) {
+        try {
+            const res = await invoke('grep_search', { ...base, pattern: args.pattern, caseInsensitive: true });
+            const matches = res?.matches || [];
+            if (matches.length > 0) {
+                ctx.onToolEvent?.('grep_search', { pattern: args.pattern, matchCount: matches.length });
+                return render(
+                    matches, args.pattern,
+                    `ℹ️ No case-sensitive match; retried CASE-INSENSITIVELY and found results. ` +
+                    `The name is spelled differently than you typed.`,
+                );
+            }
+            tried.push(`/${args.pattern}/ (case-insensitive)`);
+        } catch (_) { /* keep walking the ladder */ }
+    }
+
+    // 2. The most distinctive word of the identifier.
+    const token = distinctiveToken(args.pattern);
+    if (token) {
+        try {
+            const pattern = escapeRegex(token);
+            const res = await invoke('grep_search', { ...base, pattern, caseInsensitive: true });
+            const matches = res?.matches || [];
+            if (matches.length > 0) {
+                ctx.onToolEvent?.('grep_search', { pattern, matchCount: matches.length });
+                return render(
+                    matches, pattern,
+                    `ℹ️ "${args.pattern}" does not appear anywhere. Retried with its most distinctive ` +
+                    `word "${token}" (case-insensitive) — these are NOT matches for your original query, ` +
+                    `but they are where that word lives.`,
+                );
+            }
+            tried.push(`/${pattern}/ (case-insensitive)`);
+        } catch (_) { /* fall through to the honest empty answer */ }
+    }
+
+    return `No matches in ${searchRoot} (${filesSearched} files searched).` +
+        (args.include_glob ? ` Filter: ${args.include_glob}` : '') +
+        `\nTried: ${tried.join(', ')}.` +
+        `\nThe name does not exist in this tree under any casing. Try symbol_search for a ` +
+        `definition, a shorter/different word, or glob to locate the file by name — ` +
+        `do NOT repeat these same patterns.`;
+}
+
 /** grep_search — regex search with a literal-string tolerant fallback. */
 export async function handleGrepSearch(ctx, args, onAgentStatus) {
     const searchRoot = args.path ? ctx.resolvePath(args.path) : ctx.workspacePath;
@@ -150,9 +341,7 @@ export async function handleGrepSearch(ctx, args, onAgentStatus) {
         const { matches = [], files_searched = 0, truncated = false } = res || {};
         ctx.onToolEvent?.('grep_search', { pattern: args.pattern, matchCount: matches.length });
         if (matches.length === 0) {
-            return `No matches for /${args.pattern}/ in ${searchRoot} ` +
-                `(${files_searched} files searched).` +
-                (args.include_glob ? ` Filter: ${args.include_glob}` : '');
+            return await grepZeroResultLadder(ctx, args, searchRoot, files_searched);
         }
         const lines = matches.map(m => `${m.file}:${m.line}: ${m.text}`);
         const header = `Found ${matches.length} match(es)` +
@@ -235,12 +424,21 @@ export async function handleFetchUrl(ctx, args, onAgentStatus) {
         }
         
         let proxy = null;
-        try { proxy = (await invoke('get_ai_config'))?.proxy_url || null; } catch (_) {}
+        // The SSRF guard lives in the Rust command (it is what opens the socket);
+        // this only forwards the user's opt-out list. A read failure therefore
+        // means a STRICTER fetch, never a looser one.
+        let allowHosts = null;
+        try {
+            const cfg = await invoke('get_ai_config');
+            proxy = cfg?.proxy_url || null;
+            allowHosts = Array.isArray(cfg?.fetch_allowed_hosts) ? cfg.fetch_allowed_hosts : null;
+        } catch (_) { /* no config — deny-by-default still applies backend-side */ }
 
-        const text = await invoke('fetch_url', { 
-            url, 
+        const text = await invoke('fetch_url', {
+            url,
             headers: headerList.length > 0 ? headerList : null,
-            proxy 
+            proxy,
+            allowHosts,
         });
         return text;
     } catch (e) {
@@ -350,6 +548,9 @@ export async function handleSymbolSearch(ctx, args, onAgentStatus) {
     // over the hits instead — and when a glob is richer than an extension list
     // we fall through rather than answer from the wrong scope.
     const extensions = extensionsFromGlob(args?.include_glob);
+    // Near-misses found via the index, kept for the "did you mean" line if the
+    // scan below also comes up empty.
+    let nearMisses = [];
     if (extensions !== null) {
         try {
             const idx = new CodeIndexClient({ workspacePath: ctx.workspacePath, invoke });
@@ -359,6 +560,17 @@ export async function handleSymbolSearch(ctx, args, onAgentStatus) {
             if (kept.length) {
                 onAgentStatus?.(`Symbol index: ${query} (${kept.length} hit(s))`);
                 return renderSymbolHits(kept, query);
+            }
+            // Nothing matched the query as spelled. The index knows every symbol
+            // name in the workspace, so a typo or a half-remembered name is
+            // answerable here for the cost of one more seek: probe with the
+            // distinctive WORD of the identifier and keep whatever is closest.
+            const token = distinctiveToken(query);
+            if (token) {
+                const probe = await idx.findSymbol(token, { kind, limit: 60 });
+                const scoped = probe.filter(h => indexHitMatches(h, { rootPrefix, extensions }));
+                const best = new Set(suggestNames(scoped.map(h => h.name), query, { limit: 5 }));
+                nearMisses = scoped.filter(h => best.has(h.name)).slice(0, 5);
             }
         } catch (_) { /* index unavailable — scan instead */ }
     }
@@ -407,9 +619,23 @@ export async function handleSymbolSearch(ctx, args, onAgentStatus) {
             ? `\n(NOTE: stopped after ${Math.round(SYMBOL_SCAN_BUDGET_MS / 1000)}s having scanned ${scanned} of ${files.length} files — narrow with \`path\`, or run "Study workspace" so this query hits the index instead.)`
             : '';
         if (matches.length === 0) {
+            // "Did you mean" — from the names we just parsed, or from the index
+            // probe above. A miss on a name the workspace nearly has is the
+            // common case (a typo, the wrong half of a compound name), and
+            // answering it here saves the model a round of blind guessing.
+            const suggestions = suggestNames(all.map(s => s.name), query, { limit: 5 });
+            const fromScan = suggestions.length
+                ? all.filter(s => suggestions.includes(s.name))
+                : [];
+            const closest = fromScan.length ? fromScan : nearMisses;
+            const didYouMean = closest.length
+                ? `\nClosest names that DO exist:\n` +
+                  closest.slice(0, 5).map(s => `  ${s.name} — ${s.path}:${s.line}`).join('\n') +
+                  `\nRe-run symbol_search with one of these exact names if it is what you meant.`
+                : '';
             return `No symbol definitions matching "${query}" in ${scanned} file(s)` +
                 (kind ? ` (kind=${kind})` : '') +
-                `. Try grep_search for usages, or a shorter query.${partial}`;
+                `. Try grep_search for usages, or a shorter query.${didYouMean}${partial}`;
         }
         return formatSymbols(matches, { query, total }) +
             `

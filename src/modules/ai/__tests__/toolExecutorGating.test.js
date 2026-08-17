@@ -303,15 +303,23 @@ describe('executeTool — guard rails', () => {
     });
 
     it('rejects a path-taking tool called without a path', async () => {
-        for (const name of ['read_file', 'write_file', 'delete_file']) {
+        for (const name of ['write_file', 'delete_file']) {
             const out = await ex.executeTool({ name, args: {} }, null, null);
             expect(out).toMatch(/Missing required valid 'path'/);
         }
     });
 
+    it('read_file names BOTH of its forms when neither was supplied', async () => {
+        // It takes `path` or `paths`, so "missing 'path'" would send the model
+        // looking for the wrong argument.
+        const out = await ex.executeTool({ name: 'read_file', args: {} }, null, null);
+        expect(out).toMatch(/'path'/);
+        expect(out).toMatch(/'paths'/);
+    });
+
     it('rejects a blank path string', async () => {
         const out = await ex.executeTool({ name: 'read_file', args: { path: '   ' } }, null, null);
-        expect(out).toMatch(/Missing required valid 'path'/);
+        expect(out).toMatch(/'path'/);
     });
 
     it('an unknown tool name returns an error rather than throwing', async () => {
@@ -384,5 +392,50 @@ describe('write scope (sub-agent ownership)', () => {
             null, async () => false,   // user declines → a different error than scope
         );
         expect(out).not.toMatch(/write_scope|outside/i);
+    });
+
+    // The scope existed to stop two parallel children colliding, but only ever
+    // checked the source-editing five — so a child confined to src/moduleA could
+    // still drop a workbook anywhere in the workspace.
+    for (const name of ['write_xlsx', 'update_xlsx', 'write_docx']) {
+        it(`blocks ${name} outside the granted scope`, async () => {
+            ex.setWriteScope(['src/allowed/**']);
+            const out = await ex.executeTool(
+                { name, args: { path: 'reports/out.xlsx', sheets: [], edits: [], markdown: '' } },
+                null, async () => true,
+            );
+            expect(out).toMatch(/outside your write scope/i);
+        });
+    }
+});
+
+describe('permission level — fail-closed default', () => {
+    // A tool added to the schemas but not to getPermissionLevel's switch used to
+    // fall through to 'Allow': auto-approved AND eligible to run in parallel,
+    // with nothing to notice it. The default now follows `isSafe`.
+    it('an unknown non-safe tool asks rather than running', () => {
+        ex.toolDefinitions = [...ex.toolDefinitions, { name: 'brand_new_writer', isSafe: false, description: '', parameters: {} }];
+        expect(ex.getPermissionLevel('brand_new_writer', {})).toBe('Ask');
+    });
+
+    it('a tool with no isSafe declared is treated as unsafe', () => {
+        ex.toolDefinitions = [...ex.toolDefinitions, { name: 'undeclared_tool', description: '', parameters: {} }];
+        expect(ex.getPermissionLevel('undeclared_tool', {})).toBe('Ask');
+    });
+
+    it('an unknown read-only tool still runs without a prompt', () => {
+        ex.toolDefinitions = [...ex.toolDefinitions, { name: 'brand_new_reader', isSafe: true, description: '', parameters: {} }];
+        expect(ex.getPermissionLevel('brand_new_reader', {})).toBe('Allow');
+    });
+
+    it('every declared non-safe built-in is gated somehow (never a silent Allow)', async () => {
+        await ex.startSession('C:/work/proj');
+        const ungated = ex.toolDefinitions
+            .filter(t => t.isSafe === false)
+            // Writes inside the workspace are legitimately Allow — they are
+            // covered by the workspace boundary, not by a prompt.
+            .filter(t => ex.getPermissionLevel(t.name, { path: 'C:/elsewhere/x', from: 'C:/elsewhere/a', to: 'C:/elsewhere/b' }) === 'Allow')
+            .map(t => t.name);
+        expect(ungated).toEqual([]);
     });
 });

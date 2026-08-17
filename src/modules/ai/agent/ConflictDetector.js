@@ -18,6 +18,8 @@
 // AFTER it (the loop keeps its existing sequential executor path). Reads never
 // conflict with anything; move_file conflicts with both its source and target.
 
+import { t } from '../../../i18n/index.js';
+
 /** Normalize a path for conflict comparison: forward slashes, no trailing slash. */
 export function normalizeConflictPath(p) {
     if (typeof p !== 'string') return '';
@@ -47,6 +49,7 @@ export function callTargets(call) {
         case 'write_file':
         case 'multi_replace_file_content':
         case 'replace_lines':
+        case 'apply_patch':
         case 'delete_file':
         case 'write_xlsx':
         case 'update_xlsx':
@@ -139,5 +142,6 @@ export function partitionParallelCalls(calls) {
 export function serializationNotice(calls) {
     if (!Array.isArray(calls) || calls.length === 0) return '';
     const names = calls.map(c => c.name).join(', ');
-    return `⚠️ 同一ファイルへの並列アクセスを検出し、${names} を順次実行に変更しました。`;
+    return t('agent.conflict.serialized', { names },
+        `⚠️ 同一ファイルへの並列アクセスを検出し、${names} を順次実行に変更しました。`);
 }

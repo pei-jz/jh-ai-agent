@@ -107,11 +107,61 @@ export const ja = {
     'settings.subagentReview.on': 'オン — 完了前にファイル変更をレビューする',
     'settings.subagentReview.hint': 'オンにすると、finish_task の前に<strong>読み取り専用の独立レビュアー・サブエージェント</strong>（隔離コンテキスト）を起動し、この実行のファイル変更を依頼内容と突き合わせます。指摘（[BUG] / 受入基準違反）は1度だけ本体に差し戻され、スタイル指摘は完了を妨げません。ファイルを変更するタスクでトークンが概ね10〜20%増えます。',
 
+    // ── Agent run status (agent/stopReason.js, ModelPhaseRouter, plan-first) ──
+    // The agent's own narration. It was hard-coded Japanese, which made it the
+    // most-read untranslatable text in the app: switching the UI to English left
+    // every explanation of what the agent was doing in Japanese.
+    // The FIELD names stay English because that is what the Settings form
+    // actually shows (SAFETY_FIELDS labels are literal English in both locales).
+    // Translating them here would send the user looking for a label that is not
+    // on screen — worse than leaving the pointer untranslated. Only the
+    // navigation words, which ARE translated in the UI, are in Japanese.
+    'stop.setting.steps': '設定 → 一般 → エージェント安全制限 → Max Agent Steps',
+    'stop.setting.tokens': '設定 → 一般 → エージェント安全制限 → Token Budget',
+    'stop.setting.wallClock': '設定 → 一般 → エージェント安全制限 → Wall-clock Timeout',
+    'stop.status.steps': 'ステップ上限 ({limit}) に到達 — 自動停止します。',
+    'stop.status.tokens': 'トークン予算 ({limit}) に到達 — 自動停止します。',
+    'stop.status.wallClock': '実行時間の上限 ({limit} 分) に到達 — 自動停止します。',
+    'stop.resume': 'このタスクにメッセージを送ると、ここから続行できます。',
+    'stop.where': '上限は {setting} で変更できます。',
+    'stop.notice.steps': '⚠️ **未完了のまま停止しました。** 実行ステップ数が上限 {limit} に到達したためです（タスクが失敗したわけではありません）。{resume}{where}',
+    'stop.notice.tokens': '⚠️ **未完了のまま停止しました。** 累積トークン数（サブエージェント分を含む）が予算 {limit} に到達したためです。{resume}{where}',
+    'stop.notice.wallClock': '⚠️ **未完了のまま停止しました。** 実行時間が上限 {limit} 分に到達したためです。{resume}{where}',
+
+    'phase.plan': '計画',
+    'phase.execute': '実装',
+    'phase.review': '検収',
+    'agent.phaseRouting.on': '🧭 フェーズ別ルーティング ON — {phase}: {model}',
+    'agent.phaseRouting.reason.planFirst': 'plan-first 承認ゲート → 計画は deep で実施',
+    'agent.phaseRouting.reason.complex': 'タスクが複雑と判定 → 計画は deep で実施',
+    'agent.phaseRouting.reason.fresh': '単発タスク → 実行フェーズを fast で開始',
+    'agent.phaseRouting.reason.continued': '継続ターン(計画済み) → 実行フェーズで開始',
+    'agent.model': '🧭 モデル: {model}',
+    'agent.escalate.phase': '🧠 実装フェーズを上位モデル(deep)に昇格 — step {step} 到達',
+    'agent.escalate.tier': '🧠 上位モデル(deep)に切替 — step {step} 到達',
+    'agent.planFirst.on': '📋 計画優先モード — まず計画を提示し承認を得ます',
+    'agent.planFirst.blocked': '📋 計画承認待ち — 編集/コマンドをブロック中 ({tools})',
+    'agent.memory.recalled': '🧠 過去セッションの学習を参照',
+    'agent.conflict.serialized': '⚠️ 同一ファイルへの並列アクセスを検出し、{names} を順次実行に変更しました。',
+    'agent.vision.switched': '🖼 画像入力のためビジョン対応モデルに切替: {model}',
+    'agent.vision.unsupported': '⚠️ {count}枚の画像が添付されていますが、設定中のモデル({model})はビジョン非対応です。画像は無視されます。設定 → LLM接続 で GPT-4o / Claude / Gemini などビジョン対応モデルを選択（またはFast/Deep tierに設定）してください。',
+    'agent.vision.received': '🖼 {count}枚の画像を受信（モデル {model} はビジョン対応）。',
+    'agent.subtask.start': '🤖 [{label}] 起動: {brief}…',
+    'agent.subtask.serialized': '🤖 [{label}] ⏳ 書き込み範囲が他のサブタスクと重複 — 先行の完了を待機 (serialized)',
+    'agent.subtask.done': '🤖 [{label}] 完了 ✅',
+    'agent.subtask.failed': '🤖 [{label}] 失敗: {error}',
+
+    'settings.fetchHosts': 'fetch_url を許可するホスト',
+    'settings.fetchHosts.hint': '1行に1ホスト。<code>fetch_url</code> は既定でパブリックインターネット以外のアドレス——ループバック、社内LAN、クラウドメタデータ（<code>169.254.169.254</code>）——への接続を拒否します。エージェントが読み込んだページが「内部サービスを読んで結果を報告せよ」と指示できてしまうためです。ここに書いたホストはその例外になります。サブドメインも対象なので、<code>example.com</code> は <code>api.example.com</code> も許可します。自分のサービスに接続させる場合以外は空のままにしてください。',
+    'settings.episodeInjection': '過去セッションの要約',
+    'settings.episodeInjection.off': 'オフ — 過去セッションを注入しない（既定）',
+    'settings.episodeInjection.on': 'オン — 関連する過去セッションを最大3件注入する',
+    'settings.episodeInjection.hint': 'このワークスペースの過去セッションの要約を、毎ステップのシステムプロンプトに含めるかどうか。これは記憶層の中で<strong>最も重く</strong>（約500〜750トークン、Experience の冒頭要約は約180）、かつ唯一「観測された事実」ではなく「モデル自身の申告」から作られる層でした。固有の価値だった結果と触ったファイルは、より正確な形で Experience カードが持つようになったため、既定はオフです。<strong>データは削除されません</strong>——長期ジャーナルには全セッションが記録され続け、オンに戻せば再び注入されます。メモリ想起の<strong>自動</strong>（効果測定）を実行中の場合は、終わるまでこの設定を変えないでください——途中で変えると結果の帰属が判別できなくなります。',
     'settings.memoryRecall': 'メモリの想起',
-    'settings.memoryRecall.on': 'オン — 常に想起する（効果測定はしない）',
-    'settings.memoryRecall.auto': '自動 — オンだが半数の実行を対照群として除外し効果を測定（既定）',
+    'settings.memoryRecall.on': 'オン — 常に想起する（効果測定はしない）（既定）',
+    'settings.memoryRecall.auto': '自動 — オンだが半数の実行を対照群として除外し効果を測定',
     'settings.memoryRecall.off': 'オフ — 学習はするが想起しない（対照群）',
-    'settings.memoryRecall.hint': 'このワークスペースの過去の実行から得た教訓・知見をエージェントに見せるかどうかを決めます（設定 → Memory → Experience）。<strong>どのモードでも学習自体は続きます</strong>——止まるのは想起だけなので、「オフ」の実行もデータには寄与します。メモリが実際に効いているか知りたい場合は<strong>自動</strong>を選んでください。実行ごとにランダムに群が割り当てられ、比較の元になる1行が <code>.agent/trace/metrics.jsonl</code> に記録されます。<strong>自動では約半数の実行でメモリが使われません</strong>——これが答えを得るための代償で、必要な実行数が約900回ではなく約180回で済む理由です。結果が見えたら、あるいはこの代償を払いたくない場合は<strong>オン</strong>に切り替えてください。',
+    'settings.memoryRecall.hint': 'このワークスペースの過去の実行から得た教訓・知見をエージェントに見せるかどうかを決めます（設定 → Memory → Experience）。<strong>どのモードでも学習自体は続きます</strong>——止まるのは想起だけなので、「オフ」の実行もデータには寄与します。メモリが実際に効いているか知りたい場合は<strong>自動</strong>を選んでください。実行ごとにランダムに群が割り当てられ、比較の元になる1行が <code>.agent/trace/metrics.jsonl</code> に記録されます。<strong>自動では約半数の実行でメモリが使われません</strong>——これが答えを得るための代償で、必要な実行数が約900回ではなく約180回で済む理由です。この代償があるため自動はオプトインです。数値が必要でなければ<strong>オン</strong>のままにしてください。',
 
     'settings.routing.unset': '（未設定 — アクティブなモデルを使う）',
     'settings.routing.fast': 'モデルルーティング — Fast tier',
@@ -232,7 +282,8 @@ export const ja = {
     'memory.study.overviewRefreshed': '命名規則を更新しました（ノートは維持）',
     'memory.study.overviewFailed': '概観ノートの作成に失敗しました（索引は保存済み）',
     'memory.study.indexed': '{files} ファイルを索引化 · シンボル {symbols} 件 · 依存 {edges} 件',
-    'memory.study.capped': '⚠ ソースファイルは合計 {total} 件、今回 {omitted} 件は索引対象外（上限）— 再度「学習」でさらに網羅できます。',
+    'memory.study.skipped': ' · {count} 件は変更なし（未読込）',
+    'memory.study.capped': '⚠ ソースファイルは合計 {total} 件で、そのうち {omitted} 件は今回の索引に含まれていません。ワークスペースが一覧の上限を超えているため、削除ファイルの整理（prune）も今回は行っていません。',
     'memory.index.summary': '索引: {files} ファイル · シンボル {symbols} · 依存 {edges}',
     'memory.index.guessHint': '行の無い領域はエージェントが推測で答える領域です — 結果を信じる前に検証することをおすすめします。',
     'memory.ab.arms': '効果測定: 記録済み {rows} 実行 · 想起あり {on} / 対照 {off}',

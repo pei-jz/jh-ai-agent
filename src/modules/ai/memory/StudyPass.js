@@ -49,22 +49,39 @@ export function targetPath(target) {
 }
 
 /**
- * Files parsed per pass. A cap, not a target — the point is breadth, not depth.
- * Pass `fileCap: 0` to lift it entirely (see runStudyPass).
+ * Files parsed per pass. **0 = no cap, and that is the default.**
  *
- * Raised from 1000 once the read loop stopped being one-file-at-a-time: the old
- * value was chosen against a sequential IPC round-trip per file, which made a
- * large tree take minutes. With STUDY_READ_CONCURRENCY the same wall-clock buys
- * several times as many files.
+ * A cap only ever made sense as a time budget, and it bought that time by
+ * indexing part of the project — permanently. `fairShare` is deterministic, so
+ * the same subset was selected on every pass: pressing "Study" again re-indexed
+ * the files it already knew and never reached the rest. A partial index is
+ * worse than a slow one, because "not found" stops meaning anything.
+ *
+ * Two changes removed the reason for the cap:
+ *   • reads run concurrently (STUDY_READ_CONCURRENCY) instead of one IPC
+ *     round-trip at a time
+ *   • unchanged files are not read at all (fileStamp) — so the cost lands once,
+ *     on the first pass, and repeat passes are proportional to what CHANGED
+ *
+ * A caller that wants a quick partial pass can still pass a positive fileCap;
+ * fairShare then spreads it across directories as before.
  */
-export const STUDY_FILE_CAP = 5000;
+export const STUDY_FILE_CAP = 0;
 /**
- * Ceiling on the "how big is this tree really" glob. Deliberately far above the
- * file cap: the pass needs to SEE the whole tree to spread its fair share over
- * it, and a glob that stops early biases the index toward whatever the walker
- * reached first. (The Rust side clamps this too — commands/search.rs.)
+ * Ceiling on the "how big is this tree really" glob.
+ *
+ * This is NOT the file cap and does not do the same job: it bounds how many
+ * PATHS the listing returns (a directory walk and an array of strings), not how
+ * much is read. It has to sit above the real tree size for two reasons — the
+ * pass cannot spread a partial budget representatively over a list that was cut
+ * off, and `truncated` is what tells prune "this list is not the whole tree, do
+ * NOT delete what is missing from it".
+ *
+ * It stays finite because the listing crosses IPC as one payload. Above it, the
+ * pass still works and reports the truncation instead of pruning.
+ * (The Rust side clamps this too — commands/search.rs.)
  */
-export const STUDY_GLOB_MAX = 50000;
+export const STUDY_GLOB_MAX = 100000;
 /** Files read+parsed concurrently. Each read is an IPC round-trip. */
 export const STUDY_READ_CONCURRENCY = 8;
 
@@ -327,11 +344,11 @@ export function coverageByDir(cards, depth = 2) {
  *
  * @param {{workspacePath:string, invoke:Function, onProgress?:Function,
  *          fileCap?:number, commit?:string}} opts
- *   fileCap — 0 (or any non-positive/non-finite value) parses EVERY matching
- *   file the glob returned. Safe for the index (symbols are capped per file and
- *   writes are batched), but the pass still READS every file on every run —
- *   change detection hashes content — so the cost is linear in tree size each
- *   time, not just the first.
+ *   fileCap — DEFAULT 0: parse every matching file the glob returned. Safe for
+ *   the index (symbols are capped per file, writes are batched) and paid once:
+ *   the next pass re-reads only what changed. Pass a positive number for a
+ *   deliberately partial pass.
+ *   force — ignore the stamps and re-read everything (see fileStamp).
  */
 export async function runStudyPass({
     workspacePath, invoke, onProgress = null, fileCap = STUDY_FILE_CAP, commit = '',
@@ -341,11 +358,11 @@ export async function runStudyPass({
         return { files: 0, parsed: 0, symbols: 0, edges: 0, paths: [], areas: [] };
     }
 
-    // Two globs on purpose. The first asks for EVERYTHING (up to the backend's
-    // hard cap) so the pass knows how big the tree really is and can pick a
-    // representative spread; a cap-sized glob would silently bias the index
-    // toward whatever alphabetical prefix came first. The second is the fair
-    // share: keep `fileCap` files, spread across directories.
+    // Ask for EVERYTHING (up to the backend's ceiling) — both because the whole
+    // tree is what gets indexed by default, and because `truncated` has to mean
+    // "this list is not the whole tree" for the prune step to stay safe. With a
+    // positive fileCap the fair share below spreads that budget over the real
+    // shape of the project rather than an alphabetical prefix of it.
     let all = [];
     let truncated = false;
     // path → "m:<mtime>-<size>". Empty when the backend predates `withStamps`,
@@ -372,20 +389,37 @@ export async function runStudyPass({
     // the loop would be O(files x indexed) for no reason.
     const known = new Map(await index.knownHashes());
 
-    // Read every file once: the hash needs the content anyway, and a second read
-    // for the changed ones would double the I/O to save nothing.
     const seen = [];
     const areas = [];
-    let read = 0, symbolCount = 0, edgeCount = 0;
+    let read = 0, symbolCount = 0, edgeCount = 0, skipped = 0;
     const batch = [];
+
+    // ── Skip files whose stamp still matches the index ──────────────────────
+    // This is what makes a REPEAT pass cheap. Content hashing had to read every
+    // file to decide it had nothing to do, so the second pass over an unchanged
+    // tree cost exactly as much as the first. A file whose size and mtime are
+    // unchanged is not re-read at all — it only has to stay in `seen` so the
+    // prune step does not mistake it for deleted.
+    const toRead = [];
+    for (const path of paths) {
+        const stamp = stampOf.get(path);
+        if (!force && stamp && known.get(path) === stamp) {
+            seen.push({ path, hash: stamp });
+            skipped++;
+            read++;
+            continue;
+        }
+        toRead.push(path);
+    }
+    if (onProgress && skipped) onProgress({ read, total: paths.length, symbols: 0, skipped });
 
     // Reads run in small CONCURRENT groups. One await per file made the pass a
     // queue of IPC round-trips — the single reason the file cap had to be small,
     // since a tree of tens of thousands of files would otherwise take many
     // minutes of pure waiting. Parsing stays sequential per group so the batch,
     // counters and progress stay in a deterministic order.
-    for (let i = 0; i < paths.length; i += STUDY_READ_CONCURRENCY) {
-        const group = paths.slice(i, i + STUDY_READ_CONCURRENCY);
+    for (let i = 0; i < toRead.length; i += STUDY_READ_CONCURRENCY) {
+        const group = toRead.slice(i, i + STUDY_READ_CONCURRENCY);
         const contents = await Promise.all(group.map(async (path) => {
             try { return { path, content: String(await invoke('read_file', { path }) || ''), ok: true }; }
             catch (_) { return { path, content: '', ok: false }; }
@@ -395,11 +429,17 @@ export async function runStudyPass({
             read++;
             if (!ok) continue;
 
-            const hash = contentHash(content);
+            // Store the STAMP when we have one, so the next pass can skip this
+            // file without reading it; fall back to the content hash when the
+            // backend gave us no metadata.
+            const stamp = stampOf.get(path);
+            const hash = stamp || contentHash(content);
             seen.push({ path, hash });
 
-            // Unchanged since the last pass ⇒ nothing to re-parse.
-            if (known.get(path) !== hash) {
+            // Unchanged since the last pass ⇒ nothing to re-parse. (Reached
+            // when the stamp moved but the content did not, e.g. a rewrite with
+            // identical bytes, and on the no-metadata fallback path.)
+            if (force || known.get(path) !== hash) {
                 const found = extractSymbols(path, content).filter(isLandmark);
                 found.sort((a, b) => (b.exported === true) - (a.exported === true));
                 const symbols = found.slice(0, SYMBOLS_PER_FILE).map(s => ({
@@ -414,7 +454,7 @@ export async function runStudyPass({
             }
         }
 
-        if (onProgress) onProgress({ read, total: paths.length, symbols: symbolCount });
+        if (onProgress) onProgress({ read, total: paths.length, symbols: symbolCount, skipped });
         // Flush in chunks so a huge tree does not build one enormous IPC payload.
         if (batch.length >= 100) { await index.putFiles(batch.splice(0)); }
     }
@@ -439,6 +479,8 @@ export async function runStudyPass({
         pruned: gone,
         total: all.length,
         omitted,
+        // Files whose size+mtime matched the index, so they were never read.
+        skipped,
         truncated,
         paths: seen.map(f => f.path),
         areas,

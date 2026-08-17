@@ -27,15 +27,20 @@ export const TOOL_DEFINITIONS = [
     {
         name: 'read_file',
         isSafe: true,
-        description: 'Read the content of a file as a UTF-8 text string. NOT for binary formats: for .xlsx/.xlsm/.xls/.ods/.docx/.pptx use read_office instead — this tool returns unusable binary garbage for them, and for .pdf/images it does too. By default returns up to 2000 lines from the start. Use offset (1-indexed start line) and limit (max lines) for partial reads of large files. The result is prefixed with line numbers in `<lineno>\\t<content>` format for easy reference — these line numbers are display-only and must NEVER be included in multi_replace_file_content\'s old_text (use only the content after the tab).',
+        description: 'Read one file, or SEVERAL AT ONCE. NOT for binary formats: for .xlsx/.xlsm/.xls/.ods/.docx/.pptx use read_office instead — this tool returns unusable binary garbage for them, and for .pdf/images it does too.\n\nBATCH READ: when you already know you need more than one file (a module and its test, an import and its definition, the files a grep hit), pass them all in `paths` in ONE call instead of calling read_file repeatedly. Each file is returned in its own section, and a file that is missing or unreadable is reported inline WITHOUT failing the others. This is the single biggest saving available during investigation.\n\nUse `path` for one file, or `paths` for several — not both. `offset`/`limit` apply to single reads only. By default returns up to 2000 lines from the start. The result is prefixed with line numbers in `<lineno>\\t<content>` format for easy reference — these line numbers are display-only and must NEVER be included in multi_replace_file_content\'s old_text (use only the content after the tab).',
         parameters: {
             type: 'object',
             properties: {
-                path:   { type: 'string',  description: 'Path of the file to read' },
-                offset: { type: ['integer', 'null'], description: 'Optional (null to omit). 1-indexed starting line number (default 1). Use to skip past content you already have.' },
-                limit:  { type: ['integer', 'null'], description: 'Optional (null to omit). Maximum number of lines to return (default 2000). Increase for files where you need the whole content.' }
+                path:   { type: ['string', 'null'],  description: 'Path of a single file to read. null when using `paths`.' },
+                paths:  {
+                    type: ['array', 'null'],
+                    description: 'Several files to read in ONE call (max 20). Prefer this over repeated read_file calls whenever you already know which files you need. null when using `path`.',
+                    items: { type: 'string' }
+                },
+                offset: { type: ['integer', 'null'], description: 'Optional (null to omit). 1-indexed starting line number (default 1). Single reads only — ignored when `paths` is used.' },
+                limit:  { type: ['integer', 'null'], description: 'Optional (null to omit). Maximum number of lines per file (default 2000).' }
             },
-            required: ['path', 'offset', 'limit'],
+            required: ['path', 'paths', 'offset', 'limit'],
             additionalProperties: false
         }
     },
@@ -335,7 +340,7 @@ export const TOOL_DEFINITIONS = [
     },
     {
         name: 'multi_replace_file_content',
-        description: 'WHEN TO USE: this is the DEFAULT tool for editing an existing file — use it to change one or more specific text spans you can quote exactly. Prefer it over write_file for any partial edit. Switch to replace_lines when the region is a large/awkward contiguous block that is error-prone to retype, or when this tool keeps failing to match. Apply one or more content-based search-and-replace edits to an existing file. Each replacement provides the exact original text (old_text) and its replacement (new_text); old_text MUST match EXACTLY once in the file. BEST PRACTICE: keep old_text SHORT — ideally ONE line containing a unique identifier (plus a few words of context only if needed for uniqueness). Short exact anchors succeed far more often than large multi-line blocks, which are easy to mis-transcribe. To disambiguate when a line repeats, add the minimum extra context to make it unique. Set replace_all=true to update every occurrence (useful for renames). Line numbers are NEVER used — only literal string matching. IMPORTANT: when copying text from read_file output, strip the leading `<lineno>\\t` prefix from each line — that prefix is display-only and is NOT part of the file. MECHANICS: line endings are tolerant (write `\\n`; CRLF/LF both match), but whitespace/indentation must match exactly. Replacements apply IN ORDER — replacement #2 must match the file AS-IT-IS-AFTER #1. To delete a region, pass new_text="". On a "not found" error the tool returns the file\'s actual "Closest matching region" (with a `·`=space/`→`=tab diff) — copy that as your next old_text instead of guessing; after 3 failures on one file it auto-refreshes and surfaces the live content.',
+        description: 'WHEN TO USE: change one or more specific text spans you can quote EXACTLY. Prefer apply_patch when you have just read the file (it locates changes by context, so you do not have to reproduce the old text perfectly); prefer this one for a small surgical change, or a rename across a file via replace_all. Either way prefer both over write_file for a partial edit. Switch to replace_lines when the region is a large/awkward contiguous block that is error-prone to retype, or when this tool keeps failing to match. Apply one or more content-based search-and-replace edits to an existing file. Each replacement provides the exact original text (old_text) and its replacement (new_text); old_text MUST match EXACTLY once in the file. BEST PRACTICE: keep old_text SHORT — ideally ONE line containing a unique identifier (plus a few words of context only if needed for uniqueness). Short exact anchors succeed far more often than large multi-line blocks, which are easy to mis-transcribe. To disambiguate when a line repeats, add the minimum extra context to make it unique. Set replace_all=true to update every occurrence (useful for renames). Line numbers are NEVER used — only literal string matching. IMPORTANT: when copying text from read_file output, strip the leading `<lineno>\\t` prefix from each line — that prefix is display-only and is NOT part of the file. MECHANICS: line endings are tolerant (write `\\n`; CRLF/LF both match), but whitespace/indentation must match exactly. Replacements apply IN ORDER — replacement #2 must match the file AS-IT-IS-AFTER #1. To delete a region, pass new_text="". On a "not found" error the tool returns the file\'s actual "Closest matching region" (with a `·`=space/`→`=tab diff) — copy that as your next old_text instead of guessing; after 3 failures on one file it auto-refreshes and surfaces the live content.',
         parameters: {
             type: 'object',
             properties: {
@@ -378,31 +383,26 @@ export const TOOL_DEFINITIONS = [
         }
     },
     {
-        name: 'create_artifact',
-        description: 'Create a new markdown artifact (e.g. implementation plan, checklist) and show it in a dedicated tab.',
+        name: 'apply_patch',
+        isSafe: false,
+        description: 'WHEN TO USE: the best default for editing an existing file when you have just read it. Apply a UNIFIED DIFF. Unlike multi_replace_file_content you do NOT have to reproduce the old text exactly from memory — you copy the surrounding context lines straight out of read_file output — and unlike replace_lines the "@@" line numbers are only a HINT: the hunk is located by its context, so it still applies if the file shifted. FORMAT: one or more hunks, each starting with "@@ -oldStart,oldCount +newStart,newCount @@". Every line in a hunk body MUST begin with exactly one marker character: " " (space = unchanged context), "-" (remove) or "+" (add). Include 2-3 context lines above and below each change so the hunk can be located. Strip the read_file "<lineno>\\t" prefix — write raw file content after the marker. Optional "---"/"+++" headers are ignored. If a hunk cannot be matched, NOTHING is written and the error names which hunk failed: re-read the file and rebuild the patch from its current content rather than nudging the @@ numbers.',
         parameters: {
             type: 'object',
             properties: {
-                name: { type: 'string', description: "Name of the artifact file (e.g. 'task_plan')" },
-                content: { type: 'string', description: 'Content of the artifact in markdown format' }
+                path: { type: 'string', description: 'Path of the file to patch.' },
+                patch: { type: 'string', description: 'The unified diff. Example:\n@@ -10,6 +10,7 @@\n function greet(name) {\n-    return "hi " + name;\n+    if (!name) return "hi";\n+    return "hello " + name;\n }' }
             },
-            required: ['name', 'content'],
+            required: ['path', 'patch'],
             additionalProperties: false
         }
     },
-    {
-        name: 'update_artifact',
-        description: 'Update an existing markdown artifact (overwrites entire content).',
-        parameters: {
-            type: 'object',
-            properties: {
-                name: { type: 'string', description: 'Name of the artifact file to update' },
-                content: { type: 'string', description: 'Updated entire content of the artifact' }
-            },
-            required: ['name', 'content'],
-            additionalProperties: false
-        }
-    },
+    // create_artifact / update_artifact were removed here. Measured over this
+    // workspace's own history — 148 sessions, 68 traces — they were called ONCE
+    // and never, against 154 task_progress calls and 34 write_file calls. Only
+    // two .md artifacts were ever produced and neither was named task_plan.md,
+    // so the whole task_plan injection path in ContextBuilder had never fired.
+    // Two schema slots, a handler, a permission case and six enumerations for a
+    // feature `write_file` already covers.
     {
         name: 'finish_task',
         isSafe: true,
@@ -462,7 +462,7 @@ export const TOOL_DEFINITIONS = [
     {
         name: 'fetch_url',
         isSafe: true,
-        description: 'Fetch the content of a specific KNOWN URL via HTTP GET and return the response body as text. Use this to read a page/API/RSS whose URL you got from web_search or the user. Do NOT invent or recall URLs from memory — if you are not sure of the exact URL, call web_search first. For JSON APIs the raw JSON is returned; for HTML the full HTML is returned. Maximum response size is 500 KB.',
+        description: 'Fetch the content of a specific KNOWN URL via HTTP GET and return the response body as text. Use this to read a page/API/RSS whose URL you got from web_search or the user. Do NOT invent or recall URLs from memory — if you are not sure of the exact URL, call web_search first. For JSON APIs the raw JSON is returned; for HTML the full HTML is returned. Maximum response size is 500 KB. RESTRICTED TO PUBLIC ADDRESSES: requests to localhost/127.0.0.1, private networks (10.x, 172.16-31.x, 192.168.x) and cloud metadata (169.254.169.254) are refused, including via redirects — the user can allow specific hosts in Settings. If you hit this error, do NOT try to work around it with another tool: report it and ask the user.',
         parameters: {
             type: 'object',
             properties: {
@@ -600,7 +600,7 @@ export const TOOL_DEFINITIONS = [
                 role: {
                     type: ['string', 'null'],
                     enum: ['reviewer', 'tester', 'researcher', 'generic', null],
-                    description: "Preset defaults. 'reviewer' = read-only, reports findings + VERDICT, never fixes. 'tester' = writes/runs tests only (no implementation edits). 'researcher' = read-only investigation (+web). null/'generic' = full toolset."
+                    description: "Preset defaults. 'reviewer' = read-only (no file edits, no shell), reports findings + VERDICT, never fixes. 'tester' = writes/runs tests only (has a shell; cannot touch implementation code). 'researcher' = read-only investigation (no shell) + web. null/'generic' = full toolset. The read-only roles genuinely cannot write — it is enforced by their tool allowlist, not by instructions."
                 },
                 tools: { type: ['array', 'null'], items: { type: 'string' }, description: 'Optional explicit tool allowlist for the sub-agent (overrides the role preset). null = use the role default.' },
                 max_steps: { type: ['integer', 'null'], description: 'Optional step budget for the sub-agent (1-20). null = role default.' },

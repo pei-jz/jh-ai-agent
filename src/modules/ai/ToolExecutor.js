@@ -18,7 +18,7 @@ import {
     handleCodeDeps
 } from './tools/handlers/readOnlyHandlers.js';
 import {
-    handleWriteFile, handleMultiReplace, handleReplaceLines
+    handleWriteFile, handleMultiReplace, handleReplaceLines, handleApplyPatch
 } from './tools/handlers/editHandlers.js';
 import {
     handleDeleteFile, handleMoveFile, handleRunCommand
@@ -34,7 +34,7 @@ import { handleReadOffice, handleWriteXlsx, handleWriteDocx, handleUpdateXlsx } 
 import { handleListResources, handleReadResource } from './tools/handlers/resourceHandlers.js';
 import { resourceRegistry } from './agent/ResourceRegistry.js';
 import {
-    handleArtifact, handleFinishTask,
+    handleFinishTask,
     handleVerifySyntax, handleTaskProgress, handlePresentResult,
     handleAskUser
 } from './tools/handlers/agentMetaHandlers.js';
@@ -87,9 +87,8 @@ const TOOL_HANDLERS = {
     run_command: (ex, c) => handleRunCommand(ex, c.args, c.onConfirm, c.onAgentStatus),
     multi_replace_file_content: (ex, c) => handleMultiReplace(ex, c.args, c.onConfirm, c.onAgentStatus),
     replace_lines:   (ex, c) => handleReplaceLines(ex, c.args, c.onConfirm, c.onAgentStatus),
+    apply_patch:     (ex, c) => handleApplyPatch(ex, c.args, c.onConfirm, c.onAgentStatus),
     present_result:  (ex, c) => handlePresentResult(ex, c.args, c.onAgentStatus),
-    create_artifact: (ex, c) => handleArtifact(ex, c.args, c.name, c.onAgentStatus),
-    update_artifact: (ex, c) => handleArtifact(ex, c.args, c.name, c.onAgentStatus),
     fetch_url:       (ex, c) => handleFetchUrl(ex, c.args, c.onAgentStatus),
     web_search:      (ex, c) => handleWebSearch(ex, c.args, c.onAgentStatus),
     finish_task:     (ex, c) => handleFinishTask(ex, c.args, c.onAgentStatus),
@@ -933,10 +932,12 @@ export class ToolExecutor {
         }
 
         const alwaysOk = this._allowAgentControl !== false && name === 'finish_task';
+        // Reached only when isNative — the non-native case returned above. The
+        // old condition read `if (isNative || !this._mcpBypassesAllowlist)`,
+        // whose left side was therefore always true and whose right side could
+        // never be evaluated.
         if (this._toolAllowlist && !alwaysOk && !this._toolAllowlist.has(name)) {
-            if (isNative || !this._mcpBypassesAllowlist) {
-                return 'Deny';
-            }
+            return 'Deny';
         }
         const a = args || {};
         const pickPath = () => this.resolvePath(a.path || a.file_path || a.filepath || a.file || a.dir || a.directory);
@@ -953,6 +954,7 @@ export class ToolExecutor {
             case 'write_file':
             case 'multi_replace_file_content':
             case 'replace_lines':
+            case 'apply_patch':
             case 'write_xlsx':
             case 'update_xlsx':
             case 'write_docx':
@@ -969,7 +971,19 @@ export class ToolExecutor {
             case 'git_commit':
                 return 'Ask';
             default:
-                return 'Allow';
+                // FAIL-CLOSED. This used to `return 'Allow'`, which meant a tool
+                // added to the schemas but not to this switch was auto-approved
+                // AND eligible to run in parallel — silently, with nothing to
+                // notice it. That is how write_xlsx / update_xlsx / write_docx
+                // spent time classified as safe.
+                //
+                // `isSafe` is already declared on every schema and already means
+                // "never needs confirmation", so it is the right default: a new
+                // read-only tool keeps working with no change here, and a new
+                // mutating one costs one confirmation until someone gives it a
+                // proper case. Erring toward a prompt is recoverable; erring
+                // toward silent execution is not.
+                return this.isSafeTool(name) ? 'Allow' : 'Ask';
         }
     }
 
@@ -1256,9 +1270,18 @@ export class ToolExecutor {
 
         const rawPath = args.path || args.file_path || args.filepath || args.file || args.dir || args.directory;
 
-        const needsFilePath = ['read_file', 'write_file', 'multi_replace_file_content', 'replace_lines', 'delete_file'];
-        if (needsFilePath.includes(name) && (!rawPath || typeof rawPath !== 'string' || rawPath.trim() === '')) {
-            return `Error: Missing required valid 'path' parameter for tool '${name}'.`;
+        // read_file also accepts `paths` (batch read), in which case `path` is
+        // legitimately null — the handler resolves each entry itself.
+        const batchRead = name === 'read_file'
+            && Array.isArray(args.paths)
+            && args.paths.some(p => typeof p === 'string' && p.trim());
+
+        const needsFilePath = ['read_file', 'write_file', 'multi_replace_file_content', 'replace_lines', 'apply_patch', 'delete_file'];
+        if (needsFilePath.includes(name) && !batchRead
+            && (!rawPath || typeof rawPath !== 'string' || rawPath.trim() === '')) {
+            return name === 'read_file'
+                ? `Error: read_file needs either 'path' (one file) or 'paths' (an array of files).`
+                : `Error: Missing required valid 'path' parameter for tool '${name}'.`;
         }
 
         // Tools that handle path resolution themselves (or take no single path):

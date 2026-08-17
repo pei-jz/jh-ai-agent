@@ -3,15 +3,12 @@
 // testable. resultView.js re-exports these and adds the DOM/IPC glue
 // (attachFileOpenHandlers / ensureResultViewStyles).
 
-export function escapeHtml(str) {
-    if (str === null || str === undefined) return '';
-    return String(str)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#039;');
-}
+// Re-exported so the ~10 existing importers keep working; the implementation
+// lives in utils/html.js now (there were nine of them, with four behaviours).
+// Imported (not just re-exported): this module CALLS escapeHtml, and
+// `export … from` creates no local binding.
+import { escapeHtml, safeUrl } from './html.js';
+export { escapeHtml };
 
 // Inline markdown (code/bold/italic/link). Operates on already-escaped text.
 function renderInline(escaped) {
@@ -19,7 +16,18 @@ function renderInline(escaped) {
         .replace(/`([^`]+)`/g, '<code>$1</code>')
         .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
         .replace(/(^|[^*])\*([^*]+)\*/g, '$1<em>$2</em>')
-        .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+        // The href comes from whatever the MODEL wrote, so its scheme is vetted
+        // (utils/html.js safeUrl). It used to be interpolated verbatim, which
+        // rendered `[click me](javascript:…)` as a live javascript: link — one
+        // click from window.__TAURI__ and therefore from the shell. The CSP
+        // blocks it today; emitting it at all was the part worth fixing.
+        //
+        // NOT re-escaped: this function runs on text escapeHtml has ALREADY
+        // processed, so `?a=1&b=2` is `?a=1&amp;b=2` here. Escaping again would
+        // produce `&amp;amp;` and break every link with a query string. Being
+        // pre-escaped is also why the quotes cannot break out of the attribute.
+        .replace(/\[([^\]]+)\]\(([^)]+)\)/g,
+            (_m, text, url) => `<a href="${safeUrl(url)}" target="_blank" rel="noopener noreferrer">${text}</a>`);
 }
 
 /**

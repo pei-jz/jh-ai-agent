@@ -162,6 +162,13 @@ export function targetOf(args) {
     for (const k of ['path', 'file', 'file_path', 'from', 'target']) {
         if (typeof args[k] === 'string' && args[k]) return args[k];
     }
+    // read_file's batch form carries no `path`. One target is all this can
+    // return, so take the first — enough for the extension-keyed signature and
+    // for locator insights, which is what the trace uses this for.
+    if (Array.isArray(args.paths)) {
+        const first = args.paths.find(p => typeof p === 'string' && p.trim());
+        if (first) return first;
+    }
     return '';
 }
 

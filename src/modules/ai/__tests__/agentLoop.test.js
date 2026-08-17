@@ -136,6 +136,71 @@ describe('agent loop — permission model', () => {
     });
 });
 
+// ONE definition of "complex", shared with the plan-first gate. There used to be
+// a second, laxer copy on AgentController driving the step-1 planning injection,
+// `includeTaskTools` and phase routing's opening model — so a polite Japanese
+// request over 60 characters was "complex" for those three and "not complex" for
+// the gate. These tests pin the two ends of that disagreement.
+describe('agent loop — complexity heuristic is shared with TaskComplexity', () => {
+    // The exact shape the old 60-char Japanese rule fired on.
+    const ordinary = 'モニター画面のタスク一覧について、先頭以外はデフォルトで閉じた状態にする対応をお願いします';
+
+    it('does NOT inject the planning instruction for an ordinary Japanese request', async () => {
+        const h = makeHarness({ script: [finishStep('done'.padEnd(500, '.'))] });
+        await h.run(ordinary);
+        const firstCall = JSON.stringify(h.state.histories[0] || []);
+        expect(firstCall).not.toContain('[Planning Required]');
+    });
+
+    it('still injects it for genuinely enumerated multi-step work', async () => {
+        const h = makeHarness({ script: [finishStep('done'.padEnd(500, '.'))] });
+        await h.run('1. 認証を実装\n2. テストを追加\n3. ドキュメント更新');
+        const firstCall = JSON.stringify(h.state.histories[0] || []);
+        expect(firstCall).toContain('[Planning Required]');
+    });
+});
+
+// A sub-agent is JHAI's own work one level down, not an external app. It used to
+// satisfy both halves of the external test (caller 'Subagent' is not in the
+// interactive list, and _runSubtask passes `intent: {tier}` for model routing),
+// which turned OFF the two things that keep a child's context small.
+describe('agent loop — a sub-agent is not an external caller', () => {
+    async function runAsSubagent(h) {
+        const agent = await h.build();
+        agent.caller = 'Subagent';
+        agent._isSubagent = true;
+        agent.behaviorOverrides = {
+            enabled_tools: ['read_file', 'finish_task'],
+            max_iterations: 5,
+            intent: { tier: 'fast' },     // what made it look external
+        };
+        await agent.run('sub-task brief', '.', () => {}, () => {}, async () => true,
+            null, [], null, null, '', []);
+        return agent;
+    }
+
+    it('classifies itself as internal', async () => {
+        const h = makeHarness({ script: [finishStep('report'.padEnd(500, '.'))] });
+        const agent = await runAsSubagent(h);
+        expect(agent._isExternalCaller).toBe(false);
+    });
+
+    it('hides the connected app\'s live-editor MCP tools', async () => {
+        const h = makeHarness({ script: [finishStep('report'.padEnd(500, '.'))] });
+        const agent = await runAsSubagent(h);
+        const calls = agent.toolExecutor.setExcludeExternalAppMcpTools.mock.calls;
+        expect(calls.length).toBeGreaterThan(0);
+        expect(calls.every(([on]) => on === true)).toBe(true);
+    });
+
+    it('keeps MCP relevance pruning on, so a big server cannot flood the child', async () => {
+        const h = makeHarness({ script: [finishStep('report'.padEnd(500, '.'))] });
+        const agent = await runAsSubagent(h);
+        const [[query]] = agent.toolExecutor.setMcpRelevanceQuery.mock.calls;
+        expect(query).toBe('sub-task brief');
+    });
+});
+
 describe('agent loop — plan-first gate', () => {
     // Plan-first only engages for interactive callers on a fresh, complex turn.
     const complexPrompt = 'リファクタリングして、全体のアーキテクチャを見直し、テストも追加してください';

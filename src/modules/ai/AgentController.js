@@ -13,6 +13,18 @@ import {
 import { CompressionMetrics, fetchKey, factRetention } from './agent/CompressionMetrics.js';
 import { intentRegistry, resolveIntent } from './agent/IntentRegistry.js';
 import { normalizeSafetyLimits, resolveRecallArm } from './agent/SafetyLimits.js';
+// One definition of "is this multi-step change work" — see _looksComplex below
+// for why a second, laxer copy used to live in this file.
+import { looksComplex } from './agent/TaskComplexity.js';
+// The run's mutable counters, named so the phases below can take one argument
+// instead of closing over twenty free variables — see agent/RunState.js.
+import { RunState } from './agent/RunState.js';
+// The run's own narration. It was hard-coded Japanese, which made the agent's
+// live status the largest untranslatable surface in the app: switching the UI to
+// English relabelled the buttons and left every "why did it do that" in Japanese.
+// Each call passes the original literal as its fallback, so a missing key prints
+// what it always printed rather than a key name.
+import { t } from '../../i18n/index.js';
 import { initialPhase, advancePhase, modelForPhase, phaseLabel, PLAN_PHASE_MAX_STEPS } from './agent/ModelPhaseRouter.js';
 import { buildRecoveryHint } from './agent/RecoveryHints.js';
 import {
@@ -89,533 +101,86 @@ export class AgentController {
         this.steeringQueue.push(msg);
     }
 
+    /**
+     * Run one agent task to completion.
+     *
+     * Three phases. `_prepareRun` resolves everything the loop needs and must not
+     * be reordered into it: it re-reads the LLM connection, decides the plan-first
+     * gate, the model tier and the tool allowlist, and loads memory — all of which
+     * the first iteration already depends on. The loop is the state machine
+     * documented in `_prepareRun`. `_finishRun` turns whatever the loop left behind
+     * into the caller's result.
+     *
+     * The signature stays positional because TaskBridge, ChatView, the schedule
+     * runner and _runSubtask all call it, and an options object would be a change
+     * to every one of them for no behavioural gain.
+     */
     async run(prompt, workspacePath, onUpdate, onAgentStatus, onConfirm, clientContext = null, chatContext = [], onLog = null, abortSignal = null, kisContext = '', images = []) {
-        chatContext = chatContext || [];
-        images = images || [];
-        // A previous run must not leak its images into this one.
-        this._pendingToolImages = [];
-        this.toolExecutor.drainImages();
-        // Report a native tool-calling failure once per run (see _generateWithHistory).
-        this._nativeToolFailureNotified = false;
-        // How many leading steps re-attach the user's images to the LLM call. Covers
-        // an investigate→plan→build flow where the image is only "used" after step 1,
-        // while still bounding token cost on long tasks. (See use site below.)
-        const IMAGE_ATTACH_MAX_STEPS = 10;
+        const prep = await this._prepareRun({
+            prompt, workspacePath, onAgentStatus, chatContext, kisContext, images,
+        });
+        const st = prep.state;
+        const safety = prep.safety;
+        const isExternalCaller = prep.isExternalCaller;
+        const tierModels = prep.tierModels;
+        const isFreshTurn = prep.isFreshTurn;
+        const IMAGE_ATTACH_MAX_STEPS = prep.IMAGE_ATTACH_MAX_STEPS;
+        kisContext = prep.kisContext;
 
-        // Re-resolve the active LLM connection from settings every run so
-        // edits in Settings → LLM Connections take effect without a restart.
-        // (If the user removed the previously-active instance, this re-picks the first available one.)
-        await llmService.initFromConfig();
-
-        // Surface the tool-calling mode once, so it's clear WHY argument typos
-        // happen: in JSON-text mode the model hand-writes tool-call JSON (param
-        // keys, commas, quotes) → structural typos. Native function-calling has
-        // the API enforce the schema, eliminating that class of error.
-        try {
-            const nativeMode = llmService.supportsNativeTools?.();
-            const provider = llmService.getCurrentProvider?.() || '?';
-            onAgentStatus?.({
-                event: 'status', status: 'running',
-                message: nativeMode
-                    ? `Tool calling: native function API (${provider}) — argument schema enforced.`
-                    : `Tool calling: JSON-text mode (${provider} has no native function calls) — expect more argument typos. An OpenAI/Anthropic/Gemini/Azure connection enables schema-enforced calls.`
-            });
-        } catch (_) { /* non-critical */ }
-
-        // Phase 2: Goal-pinning — the CURRENT goal is always an explicitly
-        // labeled user message. On a CONTINUED task the chatContext carries the
-        // previous request/answer exchanges: label those requests as COMPLETED
-        // so the model never mistakes an old (already delivered) request for the
-        // active goal — the new message is the goal now.
-        let history = [];
-        if (chatContext.length > 0) {
-            history.push(...chatContext.map(m =>
-                (m.role === 'user' && typeof m.content === 'string'
-                    && !/^\[(Original Goal|Current Goal|Completed request)/.test(m.content))
-                    ? { ...m, content: `[Completed request — already delivered, do NOT redo] ${m.content}` }
-                    : m
-            ));
-            history.push({ role: 'user', content: `[Current Goal — NEW request; the completed requests above are context only] ${prompt}` });
-        } else {
-            history.push({ role: 'user', content: `[Original Goal] ${prompt}` });
-        }
-        
-        // ── Agent Loop State Machine ──────────────────────────────────
+        // ── Run-scoped facts live on `st`; the loop's own counters do not ──
         //
-        //  RUNNING  ──[tool call]──► RUNNING   (execute tools, continue)
-        //           ──[finish_task]─► DONE      (immediate exit)
-        //           ──[text only, 1st time]──► RUNNING (re-prompt once)
-        //           ──[text only, 3× in row]──► DONE   (model stuck)
-        //           ──[3× errors]──► DONE
-        //           ──[max iterations / budget / abort]──► DONE
-        //
-        //  Exit is ONLY via finish_task, safety limits, or the stuck-detector.
-        //  Text-only replies are never treated as completion on their own.
-        // ─────────────────────────────────────────────────────────────
+        // `st` (agent/RunState.js) owns what CROSSES a phase boundary — the step
+        // ceiling, the start time, the conversation — and supplies the loop's
+        // derived predicates. The counters below stay local on purpose: they are
+        // read and written on nearly every line of the loop, and moving 200-odd
+        // references onto `st.` buys nothing until the loop body itself is
+        // extracted into `_stepOnce(st)`. Doing the rename first would be a large
+        // diff through the agent's core loop for no change in what anyone can
+        // read or test. That extraction is the remaining step; this is the
+        // groundwork it needs, not a half-finished version of it.
+        const isUnlimited = st.isUnlimited;
+        const taskStartMs = st.startedAt;
+        let history = st.history;
         let iteration = 0;
         let finalResponse = '';
         let lastToolCallSignature = '';
         let repeatCount = 0;
         let jsonParseRetryCount = 0;
         let consecutiveErrorCount = 0;
-        let textOnlyCount = 0;   // consecutive text-only responses (no tool call, no finish_task)
+        let textOnlyCount = 0;
         let toolCallHistory = [];
         let usedToolTypes = new Set();
-        // Per-tool call counts (e.g. {read_file:3, write_file:1}) for the Result stats line.
         const toolUsageCounts = {};
-        // The LAST present_result envelope the agent delivered — this is the model's
-        // SUBSTANTIVE answer (markdown/table/etc.), distinct from the finish_task
-        // wrap-up thought. Preferred as the Result's headline content.
-        this._lastResultEnvelope = null;
-        // One-time soft nudge if finish_task is called with no deliverable (reset per run).
-        this._deliverableNudged = false;
-        // ── Sub-agent engine per-run state ────────────────────────────
-        // _isSubagent is set by the PARENT before child.run() — children never
-        // spawn further sub-agents and skip the review gate.
-        this._reviewDone = false;
-        this._subtaskCount = 0;
-        this._subtaskActive = 0;
-        // Tokens consumed by sub-agents (prompt+completion) — counted toward
-        // the PARENT's per-run token budget so delegation can't bypass the cap.
-        this._subtaskTokens = 0;
-        // Mirror of cumulativeTokens (parent's own LLM spend) readable from
-        // _runSubtask, for computing the remaining budget to hand to children.
-        this._spentTokens = 0;
-        // Write-ownership registry (Step 3): label → active write claim
-        // (scope array). Children whose claims overlap are SERIALIZED.
-        this._writeClaims = new Map();
-
-        // ── Efficiency instrumentation (step-reduction measurement) ───────
-        // Continuously measure the two dominant token sinks so a regression in
-        // re-read suppression or history compaction is VISIBLE in the per-task
-        // logs (📊 Efficiency Report at finish) instead of only surfacing as a
-        // vague "this took too many steps". Measurement only — never steers.
-        this._readCounts = new Map();   // normalized path → times read_file'd
-        // QUALITY of compression (not just volume): attributes each re-read to
-        // whether it crossed a compression boundary, so a policy that discards
-        // still-needed content shows up as a negative net saving.
-        this._compressionMetrics = new CompressionMetrics();
-        this._efficiency = {
-            reReads: 0,                 // read_file calls on an already-read path
-            reReadChars: 0,             // approx chars re-fetched (wasted context)
-            compressions: 0,            // _compressToolResultsInHistory invocations
-            compactions: 0,             // conversationMemory.compactHistory invocations
-            compactionCharsSaved: 0,    // history chars removed by compaction
-            promptTokens: 0,            // cumulative prompt (input) tokens
-            completionTokens: 0,        // cumulative completion (output) tokens
-        };
-
-        // ── Expand Intent/Recipe (behavior.intent) into behavior fields ──
-        // A named AI action declared by the calling app. Inline-object form
-        // { systemPrompt?, tools?[], resultKind? } is expanded here into the
-        // existing enabled_tools / extra_instructions plumbing so the rest of
-        // the loop needs no special-casing. (String-id resolution against a
-        // per-app intent registry is a future step.)
-        this._intentTier = null;   // reset per run (controller may be reused)
-        this._modelOverride = null;
-        this._deepModelId = null;
-        // ── Phase routing state (agent/ModelPhaseRouter.js) ──
-        this._phase = 'execute';        // plan → execute → review
-        this._phaseRouting = false;     // config gate; off ⇒ nothing below applies
-        this._phaseEscalated = false;   // long-run escalation promoted EXECUTE to deep
-        this._phaseTokens = { plan: 0, execute: 0, review: 0 };  // for the cost report
-        this._applyIntent();
-
-        // ── Load all Agent Safety Limits from config ─────────────────
-        // For each field: 0 / null / undefined / non-numeric is treated as
-        // "disabled / unlimited". Any positive integer is the hard threshold.
-        const safety = await this._loadSafetyLimits();
-        // Per-run token-budget override (used by the sub-agent engine to hand a
-        // child a SLICE of the parent's budget; also available to REST callers).
-        if (this.behaviorOverrides && Number.isFinite(this.behaviorOverrides.token_budget)
-            && this.behaviorOverrides.token_budget > 0) {
-            safety.tokenBudget = Math.floor(this.behaviorOverrides.token_budget);
-        }
-        // Apply the configurable history-budget ratio to the compaction logic.
-        conversationMemory.setBudgetConfig({ ratio: safety.historyBudgetRatio });
-        // Low temperature for agent edits (fewer transcription typos). Applied only
-        // when the active connection has no explicit temperature set (respects user config).
-        this._agentTemperature = safety.agentTemperature;
-        // External callers (apps invoking via the REST API, e.g. JHProjectManager)
-        // run UNATTENDED — there is no human watching to review/approve a plan. The
-        // plan-first gate's USER approval would therefore block forever (or be a
-        // meaningless click). So plan-first applies ONLY to interactive callers
-        // (JHAI's own chat = 'DirectChat', and scheduled runs). Computed once here
-        // and reused below for the tool-allowlist decision.
-        // NewTask = the Monitor "new task" modal (interactive, human-watched) →
-        // must keep the FULL built-in toolset like DirectChat. Without it the
-        // external-caller branch below strips tools to finish/present only, so a
-        // NewTask agent couldn't even read_file its workspace.
-        //
-        // NOTE: behavior.mcp_servers is deliberately NOT a marker of an external
-        // caller. JHAI's own UI (Schedule / NewTask) lets the user pick MCP servers
-        // for a run, and those runs are still interactive JHAI tasks that keep the
-        // full built-in toolset. External callers are identified by their caller
-        // name (REST API) or by behavior.intent (an external app's intent).
-        const INTERACTIVE_CALLERS = ['DirectChat', 'Schedule', 'NewTask'];
-        const isExternalCaller = (this.caller && !INTERACTIVE_CALLERS.includes(this.caller))
-            || !!(this.behaviorOverrides && this.behaviorOverrides.intent);
-        this._isExternalCaller = isExternalCaller;
-
-        // JHAI's OWN tasks (NewTask / Schedule / DirectChat / sub-agents) must NOT
-        // be offered MCP tools that a connected external app provides over its
-        // WebSocket link (JHEditor get_buffer / list_workspace_files / …). Those
-        // tools read the app's LIVE editor state — meaningless for a plain
-        // workspace task, and a common way the model burns steps. External callers
-        // keep them: that workspace access is the whole point of their task.
-        this.toolExecutor.setExcludeExternalAppMcpTools(!isExternalCaller);
-
-        // ── Plan-First approval gate ─────────────────────────────────────
-        // For a complex task, the agent must FIRST deliver a concrete plan and
-        // get the user's approval before it may edit files or run commands.
-        // Enforced in code (PLAN_GATED_TOOLS blocked until approved), not just
-        // by prompt. Config: safety.planMode = 'off' | 'auto' (complex only) |
-        // 'always'. ONLY interactive, human-watched runs (DirectChat/NewTask)
-        // and only the FIRST turn of a task — a continuation (chatContext
-        // present) is the approval reply itself, so it proceeds to implement.
-        // Sub-agents and unattended/external callers never plan-gate (no human
-        // to approve → would deadlock). A per-request bypass phrase skips it.
-        const planMode = safety.planMode || 'auto';
-        const isFreshTurn = !Array.isArray(chatContext) || chatContext.length === 0;
-        // A continuation whose latest message is a plan-revision request (the
-        // user picked the ✏️ "Request changes" option on the approval card and typed
-        // what they want changed) must RE-OPEN the plan-first gate: the run should
-        // revise the plan and re-present it — NOT dive straight into editing.
-        // Without this, any continuation (chatContext present) silently proceeds to
-        // implement, which is exactly the reported "修正したいでも実装される".
-        // NOTE: the revision text arrives as the new `prompt` (continue_task passes
-        // the user's reply as prompt and rebuilds chatContext from PAST completes),
-        // so it is looked for in `prompt`, with a fallback to the last user turn
-        // of chatContext for callers that attach the reply there instead.
-        const lastUserMsg = isFreshTurn ? '' : String([...chatContext].reverse().find(m => m?.role === 'user' && m?.content)?.content || '');
-        const isPlanRevisionTurn = !isFreshTurn && (isPlanRevision(String(prompt || '')) || isPlanRevision(lastUserMsg));
-        // The gate decision itself (caller allowlist, bypass phrase, complexity
-        // scoring) lives in SafetyGuards.planFirstGate — see its unit tests. The
-        // revision text it returns is what the user typed, stripped of markers.
-        const gate = planFirstGate({
-            prompt,
-            caller: this.caller,
-            isSubagent: this._isSubagent,
-            isFreshTurn,
-            isPlanRevisionTurn,
-            planMode,
-            lastUserMsg,
-        });
-        this._planRevisionText = gate.revisionText;
-        this._planFirstActive = gate.active;
-        this._planApproved = gate.approved;
-        if (this._planFirstActive) {
-            onAgentStatus?.({ event: 'status', status: 'running', message: '📋 計画優先モード — まず計画を提示し承認を得ます / Plan-first: proposing a plan for approval' });
-        }
-        //
-        // Model routing (fast/deep tiers) + auto-escalation. fast = default for
-        // quick/app-intent tasks; deep = complex tasks and long-run escalation.
-        //
-        // EXCEPTION — interactive chat (DirectChat): the user explicitly picks a
-        // model in the chat dropdown (→ llmService.getCurrentModel()). That choice
-        // MUST win, so tier routing / auto-escalation is DISABLED here. Otherwise a
-        // globally-configured Fast/Deep tier model silently overrides the selection
-        // — the reported symptom: the UI shows "GEMINI" but DeepSeek (the Fast tier)
-        // actually runs. Tier routing still applies to app-intent / external /
-        // scheduled callers, which have no live model picker.
-        const userPicksModel = this.caller === 'DirectChat';
-        const tierModels = userPicksModel
-            ? { fast: null, deep: null, initial: null }
-            : await this._resolveTierModels();
-        this._deepModelId = tierModels.deep;
-        this._modelOverride = tierModels.initial || null;
-        // Kept for the run's AUXILIARY calls (result summary, file descriptions,
-        // memory extraction). Those are JSON/boilerplate generators — running them
-        // on the active deep model costs seconds of post-run latency for nothing.
-        this._fastModelId = tierModels.fast || null;
-        // 0 ⇒ never promote on step count alone. See SAFETY_DEFAULTS.escalateAtStep
-        // for why the old expression promoted every run at step 15.
-        this._escalateAtStep = safety.escalateAtStep > 0 ? safety.escalateAtStep : 0;
-
-        // ── Phase routing ────────────────────────────────────────────────
-        // Same tier ids, but re-decided as the run moves plan → execute →
-        // review instead of once at the start. Requires BOTH tiers: with only
-        // one configured every phase resolves to the same model, so the run
-        // would pay the switching complexity for no saving.
-        this._phaseRouting = safety.phaseRouting === 'on'
-            && !userPicksModel
-            && !this._isSubagent          // a sub-agent is ONE phase of the parent
-            && !!tierModels.fast && !!tierModels.deep;
-        if (this._phaseRouting) {
-            this._phase = initialPhase({
-                enabled: true,
-                freshTurn: isFreshTurn,
-                planFirst: this._planFirstActive,
-                complex: this._looksComplex(prompt),
-            });
-            const m = modelForPhase(this._phase, tierModels, { enabled: true });
-            if (m) this._modelOverride = m;
-            // The opening phase, structured — without this the Dashboard's rail
-            // would not know which phase a run is in until the FIRST switch.
-            onAgentStatus?.({
-                event: 'phase',
-                phase: this._phase,
-                model: this._modelOverride,
-                from: null,
-                escalated: false,
-                reason: this._phase === 'plan'
-                    ? (this._planFirstActive
-                        ? 'plan-first 承認ゲート → 計画は deep で実施'
-                        : 'タスクが複雑と判定 → 計画は deep で実施')
-                    : (isFreshTurn
-                        ? '単発タスク → 実行フェーズを fast で開始'
-                        : '継続ターン(計画済み) → 実行フェーズで開始'),
-                tokens: { ...this._phaseTokens },
-            });
-            onAgentStatus?.({
-                event: 'status', status: 'running',
-                message: `🧭 フェーズ別ルーティング ON — ${phaseLabel(this._phase)}: ${this._modelOverride}`,
-            });
-        } else if (this._modelOverride) {
-            onAgentStatus?.({ event: 'status', status: 'running', message: `🧭 モデル: ${this._modelOverride}` });
-        }
-
-        // ── Vision routing ──────────────────────────────────────────────
-        // If images are attached, the active/selected model MUST be vision-capable,
-        // otherwise the Rust layer drops them with a note (symptom: "the current
-        // model cannot read the image"). App tasks route to the FAST tier by
-        // default, which is often a cheap text-only model — so auto-switch to any
-        // configured vision-capable model, and if none exists, warn loudly instead
-        // of silently ignoring the image.
-        if (images.length > 0) {
-            const chosen = this._modelOverride || llmService.getCurrentModel();
-            const chosenOk = llmService.modelSupportsVision?.(chosen);
-            if (!chosenOk) {
-                const candidates = [
-                    this.behaviorOverrides?.model,
-                    tierModels.deep,
-                    tierModels.fast,
-                    llmService.getCurrentModel(),
-                ].filter(Boolean);
-                const visionModel = candidates.find(id => llmService.modelSupportsVision?.(id));
-                if (visionModel) {
-                    this._modelOverride = visionModel;
-                    onAgentStatus?.({ event: 'status', status: 'running', message: `🖼 画像入力のためビジョン対応モデルに切替: ${visionModel}` });
-                } else {
-                    onAgentStatus?.({ event: 'status', status: 'running', message: `⚠️ ${images.length}枚の画像が添付されていますが、設定中のモデル(${chosen || '未設定'})はビジョン非対応です。画像は無視されます。Settings → LLM Connections で GPT-4o / Claude / Gemini などビジョン対応モデルを選択（またはFast/Deep tierに設定）してください。` });
-                }
-            } else {
-                onAgentStatus?.({ event: 'status', status: 'running', message: `🖼 ${images.length}枚の画像を受信（モデル ${chosen} はビジョン対応）。` });
-            }
-        }
-        // Load long-term memory (episodic summaries + durable facts) from disk so
-        // ContextBuilder can inject relevant context into the system prompt. Cheap
-        // and best-effort; getPromptContext degrades to '' if nothing is loaded.
-        try {
-            await conversationMemory.loadMemory(workspacePath);
-        } catch (e) {
-            console.warn('AgentController: loadMemory failed:', e);
-        }
-        this.baseMaxIterations = safety.maxSteps;
-        // Per-task override from behavior (e.g. REST API caller). 0 stays unlimited.
-        if (this.behaviorOverrides && Number.isFinite(this.behaviorOverrides.max_iterations)) {
-            this.baseMaxIterations = Math.max(0, this.behaviorOverrides.max_iterations);
-        }
-        this.maxIterations = this.baseMaxIterations;
-
-        // Convenience flag for the loop-exit / progress-reporting sites.
-        const isUnlimited = this.maxIterations <= 0;
-
-        // ── Per-run safety trackers (reset each run) ─────────────────
-        const taskStartMs = Date.now();
         let cumulativeTokens = 0;
         let tokenBudgetWarned = false;
         let wallClockWarned = false;
-        // Non-null when a LIMIT ended the run rather than the agent deciding it was
-        // done. Returned to the caller so a capped run cannot masquerade as a clean
-        // completion — see agent/stopReason.js.
         let stoppedBy = null;
         let identicalWarned = false;
         let cycleWarned = false;
         let noProgressWarned = false;
-        // bool[] — one entry per iteration: true if any mutating tool was called.
         const progressHistory = [];
-        // Tools that count as "real progress" for the no-progress detector.
-        // Anything not in this list (read_file/grep_search/list_files/open_file)
-        // is exploratory and does NOT count. MUTATING_TOOLS is imported from
-        // agent/SafetyGuards.js (P3 split).
 
-        await this.toolExecutor.startSession(workspacePath);
-
-        // RE-APPLY the external-app (WS) MCP exclusion AFTER startSession. The
-        // session reset wipes every per-run flag (ToolExecutor.startSession resets
-        // _excludeExternalAppMcpTools to false), and the call above at the top of
-        // run() is therefore clobbered — leaving JHAI's OWN tasks (NewTask /
-        // Schedule / DirectChat) offering the connected external app's WS MCP
-        // tools (JHEditor read_workspace_file / list_workspace_files / …) to the
-        // LLM every run. Re-applying here, alongside the other per-run MCP
-        // settings (server filter / context / relevance query), keeps the flag in
-        // step with the session that is actually about to run.
-        this.toolExecutor.setExcludeExternalAppMcpTools(!isExternalCaller);
-
-        // Failure trace for this session. Created after startSession because the
-        // session id names the file. Disables itself when there is no workspace.
-        this._trace = new TraceRecorder({
-            workspacePath,
-            sessionId: this.toolExecutor.getCurrentSessionId(),
-            invoke,
-        });
-
-        // What earlier sessions in this workspace learned. Loaded once; recall is
-        // then in-memory, so a hit costs no I/O and no LLM call.
-        this._cards = new CardStore({ workspacePath, invoke });
-        await this._cards.load();
-        // Which arm this run belongs to. Under 'auto' it is drawn at random, so
-        // the control group forms itself instead of depending on someone
-        // remembering to flip a switch. Learning runs in both arms.
-        this._recallOn = resolveRecallArm(safety.memoryRecall);
-        /** [{ id, at, recipe }] — what was surfaced, and when. Feeds followThrough. */
-        this._cardsShownLog = [];
-        this._memoryChars = 0;
-
-        // Invalidate ContextBuilder's static cache so the new session gets a
-        // fresh build (picks up any persona/config changes since last run).
-        contextBuilder.invalidateStaticCache();
-
-        // Non-blocking cleanup of old session directories (>30 days).
-        // Runs in the background — failures are silently ignored.
-        this._cleanupOldSessions(workspacePath).catch(() => {});
-
-        // Determine tool allowlist behavior. (isExternalCaller computed above.)
-        // NOTE: for interactive callers that picked MCP servers (Schedule/NewTask),
-        // mcp_servers is NOT external — so the built-in toolset is preserved and
-        // the selected servers' tools are surfaced through the normal MCP filter.
-        let enabledTools = this.behaviorOverrides?.enabled_tools;
-
-        if (isExternalCaller && (enabledTools === null || enabledTools === undefined)) {
-            // External callers default to restricting native tools to only finish/meta tools,
-            // while bypassing allowlist checks for MCP tools (provided by the workspace side).
-            enabledTools = [];
-            this.toolExecutor._mcpBypassesAllowlist = true;
-        } else if (isExternalCaller && Array.isArray(enabledTools)) {
-            // An EXPLICIT enabled_tools list from an external caller scopes BOTH built-in
-            // AND MCP tools — otherwise workspace-side MCP tools (list_workspace_files,
-            // read_workspace_file, …) are all advertised and the LLM calls tools that are
-            // not actually enabled for the task. Only the unspecified case above bypasses.
-            this.toolExecutor._mcpBypassesAllowlist = false;
-        }
-
-        if (Array.isArray(enabledTools)) {
-            // Add task_progress only for complex tasks; single-shot app intents
-            // stay minimal (finish_task + present_result) to avoid over-planning.
-            this.toolExecutor.setToolAllowlist(enabledTools, {
-                includeTaskTools: this._looksComplex(prompt),
-            });
-        }
-        // Write scope (Step 3): hard-restrict file-mutating tools to the given
-        // paths/globs. Set for sub-agents by _runSubtask; also honored for REST
-        // callers that pass behavior.write_scope.
-        if (Array.isArray(this.behaviorOverrides?.write_scope) && this.behaviorOverrides.write_scope.length > 0) {
-            this.toolExecutor.setWriteScope(this.behaviorOverrides.write_scope);
-        }
-        // Apply MCP server filter (if any) — restricts which MCP servers contribute tools.
-        if (this.behaviorOverrides && Array.isArray(this.behaviorOverrides.mcp_servers)) {
-            this.toolExecutor.setMcpServerFilter(this.behaviorOverrides.mcp_servers);
-        } else {
-            this.toolExecutor.setMcpServerFilter(null);
-        }
-
-        // Apply per-task MCP context (e.g. {app,windowId,documentId}) — injected
-        // into tools/call _meta.jhai so app-hosted MCP servers resolve live state.
-        this.toolExecutor.setMcpContext(this.behaviorOverrides ? this.behaviorOverrides.mcp_context : null);
-
-        // ── MCP tool pruning (interactive callers only) ─────────────────
-        // Big MCP servers (e.g. Backlog: 58 tools) used to ship EVERY schema to
-        // the LLM each step. With the prompt as relevance query, only the top-5
-        // most relevant MCP tools are sent; the rest are omitted for this run.
-        // External app callers keep the old behavior — their tool set is already
-        // scoped by the intent (enabled_tools / mcp_servers).
-        this.toolExecutor.setMcpRelevanceQuery(isExternalCaller ? null : prompt);
-
-        // ── run_subtask engine (docs/design/subagent-architecture.md) ──────
-        // Inject the sub-agent runner so the generic run_subtask tool works.
-        // Parent runs only: children must not recurse (their allowlists exclude
-        // run_subtask AND no runner is attached, so the tool isn't even
-        // presented to them).
-        if (!this._isSubagent) {
-            this.toolExecutor.setSubtaskRunner((args) =>
-                this._runSubtask(args, { workspacePath, onAgentStatus, onConfirm, onLog, abortSignal, safety }));
-        }
-
-        // Bind tool executor event forwarding
-        this.toolExecutor.onToolEvent = (event, data) => {
-            // Capture the model's delivered answer (present_result) for the Result view.
-            // Guard against a common misfire: some models call present_result twice —
-            // a good one, then an empty follow-up (e.g. kind:"answer", text:"") — which
-            // would otherwise clobber the real deliverable. Keep the earlier non-empty
-            // envelope unless the new one actually carries content.
-            if (event === 'result' && data?.envelope) {
-                const incoming = data.envelope;
-                if (!this._lastResultEnvelope
-                    || envelopeHasContent(incoming)
-                    || !envelopeHasContent(this._lastResultEnvelope)) {
-                    this._lastResultEnvelope = incoming;
-                }
-            }
-            onAgentStatus?.({ event, ...data });
-        };
-
-        // Phase 4: Load KIs (Skills & Workflows) if not provided
-        if (!kisContext) {
-            try {
-                const root = workspacePath;
-                if (root) {
-                    let loadedKis = [];
-                    try {
-                        const skillsData = await invoke('read_file', { path: `${root}/.agent/skills.json` });
-                        if (skillsData) loadedKis.push('--- SKILLS ---\n' + skillsData);
-                    } catch (e) { /* ignore */ }
-                    
-                    try {
-                        const workflowsData = await invoke('read_file', { path: `${root}/.agent/workflows.json` });
-                        if (workflowsData) loadedKis.push('--- WORKFLOWS ---\n' + workflowsData);
-                    } catch (e) { /* ignore */ }
-
-                    if (loadedKis.length > 0) {
-                        kisContext = loadedKis.join('\n\n');
-                        onAgentStatus?.({ event: 'status', status: 'running', message: 'Loaded project knowledge items.' });
-                    }
-                }
-            } catch (e) {
-                console.warn('Failed to load KIs:', e);
-            }
-        }
-
-        while (isUnlimited || iteration < this.maxIterations) {
+        while (st.hasStepsLeft()) {
             if (abortSignal?.aborted) {
                 onAgentStatus?.({ event: 'status', status: 'aborted', message: 'Process aborted by user.' });
                 break;
             }
 
-            // Sync task_plan.md check
-            try {
-                const path = `${this.toolExecutor.getSessionArtifactDir(workspacePath)}/task_plan.md`;
-                const fileData = await invoke('read_file', { path });
-                if (fileData) {
-                    onAgentStatus?.({ event: 'task_plan_sync', content: fileData });
-                }
-            } catch (e) { }
+            // The step counter lives on `st` because the loop condition
+            // (`st.hasStepsLeft()`) reads it; `iteration` mirrors it for the
+            // ~40 places in the body that report or record the step number.
+            iteration = st.nextIteration();
 
-            iteration++;
-
-            // For unlimited mode, progress can't be a real ratio — use a soft
-            // asymptotic curve so the UI bar still creeps forward without ever
-            // reaching 100% prematurely. (1 - 50/(iteration+50) gives 0.5 at
-            // step 50, ~0.66 at 100, ~0.8 at 200, ~0.95 at 950.)
-            const progress = isUnlimited
-                ? (1 - 50 / (iteration + 50))
-                : iteration / this.maxIterations;
+            // Unlimited runs have no real ratio, so RunState.progress() gives a
+            // soft asymptotic curve that creeps forward without ever claiming
+            // completion — 0.5 at step 50, ~0.8 at 200.
+            const progress = st.progress();
             onAgentStatus?.({ event: 'status', status: 'running', progress, message: `Thinking... (step ${iteration})` });
 
             // ── Wall-clock budget enforcement ──────────────────────────
             // Hard stop at 100% of budget. Soft reminder once at 80%.
             {
-                const elapsedMs = Date.now() - taskStartMs;
+                const elapsedMs = st.elapsedMs();
                 const wallClock = evaluateWallClock({
                     elapsedMs,
                     budgetMinutes: safety.wallClockMinutes,
@@ -654,13 +219,13 @@ export class AgentController {
             if (this._phaseRouting) {
                 if (this._escalateAtStep > 0 && !this._phaseEscalated && iteration >= this._escalateAtStep) {
                     this._phaseEscalated = true;
-                    onAgentStatus?.({ event: 'status', status: 'running', message: `🧠 実装フェーズを上位モデル(deep)に昇格 — step ${iteration} 到達` });
+                    onAgentStatus?.({ event: 'status', status: 'running', message: t('agent.escalate.phase', { step: iteration }, `🧠 実装フェーズを上位モデル(deep)に昇格 — step ${iteration} 到達`) });
                     this._phaseEvent('step', { iteration }, onAgentStatus);
                 }
             } else if (this._escalateAtStep > 0 && this._deepModelId && this._modelOverride !== this._deepModelId
                 && iteration >= this._escalateAtStep) {
                 this._modelOverride = this._deepModelId;
-                onAgentStatus?.({ event: 'status', status: 'running', message: `🧠 上位モデル(deep)に切替 — step ${iteration} 到達` });
+                onAgentStatus?.({ event: 'status', status: 'running', message: t('agent.escalate.tier', { step: iteration }, `🧠 上位モデル(deep)に切替 — step ${iteration} 到達`) });
             }
 
             // ── Token budget enforcement (cumulativeTokens updated below per LLM call) ──
@@ -751,7 +316,7 @@ export class AgentController {
                     if (!shadow) {
                         history.push({ role: 'user', content: brief });
                         this._emitRecall(onAgentStatus, cards, iteration, 'brief');
-                        onAgentStatus?.({ event: 'status', status: 'running', message: '🧠 過去セッションの学習を参照' });
+                        onAgentStatus?.({ event: 'status', status: 'running', message: t('agent.memory.recalled', null, '🧠 過去セッションの学習を参照') });
                     }
                 }
             }
@@ -1250,7 +815,7 @@ export class AgentController {
                     if (gated.length > 0) {
                         const names = [...new Set(gated.map(g => g.name))].join(', ');
                         const pa = planApprovalQuestion();
-                        onAgentStatus?.({ event: 'status', status: 'running', message: `📋 計画承認待ち — 編集/コマンドをブロック中 (${names})` });
+                        onAgentStatus?.({ event: 'status', status: 'running', message: t('agent.planFirst.blocked', { tools: names }, `📋 計画承認待ち — 編集/コマンドをブロック中 (${names})`) });
                         history.push({ role: 'assistant', content: response });
                         history.push({
                             role: 'user',
@@ -1740,6 +1305,32 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
             }
         }
 
+        return this._finishRun({
+            prompt, workspacePath, onAgentStatus, onLog,
+            iteration, finalResponse, stoppedBy, isUnlimited,
+            toolUsageCounts, taskStartMs, cumulativeTokens,
+        });
+    }
+
+
+    /**
+     * Turn whatever the loop left behind into the caller's result.
+     *
+     * Extracted from the tail of `run()`. The order here is load-bearing: the
+     * step-limit verdict is decided before the summary is built (it appends to
+     * finalResponse), the session artifacts are captured before `endSession()`
+     * nulls the workspace path, and long-term memory is fired WITHOUT await on
+     * purpose - see the note at that call.
+     *
+     * Takes the loop's final values explicitly rather than reading them off a
+     * state object: the loop still works in local variables, and passing what it
+     * actually ended with is honest about that.
+     */
+    async _finishRun({
+        prompt, workspacePath, onAgentStatus, onLog,
+        iteration, finalResponse, stoppedBy, isUnlimited,
+        toolUsageCounts, taskStartMs, cumulativeTokens,
+    }) {
         if (!isUnlimited && iteration >= this.maxIterations) {
             // Previously this appended a one-line parenthetical and completed
             // silently — no status event at all — so the run simply appeared to halt.
@@ -1867,6 +1458,559 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
      * @param {Array}  modifiedFiles - [{ path, original, current }] from ToolExecutor
      * @returns {Promise<{summary:string, files:Array<{path,action,description}>}>}
      */
+    /**
+     * Everything that must be true before the first LLM call.
+     *
+     * Extracted from the top of `run()`, where it was 516 lines of setup sharing
+     * scope with the 1,100-line loop that followed — the reason neither could be
+     * read or changed on its own. Behaviour is unchanged: this is the same code in
+     * the same order, returning what the loop used to close over.
+     *
+     * Order matters and is not arbitrary — the connection must be re-read before
+     * the tier is resolved, the tier before the vision check, the caller class
+     * before the tool allowlist, and the session must be started before the trace
+     * and card store name their files.
+     *
+     * ── Agent Loop State Machine ──────────────────────────────────
+     *
+     *  RUNNING  ──[tool call]──► RUNNING   (execute tools, continue)
+     *           ──[finish_task]─► DONE      (immediate exit)
+     *           ──[text only, 1st time]──► RUNNING (re-prompt once)
+     *           ──[text only, 3× in row]──► DONE   (model stuck)
+     *           ──[3× errors]──► DONE
+     *           ──[max iterations / budget / abort]──► DONE
+     *
+     *  Exit is ONLY via finish_task, safety limits, or the stuck-detector.
+     *  Text-only replies are never treated as completion on their own.
+     * ─────────────────────────────────────────────────────────────
+     *
+     * @returns {Promise<object>} the loop's starting context
+     */
+    async _prepareRun({ prompt, workspacePath, onAgentStatus, chatContext, kisContext, images }) {
+        chatContext = chatContext || [];
+        images = images || [];
+        // A previous run must not leak its images into this one.
+        this._pendingToolImages = [];
+        this.toolExecutor.drainImages();
+        // Report a native tool-calling failure once per run (see _generateWithHistory).
+        this._nativeToolFailureNotified = false;
+        // How many leading steps re-attach the user's images to the LLM call. Covers
+        // an investigate→plan→build flow where the image is only "used" after step 1,
+        // while still bounding token cost on long tasks. (See use site below.)
+        const IMAGE_ATTACH_MAX_STEPS = 10;
+
+        // Re-resolve the active LLM connection from settings every run so
+        // edits in Settings → LLM Connections take effect without a restart.
+        // (If the user removed the previously-active instance, this re-picks the first available one.)
+        await llmService.initFromConfig();
+
+        // Surface the tool-calling mode once, so it's clear WHY argument typos
+        // happen: in JSON-text mode the model hand-writes tool-call JSON (param
+        // keys, commas, quotes) → structural typos. Native function-calling has
+        // the API enforce the schema, eliminating that class of error.
+        try {
+            const nativeMode = llmService.supportsNativeTools?.();
+            const provider = llmService.getCurrentProvider?.() || '?';
+            onAgentStatus?.({
+                event: 'status', status: 'running',
+                message: nativeMode
+                    ? `Tool calling: native function API (${provider}) — argument schema enforced.`
+                    : `Tool calling: JSON-text mode (${provider} has no native function calls) — expect more argument typos. An OpenAI/Anthropic/Gemini/Azure connection enables schema-enforced calls.`
+            });
+        } catch (_) { /* non-critical */ }
+
+        // Phase 2: Goal-pinning — the CURRENT goal is always an explicitly
+        // labeled user message. On a CONTINUED task the chatContext carries the
+        // previous request/answer exchanges: label those requests as COMPLETED
+        // so the model never mistakes an old (already delivered) request for the
+        // active goal — the new message is the goal now.
+        let history = [];
+        if (chatContext.length > 0) {
+            history.push(...chatContext.map(m =>
+                (m.role === 'user' && typeof m.content === 'string'
+                    && !/^\[(Original Goal|Current Goal|Completed request)/.test(m.content))
+                    ? { ...m, content: `[Completed request — already delivered, do NOT redo] ${m.content}` }
+                    : m
+            ));
+            history.push({ role: 'user', content: `[Current Goal — NEW request; the completed requests above are context only] ${prompt}` });
+        } else {
+            history.push({ role: 'user', content: `[Original Goal] ${prompt}` });
+        }
+        
+        // ── Agent Loop State Machine ──────────────────────────────────
+        //
+        //  RUNNING  ──[tool call]──► RUNNING   (execute tools, continue)
+        //           ──[finish_task]─► DONE      (immediate exit)
+        //           ──[text only, 1st time]──► RUNNING (re-prompt once)
+        //           ──[text only, 3× in row]──► DONE   (model stuck)
+        //           ──[3× errors]──► DONE
+        //           ──[max iterations / budget / abort]──► DONE
+        //
+        //  Exit is ONLY via finish_task, safety limits, or the stuck-detector.
+        //  Text-only replies are never treated as completion on their own.
+        // ─────────────────────────────────────────────────────────────
+        let iteration = 0;
+        let finalResponse = '';
+        let lastToolCallSignature = '';
+        let repeatCount = 0;
+        let jsonParseRetryCount = 0;
+        let consecutiveErrorCount = 0;
+        let textOnlyCount = 0;   // consecutive text-only responses (no tool call, no finish_task)
+        let toolCallHistory = [];
+        let usedToolTypes = new Set();
+        // Per-tool call counts (e.g. {read_file:3, write_file:1}) for the Result stats line.
+        const toolUsageCounts = {};
+        // The LAST present_result envelope the agent delivered — this is the model's
+        // SUBSTANTIVE answer (markdown/table/etc.), distinct from the finish_task
+        // wrap-up thought. Preferred as the Result's headline content.
+        this._lastResultEnvelope = null;
+        // One-time soft nudge if finish_task is called with no deliverable (reset per run).
+        this._deliverableNudged = false;
+        // ── Sub-agent engine per-run state ────────────────────────────
+        // _isSubagent is set by the PARENT before child.run() — children never
+        // spawn further sub-agents and skip the review gate.
+        this._reviewDone = false;
+        this._subtaskCount = 0;
+        this._subtaskActive = 0;
+        // Tokens consumed by sub-agents (prompt+completion) — counted toward
+        // the PARENT's per-run token budget so delegation can't bypass the cap.
+        this._subtaskTokens = 0;
+        // Mirror of cumulativeTokens (parent's own LLM spend) readable from
+        // _runSubtask, for computing the remaining budget to hand to children.
+        this._spentTokens = 0;
+        // Write-ownership registry (Step 3): label → active write claim
+        // (scope array). Children whose claims overlap are SERIALIZED.
+        this._writeClaims = new Map();
+
+        // ── Efficiency instrumentation (step-reduction measurement) ───────
+        // Continuously measure the two dominant token sinks so a regression in
+        // re-read suppression or history compaction is VISIBLE in the per-task
+        // logs (📊 Efficiency Report at finish) instead of only surfacing as a
+        // vague "this took too many steps". Measurement only — never steers.
+        this._readCounts = new Map();   // normalized path → times read_file'd
+        // QUALITY of compression (not just volume): attributes each re-read to
+        // whether it crossed a compression boundary, so a policy that discards
+        // still-needed content shows up as a negative net saving.
+        this._compressionMetrics = new CompressionMetrics();
+        this._efficiency = {
+            reReads: 0,                 // read_file calls on an already-read path
+            reReadChars: 0,             // approx chars re-fetched (wasted context)
+            compressions: 0,            // _compressToolResultsInHistory invocations
+            compactions: 0,             // conversationMemory.compactHistory invocations
+            compactionCharsSaved: 0,    // history chars removed by compaction
+            promptTokens: 0,            // cumulative prompt (input) tokens
+            completionTokens: 0,        // cumulative completion (output) tokens
+        };
+
+        // ── Expand Intent/Recipe (behavior.intent) into behavior fields ──
+        // A named AI action declared by the calling app. Inline-object form
+        // { systemPrompt?, tools?[], resultKind? } is expanded here into the
+        // existing enabled_tools / extra_instructions plumbing so the rest of
+        // the loop needs no special-casing. (String-id resolution against a
+        // per-app intent registry is a future step.)
+        this._intentTier = null;   // reset per run (controller may be reused)
+        this._modelOverride = null;
+        this._deepModelId = null;
+        // ── Phase routing state (agent/ModelPhaseRouter.js) ──
+        this._phase = 'execute';        // plan → execute → review
+        this._phaseRouting = false;     // config gate; off ⇒ nothing below applies
+        this._phaseEscalated = false;   // long-run escalation promoted EXECUTE to deep
+        this._phaseTokens = { plan: 0, execute: 0, review: 0 };  // for the cost report
+        this._applyIntent();
+
+        // ── Load all Agent Safety Limits from config ─────────────────
+        // For each field: 0 / null / undefined / non-numeric is treated as
+        // "disabled / unlimited". Any positive integer is the hard threshold.
+        const safety = await this._loadSafetyLimits();
+        // Per-run token-budget override (used by the sub-agent engine to hand a
+        // child a SLICE of the parent's budget; also available to REST callers).
+        if (this.behaviorOverrides && Number.isFinite(this.behaviorOverrides.token_budget)
+            && this.behaviorOverrides.token_budget > 0) {
+            safety.tokenBudget = Math.floor(this.behaviorOverrides.token_budget);
+        }
+        // Apply the configurable history-budget ratio to the compaction logic.
+        conversationMemory.setBudgetConfig({ ratio: safety.historyBudgetRatio });
+        // Episodic (past-session) injection. `setEpisodeInjectionConfig` existed
+        // with no caller at all outside tests — the knob was built and never
+        // connected, so the layer's cost was not adjustable by anyone. Now the
+        // setting drives it; the default is off (agent-memory-layers.md §7).
+        conversationMemory.setEpisodeInjectionConfig({ enabled: safety.episodeInjection === 'on' });
+        // Low temperature for agent edits (fewer transcription typos). Applied only
+        // when the active connection has no explicit temperature set (respects user config).
+        this._agentTemperature = safety.agentTemperature;
+        // External callers (apps invoking via the REST API, e.g. JHProjectManager)
+        // run UNATTENDED — there is no human watching to review/approve a plan. The
+        // plan-first gate's USER approval would therefore block forever (or be a
+        // meaningless click). So plan-first applies ONLY to interactive callers
+        // (JHAI's own chat = 'DirectChat', and scheduled runs). Computed once here
+        // and reused below for the tool-allowlist decision.
+        // NewTask = the Monitor "new task" modal (interactive, human-watched) →
+        // must keep the FULL built-in toolset like DirectChat. Without it the
+        // external-caller branch below strips tools to finish/present only, so a
+        // NewTask agent couldn't even read_file its workspace.
+        //
+        // NOTE: behavior.mcp_servers is deliberately NOT a marker of an external
+        // caller. JHAI's own UI (Schedule / NewTask) lets the user pick MCP servers
+        // for a run, and those runs are still interactive JHAI tasks that keep the
+        // full built-in toolset. External callers are identified by their caller
+        // name (REST API) or by behavior.intent (an external app's intent).
+        const INTERACTIVE_CALLERS = ['DirectChat', 'Schedule', 'NewTask'];
+        // A SUB-AGENT is never external. It is JHAI's own work, one level down —
+        // but it satisfied BOTH of the tests below (caller 'Subagent' is not in
+        // the interactive list, and _runSubtask passes `intent: {tier}` for model
+        // routing), so it was classified as an external app. Two consequences,
+        // both contradicting the documented intent in ToolExecutor.setExcludeExternalAppMcpTools:
+        //   • it was offered the connected app's live-editor MCP tools
+        //     (JHEditor get_buffer / list_workspace_files), which mean nothing
+        //     to a scoped sub-task;
+        //   • MCP relevance pruning was skipped, so every child received EVERY
+        //     MCP tool with full schemas on every step. With a 58-tool server
+        //     connected, delegating cost more context than doing the work inline
+        //     — inverting the reason run_subtask exists.
+        const isExternalCaller = !this._isSubagent
+            && ((this.caller && !INTERACTIVE_CALLERS.includes(this.caller))
+                || !!(this.behaviorOverrides && this.behaviorOverrides.intent));
+        this._isExternalCaller = isExternalCaller;
+
+        // JHAI's OWN tasks (NewTask / Schedule / DirectChat / sub-agents) must NOT
+        // be offered MCP tools that a connected external app provides over its
+        // WebSocket link (JHEditor get_buffer / list_workspace_files / …). Those
+        // tools read the app's LIVE editor state — meaningless for a plain
+        // workspace task, and a common way the model burns steps. External callers
+        // keep them: that workspace access is the whole point of their task.
+        this.toolExecutor.setExcludeExternalAppMcpTools(!isExternalCaller);
+
+        // ── Plan-First approval gate ─────────────────────────────────────
+        // For a complex task, the agent must FIRST deliver a concrete plan and
+        // get the user's approval before it may edit files or run commands.
+        // Enforced in code (PLAN_GATED_TOOLS blocked until approved), not just
+        // by prompt. Config: safety.planMode = 'off' | 'auto' (complex only) |
+        // 'always'. ONLY interactive, human-watched runs (DirectChat/NewTask)
+        // and only the FIRST turn of a task — a continuation (chatContext
+        // present) is the approval reply itself, so it proceeds to implement.
+        // Sub-agents and unattended/external callers never plan-gate (no human
+        // to approve → would deadlock). A per-request bypass phrase skips it.
+        const planMode = safety.planMode || 'auto';
+        const isFreshTurn = !Array.isArray(chatContext) || chatContext.length === 0;
+        // A continuation whose latest message is a plan-revision request (the
+        // user picked the ✏️ "Request changes" option on the approval card and typed
+        // what they want changed) must RE-OPEN the plan-first gate: the run should
+        // revise the plan and re-present it — NOT dive straight into editing.
+        // Without this, any continuation (chatContext present) silently proceeds to
+        // implement, which is exactly the reported "修正したいでも実装される".
+        // NOTE: the revision text arrives as the new `prompt` (continue_task passes
+        // the user's reply as prompt and rebuilds chatContext from PAST completes),
+        // so it is looked for in `prompt`, with a fallback to the last user turn
+        // of chatContext for callers that attach the reply there instead.
+        const lastUserMsg = isFreshTurn ? '' : String([...chatContext].reverse().find(m => m?.role === 'user' && m?.content)?.content || '');
+        const isPlanRevisionTurn = !isFreshTurn && (isPlanRevision(String(prompt || '')) || isPlanRevision(lastUserMsg));
+        // The gate decision itself (caller allowlist, bypass phrase, complexity
+        // scoring) lives in SafetyGuards.planFirstGate — see its unit tests. The
+        // revision text it returns is what the user typed, stripped of markers.
+        const gate = planFirstGate({
+            prompt,
+            caller: this.caller,
+            isSubagent: this._isSubagent,
+            isFreshTurn,
+            isPlanRevisionTurn,
+            planMode,
+            lastUserMsg,
+        });
+        this._planRevisionText = gate.revisionText;
+        this._planFirstActive = gate.active;
+        this._planApproved = gate.approved;
+        if (this._planFirstActive) {
+            onAgentStatus?.({ event: 'status', status: 'running', message: t('agent.planFirst.on', null, '📋 計画優先モード — まず計画を提示し承認を得ます') });
+        }
+        //
+        // Model routing (fast/deep tiers) + auto-escalation. fast = default for
+        // quick/app-intent tasks; deep = complex tasks and long-run escalation.
+        //
+        // EXCEPTION — interactive chat (DirectChat): the user explicitly picks a
+        // model in the chat dropdown (→ llmService.getCurrentModel()). That choice
+        // MUST win, so tier routing / auto-escalation is DISABLED here. Otherwise a
+        // globally-configured Fast/Deep tier model silently overrides the selection
+        // — the reported symptom: the UI shows "GEMINI" but DeepSeek (the Fast tier)
+        // actually runs. Tier routing still applies to app-intent / external /
+        // scheduled callers, which have no live model picker.
+        const userPicksModel = this.caller === 'DirectChat';
+        const tierModels = userPicksModel
+            ? { fast: null, deep: null, initial: null }
+            : await this._resolveTierModels();
+        this._deepModelId = tierModels.deep;
+        this._modelOverride = tierModels.initial || null;
+        // Kept for the run's AUXILIARY calls (result summary, file descriptions,
+        // memory extraction). Those are JSON/boilerplate generators — running them
+        // on the active deep model costs seconds of post-run latency for nothing.
+        this._fastModelId = tierModels.fast || null;
+        // 0 ⇒ never promote on step count alone. See SAFETY_DEFAULTS.escalateAtStep
+        // for why the old expression promoted every run at step 15.
+        this._escalateAtStep = safety.escalateAtStep > 0 ? safety.escalateAtStep : 0;
+
+        // ── Phase routing ────────────────────────────────────────────────
+        // Same tier ids, but re-decided as the run moves plan → execute →
+        // review instead of once at the start. Requires BOTH tiers: with only
+        // one configured every phase resolves to the same model, so the run
+        // would pay the switching complexity for no saving.
+        this._phaseRouting = safety.phaseRouting === 'on'
+            && !userPicksModel
+            && !this._isSubagent          // a sub-agent is ONE phase of the parent
+            && !!tierModels.fast && !!tierModels.deep;
+        if (this._phaseRouting) {
+            this._phase = initialPhase({
+                enabled: true,
+                freshTurn: isFreshTurn,
+                planFirst: this._planFirstActive,
+                complex: this._looksComplex(prompt),
+            });
+            const m = modelForPhase(this._phase, tierModels, { enabled: true });
+            if (m) this._modelOverride = m;
+            // The opening phase, structured — without this the Dashboard's rail
+            // would not know which phase a run is in until the FIRST switch.
+            onAgentStatus?.({
+                event: 'phase',
+                phase: this._phase,
+                model: this._modelOverride,
+                from: null,
+                escalated: false,
+                reason: this._phase === 'plan'
+                    ? (this._planFirstActive
+                        ? t('agent.phaseRouting.reason.planFirst', null, 'plan-first 承認ゲート → 計画は deep で実施')
+                        : t('agent.phaseRouting.reason.complex', null, 'タスクが複雑と判定 → 計画は deep で実施'))
+                    : (isFreshTurn
+                        ? t('agent.phaseRouting.reason.fresh', null, '単発タスク → 実行フェーズを fast で開始')
+                        : t('agent.phaseRouting.reason.continued', null, '継続ターン(計画済み) → 実行フェーズで開始')),
+                tokens: { ...this._phaseTokens },
+            });
+            onAgentStatus?.({
+                event: 'status', status: 'running',
+                message: t('agent.phaseRouting.on', { phase: phaseLabel(this._phase), model: this._modelOverride },
+                    `🧭 フェーズ別ルーティング ON — ${phaseLabel(this._phase)}: ${this._modelOverride}`),
+            });
+        } else if (this._modelOverride) {
+            onAgentStatus?.({ event: 'status', status: 'running', message: t('agent.model', { model: this._modelOverride }, `🧭 モデル: ${this._modelOverride}`) });
+        }
+
+        // ── Vision routing ──────────────────────────────────────────────
+        // If images are attached, the active/selected model MUST be vision-capable,
+        // otherwise the Rust layer drops them with a note (symptom: "the current
+        // model cannot read the image"). App tasks route to the FAST tier by
+        // default, which is often a cheap text-only model — so auto-switch to any
+        // configured vision-capable model, and if none exists, warn loudly instead
+        // of silently ignoring the image.
+        if (images.length > 0) {
+            const chosen = this._modelOverride || llmService.getCurrentModel();
+            const chosenOk = llmService.modelSupportsVision?.(chosen);
+            if (!chosenOk) {
+                const candidates = [
+                    this.behaviorOverrides?.model,
+                    tierModels.deep,
+                    tierModels.fast,
+                    llmService.getCurrentModel(),
+                ].filter(Boolean);
+                const visionModel = candidates.find(id => llmService.modelSupportsVision?.(id));
+                if (visionModel) {
+                    this._modelOverride = visionModel;
+                    onAgentStatus?.({ event: 'status', status: 'running', message: t('agent.vision.switched', { model: visionModel }, `🖼 画像入力のためビジョン対応モデルに切替: ${visionModel}`) });
+                } else {
+                    onAgentStatus?.({ event: 'status', status: 'running', message: t('agent.vision.unsupported', { count: images.length, model: chosen || '未設定' }, `⚠️ ${images.length}枚の画像が添付されていますが、設定中のモデル(${chosen || '未設定'})はビジョン非対応です。画像は無視されます。`) });
+                }
+            } else {
+                onAgentStatus?.({ event: 'status', status: 'running', message: t('agent.vision.received', { count: images.length, model: chosen }, `🖼 ${images.length}枚の画像を受信（モデル ${chosen} はビジョン対応）。`) });
+            }
+        }
+        // Load long-term memory (episodic summaries + durable facts) from disk so
+        // ContextBuilder can inject relevant context into the system prompt. Cheap
+        // and best-effort; getPromptContext degrades to '' if nothing is loaded.
+        try {
+            await conversationMemory.loadMemory(workspacePath);
+        } catch (e) {
+            console.warn('AgentController: loadMemory failed:', e);
+        }
+        this.baseMaxIterations = safety.maxSteps;
+        // Per-task override from behavior (e.g. REST API caller). 0 stays unlimited.
+        if (this.behaviorOverrides && Number.isFinite(this.behaviorOverrides.max_iterations)) {
+            this.baseMaxIterations = Math.max(0, this.behaviorOverrides.max_iterations);
+        }
+        this.maxIterations = this.baseMaxIterations;
+
+        // Convenience flag for the loop-exit / progress-reporting sites.
+        const isUnlimited = this.maxIterations <= 0;
+
+        // ── Per-run safety trackers (reset each run) ─────────────────
+        const taskStartMs = Date.now();
+        let cumulativeTokens = 0;
+        let tokenBudgetWarned = false;
+        let wallClockWarned = false;
+        // Non-null when a LIMIT ended the run rather than the agent deciding it was
+        // done. Returned to the caller so a capped run cannot masquerade as a clean
+        // completion — see agent/stopReason.js.
+        let stoppedBy = null;
+        let identicalWarned = false;
+        let cycleWarned = false;
+        let noProgressWarned = false;
+        // bool[] — one entry per iteration: true if any mutating tool was called.
+        const progressHistory = [];
+        // Tools that count as "real progress" for the no-progress detector.
+        // Anything not in this list (read_file/grep_search/list_files/open_file)
+        // is exploratory and does NOT count. MUTATING_TOOLS is imported from
+        // agent/SafetyGuards.js (P3 split).
+
+        await this.toolExecutor.startSession(workspacePath);
+
+        // RE-APPLY the external-app (WS) MCP exclusion AFTER startSession. The
+        // session reset wipes every per-run flag (ToolExecutor.startSession resets
+        // _excludeExternalAppMcpTools to false), and the call above at the top of
+        // run() is therefore clobbered — leaving JHAI's OWN tasks (NewTask /
+        // Schedule / DirectChat) offering the connected external app's WS MCP
+        // tools (JHEditor read_workspace_file / list_workspace_files / …) to the
+        // LLM every run. Re-applying here, alongside the other per-run MCP
+        // settings (server filter / context / relevance query), keeps the flag in
+        // step with the session that is actually about to run.
+        this.toolExecutor.setExcludeExternalAppMcpTools(!isExternalCaller);
+
+        // Failure trace for this session. Created after startSession because the
+        // session id names the file. Disables itself when there is no workspace.
+        this._trace = new TraceRecorder({
+            workspacePath,
+            sessionId: this.toolExecutor.getCurrentSessionId(),
+            invoke,
+        });
+
+        // What earlier sessions in this workspace learned. Loaded once; recall is
+        // then in-memory, so a hit costs no I/O and no LLM call.
+        this._cards = new CardStore({ workspacePath, invoke });
+        await this._cards.load();
+        // Which arm this run belongs to. Under 'auto' it is drawn at random, so
+        // the control group forms itself instead of depending on someone
+        // remembering to flip a switch. Learning runs in both arms.
+        this._recallOn = resolveRecallArm(safety.memoryRecall);
+        /** [{ id, at, recipe }] — what was surfaced, and when. Feeds followThrough. */
+        this._cardsShownLog = [];
+        this._memoryChars = 0;
+
+        // Invalidate ContextBuilder's static cache so the new session gets a
+        // fresh build (picks up any persona/config changes since last run).
+        contextBuilder.invalidateStaticCache();
+
+        // Non-blocking cleanup of old session directories (>30 days).
+        // Runs in the background — failures are silently ignored.
+        this._cleanupOldSessions(workspacePath).catch(() => {});
+
+        // Determine tool allowlist behavior. (isExternalCaller computed above.)
+        // NOTE: for interactive callers that picked MCP servers (Schedule/NewTask),
+        // mcp_servers is NOT external — so the built-in toolset is preserved and
+        // the selected servers' tools are surfaced through the normal MCP filter.
+        let enabledTools = this.behaviorOverrides?.enabled_tools;
+
+        if (isExternalCaller && (enabledTools === null || enabledTools === undefined)) {
+            // External callers default to restricting native tools to only finish/meta tools,
+            // while bypassing allowlist checks for MCP tools (provided by the workspace side).
+            enabledTools = [];
+            this.toolExecutor._mcpBypassesAllowlist = true;
+        } else if (isExternalCaller && Array.isArray(enabledTools)) {
+            // An EXPLICIT enabled_tools list from an external caller scopes BOTH built-in
+            // AND MCP tools — otherwise workspace-side MCP tools (list_workspace_files,
+            // read_workspace_file, …) are all advertised and the LLM calls tools that are
+            // not actually enabled for the task. Only the unspecified case above bypasses.
+            this.toolExecutor._mcpBypassesAllowlist = false;
+        }
+
+        if (Array.isArray(enabledTools)) {
+            // Add task_progress only for complex tasks; single-shot app intents
+            // stay minimal (finish_task + present_result) to avoid over-planning.
+            this.toolExecutor.setToolAllowlist(enabledTools, {
+                includeTaskTools: this._looksComplex(prompt),
+            });
+        }
+        // Write scope (Step 3): hard-restrict file-mutating tools to the given
+        // paths/globs. Set for sub-agents by _runSubtask; also honored for REST
+        // callers that pass behavior.write_scope.
+        if (Array.isArray(this.behaviorOverrides?.write_scope) && this.behaviorOverrides.write_scope.length > 0) {
+            this.toolExecutor.setWriteScope(this.behaviorOverrides.write_scope);
+        }
+        // Apply MCP server filter (if any) — restricts which MCP servers contribute tools.
+        if (this.behaviorOverrides && Array.isArray(this.behaviorOverrides.mcp_servers)) {
+            this.toolExecutor.setMcpServerFilter(this.behaviorOverrides.mcp_servers);
+        } else {
+            this.toolExecutor.setMcpServerFilter(null);
+        }
+
+        // Apply per-task MCP context (e.g. {app,windowId,documentId}) — injected
+        // into tools/call _meta.jhai so app-hosted MCP servers resolve live state.
+        this.toolExecutor.setMcpContext(this.behaviorOverrides ? this.behaviorOverrides.mcp_context : null);
+
+        // ── MCP tool pruning (interactive callers only) ─────────────────
+        // Big MCP servers (e.g. Backlog: 58 tools) used to ship EVERY schema to
+        // the LLM each step. With the prompt as relevance query, only the top-5
+        // most relevant MCP tools are sent; the rest are omitted for this run.
+        // External app callers keep the old behavior — their tool set is already
+        // scoped by the intent (enabled_tools / mcp_servers).
+        this.toolExecutor.setMcpRelevanceQuery(isExternalCaller ? null : prompt);
+
+        // ── run_subtask engine (docs/design/subagent-architecture.md) ──────
+        // Inject the sub-agent runner so the generic run_subtask tool works.
+        // Parent runs only: children must not recurse (their allowlists exclude
+        // run_subtask AND no runner is attached, so the tool isn't even
+        // presented to them).
+        if (!this._isSubagent) {
+            this.toolExecutor.setSubtaskRunner((args) =>
+                this._runSubtask(args, { workspacePath, onAgentStatus, onConfirm, onLog, abortSignal, safety }));
+        }
+
+        // Bind tool executor event forwarding
+        this.toolExecutor.onToolEvent = (event, data) => {
+            // Capture the model's delivered answer (present_result) for the Result view.
+            // Guard against a common misfire: some models call present_result twice —
+            // a good one, then an empty follow-up (e.g. kind:"answer", text:"") — which
+            // would otherwise clobber the real deliverable. Keep the earlier non-empty
+            // envelope unless the new one actually carries content.
+            if (event === 'result' && data?.envelope) {
+                const incoming = data.envelope;
+                if (!this._lastResultEnvelope
+                    || envelopeHasContent(incoming)
+                    || !envelopeHasContent(this._lastResultEnvelope)) {
+                    this._lastResultEnvelope = incoming;
+                }
+            }
+            onAgentStatus?.({ event, ...data });
+        };
+
+        // Phase 4: Load KIs (Skills & Workflows) if not provided
+        if (!kisContext) {
+            try {
+                const root = workspacePath;
+                if (root) {
+                    let loadedKis = [];
+                    try {
+                        const skillsData = await invoke('read_file', { path: `${root}/.agent/skills.json` });
+                        if (skillsData) loadedKis.push('--- SKILLS ---\n' + skillsData);
+                    } catch (e) { /* ignore */ }
+                    
+                    try {
+                        const workflowsData = await invoke('read_file', { path: `${root}/.agent/workflows.json` });
+                        if (workflowsData) loadedKis.push('--- WORKFLOWS ---\n' + workflowsData);
+                    } catch (e) { /* ignore */ }
+
+                    if (loadedKis.length > 0) {
+                        kisContext = loadedKis.join('\n\n');
+                        onAgentStatus?.({ event: 'status', status: 'running', message: 'Loaded project knowledge items.' });
+                    }
+                }
+            } catch (e) {
+                console.warn('Failed to load KIs:', e);
+            }
+        }
+
+
+        const state = new RunState({ maxIterations: this.maxIterations, startedAt: taskStartMs });
+        state.history = history;
+        return {
+            state, safety, isExternalCaller, tierModels, isFreshTurn,
+            kisContext, IMAGE_ATTACH_MAX_STEPS,
+        };
+    }
+
     async _buildResultSummary(finalResponse, modifiedFiles, onLog = null, meta = {}, onAgentStatus = null) {
         // action is derived deterministically: a null/empty `original` means the
         // file did not exist before this session → "created"; otherwise "modified".
@@ -2483,14 +2627,28 @@ ${String(finalResponse || '').slice(0, 2000)}`;
             // The legacy per-FILE re-read counters below stay read_file-only so
             // the existing report fields keep their meaning.
             if (call.name !== 'read_file') return;
-            const raw = call.args?.path ?? call.args?.file ?? '';
-            if (!raw) return;
-            const key = String(raw).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
-            const prev = this._readCounts.get(key) || 0;
-            this._readCounts.set(key, prev + 1);
-            if (prev >= 1) {
-                this._efficiency.reReads++;
-                this._efficiency.reReadChars += (typeof result === 'string' ? result.length : 0);
+            // A batch read is N reads for this counter's purposes: charging the
+            // whole call to one path would let re-reading five files look like
+            // re-reading one, and re-read volume is the number the efficiency
+            // report exists to show.
+            const batch = Array.isArray(call.args?.paths)
+                ? call.args.paths.filter(p => typeof p === 'string' && p.trim())
+                : [];
+            const targets = batch.length > 0
+                ? batch
+                : [call.args?.path ?? call.args?.file ?? ''].filter(Boolean);
+            if (targets.length === 0) return;
+            // Chars are only known for the call as a whole, so split them evenly
+            // rather than attributing the whole payload to each path.
+            const charsEach = (typeof result === 'string' ? result.length : 0) / targets.length;
+            for (const raw of targets) {
+                const key = String(raw).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+                const prev = this._readCounts.get(key) || 0;
+                this._readCounts.set(key, prev + 1);
+                if (prev >= 1) {
+                    this._efficiency.reReads++;
+                    this._efficiency.reReadChars += Math.round(charsEach);
+                }
             }
         } catch (_) { /* instrumentation only */ }
     }
@@ -2899,7 +3057,7 @@ ${String(finalResponse || '').slice(0, 2000)}`;
         const claim = hasEditTools ? (writeScope || ['**']) : null;
 
         const label = `sub:${roleDef.id}#${this._subtaskCount}`;
-        onAgentStatus?.({ event: 'status', status: 'running', message: `🤖 [${label}] 起動: ${brief.slice(0, 100).replace(/\s+/g, ' ')}…` });
+        onAgentStatus?.({ event: 'status', status: 'running', message: t('agent.subtask.start', { label, brief: brief.slice(0, 100).replace(/\s+/g, ' ') }, `🤖 [${label}] 起動: ${brief.slice(0, 100).replace(/\s+/g, ' ')}…`) });
 
         // Parallelism cap + write-ownership wait — cheap polling semaphore
         // (parallel calls arrive via Promise.all from the tool-execution step).
@@ -2913,7 +3071,7 @@ ${String(finalResponse || '').slice(0, 2000)}`;
             if (abortSignal?.aborted) return 'Error: task aborted.';
             if (!waitNotified && claimConflicts()) {
                 waitNotified = true;
-                onAgentStatus?.({ event: 'status', status: 'running', message: `🤖 [${label}] ⏳ 書き込み範囲が他のサブタスクと重複 — 先行の完了を待機 (serialized)` });
+                onAgentStatus?.({ event: 'status', status: 'running', message: t('agent.subtask.serialized', { label }, `🤖 [${label}] ⏳ 書き込み範囲が他のサブタスクと重複 — 先行の完了を待機 (serialized)`) });
             }
             await new Promise(r => setTimeout(r, 250));
         }
@@ -2983,11 +3141,11 @@ ${String(finalResponse || '').slice(0, 2000)}`;
             for (const f of (result?.modifiedFiles || [])) {
                 try { this.toolExecutor._recordModification?.(f.path, f.original, f.current); } catch (_) {}
             }
-            onAgentStatus?.({ event: 'status', status: 'running', message: `🤖 [${label}] 完了 ✅` });
+            onAgentStatus?.({ event: 'status', status: 'running', message: t('agent.subtask.done', { label }, `🤖 [${label}] 完了 ✅`) });
             return `[Sub-agent report — role: ${roleDef.id}]\n${report}` +
                 (files.length ? `\n\nFiles modified by the sub-agent:\n${files.map(p => '- ' + p).join('\n')}` : '');
         } catch (e) {
-            onAgentStatus?.({ event: 'status', status: 'running', message: `🤖 [${label}] 失敗: ${e?.message || e}` });
+            onAgentStatus?.({ event: 'status', status: 'running', message: t('agent.subtask.failed', { label, error: e?.message || e }, `🤖 [${label}] 失敗: ${e?.message || e}`) });
             return `Error: sub-task (${roleDef.id}) failed: ${e?.message || e}`;
         } finally {
             this._subtaskActive--;
@@ -2995,34 +3153,23 @@ ${String(finalResponse || '').slice(0, 2000)}`;
         }
     }
 
-    /** @deprecated superseded by agent/TaskComplexity.js — kept for callers/tests. */
+    /**
+     * Is this request genuinely multi-step change work?
+     *
+     * One definition, in agent/TaskComplexity.js. There used to be a second copy
+     * here, kept as "@deprecated … for callers/tests" — but no test referenced it
+     * and THREE production decisions still ran on it (phase routing's opening
+     * model, `includeTaskTools`, the step-1 planning injection), while only the
+     * plan-first gate had moved to the new one.
+     *
+     * That mattered because the copy here was the OLD heuristic, whose failure
+     * mode TaskComplexity.js was written to fix: it fired on any Japanese request
+     * over 60 characters containing a common verb (対応/修正/確認), i.e. on almost
+     * every ordinary request in this product's primary language. Under phase
+     * routing that meant a polite two-sentence ask STARTED on the deep tier —
+     * exactly inverting the feature that exists to move work onto the cheap one.
+     */
     _looksComplex(prompt) {
-        if (!prompt || typeof prompt !== 'string') return false;
-        const p = prompt.trim();
-
-        // Numbered list items → almost certainly multi-step
-        if (/(?:^|\n)\s*[1-9]\d*[.)]/m.test(p)) return true;
-        // Japanese-style numbered items
-        if (/[①②③④⑤⑥⑦⑧⑨]/.test(p)) return true;
-
-        // 3+ distinct source-file mentions (.js .ts .py .rs .go .java .vue .svelte …)
-        const fileMentions = p.match(/\b\w[\w/-]*\.(?:js|ts|jsx|tsx|py|rs|go|java|vue|svelte|css|scss|html|json|md|rb|php|kt)\b/gi) || [];
-        const uniqueFiles = new Set(fileMentions.map(f => f.toLowerCase()));
-        if (uniqueFiles.size >= 3) return true;
-
-        // Complexity verbs + non-trivial length (English)
-        if (p.length > 100 && /\b(implement|add|create|refactor|update|modify|change|fix|migrate|convert|integrate)\b/i.test(p)) return true;
-
-        // Complexity verbs (Japanese) + non-trivial length. Japanese has no word
-        // spaces, so we gate on raw character count instead of word count.
-        if (p.length > 60 && /(実装|追加|作成|リファクタ|修正|変更|対応|移行|統合|設計|置き換|分割|整理|導入)/.test(p)) return true;
-
-        // Word count > 60 — probably a detailed instruction (space-delimited langs)
-        if (p.split(/\s+/).length > 60) return true;
-
-        // Long CJK instruction (no spaces) — > 120 chars is rarely a one-liner
-        if (p.length > 120 && /[぀-ヿ一-龯]/.test(p)) return true;
-
-        return false;
+        return looksComplex(prompt);
     }
 }

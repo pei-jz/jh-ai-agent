@@ -1,16 +1,12 @@
+// One implementation for all of these — see utils/html.js for what the
+// nine local copies disagreed about.
+import { escapeHtml } from '../../utils/html.js';
+
 // confirmCards — pure formatters for the Monitor's approval cards (P4 split
 // from MonitorView.js). None of these touch the DOM or view state; every input
 // arrives as an argument. Kept behaviourally identical to the former methods.
 
-function escapeHtml(str) {
-    if (!str) return '';
-    return String(str)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#039;');
-}
+
 
 /** Normalize a workspace path for the auto-approve comparison. */
 export function normWsPath(ws) {

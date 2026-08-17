@@ -9,12 +9,27 @@
 // `read_office` was not among the tools it had been given, while `run_command`
 // was. Defining the groups once removes the second place to forget.
 //
+// Grouping alone did NOT stop the leak: `run_subtask` was later added to the
+// schemas and the dispatcher and belonged to no group, so the whole sub-agent
+// engine was invisible in `general` — the product's DEFAULT mode — and worked
+// only if the user happened to pick `develop`. So every built-in must now
+// belong to some group here, and `toolSets.test.js` fails the build when one
+// does not. A group is not required to be USED by a preset (browser is not);
+// it is required to EXIST, so adding a tool forces the question "who gets this?"
+//
 // A name here is a REQUEST, not a guarantee: the executor still applies the
 // permission model and the group gates (browser/git/resources), so listing
 // `read_resource` costs nothing when no app publishes resources.
 
-/** Inspection only — nothing here can change a file. */
-export const READ_TOOLS = [
+/**
+ * Inspection only — nothing here can change a file OR run a command.
+ *
+ * Separate from READ_TOOLS because "read-only" is a claim the sub-agent roles
+ * make to the orchestrating model ("reviewer = read-only, never fixes"), and
+ * `run_command` makes that claim false: a shell can write files. Roles that
+ * advertise themselves as read-only build from THIS list.
+ */
+export const READ_ONLY_TOOLS = [
     'read_file',
     'list_files',
     'grep_search',
@@ -30,16 +45,30 @@ export const READ_TOOLS = [
     'list_resources',
     'read_resource',
     'verify_syntax',
-    // Included on purpose: the command policy auto-approves read-only commands
-    // (git diff, ls) and prompts for the rest.
-    'run_command',
+    // Read-only VCS. Not in any preset before, so a `research` agent could not
+    // answer "what changed" without shelling out to git through run_command —
+    // and the reviewer role's own persona tells it to use `git diff`.
+    'git_status',
+    'git_diff',
+    'git_log',
 ];
+
+/**
+ * Inspection, plus a shell.
+ *
+ * `run_command` is here rather than in READ_ONLY_TOOLS on purpose: the command
+ * policy auto-approves genuinely read-only commands (git diff, ls) and prompts
+ * for the rest, so an investigating agent is not blocked — but it CAN write, and
+ * a group named "read-only" must not contain it.
+ */
+export const READ_TOOLS = [...READ_ONLY_TOOLS, 'run_command'];
 
 /** Mutating file tools — subject to write-scope enforcement. */
 export const EDIT_TOOLS = [
     'write_file',
     'multi_replace_file_content',
     'replace_lines',
+    'apply_patch',
     'delete_file',
     'move_file',
 ];
@@ -57,6 +86,40 @@ export const WEB_TOOLS = ['fetch_url', 'web_search'];
 
 /** Loop control every preset needs. */
 export const TASK_TOOLS = ['task_progress', 'finish_task'];
+
+/**
+ * Termination / delivery / clarification. `setToolAllowlist` adds these
+ * implicitly whenever `agentControl` is on, so a preset does not have to list
+ * them — but they must belong to a group so the coverage test can see them.
+ */
+export const CONTROL_TOOLS = ['finish_task', 'present_result', 'ask_user'];
+
+/** Spawning an isolated sub-agent. Parent runs only (no recursion). */
+export const DELEGATION_TOOLS = ['run_subtask'];
+
+/** The one MUTATING git tool — never bundled with the read-only three. */
+export const VCS_WRITE_TOOLS = ['git_commit'];
+
+/**
+ * Headless-browser automation. Deliberately in NO preset: the group is gated on
+ * Playwright actually being installed (tools/toolGroups.js), so advertising it
+ * by default would offer tools that cannot run. Listed here so the coverage
+ * test passes and so a preset CAN opt in.
+ */
+export const BROWSER_TOOLS = [
+    'browser_navigate', 'browser_content', 'browser_click', 'browser_type',
+    'browser_eval', 'browser_screenshot', 'browser_close',
+];
+
+/**
+ * Every group, for the coverage test. A built-in that appears in none of these
+ * is unreachable from every preset — which is how `run_subtask` went missing.
+ */
+export const ALL_GROUPS = [
+    READ_ONLY_TOOLS, READ_TOOLS, EDIT_TOOLS, OUTPUT_TOOLS,
+    WEB_TOOLS, TASK_TOOLS, CONTROL_TOOLS, DELEGATION_TOOLS, VCS_WRITE_TOOLS,
+    BROWSER_TOOLS,
+];
 
 /** De-duplicated union, order preserved. */
 export function toolsOf(...groups) {

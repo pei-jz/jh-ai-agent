@@ -19,12 +19,18 @@ export const SAFETY_DEFAULTS = {
     // Learning continues either way, so a run without recall is a control
     // session, not a wasted one (docs/design/agent-memory-layers.md §6).
     //
-    // Defaults to 'auto': a small random share of runs is held back as a control
-    // group, which is the only way to find out whether recall helps at all. The
-    // alternative default ('on') cannot answer that question, and a memory layer
-    // nobody can evaluate is the failure mode this whole design is arranged
-    // against. Set it to 'on' in Settings to opt out of the measurement.
-    memoryRecall: 'auto',
+    // Defaults to 'on'. It defaulted to 'auto', which withholds memory from
+    // CONTROL_GROUP_SHARE (half) of all runs to build a control group. The
+    // statistics behind that are sound and the measurement is still worth having
+    // — but running it silently, by default, on someone who just wants the agent
+    // to work is not a defensible thing to ship. The user is told the workspace
+    // has learned something and then, on a coin flip, does not get it, with no
+    // indication why. That is an experiment on a user who never agreed to one.
+    //
+    // 'auto' remains available in Settings for anyone who wants the answer, and
+    // the comparison it feeds (SessionMetrics.compareArms, shown in Settings)
+    // still works — it just has to be opted into now.
+    memoryRecall: 'on',
     // Step at which a run on the Fast tier is promoted to Deep. 0 ⇒ never.
     //
     // Default OFF. It used to read `safety.maxIterations`, a field this module
@@ -34,6 +40,14 @@ export const SAFETY_DEFAULTS = {
     // means nothing. A switch also throws away the prompt cache for the whole
     // remainder of the run, so it is not something to do on a guessed threshold.
     escalateAtStep: 0,
+    // 'off' | 'on' — inject summaries of PAST SESSIONS into the system prompt.
+    //
+    // Off by default (docs/design/agent-memory-layers.md §7). Episodes were the
+    // heaviest injected layer and the only one built from the model's own account
+    // of what happened rather than from observation; what they uniquely carried
+    // (outcome, files touched) is now held by Experience cards. journal.md still
+    // records everything, so this is a prompt-cost decision, not a data one.
+    episodeInjection: 'off',
     // 'off' | 'on' — move the run between the Fast and Deep tiers as it passes
     // through plan → execute → review, instead of picking one tier up front.
     // Off by default: it changes which model answers, and that is not a change
@@ -45,6 +59,7 @@ const PLAN_MODES = new Set(['off', 'auto', 'always']);
 const SUBAGENT_REVIEW_MODES = new Set(['off', 'on']);
 const MEMORY_RECALL_MODES = new Set(['off', 'on', 'auto']);
 const PHASE_ROUTING_MODES = new Set(['off', 'on']);
+const EPISODE_INJECTION_MODES = new Set(['off', 'on']);
 
 /**
  * Share of sessions held back as the control group under 'auto'.
@@ -56,9 +71,10 @@ const PHASE_ROUTING_MODES = new Set(['off', 'on']);
  * runs total. At 0.5 it is ~178 — five times sooner, because the requirement is
  * set by the SMALLER arm and an even split is where that arm is largest.
  *
- * The cost is real and deliberate: half the runs will not see their memory.
- * That is the price of finding out whether the memory is worth having. Set
- * memoryRecall to 'on' in Settings to stop paying it and forgo the answer.
+ * The cost is real: half the runs will not see their memory. That is the price
+ * of finding out whether the memory is worth having, and it is why 'auto' is no
+ * longer the DEFAULT — a user who never asked to be measured should not pay it.
+ * It applies only when someone selects 'auto' in Settings.
  */
 export const CONTROL_GROUP_SHARE = 0.5;
 
@@ -126,5 +142,6 @@ export function normalizeSafetyLimits(cfg = {}) {
         escalateAtStep:           num(cfg.escalate_at_step,             d.escalateAtStep),
         memoryRecall: MEMORY_RECALL_MODES.has(cfg.memory_recall) ? cfg.memory_recall : d.memoryRecall,
         phaseRouting: PHASE_ROUTING_MODES.has(cfg.phase_routing) ? cfg.phase_routing : d.phaseRouting,
+        episodeInjection: EPISODE_INJECTION_MODES.has(cfg.episode_injection) ? cfg.episode_injection : d.episodeInjection,
     };
 }

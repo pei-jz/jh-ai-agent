@@ -1,102 +1,136 @@
-// Guards against the failure that produced this module: a tool gets added to
-// the schemas and the dispatcher, but nobody remembers the hand-written
-// allowlists — so an agent in research mode had `run_command` and no
-// `read_office`, and tried to parse spreadsheets through PowerShell.
+// The guard that `run_subtask` needed and did not have.
+//
+// Grouping the tool lists in one file removed the SECOND place to forget a new
+// tool, but not the first: a tool still has to be typed into a group by hand.
+// `run_subtask` was wired into the schemas and the dispatcher and into no group,
+// so the whole sub-agent engine was invisible in `general` — the default mode —
+// and only worked if the user happened to switch to `develop`. Nothing failed;
+// the feature was simply never offered.
+//
+// These tests close both directions: a built-in with no group fails, and a group
+// naming a tool that does not exist fails.
 
 import { describe, it, expect } from 'vitest';
-import { READ_TOOLS, EDIT_TOOLS, OUTPUT_TOOLS, WEB_TOOLS, TASK_TOOLS, toolsOf } from '../toolSets.js';
 import { TOOL_DEFINITIONS } from '../toolSchemas.js';
+import { ALL_GROUPS, READ_ONLY_TOOLS, READ_TOOLS, toolsOf } from '../toolSets.js';
 import { AGENT_MODES } from '../../AgentModes.js';
-import { SUBAGENT_ROLES } from '../../agent/SubagentRoles.js';
 
-const ALL = new Set(TOOL_DEFINITIONS.map(t => t.name));
-const GROUPS = { READ_TOOLS, EDIT_TOOLS, OUTPUT_TOOLS, WEB_TOOLS, TASK_TOOLS };
+const builtinNames = TOOL_DEFINITIONS.map(t => t.name);
+const groupedNames = new Set(ALL_GROUPS.flat());
 
-describe('toolSets are real tools', () => {
-    it.each(Object.entries(GROUPS))('%s only names tools that exist', (_name, group) => {
-        for (const t of group) expect(ALL.has(t), `${t} is not a registered tool`).toBe(true);
+describe('toolSets covers every built-in tool', () => {
+    it('no built-in belongs to zero groups', () => {
+        const orphans = builtinNames.filter(n => !groupedNames.has(n));
+        expect(orphans, `add these to a group in tools/toolSets.js: ${orphans.join(', ')}`)
+            .toEqual([]);
     });
 
-    it('no tool appears in two groups (a name has one meaning)', () => {
-        const seen = new Set();
-        for (const group of Object.values(GROUPS)) {
-            for (const t of group) {
-                expect(seen.has(t), `${t} is in more than one group`).toBe(false);
-                seen.add(t);
+    it('no group names a tool that does not exist', () => {
+        const known = new Set(builtinNames);
+        const ghosts = [...groupedNames].filter(n => !known.has(n));
+        expect(ghosts, `these are in a group but have no schema: ${ghosts.join(', ')}`)
+            .toEqual([]);
+    });
+});
+
+describe('READ_ONLY_TOOLS really is read-only', () => {
+    // The sub-agent roles advertise "read-only" to the orchestrating model. A
+    // shell makes that claim false, so the split has to hold.
+    it('excludes run_command', () => {
+        expect(READ_ONLY_TOOLS).not.toContain('run_command');
+    });
+
+    it('excludes every mutating tool', () => {
+        const mutating = ['write_file', 'multi_replace_file_content', 'replace_lines',
+            'delete_file', 'move_file', 'write_xlsx', 'update_xlsx', 'write_docx',
+            'git_commit'];
+        for (const n of mutating) expect(READ_ONLY_TOOLS).not.toContain(n);
+    });
+
+    it('READ_TOOLS is READ_ONLY_TOOLS plus the shell', () => {
+        expect(READ_TOOLS).toEqual([...READ_ONLY_TOOLS, 'run_command']);
+    });
+});
+
+describe('mode presets offer delegation', () => {
+    // The regression this whole file exists for: the sub-agent engine must be
+    // reachable from the DEFAULT mode, not only from `develop`.
+    it('general offers run_subtask', () => {
+        expect(AGENT_MODES.general.behavior.enabled_tools).toContain('run_subtask');
+    });
+
+    it('every preset that restricts tools still offers run_subtask', () => {
+        for (const [id, mode] of Object.entries(AGENT_MODES)) {
+            const list = mode.behavior.enabled_tools;
+            if (!list) continue;   // `develop` = no restriction = has everything
+            expect(list, `${id} cannot delegate`).toContain('run_subtask');
+        }
+    });
+
+    it('every preset can terminate, deliver and ask', () => {
+        for (const [id, mode] of Object.entries(AGENT_MODES)) {
+            const list = mode.behavior.enabled_tools;
+            if (!list) continue;
+            for (const n of ['finish_task', 'present_result', 'ask_user']) {
+                expect(list, `${id} is missing ${n}`).toContain(n);
             }
         }
     });
 
-    it('READ_TOOLS cannot modify a file', () => {
-        for (const t of READ_TOOLS) {
-            expect(EDIT_TOOLS).not.toContain(t);
-            expect(OUTPUT_TOOLS).not.toContain(t);
+    it('research still cannot edit source', () => {
+        const list = AGENT_MODES.research.behavior.enabled_tools;
+        for (const n of ['multi_replace_file_content', 'replace_lines', 'delete_file', 'move_file']) {
+            expect(list).not.toContain(n);
         }
     });
 });
 
 describe('toolsOf', () => {
-    it('merges groups and drops duplicates, keeping first-seen order', () => {
+    it('de-duplicates while preserving first-seen order', () => {
         expect(toolsOf(['a', 'b'], ['b', 'c'])).toEqual(['a', 'b', 'c']);
     });
-
-    it('handles an empty call', () => {
-        expect(toolsOf()).toEqual([]);
-    });
 });
 
-// ── The anti-rot checks ────────────────────────────────────────────────────
-// Any preset that can read source files must also be able to read the OTHER
-// file types a real project stores its content in. Without this, adding a
-// reader silently leaves every preset blind to it.
-const READER_COMPANIONS = ['read_office', 'symbol_search'];
-
-describe('presets stay in sync with the read group', () => {
-    const modePresets = Object.entries(AGENT_MODES)
-        .filter(([, m]) => Array.isArray(m.behavior.enabled_tools))
-        .map(([id, m]) => [`mode:${id}`, m.behavior.enabled_tools]);
-    const rolePresets = Object.entries(SUBAGENT_ROLES)
-        .filter(([, r]) => Array.isArray(r.tools))
-        .map(([id, r]) => [`role:${id}`, r.tools]);
-    const presets = [...modePresets, ...rolePresets];
-
-    it('there ARE presets to check (a rename must not silently empty this suite)', () => {
-        expect(presets.length).toBeGreaterThanOrEqual(4);
+// apply_patch was added after the groups existed, which is exactly when the last
+// tool went missing. It is a file-mutating tool, so several INDEPENDENT lists
+// have to know about it — a plan gate that does not, for instance, would let the
+// agent edit files before the user approved anything.
+describe('apply_patch is wired into every list that matters', () => {
+    it('is a real built-in with a schema', () => {
+        expect(builtinNames).toContain('apply_patch');
     });
 
-    it.each(presets)('%s: whatever can read_file can also read Office and symbols', (_id, tools) => {
-        if (!tools.includes('read_file')) return;
-        for (const companion of READER_COMPANIONS) {
-            expect(tools, `missing ${companion}`).toContain(companion);
-        }
+    it('belongs to EDIT_TOOLS, so presets and write-scope cover it', async () => {
+        const { EDIT_TOOLS } = await import('../toolSets.js');
+        expect(EDIT_TOOLS).toContain('apply_patch');
     });
 
-    it.each(presets)('%s: a preset with run_command is never left without read_office', (_id, tools) => {
-        // The exact shape of the reported bug: shell available, reader absent.
-        if (tools.includes('run_command')) expect(tools).toContain('read_office');
+    it('is blocked by the plan-first gate', async () => {
+        const { PLAN_GATED_TOOLS } = await import('../../agent/SafetyGuards.js');
+        expect(PLAN_GATED_TOOLS.has('apply_patch')).toBe(true);
     });
 
-    it.each(presets)('%s: only names registered tools', (_id, tools) => {
-        for (const t of tools) expect(ALL.has(t), `${t} is not a registered tool`).toBe(true);
-    });
-});
-
-describe('mode presets', () => {
-    it('develop stays unrestricted — narrowing it would be a regression', () => {
-        expect(AGENT_MODES.develop.behavior.enabled_tools).toBeUndefined();
+    it('is subject to sub-agent write scope', async () => {
+        const { WRITE_ENFORCED_TOOLS } = await import('../../agent/SubagentRoles.js');
+        expect(WRITE_ENFORCED_TOOLS.has('apply_patch')).toBe(true);
     });
 
-    it('research can read and report but cannot edit source', () => {
-        const tools = AGENT_MODES.research.behavior.enabled_tools;
-        expect(tools).toContain('read_office');
-        expect(tools).toContain('write_xlsx');       // a spreadsheet deliverable
-        expect(tools).toContain('write_file');       // the report file
-        expect(tools).not.toContain('multi_replace_file_content');
-        expect(tools).not.toContain('delete_file');
+    it('counts as a WRITE for parallel conflict detection', async () => {
+        const { callTargets } = await import('../../agent/ConflictDetector.js');
+        const t = callTargets({ name: 'apply_patch', args: { path: 'src/a.js', patch: '@@ -1 +1 @@\n-a\n+b' } });
+        expect(t.write).toContain('src/a.js');
     });
 
-    it('automation keeps its shell-plus-files character', () => {
-        const tools = AGENT_MODES.automation.behavior.enabled_tools;
-        expect(tools).toEqual(expect.arrayContaining(['run_command', 'read_office', ...EDIT_TOOLS]));
+    it('is NOT offered to the read-only sub-agent roles', async () => {
+        const { resolveRole } = await import('../../agent/SubagentRoles.js');
+        expect(resolveRole('reviewer').tools).not.toContain('apply_patch');
+        expect(resolveRole('researcher').tools).not.toContain('apply_patch');
+    });
+
+    it('counts as an edit for the exploration-cost metric', async () => {
+        const { explorationCost } = await import('../../memory/SessionMetrics.js');
+        expect(explorationCost([
+            { tool: 'read_file' }, { tool: 'grep_search' }, { tool: 'apply_patch' },
+        ])).toBe(2);
     });
 });

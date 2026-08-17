@@ -9,6 +9,7 @@ import { describe, it, expect, vi } from 'vitest';
 import {
     isLandmark, symbolCards, staleStudyCards, applyStudy, coverageByDir,
     runStudyPass, STUDY_FILE_CAP, STUDY_GLOB_MAX, SYMBOLS_PER_FILE, targetPath, indexSpreadsheets, dropStudyCards,
+    fileStamp, STUDY_SHEET_GLOB,
     fairShare, dirOf,
 } from '../StudyPass.js';
 import { cardKey } from '../CardStore.js';
@@ -347,11 +348,32 @@ describe('runStudyPass', () => {
         expect((await runStudyPass({ invoke: vi.fn() })).files).toBe(0);
     });
 
-    it('caps how much it takes from one file', () => {
+    it('caps how much it takes from one FILE, but not how many files', () => {
         expect(SYMBOLS_PER_FILE).toBeLessThan(50);
-        // The FILE cap is a breadth budget and may grow; the tree must still be
-        // globbed well above it so the fair share spreads over the real shape.
-        expect(STUDY_FILE_CAP).toBeLessThan(STUDY_GLOB_MAX);
+        // 0 = index the whole tree. A cap bought its time by indexing part of
+        // the project permanently: fairShare is deterministic, so re-running
+        // Study re-indexed the same subset and never reached the rest.
+        expect(STUDY_FILE_CAP).toBe(0);
+        // The listing ceiling is a different limit (paths, not reads) and must
+        // stay well above any real tree — `truncated` is what stops prune.
+        expect(STUDY_GLOB_MAX).toBeGreaterThanOrEqual(100000);
+    });
+
+    it('indexes the WHOLE tree by default — no second press needed', async () => {
+        const files = Array.from({ length: 120 }, (_, i) => `C:/ws/dir${i % 7}/f${i}.js`);
+        const invoke = vi.fn(async (cmd, a) => {
+            if (cmd === 'glob_files') {
+                if (a?.pattern === STUDY_SHEET_GLOB) return { files: [] };
+                return { files, truncated: false };
+            }
+            if (cmd === 'index_hashes') return [];
+            if (cmd === 'read_file') return 'export function alphaBeta() {}';
+            return null;
+        });
+        const r = await runStudyPass({ workspacePath: 'C:/ws', invoke });
+        expect(r.omitted).toBe(0);
+        expect(r.parsed).toBe(files.length);
+        expect(r.paths).toHaveLength(files.length);
     });
 
     it('reads files concurrently rather than one round-trip at a time', async () => {
@@ -513,5 +535,104 @@ describe('dropStudyCards', () => {
 
     it('survives junk', () => {
         expect(dropStudyCards(null)).toEqual({ kept: [], dropped: 0 });
+    });
+});
+
+// A repeat pass used to cost exactly as much as the first: change detection
+// hashed CONTENT, so deciding a file had not changed required reading it.
+describe('runStudyPass — mtime/size change detection', () => {
+    const stampFor = (path, mtime = 111, size = 22) => ({ path, mtime_ms: mtime, size });
+
+    const harness = ({ known = [], files, stamps }) => {
+        const reads = [];
+        const invoke = vi.fn(async (cmd, a) => {
+            if (cmd === 'glob_files') {
+                if (a?.pattern === STUDY_SHEET_GLOB) return { files: [] };
+                return { files, truncated: false, stamps };
+            }
+            if (cmd === 'index_hashes') return known;
+            if (cmd === 'read_file') { reads.push(a.path); return 'export function alphaBeta() {}'; }
+            return null;
+        });
+        return { invoke, reads };
+    };
+
+    it('does not read a file whose stamp still matches the index', async () => {
+        const files = ['C:/ws/a.js', 'C:/ws/b.js'];
+        const stamps = [stampFor('C:/ws/a.js'), stampFor('C:/ws/b.js', 999, 33)];
+        // a.js is recorded with its CURRENT stamp; b.js is not.
+        const { invoke, reads } = harness({
+            files, stamps, known: [['C:/ws/a.js', fileStamp(stamps[0])]],
+        });
+        const r = await runStudyPass({ workspacePath: 'C:/ws', invoke });
+        expect(reads).toEqual(['C:/ws/b.js']);
+        expect(r.skipped).toBe(1);
+    });
+
+    it('still counts a skipped file as live, so prune does not delete it', async () => {
+        const files = ['C:/ws/a.js'];
+        const stamps = [stampFor('C:/ws/a.js')];
+        const { invoke } = harness({ files, stamps, known: [['C:/ws/a.js', fileStamp(stamps[0])]] });
+        const r = await runStudyPass({ workspacePath: 'C:/ws', invoke });
+        expect(r.paths).toContain('C:/ws/a.js');
+    });
+
+    it('re-reads everything when force is set', async () => {
+        const files = ['C:/ws/a.js'];
+        const stamps = [stampFor('C:/ws/a.js')];
+        const { invoke, reads } = harness({ files, stamps, known: [['C:/ws/a.js', fileStamp(stamps[0])]] });
+        const r = await runStudyPass({ workspacePath: 'C:/ws', invoke, force: true });
+        expect(reads).toEqual(['C:/ws/a.js']);
+        expect(r.skipped).toBe(0);
+    });
+
+    it('falls back to content hashing when the backend returns no stamps', async () => {
+        // An older backend has no `stamps` field: every file must still be read.
+        const files = ['C:/ws/a.js', 'C:/ws/b.js'];
+        const { invoke, reads } = harness({ files, stamps: undefined, known: [] });
+        const r = await runStudyPass({ workspacePath: 'C:/ws', invoke });
+        expect(reads).toHaveLength(2);
+        expect(r.skipped).toBe(0);
+    });
+
+    it('stores the stamp so the NEXT pass can skip the file', async () => {
+        const files = ['C:/ws/a.js'];
+        const stamps = [stampFor('C:/ws/a.js')];
+        const put = [];
+        const invoke = vi.fn(async (cmd, a) => {
+            if (cmd === 'glob_files') {
+                if (a?.pattern === STUDY_SHEET_GLOB) return { files: [] };
+                return { files, truncated: false, stamps };
+            }
+            if (cmd === 'index_hashes') return [];
+            if (cmd === 'read_file') return 'export function alphaBeta() {}';
+            if (cmd === 'index_put_files') { put.push(...a.files); return a.files.length; }
+            return null;
+        });
+        await runStudyPass({ workspacePath: 'C:/ws', invoke });
+        expect(put[0].hash).toBe(fileStamp(stamps[0]));
+        expect(put[0].hash.startsWith('m:')).toBe(true);
+    });
+
+    it('asks the backend for stamps', async () => {
+        const { invoke } = harness({ files: [], stamps: [] });
+        await runStudyPass({ workspacePath: 'C:/ws', invoke });
+        const globCall = invoke.mock.calls.find(c => c[0] === 'glob_files');
+        expect(globCall[1].withStamps).toBe(true);
+    });
+});
+
+describe('fileStamp', () => {
+    it('is stable for the same metadata and distinct from a content hash', () => {
+        expect(fileStamp({ mtime_ms: 5, size: 9 })).toBe(fileStamp({ mtime_ms: 5, size: 9 }));
+        expect(fileStamp({ mtime_ms: 5, size: 9 })).not.toBe(fileStamp({ mtime_ms: 6, size: 9 }));
+        expect(fileStamp({ mtime_ms: 5, size: 9 })).not.toBe(fileStamp({ mtime_ms: 5, size: 10 }));
+        expect(fileStamp({ mtime_ms: 5, size: 9 }).startsWith('m:')).toBe(true);
+    });
+
+    it('is empty when there is no usable metadata', () => {
+        expect(fileStamp(null)).toBe('');
+        expect(fileStamp({})).toBe('');
+        expect(fileStamp({ mtime_ms: 0, size: 0 })).toBe('');
     });
 });

@@ -9,15 +9,15 @@
 
 /** Tools whose `path` argument names a file the user can open. */
 const PATH_TOOLS = new Set([
-    'read_file', 'write_file', 'replace_lines', 'multi_replace_file_content',
-    'delete_file', 'verify_syntax', 'create_artifact', 'update_artifact',
+    'read_file', 'write_file', 'replace_lines', 'apply_patch', 'multi_replace_file_content',
+    'delete_file', 'verify_syntax',
     'read_office', 'write_xlsx',
 ]);
 
 /** Tools that write, so the step can be marked as a change rather than a read. */
 const WRITE_TOOLS = new Set([
-    'write_file', 'replace_lines', 'multi_replace_file_content',
-    'delete_file', 'move_file', 'create_artifact', 'update_artifact', 'write_xlsx',
+    'write_file', 'replace_lines', 'apply_patch', 'multi_replace_file_content',
+    'delete_file', 'move_file', 'write_xlsx',
 ]);
 
 const basename = (p) => String(p || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop();

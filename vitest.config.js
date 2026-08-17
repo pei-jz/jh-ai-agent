@@ -55,7 +55,10 @@ export default defineConfig({
     environment: 'node',
     // .svelte.test.js files are jsdom by convention (they mount components); the
     // per-file `// @vitest-environment jsdom` pragma still decides, as before.
-    include: ['src/**/*.test.js', 'test/**/*.test.js', 'sdk/**/*.test.js'],
+    // `scripts/` is included for the release-config rules: docs/RELEASING.md
+    // documents a combination that produces no error anywhere, so the check that
+    // catches it has to be covered like anything else load-bearing.
+    include: ['src/**/*.test.js', 'test/**/*.test.js', 'sdk/**/*.test.js', 'scripts/**/*.test.js'],
     globals: true,
     coverage: {
       provider: 'v8',

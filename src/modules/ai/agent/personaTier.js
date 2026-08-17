@@ -21,7 +21,7 @@
 
 /** Editing a file is what separates "can act on the project" from "can only look". */
 const EDIT_TOOLS = new Set([
-    'write_file', 'multi_replace_file_content', 'replace_lines',
+    'write_file', 'multi_replace_file_content', 'replace_lines', 'apply_patch',
     'delete_file', 'move_file', 'create_dir',
 ]);
 
@@ -34,7 +34,7 @@ const EDIT_TOOLS = new Set([
  */
 const PRODUCE_TOOLS = new Set([
     'write_xlsx', 'update_xlsx', 'write_docx',
-    'create_artifact', 'update_artifact', 'present_result',
+    'present_result',
 ]);
 
 /** The tiers, in descending capability. Exported so callers can name one. */

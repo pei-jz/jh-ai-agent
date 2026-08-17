@@ -34,6 +34,10 @@ import { fmtConfirm, renderSimpleDiff, isWsAutoApprove, setWsAutoApprove } from 
 import { usageTotals as resolveUsageTotals } from './monitor/usageTotals.js';
 import { buildLogSteps, chatButtonHtml, requestDividerHtml } from './monitor/logs.js';
 
+
+// One implementation for all of these — see utils/html.js for what the
+// nine local copies disagreed about.
+import { escapeHtml } from '../utils/html.js';
 // Short-TTL cache of the task list, shared across MonitorView instances so that
 // switching the selected task (which re-routes and rebuilds the view) doesn't
 // re-fetch the whole list every time. Invalidated on task creation.
@@ -550,7 +554,6 @@ export class MonitorView {
         }
         switch (log.event) {
             case 'stream':          return '';
-            case 'task_plan_sync':  return '';
             case 'token_usage':     return '';
             // Live stdout/stderr stream — the backend emits ONE event per output
             // line, so a broad command (e.g. Get-ChildItem -Recurse) fires
@@ -569,7 +572,6 @@ export class MonitorView {
             case 'grep_search':
             case 'task_progress':
             case 'open_file':
-            case 'artifact_modified':
             case 'ask_user':
             case 'result':          return '';
             case 'thought':         return fmtThought(log);
@@ -4140,12 +4142,4 @@ function formatTime(isoStr) {
     catch { return ''; }
 }
 
-function escapeHtml(str) {
-    if (!str) return '';
-    return String(str)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#039;');
-}
+

@@ -1,6 +1,6 @@
-// agentMetaHandlers — artifact / lifecycle tool handlers extracted from
-// ToolExecutor (Part A refactor): create_artifact & update_artifact,
-// finish_task, verify_syntax, task_progress, present_result.
+// agentMetaHandlers — lifecycle tool handlers extracted from ToolExecutor
+// (Part A refactor): finish_task, ask_user, verify_syntax, task_progress,
+// present_result.
 //
 // Each takes the ToolExecutor instance as `ctx` and uses its helpers/fields
 // verbatim (getSessionArtifactDir, sessionModifiedFiles, workspacePath,
@@ -62,7 +62,7 @@ export async function handlePresentResult(ctx, args, onAgentStatus) {
 
     // Resolve the markdown/text body. The schema names this `markdown`, but
     // models frequently emit it under `content` (matching write_file /
-    // create_artifact) or `md`/`text`. Accept all so a mislabelled arg doesn't
+    // write_file) or `md`/`text`. Accept all so a mislabelled arg doesn't
     // silently produce an empty result envelope.
     const body = [args.markdown, args.content, args.md, args.text]
         .find(v => typeof v === 'string' && v.length > 0) || '';
@@ -104,35 +104,6 @@ export async function handlePresentResult(ctx, args, onAgentStatus) {
 
     return `Success: result presented to the calling app (kind=${kind}, ${actions.length} action(s)). ` +
         `If the goal is achieved, call finish_task next.`;
-}
-
-/** create_artifact / update_artifact — write a markdown artifact to the session dir. */
-export async function handleArtifact(ctx, args, name, onAgentStatus) {
-    const actionName = name === 'create_artifact' ? 'Creating' : 'Updating';
-    const safeName = typeof args?.name === 'string' && args.name.trim() ? args.name.trim() : 'artifact';
-    const artifactName = safeName.endsWith('.md') ? safeName : `${safeName}.md`;
-    const content = typeof args?.content === 'string' ? args.content : '';
-    onAgentStatus?.(`${actionName} artifact: ${artifactName}...`);
-
-    const artifactDir = ctx.getSessionArtifactDir();
-    const artifactPath = `${artifactDir}/${artifactName}`;
-
-    // Snapshot the pre-write content on update so the modification record keeps
-    // a real `original` (→ action "modified" instead of "created").
-    let original = null;
-    if (name === 'update_artifact') {
-        try { original = await invoke('read_file', { path: artifactPath }); } catch (_) { /* new file */ }
-    }
-
-    await invoke('create_dir', { path: artifactDir });
-    await invoke('write_file', { path: artifactPath, content });
-
-    // Track the artifact (e.g. task_plan.md) as a session-modified file so it
-    // shows up in the post-run Result file list (clickable → OS default app).
-    ctx._recordModification?.(artifactPath, original, content);
-
-    ctx.onToolEvent?.('artifact_modified', { name: artifactName, path: artifactPath, content });
-    return `Success: Artifact ${artifactName} ${name === 'create_artifact' ? 'created' : 'updated'}.`;
 }
 
 /** finish_task — pre-finish real-parser syntax gate, then declare completion. */

@@ -259,7 +259,7 @@ pub struct GlobResult {
 ///   pattern     - glob pattern. Use `**` for arbitrary directories, `*` for any chars within
 ///                 a single segment. Examples: "*.md", "src/**/*.ts", "**/*test*"
 ///   path        - root to search (absolute). Default: current working dir.
-///   max_results - default 500. Hard cap 50000.
+///   max_results - default 500. Hard cap 100000.
 ///
 /// The hard cap is what the memory "study workspace" pass runs into: it globs
 /// the whole tree first so its fair-share selection can spread over the REAL
@@ -282,7 +282,7 @@ pub async fn glob_files(
     if !root_path.exists() {
         return Err(format!("Glob root does not exist: {}", root));
     }
-    let max_results = max_results.unwrap_or(500).min(50000);
+    let max_results = max_results.unwrap_or(500).min(100000);
 
     let glob = Glob::new(&pattern)
         .map_err(|e| format!("Invalid glob '{}': {}", pattern, e))?;

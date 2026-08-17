@@ -116,6 +116,7 @@ export function makeHarness(opts = {}) {
         loadMemory: vi.fn(async () => {}),
         addEntry: vi.fn(async () => {}),
         setBudgetConfig: vi.fn(),
+        setEpisodeInjectionConfig: vi.fn(),
         // Identity compaction — the loop's own compression still runs.
         compactHistory: vi.fn(async (history) => history),
     };

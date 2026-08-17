@@ -25,7 +25,7 @@
  * "explored, then ran the tests, then explored more" look like a short run.
  */
 const EDIT_TOOLS = new Set([
-    'write_file', 'multi_replace_file_content', 'replace_lines',
+    'write_file', 'multi_replace_file_content', 'replace_lines', 'apply_patch',
     'delete_file', 'move_file', 'write_xlsx', 'update_xlsx', 'write_docx',
 ]);
 

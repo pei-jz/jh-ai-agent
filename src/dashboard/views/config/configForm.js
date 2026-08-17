@@ -141,6 +141,34 @@ export function normalizePathList(raw) {
 }
 
 /**
+ * Hosts `fetch_url` may reach despite resolving to a private address.
+ *
+ * This list is a security opt-out, so it takes HOSTNAMES only — anything that
+ * looks like a URL is reduced to its host. Pasting `http://localhost:3000/api`
+ * and having it silently never match (because the stored string is not a host)
+ * is the failure mode where a user believes they granted an exception and did
+ * not; better to accept the paste and extract the host.
+ *
+ * A bare `*` is refused: it would re-open every private address at once, which
+ * is the whole thing the guard exists to prevent.
+ */
+export function normalizeHostList(raw) {
+    const out = [];
+    for (const line of String(raw ?? '').split('\n')) {
+        let s = line.trim().toLowerCase();
+        if (!s || s === '*') continue;
+        s = s.replace(/^[a-z][a-z0-9+.-]*:\/\//, '');   // strip scheme
+        s = s.split('/')[0];                            // strip path
+        s = s.replace(/^\[|\]$/g, '');                  // bare IPv6 literal
+        // Strip a :port, but not the colons inside an IPv6 address.
+        if (!s.includes(':') || /^[^:]+:\d+$/.test(s)) s = s.split(':')[0];
+        s = s.replace(/\.+$/, '');                      // trailing root dot
+        if (s && !out.includes(s)) out.push(s);
+    }
+    return out;
+}
+
+/**
  * May this command pattern be auto-approved?
  *
  * A HARD SAFETY BOUNDARY, not a convenience check, so it is a pure function with
