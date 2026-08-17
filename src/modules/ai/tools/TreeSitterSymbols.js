@@ -103,6 +103,30 @@ export function isUnavailable() {
     return _unavailable;
 }
 
+/**
+ * How long to wait for the wasm runtime / a grammar before giving up on the
+ * tree-sitter backend for this process.
+ *
+ * These awaits used to be unbounded, and that is not the same risk as a normal
+ * async call: emscripten's abort path can leave the init promise FOREVER
+ * PENDING rather than rejecting (a missing/incompatible wasm, a webview that
+ * refuses the fetch). A pending promise is not an error, so the try/catch below
+ * never fires — symbol_search simply stopped, mid-loop, with no timeout above
+ * it anywhere in the agent. Bound it and fall back to the regex extractor.
+ */
+export const TREE_SITTER_LOAD_TIMEOUT_MS = 8000;
+
+/** Reject (never hang) when `p` doesn't settle within `ms`. */
+function withTimeout(p, ms, label) {
+    return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`tree-sitter ${label} timed out after ${ms}ms`)), ms);
+        Promise.resolve(p).then(
+            (v) => { clearTimeout(timer); resolve(v); },
+            (e) => { clearTimeout(timer); reject(e); },
+        );
+    });
+}
+
 async function getParserFor(lang) {
     if (_unavailable || !_wasmBase || !_runtimeLoader) return null;
     const grammar = GRAMMARS[lang];
@@ -110,29 +134,42 @@ async function getParserFor(lang) {
 
     if (!_runtimeReady) {
         const loader = _runtimeLoader;
-        _runtimeReady = (async () => {
+        _runtimeReady = withTimeout((async () => {
             const TreeSitter = await loader();
             // In a webview the runtime must be told where tree-sitter.wasm is
             // served from; in Node it resolves relative to the package.
             await (_initOptions ? TreeSitter.init(_initOptions) : TreeSitter.init());
             return TreeSitter;
-        })();
+        })(), TREE_SITTER_LOAD_TIMEOUT_MS, 'runtime init');
     }
 
     let TreeSitter;
     try {
         TreeSitter = await _runtimeReady;
-    } catch (_) {
+    } catch (e) {
         // Init failed — allow a retry after the next configure, and stop trying
         // until then so every call doesn't pay the failure cost.
         _runtimeReady = null;
         _unavailable = true;
+        // Say so ONCE. Falling back to regex silently is how a hard failure
+        // (a CSP that forbids wasm compilation) spent a long time looking like
+        // "symbol_search is just a bit less precise" — or, before the timeout
+        // above existed, like nothing at all.
+        console.warn(
+            '[symbol_search] tree-sitter unavailable — falling back to the regex extractor. ' +
+            'If this is a CSP error, the app CSP needs "wasm-unsafe-eval" in script-src. ' +
+            `Reason: ${e?.message || e}`
+        );
         return null;   // runtime unusable — caller falls back
     }
 
     if (!_languages.has(lang)) {
         try {
-            const loaded = await TreeSitter.Language.load(`${_wasmBase}${grammar}.wasm`);
+            const loaded = await withTimeout(
+                TreeSitter.Language.load(`${_wasmBase}${grammar}.wasm`),
+                TREE_SITTER_LOAD_TIMEOUT_MS,
+                `grammar ${grammar}`,
+            );
             _languages.set(lang, loaded);
         } catch (_) {
             // One grammar missing shouldn't disable the others.

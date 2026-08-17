@@ -1147,3 +1147,21 @@ describe('live approval card renders in the Story (the _showTaskConfirm path)', 
         expect(document.getElementById('task-timeline').textContent).toContain('git push --force');
     });
 });
+
+describe('All-Logs request dividers', () => {
+    it('renders one divider per request, with the prompt preview separated once', () => {
+        // The preview separator lives in requestDividerHtml (P4). While the view
+        // ALSO prepended " — ", wiring the module version would have produced
+        // "— — prompt"; this pins the single-separator output.
+        v.logs = [
+            { event: 'status', timestamp: '2026-07-01T00:00:00Z', data: { status: 'running', message: 'Thinking... (step 1)' } },
+            { event: 'status', timestamp: '2026-07-01T00:00:01Z', data: { status: 'running', message: 'Thinking... (step 2)' } },
+        ];
+        v.resultSummaries = [{ request: 'fix the login bug' }];
+        const html = v.renderAllLogs();
+        const dividers = html.match(/mturn-request/g) || [];
+        expect(dividers.length).toBeGreaterThan(0);
+        expect(html).toContain('fix the login bug');
+        expect(html).not.toContain('— — ');
+    });
+});

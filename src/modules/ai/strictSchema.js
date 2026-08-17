@@ -109,6 +109,73 @@ function convertNode(node) {
   return out;
 }
 
+/**
+ * Is `schema` ALREADY strict-compliant, exactly as authored? (No rewriting.)
+ *
+ * Used for the BUILT-IN tool schemas, which are hand-authored and must be sent
+ * verbatim — we only need to decide whether `function.strict = true` may be set
+ * on them. Claiming strict for a non-compliant schema makes Azure/OpenAI reject
+ * the WHOLE request with a 400 ("'required' is required to be supplied and to
+ * be an array including every key in properties"), which the agent loop then
+ * hides behind its JSON-mode fallback — the request simply arrives with no
+ * tools at all.
+ *
+ * Rules checked (per object level), mirroring OpenAI Structured Outputs:
+ *   • only the supported keyword set
+ *   • objects: `properties` present (an EMPTY properties map is fine — that is
+ *     the canonical no-argument tool), `additionalProperties: false`, and every
+ *     property key listed in `required`
+ *   • arrays: a single `items` schema that is itself non-empty and compliant
+ *   • anyOf: every branch compliant
+ *
+ * @param {object} schema a tool's `parameters`
+ * @returns {boolean}
+ */
+export function isStrictCompliant(schema) {
+  if (!isPlainObject(schema)) return false;
+
+  const walk = (node) => {
+    if (!isPlainObject(node)) return false;
+    for (const k of Object.keys(node)) {
+      if (!SUPPORTED_KEYWORDS.has(k)) return false;
+    }
+
+    const types = node.type === undefined
+      ? []
+      : (Array.isArray(node.type) ? node.type : [node.type]);
+
+    if (types.includes('object')) {
+      const props = node.properties;
+      // An open-ended map (no `properties`, or `additionalProperties` used as a
+      // value schema) cannot be expressed in strict mode.
+      if (!isPlainObject(props)) return false;
+      if (node.additionalProperties !== false) return false;
+      const keys = Object.keys(props);
+      const required = Array.isArray(node.required) ? node.required : [];
+      if (keys.some(k => !required.includes(k))) return false;
+      for (const sub of Object.values(props)) {
+        if (!walk(sub)) return false;
+      }
+    }
+
+    if (types.includes('array')) {
+      const items = node.items;
+      // Missing / tuple / empty-schema items — strict needs one typed schema.
+      if (!isPlainObject(items) || Object.keys(items).length === 0) return false;
+      if (!walk(items)) return false;
+    }
+
+    if (node.anyOf !== undefined) {
+      if (!Array.isArray(node.anyOf) || node.anyOf.length === 0) return false;
+      if (!node.anyOf.every(walk)) return false;
+    }
+
+    return true;
+  };
+
+  return walk(schema);
+}
+
 /** Union a schema node's `type` with "null" (idempotent). */
 function makeNullable(node) {
   if (!isPlainObject(node)) return node;

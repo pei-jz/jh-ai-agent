@@ -55,6 +55,46 @@ describe('agent loop — basic execution', () => {
         expect(h.toolCalls.filter(c => c.name === 'read_file')).toHaveLength(2);
     });
 
+    it('serializes two same-file writes issued in one parallel turn (P5 conflict detection)', async () => {
+        // Both calls are "Allow", so they would normally race in Promise.all.
+        // The conflict detector must pull the SECOND write into the serial
+        // phase — but both still execute, in order.
+        const h = makeHarness({
+            script: [
+                multiToolStep([
+                    ['write_file', { path: 'C:/a.js', content: 'v1' }],
+                    ['write_file', { path: 'C:/a.js', content: 'v2' }],
+                ]),
+                finishStep(),
+            ],
+        });
+        await h.run();
+        const writes = h.toolCalls.filter(c => c.name === 'write_file' && c.args?.path === 'C:/a.js');
+        expect(writes).toHaveLength(2);
+        expect(writes[0].args.content).toBe('v1');
+        expect(writes[1].args.content).toBe('v2');
+        // The user was told WHY one call ran after the other.
+        expect(h.events.some(e => e.message && e.message.includes('順次実行'))).toBe(true);
+        // …and BOTH calls are visible in the timeline. The serialized one used to
+        // skip its tool_call event, so it ran without ever appearing in Monitor.
+        const callEvents = h.events.filter(e => e.event === 'tool_call' && e.name === 'write_file');
+        expect(callEvents).toHaveLength(2);
+    });
+
+    it('keeps different-file writes in parallel (no serialization notice)', async () => {
+        const h = makeHarness({
+            script: [
+                multiToolStep([
+                    ['write_file', { path: 'C:/a.js' }],
+                    ['write_file', { path: 'C:/b.js' }],
+                ]),
+                finishStep(),
+            ],
+        });
+        await h.run();
+        expect(h.events.some(e => e.message && e.message.includes('順次実行'))).toBe(false);
+    });
+
     it('surfaces a tool error to the agent instead of throwing', async () => {
         const h = makeHarness({
             script: [toolStep('read_file', { path: 'missing' }), finishStep()],

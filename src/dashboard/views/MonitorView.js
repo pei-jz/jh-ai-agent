@@ -27,6 +27,12 @@ import { rowStatus } from './monitor/taskList.js';
 import { toolTarget, toolLineText } from './monitor/toolLine.js';
 import { MONITOR_STYLES } from './MonitorView.styles.js';
 import { extractThoughtSummary, fmtThought, formatThoughtDetail, fmtTool, fmtFile, fmtStatus, isChatLog, fmtEfficiency, fmtReview, fmtTelemetry } from './monitorLogFormat.js';
+// P4 monolith split: approval-card markup, token-usage aggregation and the
+// All-Logs step-grouping loop live in monitor/ pure modules; this file keeps
+// the view orchestration (DOM + WS + Svelte mounts).
+import { fmtConfirm, renderSimpleDiff, isWsAutoApprove, setWsAutoApprove } from './monitor/confirmCards.js';
+import { usageTotals as resolveUsageTotals } from './monitor/usageTotals.js';
+import { buildLogSteps, chatButtonHtml, requestDividerHtml } from './monitor/logs.js';
 
 // Short-TTL cache of the task list, shared across MonitorView instances so that
 // switching the selected task (which re-routes and rebuilds the view) doesn't
@@ -453,138 +459,73 @@ export class MonitorView {
 
     // ─── Log Rendering ──────────────────────────────────────────────────────
 
+    /**
+     * Render the "All Logs" view. The step-grouping loop (which log events
+     * belong to which step, what each step's summary is, where requests start)
+     * now lives in monitor/logs.js (P4 split); this method supplies the
+     * per-line formatters and assembles the final HTML.
+     */
     renderAllLogs() {
         if (this.logs.length === 0) return '<div class="mconsole-placeholder">Waiting for execution logs...</div>';
 
         // Reset chat data map for this render
         this._chatDataMap = {};
 
-        // Events to skip entirely from inline rendering
-        const SKIP_EVENTS = new Set(['token_usage', 'stream', 'task_plan_sync', 'confirm_resolved']);
+        // Previews are stored WITHOUT the separator — requestDividerHtml adds it.
+        const dividerPreviews = [];
+        const onRequestDivider = (requestNum) => {
+            const req = this.resultSummaries?.[requestNum - 1]?.request;
+            dividerPreviews.push(req
+                ? escapeHtml(String(req).replace(/\s+/g, ' ').slice(0, 60))
+                : '');
+        };
 
+        const { init, steps, requestStepIndexes } = buildLogSteps(this.logs, {
+            lineHtmlFor: (log) => this.formatLogLine(log),
+            isChatLog,
+            extractThoughtSummary,
+            formatTime,
+            onRequestDivider,
+        });
+
+        // Request dividers, one per request boundary (requestStepIndexes tells
+        // us which step indexes start a new request).
         let html = '';
-        let stepId = null;
-        let stepBody = '';
-        let stepCount = 0;
-        let stepSummary = '';      // thought-based summary
-        let stepFirstTool = null; // fallback if no thought
-        let stepChatEntries = []; // CHAT API calls for this step
-        let stepTime = '';
+        const requestAt = new Set(requestStepIndexes || []);
+        let requestIdx = 0;
+        const dividerFor = () => {
+            const preview = dividerPreviews[requestIdx] || '';
+            requestIdx++;
+            return requestDividerHtml(requestIdx, preview);
+        };
 
-        const totalSteps = this.logs.filter(l =>
-            l.event === 'status' && l.data.message?.startsWith('Thinking... (step ')
-        ).length;
-
-        const flushStep = () => {
-            if (stepId === null) return;
-
-            // Determine best summary for a historical (replayed) step.
-            // Priority: explicit thought summary > first tool name > generic fallback.
-            // ("Executing…" is reserved for *live* steps where activity is still happening;
-            //  for a finished step it would be misleading.)
-            const finalSummary = stepSummary ||
-                (stepFirstTool ? `Used ${stepFirstTool}` : 'Reasoning step (no output)');
-
-            // Build CHAT button if we have entries
+        steps.forEach((step, i) => {
+            const isLatest = step.isLatest;
+            if (requestAt.has(i)) html += dividerFor();
+            // Build CHAT button if we have entries.
             let chatBtnHtml = '';
-            if (stepChatEntries.length > 0) {
+            if (step.chatEntries.length > 0) {
                 const chatUid = 'chat-' + Math.random().toString(36).slice(2, 8);
-                this._chatDataMap[chatUid] = [...stepChatEntries];
-                const totalPrompt     = stepChatEntries.reduce((s, c) => s + (c.usage?.prompt_tokens     || 0), 0);
-                const totalCompletion = stepChatEntries.reduce((s, c) => s + (c.usage?.completion_tokens || 0), 0);
-                const totalCached     = stepChatEntries.reduce((s, c) => s + (c.usage?.cache_read_input_tokens || 0), 0);
-                const totalDur        = stepChatEntries.reduce((s, c) => s + (c.duration || 0), 0);
-                const lastEntry = stepChatEntries[stepChatEntries.length - 1];
-                const statusCode = lastEntry.status || 200;
-                const isErr = statusCode >= 400 || lastEntry.error;
-                const cachedTxt = totalCached > 0 ? ` ⚡${totalCached}t` : '';
-                chatBtnHtml = `<button class="mstep-chat-btn${isErr ? ' err' : ''}" data-chat-uid="${chatUid}">CHAT ${statusCode} · ↑${totalPrompt}t${cachedTxt} ↓${totalCompletion}t · ${totalDur}ms</button>`;
+                this._chatDataMap[chatUid] = [...step.chatEntries];
+                chatBtnHtml = chatButtonHtml(chatUid, step.chatEntries);
             }
-
-            const isLatest = stepCount === totalSteps;
             html += `
-                <div class="mstep" id="mstep-${stepId}">
-                    <div class="mstep-header ${isLatest ? 'expanded' : ''}" data-step-id="${stepId}">
+                <div class="mstep" id="mstep-${step.stepId}">
+                    <div class="mstep-header ${isLatest ? 'expanded' : ''}" data-step-id="${step.stepId}">
                         <span class="mstep-toggle">${isLatest ? '▼' : '▶'}</span>
                         ${isLatest ? '<span class="mstep-pulse"></span>' : ''}
-                        <span class="mstep-num">Step ${stepId}</span>
-                        <span class="mstep-summary">${escapeHtml(finalSummary)}</span>
+                        <span class="mstep-num">Step ${step.stepId}</span>
+                        <span class="mstep-summary">${escapeHtml(step.summary)}</span>
                         ${chatBtnHtml}
-                        <span class="mstep-time">${stepTime}</span>
+                        <span class="mstep-time">${step.time}</span>
                     </div>
-                    <div class="mstep-body ${isLatest ? 'open' : ''}">${stepBody}</div>
+                    <div class="mstep-body ${isLatest ? 'open' : ''}">${step.lines.join('')}</div>
                 </div>
             `;
-            stepBody = '';
-            stepSummary = '';
-            stepFirstTool = null;
-            stepChatEntries = [];
-        };
+        });
 
-        let initHtml = '';
-        // Request/turn boundaries: each run's step counter restarts at 1, so a
-        // step number that is <= the previous one marks a NEW request. We drop a
-        // labelled divider there (and before the very first request) so a
-        // multi-turn task doesn't read as one undifferentiated wall of steps.
-        let lastStepNum = null;
-        let requestNum = 0;
-        const requestDivider = () => {
-            requestNum++;
-            const req = this.resultSummaries?.[requestNum - 1]?.request;
-            const preview = req ? ' — ' + escapeHtml(String(req).replace(/\s+/g, ' ').slice(0, 60)) : '';
-            return `<div class="mturn-divider mturn-request"><span>▼ Request ${requestNum}${preview}</span></div>`;
-        };
-
-        for (const log of this.logs) {
-            // Skip noise events
-            if (SKIP_EVENTS.has(log.event)) continue;
-
-            // Step boundary marker
-            if (log.event === 'status' && log.data.message?.startsWith('Thinking... (step ')) {
-                flushStep();
-                const m = log.data.message.match(/\(step (\d+)\)/);
-                stepId = m ? parseInt(m[1]) : stepCount + 1;
-                // New request when the step counter restarts (num <= previous) or
-                // this is the first step overall.
-                if (lastStepNum === null || stepId <= lastStepNum) {
-                    html += requestDivider();
-                }
-                lastStepNum = stepId;
-                stepCount++;
-                stepTime = log.timestamp ? formatTime(log.timestamp) : '';
-                continue;
-            }
-
-            // CHAT API call → collect for button (not inline). METRICS/REVIEW are
-            // NOT chat — they render inline as their own cards (below).
-            if (log.event === 'log' && isChatLog(log.data)) {
-                if (stepId !== null) {
-                    stepChatEntries.push(log.data);
-                    continue; // skip inline rendering
-                }
-                continue;
-            }
-
-            // Thought → extract summary
-            if (log.event === 'thought' && stepId !== null) {
-                const raw = typeof log.data.text === 'string' ? log.data.text : JSON.stringify(log.data.text);
-                stepSummary = extractThoughtSummary(raw);
-            }
-
-            // First tool call → fallback summary
-            if (log.event === 'tool_call' && stepId !== null && !stepFirstTool) {
-                stepFirstTool = log.data.name || null;
-            }
-
-            const lineHtml = this.formatLogLine(log);
-            if (!lineHtml) continue;
-            if (stepId === null) initHtml += lineHtml;
-            else stepBody += lineHtml;
-        }
-
-        flushStep();
-
-        if (initHtml) {
+        // The init (pre-step) block.
+        if (init.length > 0) {
             html = `
                 <div class="mstep" id="mstep-init">
                     <div class="mstep-header" data-step-id="init">
@@ -592,7 +533,7 @@ export class MonitorView {
                         <span class="mstep-num">Init</span>
                         <span class="mstep-summary">Initialization</span>
                     </div>
-                    <div class="mstep-body">${initHtml}</div>
+                    <div class="mstep-body">${init.join('')}</div>
                 </div>
             ` + html;
         }
@@ -658,66 +599,20 @@ export class MonitorView {
         }
     }
 
+    // NOTE: _fmtConfirm / renderSimpleDiff / _isWsAutoApprove / _setWsAutoApprove
+    // now live in monitor/confirmCards.js (P4 split). The workspace + its
+    // auto-approve state are resolved here (view state) and passed in.
     _fmtConfirm(data, idPrefix = 'confirm') {
-        const cid = data.confirmId;
-        let inner = '';
-        let alwaysBtn = '';
-        let autoWs = '';
-        if (data.type === 'command_confirm') {
-            const dangerous = data.risk === 'dangerous';
-            const riskBadge = dangerous
-                ? `<span class="mconfirm-risk">⚠️ Dangerous command</span>`
-                : '';
-            inner = `<h4>🛡 Command Approval ${riskBadge}</h4><p>${escapeHtml(data.message || '')}</p><pre><code>${escapeHtml(data.command || '')}</code></pre>`;
-            // "Always allow" recurs for normal commands; dangerous can never be
-            // whitelisted (allowAlways is false for them from the handler).
-            if (data.allowAlways) {
-                alwaysBtn = `<button class="btn btn-secondary btn-approve-always" data-confirm-id="${cid}" title="Approve now and auto-allow this command pattern in future">✓ Always allow</button>`;
-            }
-            // D: per-workspace auto-approve toggle (normal commands only; dangerous
-            // always confirm). Reads/writes localStorage; the executor honors it
-            // live for the next command.
-            const ws = this.tasks?.find(t => t.id === this.selectedTaskId)?.workspace_path || '';
-            if (!dangerous && ws) {
-                const on = this._isWsAutoApprove(ws);
-                autoWs = `<label class="mconfirm-autows"><input type="checkbox" class="cb-autows" data-ws="${escapeHtml(ws)}" ${on ? 'checked' : ''}> Auto-approve commands in this workspace from now on (dangerous ones are always confirmed)</label>`;
-            }
-            autoWs += `<div class="mconfirm-manage"><a class="acm-open" title="Manage approved commands">🛡 Manage allowlist</a></div>`;
-        } else if (data.type === 'diff_review') {
-            inner = `<h4>📝 File Modification</h4><p><code>${escapeHtml(data.path || '')}</code></p><p>${escapeHtml(data.message || '')}</p>${this.renderSimpleDiff(data.oldContent || '', data.newContent || '')}`;
-        }
-        return `
-            <div class="mconfirm-box log-confirm-request" id="${idPrefix}-${cid}" data-confirm-card="${cid}">
-                ${inner}
-                ${autoWs}
-                <div class="mconfirm-actions">
-                    <button class="btn btn-success btn-approve" data-confirm-id="${cid}">Approve</button>
-                    ${alwaysBtn}
-                    <button class="btn btn-error btn-reject" data-confirm-id="${cid}">Reject</button>
-                </div>
-            </div>
-        `;
+        const ws = this.tasks?.find(t => t.id === this.selectedTaskId)?.workspace_path || '';
+        return fmtConfirm(data, idPrefix, isWsAutoApprove(ws), ws);
     }
 
     /** localStorage-backed per-workspace "auto-approve commands" set (shared with
-     *  ToolExecutor._isAutoApproveWorkspace, which reads it live). */
-    _isWsAutoApprove(ws) {
-        const norm = String(ws).replace(/\\/g, '/').replace(/\/+$/, '');
-        try {
-            const arr = JSON.parse(localStorage.getItem('jhai_autoapprove_workspaces') || '[]');
-            return Array.isArray(arr) && arr.some(p => String(p).replace(/\\/g, '/').replace(/\/+$/, '') === norm);
-        } catch (_) { return false; }
-    }
+     *  ToolExecutor._isAutoApproveWorkspace, which reads it live). Now delegated
+     *  to monitor/confirmCards.js (P4 split). */
+    _isWsAutoApprove(ws) { return isWsAutoApprove(ws); }
 
-    _setWsAutoApprove(ws, on) {
-        const norm = String(ws).replace(/\\/g, '/').replace(/\/+$/, '');
-        let arr = [];
-        try { arr = JSON.parse(localStorage.getItem('jhai_autoapprove_workspaces') || '[]'); } catch (_) {}
-        if (!Array.isArray(arr)) arr = [];
-        arr = arr.filter(p => String(p).replace(/\\/g, '/').replace(/\/+$/, '') !== norm);
-        if (on) arr.push(ws);
-        try { localStorage.setItem('jhai_autoapprove_workspaces', JSON.stringify(arr)); } catch (_) {}
-    }
+    _setWsAutoApprove(ws, on) { setWsAutoApprove(ws, on); }
 
     /** Manage the command-approval whitelist: view + remove "always allow"
      *  patterns and auto-approve workspaces. */
@@ -2389,30 +2284,11 @@ export class MonitorView {
      *      log paging (which can drop the early `token_usage` events entirely);
      *   3. summing the logs — the last resort.
      */
+    // NOTE: _usageTotals' fallback chain now lives in monitor/usageTotals.js
+    // (P4 split). The view resolves its three inputs and delegates.
     _usageTotals() {
-        const live = this.tokenUsage || {};
-        if (live.total_tokens > 0) return live;
-
-        const stored = (this.tasks || []).find(t => t.id === this.selectedTaskId)?.token_usage;
-        if (stored && (stored.total_tokens > 0 || stored.prompt_tokens > 0)) return stored;
-
-        const sum = {
-            prompt_tokens: 0, completion_tokens: 0, total_tokens: 0,
-            cache_read_input_tokens: 0, cache_creation_input_tokens: 0,
-        };
-        for (const l of (this.logs || [])) {
-            if (l.event !== 'token_usage') continue;
-            const d = l.data || {};
-            const cr = d.cache_read_input_tokens || 0;
-            const cc = d.cache_creation_input_tokens || 0;
-            sum.prompt_tokens += d.prompt_tokens || 0;
-            sum.completion_tokens += d.completion_tokens || 0;
-            sum.cache_read_input_tokens += cr;
-            sum.cache_creation_input_tokens += cc;
-            sum.total_tokens += d.total_tokens
-                || ((d.prompt_tokens || 0) + (d.completion_tokens || 0) + cr + cc);
-        }
-        return sum;
+        const stored = (this.tasks || []).find(t => t.id === this.selectedTaskId)?.token_usage || null;
+        return resolveUsageTotals({ live: this.tokenUsage, stored, logs: this.logs });
     }
 
     /**
@@ -2994,27 +2870,8 @@ export class MonitorView {
         }
     }
 
-    renderSimpleDiff(oldText, newText) {
-        const ol = oldText.split('\n');
-        const nl = newText.split('\n');
-        let html = '<div style="font-family:monospace;font-size:10.5px;background:#0f1419;padding:8px;border-radius:4px;overflow-x:auto;max-height:200px;border:1px solid var(--border);">';
-        let i = 0, j = 0;
-        while (i < ol.length || j < nl.length) {
-            if (i < ol.length && j < nl.length) {
-                if (ol[i] === nl[j]) {
-                    html += `<div style="color:#666;padding:1px 4px;white-space:pre">  ${escapeHtml(ol[i])}</div>`; i++; j++;
-                } else {
-                    html += `<div style="color:#ff5555;background:rgba(255,85,85,0.1);padding:1px 4px;white-space:pre">- ${escapeHtml(ol[i++])}</div>`;
-                    html += `<div style="color:#50fa7b;background:rgba(80,250,123,0.1);padding:1px 4px;white-space:pre">+ ${escapeHtml(nl[j++])}</div>`;
-                }
-            } else if (i < ol.length) {
-                html += `<div style="color:#ff5555;background:rgba(255,85,85,0.1);padding:1px 4px;white-space:pre">- ${escapeHtml(ol[i++])}</div>`;
-            } else {
-                html += `<div style="color:#50fa7b;background:rgba(80,250,123,0.1);padding:1px 4px;white-space:pre">+ ${escapeHtml(nl[j++])}</div>`;
-            }
-        }
-        return html + '</div>';
-    }
+    // NOTE: renderSimpleDiff now lives in monitor/confirmCards.js (P4 split).
+    renderSimpleDiff(oldText, newText) { return renderSimpleDiff(oldText, newText); }
 
     // ─── CHAT Modal ─────────────────────────────────────────────────────────
 

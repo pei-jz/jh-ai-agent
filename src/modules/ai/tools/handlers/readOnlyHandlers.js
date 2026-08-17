@@ -295,31 +295,74 @@ export async function handleWebSearch(ctx, args, onAgentStatus) {
  * SymbolIndex, then ranks by match quality. Parsing lives in SymbolIndex.js
  * (unit-tested); this wrapper is just I/O + formatting.
  */
+/** Wall-clock budget for the SCAN path. Past it we answer with what we have. */
+const SYMBOL_SCAN_BUDGET_MS = 20000;
+/** How many files to read+parse concurrently in the scan path. */
+const SYMBOL_SCAN_CONCURRENCY = 8;
+
+/**
+ * Does an index hit satisfy the caller's path / glob narrowing?
+ *
+ * Only the narrowing forms that are cheap and unambiguous are honored here;
+ * anything else makes the caller fall back to the scan rather than silently
+ * answering from a differently-scoped index.
+ */
+function indexHitMatches(hit, { rootPrefix, extensions }) {
+    const p = String(hit?.path || '').replace(/\\/g, '/');
+    if (!p) return false;
+    if (rootPrefix && !p.toLowerCase().startsWith(rootPrefix)) return false;
+    if (extensions && extensions.length) {
+        const ext = p.toLowerCase().split('.').pop();
+        if (!extensions.includes(ext)) return false;
+    }
+    return true;
+}
+
+/**
+ * Extensions a glob restricts to, when that is all it does ("*.js",
+ * "**\/*.{ts,tsx}"). Returns null when the glob says something more (a
+ * directory shape, a name pattern) that this cheap check cannot honor.
+ */
+function extensionsFromGlob(glob) {
+    const g = String(glob || '').trim();
+    if (!g) return [];
+    const m = /^(?:\*\*\/)?\*\.(?:\{([^}]+)\}|([A-Za-z0-9]+))$/.exec(g);
+    if (!m) return null;
+    return (m[1] ? m[1].split(',') : [m[2]]).map(s => s.trim().toLowerCase()).filter(Boolean);
+}
+
 export async function handleSymbolSearch(ctx, args, onAgentStatus) {
     const query = String(args?.query || '').trim();
     if (!query) return 'Error: symbol_search requires a non-empty "query" (the symbol name to find).';
     const searchRoot = args?.path ? ctx.resolvePath(args.path) : ctx.workspacePath;
     const kind = String(args?.kind || '').trim();
+    const limit = Number.isFinite(args?.max_results) ? Math.max(1, Math.min(200, args.max_results)) : 50;
 
     // Ask the INDEX first. When the workspace has been studied this is a single
     // index seek instead of globbing and re-parsing thousands of files, which is
     // where the order-of-magnitude token and time saving comes from. Nothing
     // indexed (or no study yet) falls through to the scan below, so the tool
     // never depends on the index existing.
-    if (!args?.path && !args?.include_glob) {
+    //
+    // `path` / `include_glob` used to DISABLE this shortcut outright, which is
+    // backwards: narrowing the search is exactly when the caller is being
+    // careful, and it dropped them onto the slow path. Both are cheap filters
+    // over the hits instead — and when a glob is richer than an extension list
+    // we fall through rather than answer from the wrong scope.
+    const extensions = extensionsFromGlob(args?.include_glob);
+    if (extensions !== null) {
         try {
             const idx = new CodeIndexClient({ workspacePath: ctx.workspacePath, invoke });
-            const hits = await idx.findSymbol(query, {
-                kind,
-                limit: Number.isFinite(args?.max_results) ? args.max_results : 40,
-            });
-            if (hits.length) {
-                onAgentStatus?.(`Symbol index: ${query} (${hits.length} hit(s))`);
-                return renderSymbolHits(hits, query);
+            const hits = await idx.findSymbol(query, { kind, limit });
+            const rootPrefix = args?.path ? String(searchRoot).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase() : '';
+            const kept = hits.filter(h => indexHitMatches(h, { rootPrefix, extensions }));
+            if (kept.length) {
+                onAgentStatus?.(`Symbol index: ${query} (${kept.length} hit(s))`);
+                return renderSymbolHits(kept, query);
             }
         } catch (_) { /* index unavailable — scan instead */ }
     }
-    const limit = Number.isFinite(args?.max_results) ? Math.max(1, Math.min(200, args.max_results)) : 50;
+
     // Default to the source types SymbolIndex understands.
     const pattern = args?.include_glob || '**/*.{js,jsx,mjs,cjs,ts,tsx,rs,py,java}';
 
@@ -331,29 +374,47 @@ export async function handleSymbolSearch(ctx, args, onAgentStatus) {
             return `No indexable source files under ${searchRoot} (pattern: ${pattern}).`;
         }
         // Read + extract. A file that fails to read is skipped, not fatal.
+        // Files are processed in small CONCURRENT batches: one await per file in
+        // series made a few hundred files an IPC round-trip queue, and the whole
+        // pass is bounded by SYMBOL_SCAN_BUDGET_MS so a stalled backend can only
+        // cost that much before the tool answers with what it already parsed.
         ensureTreeSitterConfigured();
+        const deadline = Date.now() + SYMBOL_SCAN_BUDGET_MS;
         const all = [];
         let backend = 'regex';
-        for (const file of files) {
-            let content;
-            try { content = await invoke('read_file', { path: file }); } catch (_) { continue; }
-            if (typeof content !== 'string') continue;
-            const res = await extractSymbolsBest(file, content);
-            backend = res.backend;
-            all.push(...res.symbols);
+        let scanned = 0;
+        let timedOut = false;
+        for (let i = 0; i < files.length; i += SYMBOL_SCAN_CONCURRENCY) {
+            if (Date.now() > deadline) { timedOut = true; break; }
+            const batch = files.slice(i, i + SYMBOL_SCAN_CONCURRENCY);
+            const parsed = await Promise.all(batch.map(async (file) => {
+                let content;
+                try { content = await invoke('read_file', { path: file }); } catch (_) { return null; }
+                if (typeof content !== 'string') return null;
+                try { return await extractSymbolsBest(file, content); } catch (_) { return null; }
+            }));
+            for (const r of parsed) {
+                if (!r) continue;
+                scanned++;
+                backend = r.backend;
+                all.push(...r.symbols);
+            }
         }
         const matches = matchSymbols(all, query, { kind, limit });
         const total = matchSymbols(all, query, { kind, limit: Number.MAX_SAFE_INTEGER }).length;
         ctx.onToolEvent?.('symbol_search', { query, matchCount: matches.length });
+        const partial = timedOut
+            ? `\n(NOTE: stopped after ${Math.round(SYMBOL_SCAN_BUDGET_MS / 1000)}s having scanned ${scanned} of ${files.length} files — narrow with \`path\`, or run "Study workspace" so this query hits the index instead.)`
+            : '';
         if (matches.length === 0) {
-            return `No symbol definitions matching "${query}" in ${files.length} file(s)` +
+            return `No symbol definitions matching "${query}" in ${scanned} file(s)` +
                 (kind ? ` (kind=${kind})` : '') +
-                `. Try grep_search for usages, or a shorter query.`;
+                `. Try grep_search for usages, or a shorter query.${partial}`;
         }
         return formatSymbols(matches, { query, total }) +
             `
 
-(searched ${files.length} files via ${backend}; definitions only — use grep_search for call sites)`;
+(searched ${scanned} files via ${backend}; definitions only — use grep_search for call sites)${partial}`;
     } catch (e) {
         return `Error: symbol_search failed — ${e?.message || e}`;
     }

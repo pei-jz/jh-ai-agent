@@ -8,7 +8,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
     isLandmark, symbolCards, staleStudyCards, applyStudy, coverageByDir,
-    runStudyPass, STUDY_FILE_CAP, SYMBOLS_PER_FILE, targetPath, indexSpreadsheets, dropStudyCards,
+    runStudyPass, STUDY_FILE_CAP, STUDY_GLOB_MAX, SYMBOLS_PER_FILE, targetPath, indexSpreadsheets, dropStudyCards,
     fairShare, dirOf,
 } from '../StudyPass.js';
 import { cardKey } from '../CardStore.js';
@@ -349,7 +349,44 @@ describe('runStudyPass', () => {
 
     it('caps how much it takes from one file', () => {
         expect(SYMBOLS_PER_FILE).toBeLessThan(50);
-        expect(STUDY_FILE_CAP).toBeLessThanOrEqual(1000);
+        // The FILE cap is a breadth budget and may grow; the tree must still be
+        // globbed well above it so the fair share spreads over the real shape.
+        expect(STUDY_FILE_CAP).toBeLessThan(STUDY_GLOB_MAX);
+    });
+
+    it('reads files concurrently rather than one round-trip at a time', async () => {
+        // The sequential read loop was the only reason the file cap had to be
+        // small: every file cost an IPC round-trip of pure waiting.
+        let inFlight = 0;
+        let peak = 0;
+        const files = Array.from({ length: 40 }, (_, i) => `C:/ws/f${i}.js`);
+        const invoke = vi.fn(async (cmd) => {
+            if (cmd === 'glob_files') return { files, truncated: false };
+            if (cmd === 'read_file') {
+                inFlight++;
+                peak = Math.max(peak, inFlight);
+                await new Promise(r => setTimeout(r, 1));
+                inFlight--;
+                return 'export function alpha() {}';
+            }
+            if (cmd === 'index_hashes') return [];
+            return null;
+        });
+        await runStudyPass({ workspacePath: 'C:/ws', invoke });
+        expect(peak).toBeGreaterThan(1);
+    });
+
+    it('parses the whole tree when the cap is lifted (fileCap: 0)', async () => {
+        const files = Array.from({ length: 30 }, (_, i) => `C:/ws/f${i}.js`);
+        const invoke = vi.fn(async (cmd) => {
+            if (cmd === 'glob_files') return { files, truncated: false };
+            if (cmd === 'read_file') return 'export function alphaBeta() {}';
+            if (cmd === 'index_hashes') return [];
+            return null;
+        });
+        const r = await runStudyPass({ workspacePath: 'C:/ws', invoke, fileCap: 0 });
+        expect(r.omitted).toBe(0);
+        expect(r.parsed).toBe(30);
     });
 });
 

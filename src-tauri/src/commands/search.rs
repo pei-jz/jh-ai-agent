@@ -232,10 +232,24 @@ fn is_likely_binary_path(p: &Path) -> bool {
 
 // ── glob_files ─────────────────────────────────────────────────────────────────
 
+/// Cheap change-detection stamp for one file: what the OS already knows about
+/// it. Returned only when the caller asks (`with_stamps`), so the common glob
+/// stays a plain list of paths.
+#[derive(Debug, Serialize)]
+pub struct FileStamp {
+    pub path: String,
+    pub size: u64,
+    /// Unix epoch milliseconds. 0 when the platform/file has no mtime.
+    pub mtime_ms: i64,
+}
+
 #[derive(Debug, Serialize)]
 pub struct GlobResult {
     pub files: Vec<String>,
     pub truncated: bool,
+    /// Present only for `with_stamps: true`. Same order as `files`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stamps: Option<Vec<FileStamp>>,
 }
 
 /// List files under `path` matching a glob pattern (e.g. "**/*.test.js").
@@ -245,12 +259,20 @@ pub struct GlobResult {
 ///   pattern     - glob pattern. Use `**` for arbitrary directories, `*` for any chars within
 ///                 a single segment. Examples: "*.md", "src/**/*.ts", "**/*test*"
 ///   path        - root to search (absolute). Default: current working dir.
-///   max_results - default 500. Hard cap 5000.
+///   max_results - default 500. Hard cap 50000.
+///
+/// The hard cap is what the memory "study workspace" pass runs into: it globs
+/// the whole tree first so its fair-share selection can spread over the REAL
+/// shape of the project, and a ceiling below the tree size silently biases that
+/// selection toward whatever the walker reached first. Only paths are collected
+/// here (no file contents), so a larger ceiling costs a directory walk and a
+/// vector of strings.
 #[tauri::command]
 pub async fn glob_files(
     pattern: String,
     path: Option<String>,
     max_results: Option<usize>,
+    with_stamps: Option<bool>,
 ) -> Result<GlobResult, String> {
     if pattern.trim().is_empty() {
         return Err("pattern must not be empty".to_string());
@@ -260,13 +282,15 @@ pub async fn glob_files(
     if !root_path.exists() {
         return Err(format!("Glob root does not exist: {}", root));
     }
-    let max_results = max_results.unwrap_or(500).min(5000);
+    let max_results = max_results.unwrap_or(500).min(50000);
 
     let glob = Glob::new(&pattern)
         .map_err(|e| format!("Invalid glob '{}': {}", pattern, e))?;
     let matcher = glob.compile_matcher();
 
+    let want_stamps = with_stamps.unwrap_or(false);
     let mut files: Vec<String> = Vec::new();
+    let mut stamps: Vec<FileStamp> = Vec::new();
     let mut truncated = false;
 
     let walker = WalkBuilder::new(root_path)
@@ -286,7 +310,27 @@ pub async fn glob_files(
         let rel = p.strip_prefix(root_path).unwrap_or(p);
         let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
         if matcher.is_match(rel) || matcher.is_match(name) {
-            files.push(p.to_string_lossy().into_owned());
+            let full = p.to_string_lossy().into_owned();
+            if want_stamps {
+                // The walker already stat()ed this entry, so size+mtime are
+                // effectively free here — and they let a caller skip READING a
+                // file that cannot have changed.
+                let (size, mtime_ms) = entry
+                    .metadata()
+                    .ok()
+                    .map(|m| {
+                        let mt = m
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_millis() as i64)
+                            .unwrap_or(0);
+                        (m.len(), mt)
+                    })
+                    .unwrap_or((0, 0));
+                stamps.push(FileStamp { path: full.clone(), size, mtime_ms });
+            }
+            files.push(full);
             if files.len() >= max_results {
                 truncated = true;
                 break;
@@ -294,7 +338,11 @@ pub async fn glob_files(
         }
     }
 
-    Ok(GlobResult { files, truncated })
+    Ok(GlobResult {
+        files,
+        truncated,
+        stamps: if want_stamps { Some(stamps) } else { None },
+    })
 }
 
 // ── tests ────────────────────────────────────────────────────────────────────────

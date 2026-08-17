@@ -14,6 +14,21 @@ const defaultInvoke = async (cmd) => (cmd === 'get_ai_config' ? {} : null);
 const invoke = vi.fn(defaultInvoke);
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a) => invoke(...a) }));
 
+// Local-first memory (P5): stored under the app config dir, injected into the
+// prompt. `configDir` and its contents are supplied per-test.
+let configDir = 'C:/cfg';
+let localMemoryJson = '';
+vi.mock('../memory/localMemory.js', async (importOriginal) => {
+    const actual = await importOriginal();
+    return {
+        ...actual,
+        readLocalMemory: async () => {
+            if (!localMemoryJson) return { entries: [] };
+            try { return { entries: JSON.parse(localMemoryJson).entries }; } catch (_) { return { entries: [] }; }
+        },
+    };
+});
+
 let projectSummary = '';
 let projectInstructions = '';
 vi.mock('../ProjectContext.js', () => ({
@@ -63,9 +78,12 @@ beforeEach(() => {
     projectSummary = '\n[Project Structure Overview]\nsrc/\n';
     projectInstructions = '';
     nativeTools = true;
+    configDir = 'C:/cfg';
+    localMemoryJson = '';
     invoke.mockReset();
     invoke.mockImplementation(defaultInvoke);
     contextBuilder.invalidateStaticCache();
+    contextBuilder._configDir = undefined; // reset the per-process dir cache
 });
 
 describe('project instructions (.agent/instructions.md)', () => {
@@ -190,5 +208,47 @@ describe('cache-break sentinel', () => {
         const stable = sentinel === -1 ? p : p.slice(0, sentinel);
         expect(stable).toContain('<environment>');
         expect(stable).toContain('<project_summary>');
+    });
+});
+
+describe('developer memory (localMemory, P5)', () => {
+    it('is injected as a labelled block when the store has entries', async () => {
+        invoke.mockImplementation(async (cmd) => (cmd === 'get_ai_config' ? {} : (cmd === 'get_app_config_dir' ? configDir : null)));
+        localMemoryJson = '{"entries":[{"text":"Rust + Svelte","category":"preference"}]}';
+        const p = await build();
+        expect(p).toContain('<developer_memory>');
+        expect(p).toContain('[preference] Rust + Svelte');
+    });
+
+    it('is absent when the store is empty', async () => {
+        invoke.mockImplementation(async (cmd) => (cmd === 'get_ai_config' ? {} : (cmd === 'get_app_config_dir' ? configDir : null)));
+        const p = await build();
+        expect(p).not.toContain('<developer_memory>');
+    });
+
+    it('is absent when the backend has no get_app_config_dir', async () => {
+        // defaultInvoke returns null for every non-config command.
+        const p = await build();
+        expect(p).not.toContain('<developer_memory>');
+    });
+
+    it('lands in the CACHEABLE (stable) region', async () => {
+        invoke.mockImplementation(async (cmd) => (cmd === 'get_ai_config' ? {} : (cmd === 'get_app_config_dir' ? configDir : null)));
+        localMemoryJson = '{"entries":[{"text":"Rust + Svelte","category":"preference"}]}';
+        const p = await build();
+        const sentinel = p.indexOf(ContextBuilder.SYSTEM_CACHE_BREAK);
+        const stable = sentinel === -1 ? p : p.slice(0, sentinel);
+        expect(stable).toContain('<developer_memory>');
+    });
+
+    it('REBUILDS the cached prefix when the store changes mid-run', async () => {
+        invoke.mockImplementation(async (cmd) => (cmd === 'get_ai_config' ? {} : (cmd === 'get_app_config_dir' ? configDir : null)));
+        localMemoryJson = '{"entries":[{"text":"version one","category":"preference"}]}';
+        const before = await build();
+        localMemoryJson = '{"entries":[{"text":"version two","category":"preference"}]}';
+        const after = await build();
+        expect(before).not.toBe(after);
+        expect(after).toContain('version two');
+        expect(after).not.toContain('version one');
     });
 });

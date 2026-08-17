@@ -5,6 +5,7 @@ import { tokenEstimator } from './TokenEstimator.js';
 import llmService from './LLMService.js';
 import { composePersona, buildInstructionsBlock, hashText } from './agent/ProjectInstructions.js';
 import { readOverview } from './memory/workspaceMemory.js';
+import { readLocalMemory, localMemoryContext } from './memory/localMemory.js';
 import { renderOverview } from './memory/ProjectOverview.js';
 // Which KIND of agent this task's prompt describes. Replaces a two-way
 // editing/lite branch that made every non-code task a second-class citizen.
@@ -64,6 +65,24 @@ JSON FORMATTING RULES (critical — most failures come from these):
     /** Force a full rebuild on the next getSystemPrompt call. */
     invalidateStaticCache() {
         this._staticCache = null;
+    }
+
+    /**
+     * Resolve the app config dir once per process (it cannot change) and cache
+     * it. Absent/older backends return null — the caller injects no local
+     * memory in that case.
+     * @param {(cmd:string,args:object)=>Promise<any>} invoke
+     * @returns {Promise<string|null>}
+     */
+    async _getConfigDir(invoke) {
+        if (this._configDir !== undefined) return this._configDir;
+        let dir = null;
+        try {
+            const d = await invoke('get_app_config_dir');
+            if (typeof d === 'string' && d.trim()) dir = d.trim();
+        } catch (_) { /* older backend */ }
+        this._configDir = dir;
+        return dir;
     }
 
     /**
@@ -281,7 +300,19 @@ JSON FORMATTING RULES (critical — most failures come from these):
         // step rather than after a restart.
         let overview = { text: '', generatedAt: '' };
         try { overview = await readOverview(root, invoke); } catch (_) { /* none yet */ }
-        const filesHash = hashText(personaOverride, projectInstructions, overview.text);
+        // The developer's OWN cross-workspace memory (P5). App-wide, not
+        // workspace-scoped; joined into the cache key so an entry added mid-run
+        // takes effect immediately. `get_app_config_dir` is resolved once per
+        // process (it cannot change) and cached.
+        let localMemoryEntries = [];
+        try {
+            const configDir = await this._getConfigDir(invoke);
+            if (configDir) {
+                const stored = await readLocalMemory(configDir, invoke);
+                localMemoryEntries = stored.entries;
+            }
+        } catch (_) { /* no local memory backend — inject nothing */ }
+        const filesHash = hashText(personaOverride, projectInstructions, overview.text, JSON.stringify(localMemoryEntries));
 
         const cacheKey = `${root}|${currentModel}|${outputLanguage}|${isNative}|${tier}|${subagentsEnabled ? 'sub' : 'nosub'}|${filesHash}`;
 
@@ -511,6 +542,13 @@ ${projectInfo}
         // the whole run — so it's stable and cacheable.
         if (memoryContext) {
             stablePart += `\n${memoryContext}\n`;
+        }
+
+        // Developer's cross-workspace memory (P5). Emitted as a small standing
+        // block in the STABLE region — app-wide preferences are run-constant.
+        const localBlock = localMemoryContext(localMemoryEntries, currentQuery);
+        if (localBlock) {
+            stablePart += `\n${localBlock}\n`;
         }
 
         if (editContext) {

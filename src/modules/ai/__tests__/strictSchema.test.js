@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { toStrictSchema } from '../strictSchema.js';
+import { toStrictSchema, isStrictCompliant } from '../strictSchema.js';
 
 describe('toStrictSchema', () => {
   it('marks every property required and forbids extras', () => {
@@ -95,5 +95,60 @@ describe('toStrictSchema', () => {
       required: ['action'],
     });
     expect(schema.properties.action.enum).toEqual(['set', 'get']);
+  });
+});
+
+describe('isStrictCompliant', () => {
+  it('accepts a hand-authored strict schema', () => {
+    expect(isStrictCompliant({
+      type: 'object',
+      properties: { path: { type: 'string' }, limit: { type: ['integer', 'null'] } },
+      required: ['path', 'limit'],
+      additionalProperties: false,
+    })).toBe(true);
+  });
+
+  it('accepts a no-argument tool (empty properties)', () => {
+    expect(isStrictCompliant({ type: 'object', properties: {}, additionalProperties: false })).toBe(true);
+  });
+
+  it('rejects a schema whose required omits a property', () => {
+    expect(isStrictCompliant({
+      type: 'object',
+      properties: { a: { type: 'string' }, b: { type: 'string' } },
+      required: ['a'],
+      additionalProperties: false,
+    })).toBe(false);
+  });
+
+  it('rejects additionalProperties true / used as a value schema (open map)', () => {
+    expect(isStrictCompliant({
+      type: 'object', properties: { a: { type: 'string' } }, required: ['a'], additionalProperties: true,
+    })).toBe(false);
+    expect(isStrictCompliant({
+      type: 'object',
+      properties: { widths: { type: 'object', additionalProperties: { type: 'number' } } },
+      required: ['widths'],
+      additionalProperties: false,
+    })).toBe(false);
+  });
+
+  it('rejects an untyped items schema and unsupported keywords', () => {
+    expect(isStrictCompliant({
+      type: 'object', properties: { rows: { type: 'array', items: {} } }, required: ['rows'], additionalProperties: false,
+    })).toBe(false);
+    expect(isStrictCompliant({
+      type: 'object',
+      properties: { n: { type: 'integer', minimum: 1 } },
+      required: ['n'],
+      additionalProperties: false,
+    })).toBe(false);
+  });
+
+  it('does not mutate the schema it inspects', () => {
+    const s = { type: 'object', properties: { a: { type: 'string' } }, required: ['a'], additionalProperties: false };
+    const before = JSON.stringify(s);
+    isStrictCompliant(s);
+    expect(JSON.stringify(s)).toBe(before);
   });
 });

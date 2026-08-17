@@ -131,7 +131,18 @@ class LLMService {
         if (modelId) {
             model = String(modelId).toLowerCase();
             const match = (this._models || []).find(m => m.id === modelId);
-            provider = String(match?.provider || String(modelId).split(':')[0] || '').toLowerCase();
+            // Fallbacks matter here: the id's prefix is the INSTANCE id
+            // ("inst_1716…"), never a provider name, so a missed lookup (models
+            // list not cached yet / the fetch failed) would silently answer
+            // "no native tools" and the run would go out with no tools at all —
+            // no error anywhere. Prefer the resolved provider of the active
+            // model before falling back to the prefix.
+            provider = String(
+                match?.provider
+                || (modelId === this.currentModel ? this.currentProvider : '')
+                || String(modelId).split(':')[0]
+                || ''
+            ).toLowerCase();
         } else {
             provider = this.getCurrentProvider() || '';
             model    = (this.getCurrentModel()   || '').toLowerCase();
@@ -277,6 +288,10 @@ class LLMService {
         if (!window.apiClient || !this.currentModel) return;
         try {
             const res = await window.apiClient.getModels();
+            // Keep the registry cached here too: supportsNativeTools() and
+            // _resolveModelMeta() read it, and this path can run without
+            // initFromConfig() (setCurrentModel from the model dropdown).
+            if (Array.isArray(res?.models) && res.models.length) this._models = res.models;
             const match = (res?.models || []).find(m => m.id === this.currentModel);
             if (match) {
                 if (match.provider) this.currentProvider = match.provider;

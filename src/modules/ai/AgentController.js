@@ -1,4 +1,4 @@
-import { planApprovalQuestion, isPlanRevision, stripPlanRevisionMarker } from './agent/PlanFirstApproval.js';
+import { planApprovalQuestion, isPlanRevision } from './agent/PlanFirstApproval.js';
 import llmService from './LLMService.js';
 import { ToolExecutor } from './ToolExecutor.js';
 import { contextBuilder, ContextBuilder } from './ContextBuilder.js';
@@ -10,11 +10,8 @@ import {
     safeParseJSON, extractToolCall, extractAllPossibleToolCalls,
     extractThoughtFromMalformedText, cleanFinalResponse, stripReActPreamble
 } from './agent/ResponseParser.js';
-import { detectCycle } from './agent/LoopDetector.js';
-import { CompressionMetrics, fetchKey, hashContent, factRetention } from './agent/CompressionMetrics.js';
-import { shouldPlanFirst } from './agent/TaskComplexity.js';
+import { CompressionMetrics, fetchKey, factRetention } from './agent/CompressionMetrics.js';
 import { intentRegistry, resolveIntent } from './agent/IntentRegistry.js';
-import { classifyCommand } from './tools/commandPolicy.js';
 import { normalizeSafetyLimits, resolveRecallArm } from './agent/SafetyLimits.js';
 import { initialPhase, advancePhase, modelForPhase, phaseLabel, PLAN_PHASE_MAX_STEPS } from './agent/ModelPhaseRouter.js';
 import { buildRecoveryHint } from './agent/RecoveryHints.js';
@@ -25,6 +22,26 @@ import {
     summarizeReview
 } from './agent/SubagentRoles.js';
 import { stopReason, stopNotice, stopStatusMessage } from './agent/stopReason.js';
+// P3 monolith split: pure prompt/history assembly, safety guards, tool
+// dispatch and LLM-turn formatting live in their own modules; this file
+// keeps the run loop, state and orchestration.
+import {
+    applyDescriptions, envelopeHasContent, toolArgHint,
+    historyChars, historyText, droppedContentHashes,
+    pushAssistantToolTurn, pushToolResultsTurn, compressToolResultsInHistory,
+} from './agent/PromptAssembler.js';
+import {
+    classifyToolCalls, planFirstGate,
+    isPlanGatedTool, evaluateWallClock, evaluateTokenBudget,
+    evaluateIdenticalCalls, hasIdenticalTail, findCycle, isNoProgressWindow,
+    iterationMadeProgress, phaseSignalForToolCalls,
+    noProgressCheckMessage, identicalCallWarning, tailLoopWarning, cycleWarning,
+} from './agent/SafetyGuards.js';
+import { executeOneCall, countToolUsage, isErrorResult, summarizeForStatus, routeProducedImages } from './agent/ToolDispatch.js';
+import { formatNativeToolCalls, looksLikeToolTextCall, stripThoughtWrapper } from './agent/LLMTurn.js';
+// P5: parallel tool-call conflict detection — two calls mutating the same file
+// must not race inside Promise.all; the loop serializes the flagged ones.
+import { partitionParallelCalls, serializationNotice } from './agent/ConflictDetector.js';
 // Step 0 of the memory plan: record what each tool call did, with a normalized
 // failure signature. Recording only — nothing here changes what the agent does.
 import { TraceRecorder } from './memory/TraceRecorder.js';
@@ -48,51 +65,9 @@ import { sessionMetrics, appendSessionMetrics } from './memory/SessionMetrics.js
  */
 const DELIVERABLE_MIN_CHARS = 400;
 
-/**
- * Fold `[{path, description}]` from the description generator onto the result's
- * file rows, mutating them in place. Path matching tolerates separator and
- * absolute/relative differences — the model echoes back whatever form it likes.
- * @returns {boolean} true when at least one description was applied
- */
-function applyDescriptions(files, items) {
-    if (!Array.isArray(items)) return false;
-    let applied = false;
-    for (const item of items) {
-        if (!item || !item.path || !item.description) continue;
-        const norm = String(item.path).replace(/\\/g, '/');
-        const match = files.find(f =>
-            f.path === item.path ||
-            f.path.replace(/\\/g, '/') === norm ||
-            f.path.replace(/\\/g, '/').endsWith(norm));
-        if (!match) continue;
-        match.description = String(item.description).substring(0, 200);
-        applied = true;
-    }
-    return applied;
-}
-
-const PLAN_GATED_TOOLS = new Set([
-    'write_file', 'multi_replace_file_content', 'replace_lines',
-    'delete_file', 'move_file', 'run_command',
-]);
-
-/**
- * True when a present_result envelope actually carries a deliverable. Used to
- * stop an empty follow-up present_result from clobbering a good earlier one.
- */
-function _envelopeHasContent(env) {
-    if (!env || typeof env !== 'object') return false;
-    const p = env.payload || {};
-    const nonEmptyStr = (v) => typeof v === 'string' && v.trim().length > 0;
-    switch (env.kind) {
-        case 'answer':    return nonEmptyStr(p.text) || nonEmptyStr(p.answer);
-        case 'code-edit': return Array.isArray(p.edits) && p.edits.length > 0;
-        case 'file-list': return Array.isArray(p.files) && p.files.length > 0;
-        case 'markdown':
-        case 'table':
-        default:          return nonEmptyStr(p.md) || nonEmptyStr(p.markdown) || nonEmptyStr(p.text);
-    }
-}
+// NOTE: applyDescriptions / PLAN_GATED_TOOLS / envelopeHasContent / MUTATING_TOOLS
+// now live in agent/PromptAssembler.js + agent/SafetyGuards.js (P3 split) and
+// are imported at the top of this file.
 
 export class AgentController {
     constructor() {
@@ -120,6 +95,8 @@ export class AgentController {
         // A previous run must not leak its images into this one.
         this._pendingToolImages = [];
         this.toolExecutor.drainImages();
+        // Report a native tool-calling failure once per run (see _generateWithHistory).
+        this._nativeToolFailureNotified = false;
         // How many leading steps re-attach the user's images to the LLM call. Covers
         // an investigate→plan→build flow where the image is only "used" after step 1,
         // while still bounding token cost on long tasks. (See use site below.)
@@ -300,7 +277,6 @@ export class AgentController {
         // to approve → would deadlock). A per-request bypass phrase skips it.
         const planMode = safety.planMode || 'auto';
         const isFreshTurn = !Array.isArray(chatContext) || chatContext.length === 0;
-        const planBypass = /計画(は)?(不要|いらない|なし)|そのまま実装|プラン不要|no\s*plan|skip\s*plan|just\s*implement/i.test(String(prompt || ''));
         // A continuation whose latest message is a plan-revision request (the
         // user picked the ✏️ "Request changes" option on the approval card and typed
         // what they want changed) must RE-OPEN the plan-first gate: the run should
@@ -313,26 +289,21 @@ export class AgentController {
         // of chatContext for callers that attach the reply there instead.
         const lastUserMsg = isFreshTurn ? '' : String([...chatContext].reverse().find(m => m?.role === 'user' && m?.content)?.content || '');
         const isPlanRevisionTurn = !isFreshTurn && (isPlanRevision(String(prompt || '')) || isPlanRevision(lastUserMsg));
-        // The revision text itself (what the user typed) is passed to the agent so
-        // it can revise the plan accordingly — stripped of any prefix markers.
-        this._planRevisionText = isPlanRevisionTurn
-            ? stripPlanRevisionMarker(String(prompt || ''))
-                || stripPlanRevisionMarker(lastUserMsg)
-            : '';
-        // Only callers with a HUMAN watching in real time can approve a plan.
-        // 'Schedule' is in INTERACTIVE_CALLERS (full toolset) but runs UNATTENDED,
-        // so it must NOT plan-gate (ask_user would pause forever).
-        const PLAN_FIRST_CALLERS = new Set(['DirectChat', 'NewTask']);
-        // A plan-revision turn ALWAYS re-opens the gate regardless of complexity
-        // scoring — the plan is already on the table; the user just wants it
-        // changed, and re-presenting it needs the same protected planning phase.
-        this._planFirstActive = planMode !== 'off'
-            && PLAN_FIRST_CALLERS.has(this.caller)
-            && !this._isSubagent
-            && (isFreshTurn || isPlanRevisionTurn)
-            && !planBypass
-            && (planMode === 'always' || isPlanRevisionTurn || shouldPlanFirst(prompt));
-        this._planApproved = !this._planFirstActive;
+        // The gate decision itself (caller allowlist, bypass phrase, complexity
+        // scoring) lives in SafetyGuards.planFirstGate — see its unit tests. The
+        // revision text it returns is what the user typed, stripped of markers.
+        const gate = planFirstGate({
+            prompt,
+            caller: this.caller,
+            isSubagent: this._isSubagent,
+            isFreshTurn,
+            isPlanRevisionTurn,
+            planMode,
+            lastUserMsg,
+        });
+        this._planRevisionText = gate.revisionText;
+        this._planFirstActive = gate.active;
+        this._planApproved = gate.approved;
         if (this._planFirstActive) {
             onAgentStatus?.({ event: 'status', status: 'running', message: '📋 計画優先モード — まず計画を提示し承認を得ます / Plan-first: proposing a plan for approval' });
         }
@@ -466,16 +437,8 @@ export class AgentController {
         const progressHistory = [];
         // Tools that count as "real progress" for the no-progress detector.
         // Anything not in this list (read_file/grep_search/list_files/open_file)
-        // is exploratory and does NOT count.
-        const MUTATING_TOOLS = new Set([
-            'write_file', 'write_to_file',
-            'multi_replace_file_content',
-            'create_artifact', 'update_artifact',
-            'write_xlsx',      // producing a spreadsheet IS the deliverable
-            'run_command',     // count as progress — conservative (avoids false stops)
-            'delete_file', 'move_file',
-            'finish_task',     // terminal — also counts as "progress" (will end loop)
-        ]);
+        // is exploratory and does NOT count. MUTATING_TOOLS is imported from
+        // agent/SafetyGuards.js (P3 split).
 
         await this.toolExecutor.startSession(workspacePath);
 
@@ -589,8 +552,8 @@ export class AgentController {
             if (event === 'result' && data?.envelope) {
                 const incoming = data.envelope;
                 if (!this._lastResultEnvelope
-                    || _envelopeHasContent(incoming)
-                    || !_envelopeHasContent(this._lastResultEnvelope)) {
+                    || envelopeHasContent(incoming)
+                    || !envelopeHasContent(this._lastResultEnvelope)) {
                     this._lastResultEnvelope = incoming;
                 }
             }
@@ -651,16 +614,20 @@ export class AgentController {
 
             // ── Wall-clock budget enforcement ──────────────────────────
             // Hard stop at 100% of budget. Soft reminder once at 80%.
-            if (safety.wallClockMinutes > 0) {
+            {
                 const elapsedMs = Date.now() - taskStartMs;
-                const budgetMs = safety.wallClockMinutes * 60 * 1000;
-                if (elapsedMs >= budgetMs) {
+                const wallClock = evaluateWallClock({
+                    elapsedMs,
+                    budgetMinutes: safety.wallClockMinutes,
+                    pctWarned: wallClockWarned,
+                });
+                if (wallClock.stop) {
                     stoppedBy = stopReason('wall_clock', { limit: safety.wallClockMinutes });
                     onAgentStatus?.({ event: 'status', status: 'running', message: stopStatusMessage(stoppedBy) });
                     finalResponse = (finalResponse || '') + stopNotice(stoppedBy);
                     break;
                 }
-                if (elapsedMs >= budgetMs * 0.8 && !wallClockWarned) {
+                if (wallClock.warn) {
                     wallClockWarned = true;
                     history.push({
                         role: 'user',
@@ -699,15 +666,20 @@ export class AgentController {
             // ── Token budget enforcement (cumulativeTokens updated below per LLM call) ──
             // Sub-agent consumption (_subtaskTokens) counts toward the same cap —
             // delegation must not be a budget bypass.
-            if (safety.tokenBudget > 0) {
+            {
                 const spent = cumulativeTokens + this._subtaskTokens;
-                if (spent >= safety.tokenBudget) {
+                const budget = evaluateTokenBudget({
+                    spent,
+                    budgetTokens: safety.tokenBudget,
+                    warned: tokenBudgetWarned,
+                });
+                if (budget.stop) {
                     stoppedBy = stopReason('token_budget', { limit: safety.tokenBudget, used: spent });
                     onAgentStatus?.({ event: 'status', status: 'running', message: stopStatusMessage(stoppedBy) });
                     finalResponse = (finalResponse || '') + stopNotice(stoppedBy);
                     break;
                 }
-                if (spent >= safety.tokenBudget * 0.8 && !tokenBudgetWarned) {
+                if (budget.warn) {
                     tokenBudgetWarned = true;
                     history.push({
                         role: 'user',
@@ -942,7 +914,7 @@ export class AgentController {
                     if (toolImages.length) {
                         onAgentStatus?.({ event: 'status', status: 'running', message: `🖼 ツール由来の画像 ${toolImages.length}枚をLLMに添付します（${toolImages.map(i => i.source).join(', ')}）。` });
                     }
-                    genResult = await this._generateWithHistory(compactedHistory, systemPrompt, abortSignal, kisContext, stepImages, onUpdate);
+                    genResult = await this._generateWithHistory(compactedHistory, systemPrompt, abortSignal, kisContext, stepImages, onUpdate, onAgentStatus);
                     
                     if (compactedHistory.length < history.length) {
                         history = compactedHistory;
@@ -1178,30 +1150,31 @@ export class AgentController {
                     argsStr: JSON.stringify(tc.args || {})
                 }));
                 toolCallHistory.push(...currentToolCalls);
-                toolCall.tool_calls.forEach(tc => {
-                    usedToolTypes.add(tc.name);
-                    toolUsageCounts[tc.name] = (toolUsageCounts[tc.name] || 0) + 1;
-                });
+                toolCall.tool_calls.forEach(tc => usedToolTypes.add(tc.name));
+                countToolUsage(toolCall.tool_calls, toolUsageCounts);
 
                 // (Removed legacy hack that silently bumped maxIterations to a
                 // hardcoded 20 when ≥5 tool types were used — it overrode the user's
                 // configured step cap. We now always honor the configured limit;
                 // raise Settings → General → Max Steps if more headroom is needed.)
 
-                if (currentSignature === lastToolCallSignature) {
-                    repeatCount++;
-                    // Two-stage escalation:
-                    //   stage 1 (warn): at `identicalCallThreshold` (default 5) → inject a system
-                    //                   message, reset the counter, let the LLM try again
-                    //   stage 2 (stop): at 3× the threshold (default 15) → genuine hard stop
-                    // The previous behavior was a hard stop at literally 3 identical calls in a
-                    // row, which was too aggressive — many legitimate retry/poll patterns hit it
-                    // and the user had no way to override. Both thresholds are now configurable
-                    // (Settings → General → Identical Call Threshold), and 0 disables both.
-                    const warnAt = safety.identicalCallThreshold;
-                    const stopAt = warnAt > 0 ? warnAt * 3 : 0;
-
-                    if (warnAt > 0 && repeatCount >= warnAt && !identicalWarned) {
+                // Two-stage escalation (thresholds in SafetyGuards.evaluateIdenticalCalls):
+                //   stage 1 (warn): at `identicalCallThreshold` (default 5) → inject a system
+                //                   message, reset the counter, let the LLM try again
+                //   stage 2 (stop): at 3× the threshold (default 15) → genuine hard stop
+                // The original behavior was a hard stop at literally 3 identical calls in a
+                // row, which was too aggressive — many legitimate retry/poll patterns hit it
+                // and the user had no way to override. Both thresholds are configurable
+                // (Settings → General → Identical Call Threshold), and 0 disables both.
+                const identical = evaluateIdenticalCalls({
+                    signature: currentSignature,
+                    lastSignature: lastToolCallSignature,
+                    repeatCount,
+                    warnAt: safety.identicalCallThreshold,
+                });
+                repeatCount = identical.repeatCount;
+                if (identical.isRepeat) {
+                    if (identical.warn && !identicalWarned) {
                         identicalWarned = true;
                         onAgentStatus?.({
                             event: 'status',
@@ -1211,14 +1184,14 @@ export class AgentController {
                         history.push({ role: 'assistant', content: response });
                         history.push({
                             role: 'user',
-                            content: `[System Warning] You have invoked "${toolCall.tool_calls[0]?.name || 'a tool'}" with identical arguments ${repeatCount} times in a row. This rarely makes sense — please try a different approach, or call \`finish_task\` if the goal is already complete.`
+                            content: identicalCallWarning(toolCall.tool_calls[0]?.name, repeatCount),
                         });
                         repeatCount = 0;
                         toolCallHistory = [];
                         continue;
                     }
 
-                    if (stopAt > 0 && repeatCount >= stopAt) {
+                    if (identical.stop) {
                         onAgentStatus?.({ event: 'error', error: `Loop detected (${repeatCount}× identical calls, warning ignored). Stopping.` });
                         finalResponse = (finalResponse || '') +
                             `\n\n(注意: 同一ツール呼び出しを ${repeatCount} 回繰り返し、警告も無視されたため自動停止しました。Settings → General → Identical Call Threshold で調整できます。)`;
@@ -1226,26 +1199,19 @@ export class AgentController {
                     }
                 } else {
                     lastToolCallSignature = currentSignature;
-                    repeatCount = 0;
                     identicalWarned = false; // reset so next streak can re-warn
                 }
 
                 // Phase 4: Pattern loop detection (5x identical tool+args)
-                if (toolCallHistory.length >= 5) {
-                    const lastFive = toolCallHistory.slice(-5);
-                    const isIdenticalCall = lastFive.every(c =>
-                        c.name === lastFive[0].name && c.argsStr === lastFive[0].argsStr
-                    );
-                    if (isIdenticalCall) {
-                        onAgentStatus?.({ event: 'status', status: 'running', message: "Pattern loop detected (identical tool call 5x). Injecting guidance." });
-                        history.push({ role: 'assistant', content: response });
-                        history.push({
-                            role: 'user',
-                            content: `[System Warning] You have invoked the tool "${lastFive[0].name}" with identical arguments 5 times in a row. To prevent infinite loops, consider a different approach or report the status to the user.`
-                        });
-                        toolCallHistory = [];
-                        continue;
-                    }
+                if (hasIdenticalTail(toolCallHistory, 5)) {
+                    onAgentStatus?.({ event: 'status', status: 'running', message: "Pattern loop detected (identical tool call 5x). Injecting guidance." });
+                    history.push({ role: 'assistant', content: response });
+                    history.push({
+                        role: 'user',
+                        content: tailLoopWarning(toolCallHistory[toolCallHistory.length - 1]?.name),
+                    });
+                    toolCallHistory = [];
+                    continue;
                 }
 
                 // ── Oscillation cycle detection (ABAB / ABCABC patterns) ──
@@ -1256,8 +1222,8 @@ export class AgentController {
                 // `cycleWarned` guards against re-firing on every iteration in case
                 // the LLM ignores the warning and keeps cycling — second escalation
                 // happens via identical-call counter or no-progress detector instead.
-                if (!cycleWarned && safety.cycleDetectionMinRepeats > 0) {
-                    const cycle = this._detectCycle(toolCallHistory, safety.cycleDetectionMinRepeats);
+                if (!cycleWarned) {
+                    const cycle = findCycle(toolCallHistory, safety.cycleDetectionMinRepeats);
                     if (cycle) {
                         cycleWarned = true;
                         onAgentStatus?.({
@@ -1266,10 +1232,7 @@ export class AgentController {
                             message: `Cycle detected (${cycle.pattern} ×${cycle.repeats}). Injecting guidance.`
                         });
                         history.push({ role: 'assistant', content: response });
-                        history.push({
-                            role: 'user',
-                            content: `[System Warning] You're oscillating between the same actions (${cycle.pattern}) — repeated ${cycle.repeats} times with no progress. Pick a fundamentally different approach, call \`finish_task\` if the goal is already achieved, or ask the user for guidance. Do NOT repeat the same cycle.`
-                        });
+                        history.push({ role: 'user', content: cycleWarning(cycle) });
                         toolCallHistory = [];
                         continue;
                     }
@@ -1279,17 +1242,11 @@ export class AgentController {
                 //    approved. The agent must present a plan + ask_user first;
                 //    read/investigation tools, present_result and ask_user pass.
                 if (this._planFirstActive && !this._planApproved) {
-                    const gated = toolCall.tool_calls.filter(tc => {
-                        if (!PLAN_GATED_TOOLS.has(tc.name)) return false;
-                        // Let READ-ONLY (safe-classified) shell commands run during
-                        // planning — `dir` / `git status` / `git log` etc. can't
-                        // mutate the workspace, so investigation isn't blocked.
-                        // Anything that writes/deletes (normal/dangerous) stays gated.
-                        if (tc.name === 'run_command') {
-                            return classifyCommand(tc.args?.command || '') !== 'safe';
-                        }
-                        return true;
-                    });
+                    // isPlanGatedTool lets READ-ONLY (safe-classified) shell commands
+                    // run during planning — `dir` / `git status` / `git log` can't
+                    // mutate the workspace, so investigation isn't blocked. Anything
+                    // that writes/deletes (normal/dangerous) stays gated.
+                    const gated = toolCall.tool_calls.filter(tc => isPlanGatedTool(tc.name, tc.args));
                     if (gated.length > 0) {
                         const names = [...new Set(gated.map(g => g.name))].join(', ');
                         const pa = planApprovalQuestion();
@@ -1325,20 +1282,12 @@ export class AgentController {
                 }
 
                 // Phase 4: Permission-based tool classification + parallel execution
-                const safeCalls = [];
-                const dangerousCalls = [];
-                const deniedCalls = [];
+                const { safeCalls, dangerousCalls, deniedCalls } = classifyToolCalls(
+                    toolCall.tool_calls,
+                    this.toolExecutor.getPermissionLevel?.bind(this.toolExecutor),
+                );
                 const results = [];
                 let hasErrors = false;
-
-                for (const tc of toolCall.tool_calls) {
-                    const level = this.toolExecutor.getPermissionLevel 
-                        ? this.toolExecutor.getPermissionLevel(tc.name, tc.args) 
-                        : "Allow";
-                    if (level === "Allow") safeCalls.push(tc);
-                    else if (level === "Deny") deniedCalls.push(tc);
-                    else dangerousCalls.push(tc); // "Ask"
-                }
 
                 // Handle Denied Calls immediately
                 for (const call of deniedCalls) {
@@ -1351,20 +1300,41 @@ export class AgentController {
                     onAgentStatus?.({ event: 'tool_call', name: call.name, args: call.args, status: 'denied' });
                 }
 
-                // Execute safe calls in parallel
+                // Execute safe calls in parallel — but never two calls that
+                // mutate the SAME file (P5 conflict detection). The loop has no
+                // cross-call locking; a second write racing the first silently
+                // wins/loses. partitionParallelCalls keeps the first writer in
+                // the parallel batch and pulls conflicting later ones into
+                // `serial`, run after the batch in their original order.
                 if (safeCalls.length > 0) {
-                    const safeResults = await Promise.all(safeCalls.map(async (call) => {
+                    const { parallel, serial } = partitionParallelCalls(safeCalls);
+                    if (serial.length > 0) {
+                        onAgentStatus?.({ event: 'status', status: 'running', message: serializationNotice(serial) });
+                    }
+
+                    const runOne = (call) => {
+                        // The tool_call event is what the Monitor timeline draws a
+                        // row from — a serialized call that skipped it was invisible
+                        // there even though it ran.
                         onAgentStatus?.({ event: 'tool_call', name: call.name, args: call.args });
-                        const toolStartTime = Date.now();
-                        const result = await this.toolExecutor.executeTool(call, (statusMsg) => {
-                            onAgentStatus?.({ event: 'status', status: 'running', message: statusMsg });
-                        }, onConfirm);
-                        const toolDuration = Date.now() - toolStartTime;
-                        return { call, result, duration: toolDuration };
-                    }));
+                        return executeOneCall({
+                            call,
+                            executor: this.toolExecutor,
+                            onStatus: (msg) => onAgentStatus?.({ event: 'status', status: 'running', message: msg }),
+                            onConfirm,
+                        });
+                    };
+
+                    const safeResults = await Promise.all(parallel.map(runOne));
+
+                    // Conflicting (same-file) calls run one-at-a-time AFTER the
+                    // batch — each sees the previous call's write.
+                    for (const call of serial) {
+                        safeResults.push(await runOne(call));
+                    }
 
                     for (const { call, result, duration } of safeResults) {
-                        const isError = typeof result === 'string' && result.startsWith('Error');
+                        const isError = isErrorResult(result);
                         if (isError) hasErrors = true;
                         this._trackReadEfficiency(call, result, isError);
                         this._trace?.record({ iteration, tool: call.name, args: call.args, result, isError, ms: duration });
@@ -1376,12 +1346,13 @@ export class AgentController {
                 // Execute dangerous calls sequentially (with user confirmation)
                 for (const call of dangerousCalls) {
                     onAgentStatus?.({ event: 'tool_call', name: call.name, args: call.args });
-                    const toolStartTime = Date.now();
-                    const result = await this.toolExecutor.executeTool(call, (statusMsg) => {
-                        onAgentStatus?.({ event: 'status', status: 'running', message: statusMsg });
-                    }, onConfirm);
-                    const toolDuration = Date.now() - toolStartTime;
-                    const isError = typeof result === 'string' && result.startsWith('Error');
+                    const { result, duration: toolDuration } = await executeOneCall({
+                        call,
+                        executor: this.toolExecutor,
+                        onStatus: (msg) => onAgentStatus?.({ event: 'status', status: 'running', message: msg }),
+                        onConfirm,
+                    });
+                    const isError = isErrorResult(result);
 
                     this._trackReadEfficiency(call, result, isError);
                     this._trace?.record({ iteration, tool: call.name, args: call.args, result, isError, ms: toolDuration });
@@ -1392,11 +1363,7 @@ export class AgentController {
                         hasErrors = true;
                         onAgentStatus?.({ event: 'status', status: 'running', message: `❌ ${call.name} failed: ${result}` });
                     } else {
-                        let summary = result;
-                        if (typeof result === 'string' && result.length > 300) {
-                            summary = result.substring(0, 300) + '...';
-                        }
-                        onAgentStatus?.({ event: 'status', status: 'running', message: `✅ ${call.name} finished: ${summary}` });
+                        onAgentStatus?.({ event: 'status', status: 'running', message: `✅ ${call.name} finished: ${summarizeForStatus(result)}` });
                     }
                 }
 
@@ -1413,13 +1380,9 @@ export class AgentController {
                 // step cap. `planFirstPending` keeps a BLOCKED edit from counting:
                 // under the plan-first gate that call never ran.
                 if (this._phaseRouting && this._phase === 'plan') {
-                    const names = toolCall.tool_calls.map(tc => tc.name);
-                    if (names.some(n => PLAN_GATED_TOOLS.has(n))) {
-                        this._phaseEvent('mutation', {
-                            planFirstPending: this._planFirstActive && !this._planApproved,
-                        }, onAgentStatus);
-                    } else if (names.includes('task_progress')) {
-                        this._phaseEvent('plan-done', {
+                    const signal = phaseSignalForToolCalls(toolCall.tool_calls.map(tc => tc.name));
+                    if (signal) {
+                        this._phaseEvent(signal, {
                             planFirstPending: this._planFirstActive && !this._planApproved,
                         }, onAgentStatus);
                     }
@@ -1428,18 +1391,20 @@ export class AgentController {
                 // Collect any images the tools produced. They cannot travel inside
                 // a tool result (text-only on every provider), so the next request
                 // carries them instead — see the stepImages assembly above.
-                let imageNotice = '';
                 const producedImages = this.toolExecutor.drainImages();
-                if (producedImages.length) {
-                    const activeModel = this._modelOverride || llmService.getCurrentModel();
-                    if (llmService.modelSupportsVision?.(activeModel)) {
-                        this._pendingToolImages.push(...producedImages);
-                    } else {
-                        // Dropping them silently would leave the model reasoning
-                        // about pictures it never received.
-                        imageNotice = `\n[Note: ${producedImages.length} image(s) were extracted, but the active model (${activeModel || 'unknown'}) has no vision support so they could not be shown. Work from the text, or tell the user to switch to a vision-capable model.]`;
-                        onAgentStatus?.({ event: 'status', status: 'running', message: `⚠️ 抽出した画像${producedImages.length}枚は、モデル(${activeModel || '未設定'})がビジョン非対応のため渡せませんでした。` });
-                    }
+                const activeModel = this._modelOverride || llmService.getCurrentModel();
+                // Dropping them silently would leave the model reasoning about
+                // pictures it never received, so the notice rides into the prompt.
+                const imageRoute = routeProducedImages({
+                    producedImages,
+                    activeModel,
+                    modelSupportsVision: (m) => llmService.modelSupportsVision?.(m) === true,
+                });
+                const imageNotice = imageRoute.notice;
+                if (imageRoute.attached) {
+                    this._pendingToolImages.push(...producedImages);
+                } else if (imageNotice) {
+                    onAgentStatus?.({ event: 'status', status: 'running', message: `⚠️ 抽出した画像${producedImages.length}枚は、モデル(${activeModel || '未設定'})がビジョン非対応のため渡せませんでした。` });
                 }
 
                 // Recovery hints by error type → ./agent/RecoveryHints.js (unit-tested).
@@ -1462,7 +1427,7 @@ export class AgentController {
                 // spinning without producing artifacts, not just because N steps
                 // have elapsed.
                 const iterTools = toolCall.tool_calls.map(tc => tc.name);
-                const iterHadProgress = iterTools.some(n => MUTATING_TOOLS.has(n));
+                const iterHadProgress = iterationMadeProgress(iterTools);
                 progressHistory.push(iterHadProgress);
 
                 // When real progress resumes, reset detection booleans so the
@@ -1473,23 +1438,17 @@ export class AgentController {
                     noProgressWarned = false;
                 }
 
-                if (safety.noProgressWindow > 0 &&
-                    progressHistory.length >= safety.noProgressWindow &&
-                    !noProgressWarned) {
-                    const recent = progressHistory.slice(-safety.noProgressWindow);
-                    const anyProgress = recent.some(p => p);
-                    if (!anyProgress) {
-                        noProgressWarned = true;
-                        onAgentStatus?.({
-                            event: 'status',
-                            status: 'running',
-                            message: `No file changes in ${safety.noProgressWindow} steps — checking in with the agent.`
-                        });
-                        history.push({
-                            role: 'user',
-                            content: `[System Check] You've executed ${safety.noProgressWindow} consecutive steps without modifying any files (read_file / grep_search / list_files only). Two options:\n1. If the user's goal is fully achieved — call \`finish_task\` now with a summary.\n2. If you are still working — call your next tool immediately (do NOT reply with text only).`
-                        });
-                    }
+                if (!noProgressWarned && isNoProgressWindow(progressHistory, safety.noProgressWindow)) {
+                    noProgressWarned = true;
+                    onAgentStatus?.({
+                        event: 'status',
+                        status: 'running',
+                        message: `No file changes in ${safety.noProgressWindow} steps — checking in with the agent.`
+                    });
+                    history.push({
+                        role: 'user',
+                        content: noProgressCheckMessage(safety.noProgressWindow),
+                    });
                 }
 
                 // If ask_user was just executed, the agent is BLOCKED on user input:
@@ -2174,7 +2133,7 @@ ${String(finalResponse || '').slice(0, 2000)}`;
 
     // ─── Phase 4: _generateWithHistory — tries native tool calling first, falls back to JSON mode ───
 
-    async _generateWithHistory(history, systemPrompt, abortSignal, kisContext = '', images = [], onUpdate = null) {
+    async _generateWithHistory(history, systemPrompt, abortSignal, kisContext = '', images = [], onUpdate = null, onAgentStatus = null) {
         // Use the single source-of-truth from LLMService, evaluated for the model
         // we ACTUALLY send (tier/override), not the label in currentModel.
         // ContextBuilder has already built systemPrompt using the same effective
@@ -2232,10 +2191,11 @@ ${String(finalResponse || '').slice(0, 2000)}`;
                                 return { content: JSON.stringify(recovered), usage: result.usage, sentRequest: result.sentRequest, nativeTurn };
                             }
                         }
-                        const looksLikeToolTextCall = /\bCALL:\s*\w/i.test(txt) ||
-                            /<function=|<tool_call>/.test(txt) ||
-                            this.toolExecutor.toolDefinitions?.some(td => new RegExp(`\\b${td.name}\\b`).test(txt) && /PLAN:/i.test(txt));
-                        if (!txt || looksLikeToolTextCall) {
+                        // NOTE: this used to be a local const of the same name,
+                        // which SHADOWED the imported helper — the module version
+                        // was dead while an inline copy ran.
+                        const toolNames = (this.toolExecutor.toolDefinitions || []).map(td => td.name);
+                        if (!txt || looksLikeToolTextCall(txt, toolNames)) {
                             nativeFailed = true;
                             break;
                         }
@@ -2252,28 +2212,10 @@ ${String(finalResponse || '').slice(0, 2000)}`;
                         //     the whole turn to JSON-mode fallback)
                         // Genuinely malformed JSON still raises SyntaxError → the
                         // self-correction retry below.
-                        const toolCallsFormatted = result.toolCalls
-                            .filter(tc => tc && (tc.function?.name || tc.name))
-                            .map(tc => {
-                                const fn = tc.function || tc;   // some providers flatten name/arguments
-                                let args = fn.arguments ?? fn.args ?? {};
-                                if (typeof args === 'string') {
-                                    const s = args.trim();
-                                    if (s === '') {
-                                        args = {};
-                                    } else {
-                                        try {
-                                            args = this._safeParseJSON(s);
-                                        } catch (parseErr) {
-                                            throw new SyntaxError(`JSON parsing failed for tool '${fn.name}': ${parseErr.message}`);
-                                        }
-                                    }
-                                }
-                                return {
-                                    name: fn.name,
-                                    args: args
-                                };
-                            });
+                        const toolCallsFormatted = formatNativeToolCalls(
+                            result.toolCalls,
+                            (s) => this._safeParseJSON(s),
+                        );
                         // Every entry was malformed → treat as a native failure and
                         // fall back to JSON mode rather than proceeding with nothing.
                         if (toolCallsFormatted.length === 0) {
@@ -2284,10 +2226,7 @@ ${String(finalResponse || '').slice(0, 2000)}`;
                         // Strip <thought>…</thought> XML wrapper that the model may output
                         // (per protocol instruction), keeping only the inner OBSERVE/PLAN/CALL text.
                         const rawThought = (result.content || '').trim();
-                        const thoughtInner = rawThought
-                            ? rawThought.replace(/^[\s\S]*?<thought>([\s\S]*?)<\/thought>[\s\S]*$/, '$1').trim()
-                            : '';
-                        const thought = thoughtInner || rawThought;
+                        const thought = stripThoughtWrapper(rawThought) || rawThought;
 
                         const content = JSON.stringify({
                             thought,
@@ -2323,7 +2262,26 @@ ${String(finalResponse || '').slice(0, 2000)}`;
                         });
                         continue;
                     }
+                    // The user cancelled — do NOT degrade to a JSON-mode call.
+                    // chat() would attach its abort listener to an ALREADY-aborted
+                    // signal (which never fires again), so the fallback request
+                    // would go out uncancellable after a stop.
+                    if (abortSignal?.aborted || /AbortError/i.test(String(e?.message || ''))) throw e;
                     console.warn('Native tool use failed, falling back to JSON mode:', e);
+                    // Make the degradation VISIBLE. A provider-side rejection of the
+                    // tools payload (e.g. Azure 400 on a strict-schema violation)
+                    // otherwise looked like "the request simply has no tools": the
+                    // failed native request is discarded and only the tool-less
+                    // fallback shows up in the Monitor. Once per run — a persistent
+                    // cause repeats on every step.
+                    if (!this._nativeToolFailureNotified) {
+                        this._nativeToolFailureNotified = true;
+                        const detail = String(e?.message || e || '').slice(0, 400);
+                        onAgentStatus?.({
+                            event: 'status', status: 'running',
+                            message: `⚠️ ネイティブtool callingが失敗したためJSONモードにフォールバックします（以降のリクエストにtoolsは載りません）: ${detail}`,
+                        });
+                    }
                     nativeFailed = true;
                     break;
                 }
@@ -2479,63 +2437,16 @@ ${String(finalResponse || '').slice(0, 2000)}`;
         } catch (e) { }
     }
 
-    /**
-     * A short, human-readable hint of what a tool call is acting on — the command
-     * for run_command, the file basename for file tools, the query for searches.
-     * Used to make progress lines (esp. sub-agent activity) describe the actual
-     * work instead of just repeating a bare tool name. Returns '' when there's
-     * nothing concise to show.
-     */
-    _toolArgHint(name, args) {
-        try {
-            const a = args || {};
-            const base = (p) => String(p || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop();
-            switch (name) {
-                case 'run_command':
-                    return String(a.command || '').replace(/\s+/g, ' ').trim().slice(0, 60);
-                case 'read_file':
-                case 'write_file':
-                case 'replace_lines':
-                case 'multi_replace_file_content':
-                case 'delete_file':
-                case 'verify_syntax':
-                case 'create_artifact':
-                    return base(a.path);
-                case 'move_file':
-                    return base(a.to || a.from);
-                case 'grep_search':
-                    return String(a.query || '').slice(0, 40);
-                case 'list_files':
-                case 'glob':
-                    return String(a.path || a.pattern || '').slice(0, 40);
-                case 'web_search':
-                    return String(a.query || '').slice(0, 40);
-                case 'run_subtask':
-                    return String(a.role || 'generic');
-                default:
-                    return '';
-            }
-        } catch (_) { return ''; }
-    }
+    // NOTE: _toolArgHint / _historyChars / _historyText / _droppedContentHashes
+    // now live in agent/PromptAssembler.js (P3 split) — thin wrappers keep the
+    // existing this._method(...) call sites working.
+    _toolArgHint(name, args) { return toolArgHint(name, args); }
 
     /** Total character weight of a history array (cheap proxy for token size). */
-    _historyChars(history) {
-        if (!Array.isArray(history)) return 0;
-        let n = 0;
-        for (const m of history) {
-            const c = m && m.content;
-            n += typeof c === 'string' ? c.length : (c ? JSON.stringify(c).length : 0);
-        }
-        return n;
-    }
+    _historyChars(history) { return historyChars(history); }
 
     /** All history text as one blob — for measuring what a summary preserved. */
-    _historyText(history) {
-        if (!Array.isArray(history)) return '';
-        return history
-            .map(m => (typeof m?.content === 'string' ? m.content : ''))
-            .join('\n');
-    }
+    _historyText(history) { return historyText(history); }
 
     /**
      * Content hashes present BEFORE compaction but gone after — i.e. what the
@@ -2543,21 +2454,7 @@ ${String(finalResponse || '').slice(0, 2000)}`;
      * from "a compression happened in between" (correlation) to "this exact
      * content was dropped" (causation).
      */
-    _droppedContentHashes(before, after) {
-        const hashOf = (arr) => {
-            const set = new Set();
-            for (const m of (Array.isArray(arr) ? arr : [])) {
-                if (typeof m?.content === 'string' && m.content) set.add(hashContent(m.content));
-            }
-            return set;
-        };
-        const kept = hashOf(after);
-        const dropped = [];
-        for (const h of hashOf(before)) {
-            if (!kept.has(h)) dropped.push(h);
-        }
-        return dropped;
-    }
+    _droppedContentHashes(before, after) { return droppedContentHashes(before, after); }
 
     /**
      * Efficiency instrumentation — count read_file RE-READS (a file fetched more
@@ -2656,250 +2553,22 @@ ${String(finalResponse || '').slice(0, 2000)}`;
 
     // ─── Phase 3: History Compression (JHEditor detailed version) ───
 
-    /**
-     * True if a "Tool Execution Results:" message contains a successful read_file
-     * result whose content is substantial but within `budget` chars — i.e. a file
-     * snapshot worth preserving verbatim through compression (re-read suppression).
-     */
-    _resultGroupHasReadContent(content, budget) {
-        if (typeof content !== 'string') return false;
-        try {
-            const marker = 'Tool Execution Results:\n';
-            const j = content.indexOf(marker);
-            if (j === -1) return false;
-            const raw = content.substring(j + marker.length).trim();
-            const end = raw.indexOf('\n[');
-            const jsonStr = end !== -1 ? raw.substring(0, end) : raw;
-            const results = JSON.parse(jsonStr);
-            if (!Array.isArray(results)) return false;
-            return results.some(r =>
-                r && r.tool_call_name === 'read_file' &&
-                typeof r.result === 'string' &&
-                !r.result.startsWith('Error') &&
-                r.result.length > 200 && r.result.length <= budget);
-        } catch (_) {
-            return false;
-        }
-    }
+    // NOTE: _resultGroupHasReadContent / _pushAssistantToolTurn /
+    // _pushToolResultsTurn / _compressToolResultsInHistory now live in
+    // agent/PromptAssembler.js (P3 split) — thin wrappers keep the existing
+    // this._method(...) call sites working.
+    _resultGroupHasReadContent(content, budget) { return resultGroupHasReadContent(content, budget); }
 
-    /**
-     * Write the assistant turn to history. NATIVE sessions get the standards-
-     * aligned form — prose `content` + `tool_calls` array with ids (what the
-     * model was RL-trained on; replaying turns as a JSON text envelope taught
-     * weak models to answer in text). JSON-mode sessions keep the legacy text
-     * envelope so that protocol stays self-consistent end to end.
-     */
     _pushAssistantToolTurn(history, response, toolCall, genResult, callIdOf) {
-        if (!callIdOf || callIdOf.size === 0 || !toolCall?.tool_calls?.length) {
-            history.push({ role: 'assistant', content: response });
-            return;
-        }
-        const thought = genResult?.nativeTurn?.text
-            || (typeof toolCall.thought === 'string' ? toolCall.thought : (toolCall.thought?.current_task || ''))
-            || '';
-        history.push({
-            role: 'assistant',
-            content: thought,
-            tool_calls: toolCall.tool_calls.map((c, i) => ({
-                id: callIdOf.get(c) || `call_syn_x_${i}`,
-                type: 'function',
-                function: { name: c.name, arguments: JSON.stringify(c.args ?? {}) },
-            })),
-        });
+        return pushAssistantToolTurn(history, response, toolCall, genResult, callIdOf);
     }
 
-    /**
-     * Write this iteration's tool results. Native → one role:"tool" message per
-     * call (id-correlated; Rust converts per provider) + an optional trailing
-     * user note; JSON-mode → the legacy single "Tool Execution Results:" user
-     * message (byte-identical to the previous format).
-     */
     _pushToolResultsTurn(history, results, native, tailText) {
-        if (native) {
-            for (const r of results) {
-                history.push({
-                    role: 'tool',
-                    tool_call_id: r.id || 'call_unknown',
-                    name: r.tool_call_name,
-                    content: typeof r.result === 'string' ? r.result : JSON.stringify(r.result ?? ''),
-                });
-            }
-            const tail = (tailText || '').trim();
-            if (tail) history.push({ role: 'user', content: tail });
-        } else {
-            history.push({
-                role: 'user',
-                content: `Tool Execution Results:\n${JSON.stringify(results, null, 2)}${tailText || ''}`,
-            });
-        }
+        return pushToolResultsTurn(history, results, native, tailText);
     }
 
     _compressToolResultsInHistory(history) {
-        // ── Compression policy (revised) ─────────────────────────────────
-        //   • Keep the 3 most-recent tool result groups VERBATIM. This is the
-        //     window inside which self-correction usually happens, and the
-        //     full content (especially error diagnostics like "Closest matching
-        //     region" diffs) is what enables the LLM to recover.
-        //   • For older groups, summarize success results (name + "Completed")
-        //     but keep error results with up to 2 KB of detail — errors are the
-        //     only past content that consistently helps the LLM avoid repeating
-        //     the same mistake.
-        //   • Also scrub the *assistant* message immediately before any
-        //     summarized error result: it contains the failed tool-call args
-        //     (often a huge multiline old_text full of typos) which add noise
-        //     and tempt the LLM to copy the bad version.
-        const KEEP_RECENT_RESULTS = 3;
-        const ERROR_KEEP_CHARS    = 2000;
-
-        // Pass 1: collect result GROUPS newest-first. A group is either the
-        // legacy single "Tool Execution Results:" user message (JSON mode) or a
-        // consecutive run of role:"tool" messages (native standards-aligned
-        // history) — one group per agent iteration in both protocols.
-        const groups = [];
-        for (let i = history.length - 1; i >= 0; i--) {
-            const m = history[i];
-            if (m.role === 'user' && typeof m.content === 'string' &&
-                m.content.startsWith('Tool Execution Results:')) {
-                groups.push({ kind: 'text', idx: i });
-            } else if (m.role === 'tool') {
-                let start = i;
-                while (start - 1 >= 0 && history[start - 1].role === 'tool') start--;
-                groups.push({ kind: 'native', start, end: i });
-                i = start;   // skip past the whole run
-            }
-        }
-        // groups is newest-first; the first KEEP_RECENT_RESULTS are exempt.
-        const toCompress = groups.slice(KEEP_RECENT_RESULTS);
-        if (toCompress.length === 0) return;
-
-        // ── Re-read suppression: preserve the latest read_file SNAPSHOT verbatim ──
-        // Stripping old read_file results to "(Completed)" discards the file's
-        // content, so once a read ages out of the 3-recent window the agent has
-        // nothing to work from and RE-READS the whole file — the dominant token
-        // sink on long single-file edits. Keep the most-recent sizable read_file
-        // result (one file, within a char budget) so the current snapshot stays
-        // available and re-reads become unnecessary.
-        const SNAPSHOT_CHAR_BUDGET = 40000;
-        let preserveIdx = -1;         // legacy text-group message to keep verbatim
-        let preserveNativeIdx = -1;   // native role:"tool" read_file message to keep
-        for (const g of groups) { // newest-first
-            if (g.kind === 'text') {
-                if (this._resultGroupHasReadContent(history[g.idx]?.content, SNAPSHOT_CHAR_BUDGET)) {
-                    preserveIdx = g.idx;
-                    break;
-                }
-            } else {
-                let found = -1;
-                for (let j = g.end; j >= g.start; j--) {
-                    const m = history[j];
-                    if (m.name === 'read_file' && typeof m.content === 'string' &&
-                        !m.content.startsWith('Error') &&
-                        m.content.length > 500 && m.content.length <= SNAPSHOT_CHAR_BUDGET) {
-                        found = j;
-                        break;
-                    }
-                }
-                if (found !== -1) { preserveNativeIdx = found; break; }
-            }
-        }
-
-        for (const g of toCompress) {
-            // ── Native group: per role:"tool" message compression ─────────
-            if (g.kind === 'native') {
-                let hadNativeError = false;
-                for (let j = g.start; j <= g.end; j++) {
-                    if (j === preserveNativeIdx) continue;   // latest file snapshot stays
-                    const m = history[j];
-                    if (typeof m.content !== 'string') continue;
-                    if (m.content.startsWith('Error')) {
-                        hadNativeError = true;
-                        if (m.content.length > ERROR_KEEP_CHARS) {
-                            m.content = m.content.substring(0, ERROR_KEEP_CHARS) + '… [truncated]';
-                        }
-                    } else if (m.content.length > 200) {
-                        m.content = '(Completed — result summarized to save context)';
-                    }
-                }
-                // Scrub the failed call's args from the preceding assistant turn —
-                // same rationale as the legacy path: huge typo-ridden old_text noise.
-                if (hadNativeError && g.start > 0) {
-                    const prev = history[g.start - 1];
-                    if (prev.role === 'assistant' && Array.isArray(prev.tool_calls)) {
-                        for (const tc of prev.tool_calls) {
-                            if (tc?.function) {
-                                tc.function.arguments = '{"_scrubbed":"prior call failed — args removed to keep context clean"}';
-                            }
-                        }
-                    }
-                }
-                continue;
-            }
-
-            const i = g.idx;
-            if (i === preserveIdx) continue; // keep the latest file snapshot intact
-            const original = history[i].content;
-            let summary = '[System: Past tool execution results have been summarized.]';
-            let hadError = false;
-
-            try {
-                const jsonStartIndex = original.indexOf('Tool Execution Results:\n');
-                if (jsonStartIndex !== -1) {
-                    const rawJson = original.substring(jsonStartIndex + 'Tool Execution Results:\n'.length).trim();
-                    const jsonEnd = rawJson.indexOf('\n[');
-                    const jsonStr = jsonEnd !== -1 ? rawJson.substring(0, jsonEnd) : rawJson;
-                    try {
-                        const results = JSON.parse(jsonStr);
-                        if (Array.isArray(results)) {
-                            const toolSummaries = results.map(r => {
-                                const name = r.tool_call_name || 'unknown';
-                                const resStr = typeof r.result === 'string' ? r.result : JSON.stringify(r.result || '');
-                                const isError = resStr.startsWith('Error');
-                                if (isError) {
-                                    hadError = true;
-                                    // ── Bug 2 fix: preserve up to ERROR_KEEP_CHARS of error detail ──
-                                    // so the LLM can still see the closest-region diff / fresh content
-                                    // from auto-recovery, instead of just "Error: ...(truncated)".
-                                    const errKept = resStr.length > ERROR_KEEP_CHARS
-                                        ? resStr.substring(0, ERROR_KEEP_CHARS) + '… [truncated]'
-                                        : resStr;
-                                    return `${name} →\n${errKept}`;
-                                }
-                                return `${name} (Completed)`;
-                            });
-                            summary = `[System: Past tool results — older entries summarized]\n${toolSummaries.join('\n\n')}`;
-                        }
-                    } catch (_) { /* fall through to generic summary */ }
-                }
-            } catch (_) { /* fall through */ }
-
-            history[i].content = summary;
-
-            // ── Bug 5 fix: scrub the assistant message that came right before ──
-            // If the previous turn was an assistant emitting tool_calls and the
-            // result was an error, the args almost certainly contained the
-            // typo-ridden old_text/new_text. Replace it with a thought-only stub
-            // so the bad code doesn't pollute future context.
-            if (hadError && i > 0 && history[i - 1].role === 'assistant') {
-                const prev = history[i - 1];
-                try {
-                    const parsed = typeof prev.content === 'string'
-                        ? JSON.parse(prev.content)
-                        : prev.content;
-                    if (parsed && (parsed.tool_calls || parsed.thought)) {
-                        const names = Array.isArray(parsed.tool_calls)
-                            ? parsed.tool_calls.map(tc => tc?.name || 'unknown').join(', ')
-                            : 'unknown';
-                        const thoughtKept = typeof parsed.thought === 'string'
-                            ? (parsed.thought.length > 300 ? parsed.thought.slice(0, 300) + '…' : parsed.thought)
-                            : '';
-                        history[i - 1].content = JSON.stringify({
-                            thought: thoughtKept,
-                            tool_calls: `[scrubbed: prior call to ${names} failed — see next message for the error detail. Original args removed to keep context clean.]`
-                        });
-                    }
-                } catch (_) { /* not JSON or unexpected shape — leave as-is */ }
-            }
-        }
+        return compressToolResultsInHistory(history);
     }
 
     // ─── Phase 4: Robust JSON parsing with jsonrepair and multi-fallback (from JHEditor) ───
@@ -2930,25 +2599,6 @@ ${String(finalResponse || '').slice(0, 2000)}`;
         return normalizeSafetyLimits(cfg);
     }
 
-    /**
-     * Detect a repeating cycle of length 2 or 3 in the recent tool-call history.
-     *
-     * Catches the "ABAB…" / "ABCABC…" oscillation pattern, where the agent
-     * isn't repeating *one* call enough to trigger the identical-call stop
-     * but IS spinning between a small fixed set of calls without making progress.
-     *
-     * @param {Array}  history     The full toolCallHistory array.
-     * @param {number} minRepeats  Required number of consecutive repeats for a
-     *                             pattern to count as a cycle. 0 ⇒ detection disabled.
-     *                             Tune higher to be more permissive (fewer false stops),
-     *                             lower to catch loops sooner.
-     *
-     * Returns null if no cycle, or { pattern, length, repeats }.
-     *
-     * Length 2 needs `2 * minRepeats` matching tail calls (e.g. minRepeats=3 → last 6 = ABABAB).
-     * Length 3 needs `3 * minRepeats` matching tail calls (e.g. minRepeats=3 → last 9 = ABCABCABC).
-     */
-    _detectCycle(history, minRepeats = 3) { return detectCycle(history, minRepeats); }
 
     // ─── Phase 4: Full _cleanFinalResponse with thought extraction + multi-language (from JHEditor) ───
 

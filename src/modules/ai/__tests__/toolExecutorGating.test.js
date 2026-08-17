@@ -15,6 +15,7 @@ let mcpTools = [];
 vi.mock('../McpManager.js', () => ({
     mcpManager: {
         getAllTools: () => mcpTools,
+        callTool: async () => ({ content: [{ type: 'text', text: 'ok' }] }),
         clients: new Map(),
     },
 }));
@@ -323,6 +324,44 @@ describe('executeTool — guard rails', () => {
         ex.setToolAllowlist(['finish_task']);
         const out = await ex.executeTool({ name: 'finish_task', args: { summary: 'done' } }, null, null);
         expect(out).not.toMatch(/not enabled/);
+    });
+
+    it('rejects an MCP call whose args violate the advertised inputSchema', async () => {
+        mcpTools = [{
+            name: 'query_db', _serverName: 'er-app',
+            inputSchema: {
+                type: 'object',
+                properties: { sql: { type: 'string' } },
+                required: ['sql'],
+                additionalProperties: false,
+            },
+        }];
+        const out = await ex._dispatchMcpTool('query_db', { sql: 42 }, () => {});
+        expect(out).toMatch(/^Error:/);
+        expect(out).toContain('Invalid arguments');
+        expect(out).toContain('query_db');
+        expect(out).toContain('must be string');
+    });
+
+    it('passes an MCP call through when its args satisfy the schema', async () => {
+        mcpTools = [{
+            name: 'query_db', _serverName: 'er-app',
+            inputSchema: {
+                type: 'object',
+                properties: { sql: { type: 'string' }, limit: { type: 'integer' } },
+                required: ['sql'],
+            },
+        }];
+        // No real server behind the stub manager — an invalid/empty response is
+        // fine; what matters is the validator did NOT block the call.
+        const out = await ex._dispatchMcpTool('query_db', { sql: 'select 1', limit: 5 }, () => {});
+        expect(String(out)).not.toMatch(/Invalid arguments/);
+    });
+
+    it('skips validation when the MCP tool publishes no inputSchema', async () => {
+        mcpTools = [{ name: 'loose_tool', _serverName: 'srv' }];
+        const out = await ex._dispatchMcpTool('loose_tool', { anything: 1 }, () => {});
+        expect(String(out)).not.toMatch(/Invalid arguments/);
     });
 });
 
