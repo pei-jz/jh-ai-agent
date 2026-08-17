@@ -34,6 +34,10 @@ import MemoryTab from '../svelte/config/MemoryTab.svelte';
 import { approvedPatternRefusal } from './config/configForm.js';
 import { mountComponent, destroyComponent } from '../svelte/mount.svelte.js';
 
+
+// One implementation for all of these — see utils/html.js for what the
+// nine local copies disagreed about.
+import { escapeHtml } from '../utils/html.js';
 /** Every host id a migrated region mounts into — teardown walks this list. */
 const MOUNT_HOSTS = [
     'cfg-conn-table', 'cfg-conn-modal', 'cfg-general-panel', 'cfg-mcp-panel',
@@ -56,6 +60,7 @@ export class ConfigView {
             max_steps: 0,
             approved_projects: [],
             write_allowed_paths: [],
+            fetch_allowed_hosts: [],
             mcp_servers: {},
             llm_instances: [],
             active_llm_instance_id: null,
@@ -613,6 +618,7 @@ export class ConfigView {
             max_steps:                   limit(this.config.max_steps),
             approved_projects: this.config.approved_projects || [],
             write_allowed_paths: this.config.write_allowed_paths || [],
+            fetch_allowed_hosts: this.config.fetch_allowed_hosts || [],
             mcp_servers: mcpConfig,
             llm_instances: this.config.llm_instances,
             active_llm_instance_id: activeId,
@@ -627,8 +633,9 @@ export class ConfigView {
             history_compress_ratio:      (this.config.history_compress_ratio ?? null),
             plan_mode:                   (this.config.plan_mode || 'auto'),
             subagent_review:             (this.config.subagent_review || 'off'),
-            memory_recall:               (this.config.memory_recall || 'auto'),
+            memory_recall:               (this.config.memory_recall || 'on'),
             phase_routing:               (this.config.phase_routing || 'off'),
+            episode_injection:           (this.config.episode_injection || 'off'),
             // `??`, NOT `||`. "(not set)" sends an EMPTY STRING as the explicit
             // clear sentinel — `||` collapsed it to null, which the backend's
             // field-wise merge reads as "the caller didn't mention this" and
@@ -1220,7 +1227,8 @@ export class ConfigView {
             // the user is expected to read.
             this._studyStatus = t('memory.study.indexed', {
                 files: res.files, symbols: res.symbols, edges: res.edges,
-            }) + (res.pruned ? t('memory.study.dropped', { count: res.pruned }) : '')
+            }) + (res.skipped ? t('memory.study.skipped', { count: res.skipped }) : '')
+                + (res.pruned ? t('memory.study.dropped', { count: res.pruned }) : '')
                 + (res.truncated || res.omitted
                     ? ' ' + t('memory.study.capped', { total: res.total || res.files + (res.omitted || 0), omitted: res.omitted || 0 })
                     : '');
@@ -1592,14 +1600,7 @@ export class ConfigView {
     }
 }
 
-function escapeHtml(str) {
-    if (!str) return '';
-    return str.replace(/&/g, "&amp;")
-              .replace(/</g, "&lt;")
-              .replace(/>/g, "&gt;")
-              .replace(/"/g, "&quot;")
-              .replace(/'/g, "&#039;");
-}
+
 
 function showNotification(message) {
     const el = document.createElement('div');

@@ -9,7 +9,10 @@
 import { promptTemplateManager } from '../../modules/ai/PromptTemplateManager.js';
 import { skillManager } from '../../modules/ai/SkillManager.js';
 
-function esc(s) { return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+// utils/html.js, not a local copy. The local one escaped only & < > while its
+// output goes into double-quoted attributes below (data-name / title), so a
+// skill file named `x" onmouseover="...` escaped the attribute.
+import { esc } from '../utils/html.js';
 
 export class SlashCommands {
     /**

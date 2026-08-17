@@ -22,7 +22,7 @@
  *   request begins — the view inserts a request divider there.
  */
 export function buildLogSteps(logs, fmt) {
-    const SKIP_EVENTS = new Set(['token_usage', 'stream', 'task_plan_sync', 'confirm_resolved']);
+    const SKIP_EVENTS = new Set(['token_usage', 'stream', 'confirm_resolved']);
 
     const init = [];
     const steps = [];

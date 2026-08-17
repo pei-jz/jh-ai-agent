@@ -21,7 +21,21 @@ const MEMORY_MIN_RELEVANCE = 0.08;
  * `_episodeInjectionStats` for comparison.
  */
 const EPISODE_INJECTION_DEFAULTS = {
-    enabled: true,        // false → skip the episodic section entirely
+    // OFF by default — the decision recorded in docs/design/agent-memory-layers.md
+    // §7, now actually implemented.
+    //
+    // Episodes were the heaviest injected memory layer (~500–750 tokens for three
+    // entries, against ~200–400 for facts and ~180 for the experience brief) and
+    // the least verified: each one is the model's own account of a past session,
+    // where every other layer records what was observed. The two things they
+    // uniquely carried — the outcome and which files were touched — are now held
+    // more accurately by Experience cards, and the raw text is still on disk in
+    // journal.md. So the data stays; only the per-step prompt cost goes.
+    //
+    // MEASUREMENT CAVEAT (§7): while a workspace is running the memoryRecall
+    // 'auto' comparison, do not change this setting mid-way. An improvement would
+    // then be unattributable — Experience recall, or one fewer injected layer?
+    enabled: false,
     minRelevance: MEMORY_MIN_RELEVANCE,
     maxSessions: 3,       // how many past sessions may be injected
     tokenBudget: 1200,    // soft token cap for the whole episodic section

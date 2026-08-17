@@ -27,6 +27,8 @@
 // the events; this owns the policy. That split is deliberate — the policy is the
 // part with opinions in it, and opinions need tests.
 
+import { t } from '../../../i18n/index.js';
+
 /** The phases of a run, in the order a task normally passes through them. */
 export const PHASES = ['plan', 'execute', 'review'];
 
@@ -153,9 +155,17 @@ export function modelForPhase(phase, tiers = {}, opts = {}) {
     return tier === 'deep' ? (deep || fast) : (fast || deep);
 }
 
-/** Human label for a phase, for status lines. `ja` first: the status feed is Japanese. */
+/**
+ * Human label for a phase, for status lines.
+ *
+ * This returned "計画 / plan" — both languages at once, because the status feed
+ * was Japanese-only and the English half was there for anyone who needed it.
+ * Now that the feed goes through the catalog, each locale gets its own word.
+ */
 export function phaseLabel(phase) {
-    return ({ plan: '計画 / plan', execute: '実装 / execute', review: '検収 / review' })[phase] || String(phase);
+    const fallback = { plan: '計画', execute: '実装', review: '検収' }[phase];
+    if (!fallback) return String(phase);
+    return t(`phase.${phase}`, null, fallback);
 }
 
 // ── Cost estimate for the settings screen ────────────────────────────────────

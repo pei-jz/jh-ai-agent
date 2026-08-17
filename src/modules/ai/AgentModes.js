@@ -17,7 +17,10 @@
  * `read_office`, so it tried to parse spreadsheets through the shell.
  */
 
-import { READ_TOOLS, EDIT_TOOLS, WEB_TOOLS, OUTPUT_TOOLS, TASK_TOOLS, toolsOf } from './tools/toolSets.js';
+import {
+    READ_TOOLS, EDIT_TOOLS, WEB_TOOLS, OUTPUT_TOOLS,
+    TASK_TOOLS, CONTROL_TOOLS, DELEGATION_TOOLS, toolsOf,
+} from './tools/toolSets.js';
 
 // ── Four role-clear modes ──────────────────────────────────────────────────
 // Consolidated from 5 overlapping ones in 2026-06-14; `general` added 2026-08-09
@@ -32,18 +35,27 @@ import { READ_TOOLS, EDIT_TOOLS, WEB_TOOLS, OUTPUT_TOOLS, TASK_TOOLS, toolsOf } 
 // allowlist, which is what `develop` relies on.
 export const AGENT_MODES = {
     // The DEFAULT. General work, not only code: read the material, reason over it,
-    // and deliver a concrete artefact. It gets the full toolset minus run_command —
-    // a general task should not need a shell, and withholding it is what selects the
-    // `general` persona tier (see agent/personaTier.js) rather than the code-focused
-    // one. `develop` remains for work that edits and verifies source.
+    // and deliver a concrete artefact.
+    //
+    // It gets everything except the browser group and `git_commit`. This comment
+    // used to claim "the full toolset minus run_command — a general task should
+    // not need a shell, and withholding it is what selects the `general` persona
+    // tier", and both halves were untrue: READ_TOOLS has always contained
+    // `run_command`, and the tier is pinned explicitly below rather than inferred.
+    // Running a one-off script to compute something for a report is ordinary
+    // general work, so the shell stays — the command policy is what gates it.
     general: {
         id: 'general',
         label: '🧰 General',
         description: 'Everyday work — read documents, analyse, and produce a deliverable (the default)',
         behavior: {
             enabled_tools: toolsOf(
-                READ_TOOLS, EDIT_TOOLS, WEB_TOOLS, OUTPUT_TOOLS, TASK_TOOLS,
-                ['present_result', 'ask_user', 'create_artifact', 'update_artifact', 'write_docx'],
+                READ_TOOLS, EDIT_TOOLS, WEB_TOOLS, OUTPUT_TOOLS,
+                TASK_TOOLS, CONTROL_TOOLS,
+                // Without this the sub-agent engine (roles, write-scope ownership,
+                // budget slicing, the reviewer gate) was unreachable in the mode
+                // most users never leave.
+                DELEGATION_TOOLS,
             ),
             persona_tier: 'general',
             // 300, not 40. The old ceiling was low enough that ordinary work hit it —
@@ -90,7 +102,13 @@ Rules:
             // this mode automatically. `write_file` is the report file; source
             // editing stays out (the persona forbids it and EDIT_TOOLS is not
             // included).
-            enabled_tools: toolsOf(READ_TOOLS, WEB_TOOLS, OUTPUT_TOOLS, TASK_TOOLS, ['write_file', 'present_result', 'write_docx']),
+            enabled_tools: toolsOf(
+                READ_TOOLS, WEB_TOOLS, OUTPUT_TOOLS, TASK_TOOLS, CONTROL_TOOLS,
+                // Several independent investigations in parallel is the case
+                // delegation was built for, and research is where it pays best.
+                DELEGATION_TOOLS,
+                ['write_file'],
+            ),
             persona_tier: 'general',
             max_iterations: 300   // see the note on `general`
         }
@@ -113,7 +131,11 @@ Rules:
 - Set safe_to_auto_run=true ONLY for clearly read-only commands.
 - For destructive operations (delete, overwrite, move), verify the path first.
 - Respond in Japanese unless asked otherwise.`,
-            enabled_tools: toolsOf(READ_TOOLS, EDIT_TOOLS, OUTPUT_TOOLS, TASK_TOOLS, ['run_command']),
+            // `run_command` is not listed separately — it is part of READ_TOOLS.
+            enabled_tools: toolsOf(
+                READ_TOOLS, EDIT_TOOLS, OUTPUT_TOOLS, TASK_TOOLS, CONTROL_TOOLS,
+                DELEGATION_TOOLS,
+            ),
             persona_tier: 'develop',
             max_iterations: 300   // see the note on `general`
         }

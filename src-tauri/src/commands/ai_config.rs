@@ -72,6 +72,13 @@ pub struct AiConfig {
     /// in addition to the active workspace. Configured from Settings.
     #[serde(default)]
     pub write_allowed_paths: Option<Vec<String>>,
+    /// Hosts `fetch_url` may reach even though they resolve to a private or
+    /// loopback address. Empty/None ⇒ nothing private is reachable, which is the
+    /// default: a fetched page can instruct the agent to read an internal
+    /// service, so the guard denies by construction and this is the opt-out.
+    /// Matches exactly or as a domain suffix ("example.com" covers "api.example.com").
+    #[serde(default)]
+    pub fetch_allowed_hosts: Option<Vec<String>>,
     pub mcp_servers: Option<serde_json::Value>,
     pub llm_instances: Option<Vec<LlmInstance>>,
     /// The instance id (from llm_instances) that should be used by default
@@ -184,6 +191,13 @@ pub struct AiConfig {
     /// See src/modules/ai/agent/ModelPhaseRouter.js.
     #[serde(default)]
     pub phase_routing: Option<String>,
+
+    /// Inject summaries of PAST SESSIONS into the system prompt: "off" | "on".
+    /// None => frontend default ("off"). The knob existed in ConversationMemory
+    /// with no caller, so the heaviest memory layer was not adjustable at all.
+    /// See docs/design/agent-memory-layers.md §7.
+    #[serde(default)]
+    pub episode_injection: Option<String>,
 }
 
 /// Turn the UI's explicit-clear sentinel back into "unset".
@@ -216,6 +230,8 @@ pub async fn get_ai_config<R: tauri::Runtime>(
             max_steps: Some(100),
             approved_projects: Some(Vec::new()),
             write_allowed_paths: Some(Vec::new()),
+            // Empty ⇒ fetch_url reaches nothing private. Opt-in only.
+            fetch_allowed_hosts: Some(Vec::new()),
             mcp_servers: None,
             llm_instances: Some(Vec::new()),
             active_llm_instance_id: None,
@@ -236,6 +252,7 @@ pub async fn get_ai_config<R: tauri::Runtime>(
             subagent_review: None,
             memory_recall: None,
             phase_routing: None,
+            episode_injection: None,
         });
     }
 
@@ -382,6 +399,9 @@ pub async fn save_ai_config<R: tauri::Runtime>(
                 if final_config.memory_recall.is_none() {
                     final_config.memory_recall = old_config.memory_recall;
                 }
+                if final_config.episode_injection.is_none() {
+                    final_config.episode_injection = old_config.episode_injection.clone();
+                }
             }
         }
     }
@@ -423,6 +443,8 @@ pub async fn set_rag_approval<R: tauri::Runtime>(
             max_steps: Some(100),
             approved_projects: Some(Vec::new()),
             write_allowed_paths: Some(Vec::new()),
+            // Empty ⇒ fetch_url reaches nothing private. Opt-in only.
+            fetch_allowed_hosts: Some(Vec::new()),
             mcp_servers: None,
             llm_instances: Some(Vec::new()),
             active_llm_instance_id: None,
@@ -443,6 +465,7 @@ pub async fn set_rag_approval<R: tauri::Runtime>(
             subagent_review: None,
             memory_recall: None,
             phase_routing: None,
+            episode_injection: None,
         }
     };
 

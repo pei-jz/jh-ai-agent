@@ -5,13 +5,12 @@
 
 import { normalizeLeakedEscapes } from '../utils/resultView.js';
 
-function escapeHtml(str) {
-    if (!str) return '';
-    return String(str)
-        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;').replace(/'/g, '&#039;');
-}
 
+
+
+// One implementation for all of these — see utils/html.js for what the
+// nine local copies disagreed about.
+import { escapeHtml } from '../utils/html.js';
 export function extractThoughtSummary(rawText) {
         const txt = (rawText || '').trim();
         if (txt.startsWith('{') || txt.startsWith('[')) {
@@ -234,14 +233,6 @@ export function fmtTool(log) {
             toolIcon = '📁';
             const path = args.path || args.directory || '';
             toolTitle = `Listed Directory: <code>${escapeHtml(path)}</code>`;
-            toolClass = 'log-tool';
-            if (resultStr) {
-                customContentHtml = `<pre style="margin:0;font-family:var(--font-mono);font-size:10.5px;white-space:pre;overflow-x:auto;color:inherit;">${escapeHtml(resultStr)}</pre>`;
-            }
-        } else if (name === 'create_artifact' || name === 'update_artifact') {
-            toolIcon = '📄';
-            const artName = args.name || '';
-            toolTitle = `Saved Artifact: <code>${escapeHtml(artName)}</code>`;
             toolClass = 'log-tool';
             if (resultStr) {
                 customContentHtml = `<pre style="margin:0;font-family:var(--font-mono);font-size:10.5px;white-space:pre;overflow-x:auto;color:inherit;">${escapeHtml(resultStr)}</pre>`;

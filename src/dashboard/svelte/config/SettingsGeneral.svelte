@@ -19,7 +19,7 @@
     import {
         SAFETY_FIELDS, OUTPUT_LANGUAGES, MASKED,
         normalizeInt, normalizeRatio, normalizeText, normalizeSecret,
-        normalizeModelId, normalizePathList, modelChoices,
+        normalizeModelId, normalizePathList, normalizeHostList, modelChoices,
     } from '../../views/config/configForm.js';
     import { describeLicense } from '../../../modules/license/licenseState.js';
     import { modelRates, estimateSavings } from '../../../modules/ai/agent/ModelPhaseRouter.js';
@@ -181,15 +181,29 @@
 
         <div class="input-group cfg-group-gap">
             <label class="input-label" for="cfg-memory-recall">{t('settings.memoryRecall')}</label>
-            <select id="cfg-memory-recall" class="input" value={config.memory_recall ?? 'auto'}
+            <select id="cfg-memory-recall" class="input" value={config.memory_recall ?? 'on'}
                 onchange={(e) => patch('memory_recall', e.currentTarget.value)}>
-                <!-- Auto leads because it is the default: it is the only arm that
-                     can answer whether recall is helping at all. -->
-                <option value="auto">{t('settings.memoryRecall.auto')}</option>
+                <!-- On leads because it is the default. Auto is the measurement
+                     arm and withholds memory from half of all runs, so it is
+                     opt-in rather than something a user is enrolled in. -->
                 <option value="on">{t('settings.memoryRecall.on')}</option>
+                <option value="auto">{t('settings.memoryRecall.auto')}</option>
                 <option value="off">{t('settings.memoryRecall.off')}</option>
             </select>
             <p class="input-hint">{@html t('settings.memoryRecall.hint')}</p>
+        </div>
+
+        <!-- Episodic injection. The knob existed in ConversationMemory with no
+             caller outside tests, so the heaviest memory layer was not adjustable
+             by anyone. Default off per agent-memory-layers.md §7. -->
+        <div class="input-group cfg-group-gap">
+            <label class="input-label" for="cfg-episode-injection">{t('settings.episodeInjection')}</label>
+            <select id="cfg-episode-injection" class="input" value={config.episode_injection ?? 'off'}
+                onchange={(e) => patch('episode_injection', e.currentTarget.value)}>
+                <option value="off">{t('settings.episodeInjection.off')}</option>
+                <option value="on">{t('settings.episodeInjection.on')}</option>
+            </select>
+            <p class="input-hint">{@html t('settings.episodeInjection.hint')}</p>
         </div>
 
         <!-- Both routing selects send "" rather than null to clear — see
@@ -289,6 +303,16 @@
             value={(config.write_allowed_paths || []).join('\n')}
             oninput={(e) => patch('write_allowed_paths', normalizePathList(e.currentTarget.value))}
         ></textarea>
+
+        <div class="input-group">
+            <label class="input-label" for="cfg-fetch-hosts">{t('settings.fetchHosts')}</label>
+            <textarea id="cfg-fetch-hosts" class="input cfg-path-area" rows="3"
+                placeholder={'localhost\nintranet.example.com'}
+                value={(config.fetch_allowed_hosts || []).join('\n')}
+                oninput={(e) => patch('fetch_allowed_hosts', normalizeHostList(e.currentTarget.value))}
+            ></textarea>
+            <p class="input-hint">{@html t('settings.fetchHosts.hint')}</p>
+        </div>
     {/snippet}
     {@render section('paths', false, 'folder', t('settings.sec.paths'), pathsBody)}
 

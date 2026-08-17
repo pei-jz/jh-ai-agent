@@ -11,7 +11,7 @@ import { isPlanRevision, stripPlanRevisionMarker } from './PlanFirstApproval.js'
 
 /** Tools blocked by the Plan-First gate until the user approves the plan. */
 export const PLAN_GATED_TOOLS = new Set([
-    'write_file', 'multi_replace_file_content', 'replace_lines',
+    'write_file', 'multi_replace_file_content', 'replace_lines', 'apply_patch',
     'delete_file', 'move_file', 'run_command',
 ]);
 
@@ -19,7 +19,6 @@ export const PLAN_GATED_TOOLS = new Set([
 export const MUTATING_TOOLS = new Set([
     'write_file', 'write_to_file',
     'multi_replace_file_content',
-    'create_artifact', 'update_artifact',
     'write_xlsx',      // producing a spreadsheet IS the deliverable
     'run_command',     // count as progress — conservative (avoids false stops)
     'delete_file', 'move_file',

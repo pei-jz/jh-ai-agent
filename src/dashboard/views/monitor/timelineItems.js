@@ -1,3 +1,8 @@
+// One implementation for all of these — see utils/html.js for what the
+// nine local copies disagreed about.
+import { esc } from '../../utils/html.js';
+export { esc };
+
 // timelineItems — the VOCABULARY of a timeline item.
 //
 // What kind of moment an item is, what it should be labelled, what a step DID,
@@ -23,11 +28,7 @@
  * it: Svelte escapes interpolations itself, and calling esc() there would show
  * literal `&amp;` to the user.
  */
-export function esc(s) {
-    return String(s ?? '')
-        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-}
+
 
 /** Elapsed seconds between two epoch stamps, or null when either is missing. */
 export function spanOf(from, to) {
@@ -70,12 +71,13 @@ const CHIP_ICON = {
     read_file: 'file', read_office: 'file', list_files: 'folder', glob: 'folder',
     grep_search: 'search', symbol_search: 'search', web_search: 'search',
     write_file: 'edit', multi_replace_file_content: 'edit', replace_lines: 'edit',
-    write_xlsx: 'edit', create_artifact: 'edit', update_artifact: 'edit',
+    apply_patch: 'edit',
+    write_xlsx: 'edit',
     delete_file: 'trash', move_file: 'edit', run_command: 'code',
     verify_syntax: 'shield', fetch_url: 'plug', read_resource: 'plug',
 };
-const WRITE_CHIPS = new Set(['write_file', 'multi_replace_file_content', 'replace_lines',
-    'write_xlsx', 'create_artifact', 'update_artifact', 'delete_file', 'move_file']);
+const WRITE_CHIPS = new Set(['write_file', 'multi_replace_file_content', 'replace_lines', 'apply_patch',
+    'write_xlsx', 'delete_file', 'move_file']);
 
 /** Chips for a completed run's stats: steps, tool count, tokens, duration. */
 export function statChips(stats = {}) {

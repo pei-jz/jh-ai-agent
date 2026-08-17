@@ -3,6 +3,7 @@ import { describe as suite, it, expect } from 'vitest';
 import {
     stopReason, stopStatusMessage, stopNotice, wasInterrupted,
 } from '../stopReason.js';
+import { setLocale } from '../../../../i18n/index.js';
 
 const KINDS = ['step_limit', 'token_budget', 'wall_clock'];
 
@@ -94,5 +95,53 @@ suite('stopNotice', () => {
     it('is empty for a normal finish', () => {
         expect(stopNotice(null)).toBe('');
         expect(stopNotice({ kind: 'finish_task' })).toBe('');
+    });
+});
+
+// These strings were hard-coded Japanese, which made the agent's explanation of
+// why it stopped the largest untranslatable surface in the app: an English UI
+// relabelled the buttons and still said 未完了のまま停止しました.
+suite('stopReason — follows the UI language', () => {
+    it('speaks English when the UI is English', () => {
+        setLocale('en');
+        try {
+            const r = stopReason('step_limit', { limit: 300 });
+            expect(stopStatusMessage(r)).toContain('Step limit');
+            expect(stopNotice(r)).toContain('Stopped before finishing');
+            expect(stopNotice(r)).toContain('Send a message to this task');
+        } finally {
+            setLocale('ja');
+        }
+    });
+
+    it('speaks Japanese when the UI is Japanese', () => {
+        setLocale('ja');
+        const r = stopReason('wall_clock', { limit: 30 });
+        expect(stopStatusMessage(r)).toContain('実行時間の上限');
+        expect(stopNotice(r)).toContain('未完了のまま停止しました');
+    });
+
+    it('names a setting the user can actually find on screen', () => {
+        // The Settings form's field labels are literal English in BOTH locales,
+        // so a fully-translated pointer would name a label that is not there.
+        for (const loc of ['ja', 'en']) {
+            setLocale(loc);
+            expect(stopNotice(stopReason('step_limit', { limit: 1 }))).toContain('Max Agent Steps');
+            expect(stopNotice(stopReason('token_budget', { limit: 1 }))).toContain('Token Budget');
+            expect(stopNotice(stopReason('wall_clock', { limit: 1 }))).toContain('Wall-clock Timeout');
+        }
+        setLocale('ja');
+    });
+
+    it('still carries the limit and the resume hint in every locale', () => {
+        for (const loc of ['ja', 'en']) {
+            setLocale(loc);
+            for (const kind of KINDS) {
+                const notice = stopNotice(stopReason(kind, { limit: 1234 }));
+                expect(notice, `${loc}/${kind}`).toContain('1,234');
+                expect(notice, `${loc}/${kind}`).not.toContain('{');
+            }
+        }
+        setLocale('ja');
     });
 });

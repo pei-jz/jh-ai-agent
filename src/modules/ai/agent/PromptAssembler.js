@@ -64,13 +64,23 @@ export function toolArgHint(name, args) {
         switch (name) {
             case 'run_command':
                 return String(a.command || '').replace(/\s+/g, ' ').trim().slice(0, 60);
-            case 'read_file':
+            case 'read_file': {
+                // Batch read: name the files rather than showing an empty hint,
+                // and cut off before the status line becomes a paragraph.
+                const many = Array.isArray(a.paths) ? a.paths.filter(Boolean) : [];
+                if (many.length === 1) return base(many[0]);
+                if (many.length > 1) {
+                    const shown = many.slice(0, 3).map(base).join(', ');
+                    return many.length > 3 ? `${shown} +${many.length - 3}` : shown;
+                }
+                return base(a.path);
+            }
             case 'write_file':
             case 'replace_lines':
+            case 'apply_patch':
             case 'multi_replace_file_content':
             case 'delete_file':
             case 'verify_syntax':
-            case 'create_artifact':
                 return base(a.path);
             case 'move_file':
                 return base(a.to || a.from);

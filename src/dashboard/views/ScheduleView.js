@@ -2,6 +2,10 @@ import { scheduleManager, monthDay } from '../../modules/ai/ScheduleManager.js';
 import { AGENT_MODES, DEFAULT_MODE_ID, buildBehavior } from '../../modules/ai/AgentModes.js';
 import { mcpManager } from '../../modules/ai/McpManager.js';
 
+
+// One implementation for all of these — see utils/html.js for what the
+// nine local copies disagreed about.
+import { escapeHtml } from '../utils/html.js';
 const SCHEDULE_KEY = 'jh_schedules';
 
 function loadSchedules() {
@@ -90,10 +94,7 @@ const DOM_OPTIONS = [...Array.from({ length: 31 }, (_, i) => String(i + 1)), 'la
 
 const domLabel = (v) => (v === 'last' ? 'Last day' : `Day ${v}`);
 
-function escapeHtml(s) {
-    if (!s) return '';
-    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}
+
 
 export class ScheduleView {
     constructor() {

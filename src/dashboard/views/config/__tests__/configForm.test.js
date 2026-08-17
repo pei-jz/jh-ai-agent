@@ -10,7 +10,7 @@ import { describe, it, expect, vi } from 'vitest';
 import {
     SAFETY_FIELDS, OUTPUT_LANGUAGES, MASKED,
     normalizeInt, normalizeRatio, normalizeText, normalizeSecret,
-    normalizeModelId, normalizePathList, approvedPatternRefusal, modelChoices,
+    normalizeModelId, normalizePathList, normalizeHostList, approvedPatternRefusal, modelChoices,
 } from '../configForm.js';
 
 describe('SAFETY_FIELDS', () => {
@@ -146,6 +146,44 @@ describe('normalizePathList', () => {
     it('is empty for nothing', () => {
         expect(normalizePathList('')).toEqual([]);
         expect(normalizePathList(null)).toEqual([]);
+    });
+});
+
+// This list is a security opt-out: each entry re-opens an address fetch_url
+// would otherwise refuse. The parsing has to be forgiving about what a person
+// pastes but strict about what it stores.
+describe('normalizeHostList', () => {
+    it('keeps plain hostnames, lower-cased and de-duplicated', () => {
+        expect(normalizeHostList('localhost\nIntranet.Example.com\nlocalhost'))
+            .toEqual(['localhost', 'intranet.example.com']);
+    });
+
+    it('reduces a pasted URL to its host', () => {
+        expect(normalizeHostList('http://localhost:3000/api/v1')).toEqual(['localhost']);
+        expect(normalizeHostList('https://intranet.example.com/wiki')).toEqual(['intranet.example.com']);
+    });
+
+    it('strips a port', () => {
+        expect(normalizeHostList('127.0.0.1:14300')).toEqual(['127.0.0.1']);
+    });
+
+    it('keeps an IPv6 literal intact', () => {
+        expect(normalizeHostList('[::1]')).toEqual(['::1']);
+        expect(normalizeHostList('fe80::1')).toEqual(['fe80::1']);
+    });
+
+    it('drops the trailing root dot so it matches the guard', () => {
+        expect(normalizeHostList('example.com.')).toEqual(['example.com']);
+    });
+
+    it('REFUSES a bare wildcard — it would undo the guard entirely', () => {
+        expect(normalizeHostList('*')).toEqual([]);
+        expect(normalizeHostList('example.com\n*\nother.com')).toEqual(['example.com', 'other.com']);
+    });
+
+    it('is empty for nothing', () => {
+        expect(normalizeHostList('')).toEqual([]);
+        expect(normalizeHostList(null)).toEqual([]);
     });
 });
 

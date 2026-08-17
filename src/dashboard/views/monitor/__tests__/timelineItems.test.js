@@ -14,7 +14,11 @@ import {
 
 describe('esc', () => {
     it('neutralises the five characters that break HTML', () => {
-        expect(esc('<b>&"\'')).toBe('&lt;b&gt;&amp;&quot;&#39;');
+        // `&#039;` since the nine local escapers were merged into utils/html.js;
+        // the zero-padded form is what most of them emitted. Both are valid HTML
+        // and nothing reads the entity back, so the exact spelling is arbitrary —
+        // it is pinned only to keep the merged implementation from drifting again.
+        expect(esc('<b>&"\'')).toBe('&lt;b&gt;&amp;&quot;&#039;');
     });
 
     it('treats null and undefined as empty', () => {

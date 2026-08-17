@@ -276,3 +276,36 @@ describe('SafetyLimits subagent_review', () => {
         expect(normalizeSafetyLimits({ subagent_review: 1 }).subagentReview).toBe('off');
     });
 });
+
+// The run_subtask schema tells the orchestrating model that these roles are
+// read-only, and the code has to make that true. It did not: both were built
+// from READ_TOOLS, which contains `run_command`, and a shell can write files.
+describe('read-only roles cannot write — enforced, not merely instructed', () => {
+    const MUTATING = [
+        'write_file', 'multi_replace_file_content', 'replace_lines',
+        'delete_file', 'move_file', 'write_xlsx', 'update_xlsx', 'write_docx',
+        'git_commit',
+    ];
+
+    for (const role of ['reviewer', 'researcher']) {
+        it(`${role} has no shell`, () => {
+            expect(resolveRole(role).tools).not.toContain('run_command');
+        });
+
+        it(`${role} has no file-mutating tool`, () => {
+            const tools = resolveRole(role).tools;
+            for (const n of MUTATING) expect(tools, `${role} has ${n}`).not.toContain(n);
+        });
+
+        it(`${role} can still inspect a diff`, () => {
+            // Removing the shell must not remove the reviewer's actual job.
+            const tools = resolveRole(role).tools;
+            expect(tools).toContain('read_file');
+            expect(tools).toContain('git_diff');
+        });
+    }
+
+    it('tester keeps its shell — it has to RUN the tests', () => {
+        expect(resolveRole('tester').tools).toContain('run_command');
+    });
+});

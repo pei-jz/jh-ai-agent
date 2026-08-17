@@ -17,10 +17,18 @@ export const SUBTASK_REPORT_MAX_CHARS = 8000;
 export const SUBTASK_MAX_STEPS_CAP = 20;
 
 // Shared with AgentModes — see tools/toolSets.js for why they live in one place.
-import { READ_TOOLS, EDIT_TOOLS, WEB_TOOLS } from '../tools/toolSets.js';
+import { READ_TOOLS, READ_ONLY_TOOLS, EDIT_TOOLS, OUTPUT_TOOLS, WEB_TOOLS } from '../tools/toolSets.js';
 
-/** File-mutating tools subject to write-scope enforcement (Step 3). */
-export const WRITE_ENFORCED_TOOLS = new Set(EDIT_TOOLS);
+/**
+ * Tools whose writes are checked against the sub-agent's write scope (Step 3).
+ *
+ * This was `new Set(EDIT_TOOLS)`, i.e. the source-editing five — which left the
+ * document writers (write_xlsx / update_xlsx / write_docx) unchecked, so a child
+ * confined to `src/moduleA` could still drop a workbook anywhere in the
+ * workspace. The scope is meant to prevent two parallel children colliding, and
+ * a collision on a spreadsheet is a collision.
+ */
+export const WRITE_ENFORCED_TOOLS = new Set([...EDIT_TOOLS, ...OUTPUT_TOOLS]);
 
 /** Default write scope for the tester role: test files/dirs only. */
 export const TESTER_WRITE_PATTERNS = [
@@ -37,12 +45,18 @@ export const SUBAGENT_ROLES = {
     reviewer: {
         id: 'reviewer',
         label: 'Reviewer',
-        tools: [...READ_TOOLS],           // read-only by construction — cannot edit
+        // READ_ONLY_TOOLS, not READ_TOOLS. This said "read-only by construction —
+        // cannot edit" while handing over READ_TOOLS, which contains
+        // `run_command` — and a shell can write files, so the claim was false and
+        // the run_subtask schema repeated it to the orchestrating model as a
+        // safety property. Reviewing does not need a shell: git_status/git_diff/
+        // git_log are in READ_ONLY_TOOLS and are what the persona asks for.
+        tools: [...READ_ONLY_TOOLS],
         maxIterations: 8,
         tier: 'fast',
         persona: `## Role: Independent Code Reviewer
 You review changes made by another agent. You NEVER fix anything yourself — you only report findings.
-- Inspect the changes (in a git workspace, \`git diff\` / \`git status\` via run_command is the fastest way; otherwise read the listed files).
+- Inspect the changes (in a git workspace, the \`git_diff\` / \`git_status\` tools are the fastest way; otherwise read the listed files).
 - Judge ONLY against the acceptance criteria in the brief plus objective defects (bugs, syntax errors, broken behavior, unmet requirements).
 - Classify every finding as [CRITERIA-VIOLATION], [BUG], or [STYLE]. STYLE findings are informational and must NOT fail the review.
 - Your report MUST end with this exact block:
@@ -69,7 +83,9 @@ ${COMMON_PERSONA_RULES}`,
     researcher: {
         id: 'researcher',
         label: 'Researcher',
-        tools: [...READ_TOOLS, ...WEB_TOOLS],
+        // Also READ_ONLY_TOOLS — the schema advertises this role as "read-only
+        // investigation (+web)", and that has to be true.
+        tools: [...READ_ONLY_TOOLS, ...WEB_TOOLS],
         maxIterations: 10,
         tier: 'fast',
         persona: `## Role: Researcher

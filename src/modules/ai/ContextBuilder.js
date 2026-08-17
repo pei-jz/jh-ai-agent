@@ -215,44 +215,12 @@ JSON FORMATTING RULES (critical — most failures come from these):
             memoryContext = conversationMemory.getPromptContext(currentQuery);
         } catch (e) { }
 
-        // Artifacts (DISK IO — must run every iteration since files change)
-        let artifactContext = '';
-        let taskPlanContent = '';
-        const isAgentSession = toolExecutor.isSessionActive ? toolExecutor.isSessionActive() : false;
-        if (isAgentSession) {
-            try {
-                const artifactDir = toolExecutor.getSessionArtifactDir(workspacePath);
-                const files = await invoke('read_dir', { path: artifactDir });
-                if (files && files.length > 0) {
-                    const otherArtifacts = [];
-                    for (const file of files) {
-                        if (!file.name.endsWith('.md')) continue;
-                        let data;
-                        try {
-                            data = await invoke('read_file', { path: `${artifactDir}/${file.name}` });
-                        } catch (_) { continue; }
-
-                        if (file.name === 'task_plan.md' || file.name.toLowerCase() === 'task_plan.md') {
-                            taskPlanContent = data;
-                        } else {
-                            otherArtifacts.push({ name: file.name, content: data });
-                        }
-                    }
-                    if (otherArtifacts.length > 0) {
-                        artifactContext = '<artifacts>\n';
-                        for (const a of otherArtifacts) {
-                            artifactContext += `<artifact name="${a.name}">\n<![CDATA[\n${a.content}\n]]>\n</artifact>\n`;
-                        }
-                        artifactContext += '</artifacts>\n';
-
-                        const artifactTokens = tokenEstimator.estimateTokens(artifactContext);
-                        if (artifactTokens > Math.floor(systemBudget * 0.15)) {
-                            artifactContext = tokenEstimator.trimToFit(artifactContext, Math.floor(systemBudget * 0.15));
-                        }
-                    }
-                }
-            } catch (e) { }
-        }
+        // The per-step artifact directory scan lived here: it read every .md in
+        // the session dir, pulled task_plan.md out for its own prompt block and
+        // injected the rest. Removed with create_artifact/update_artifact — those
+        // were the only writers, and over 148 sessions of real use they produced
+        // two files, neither named task_plan.md. So this did a directory read and
+        // an N-file read on EVERY iteration of EVERY run to inject nothing.
 
         // ── Static Prefix (cached per session) ────────────────────────────
         // Reading config is needed for outputLanguage (part of cache key).
@@ -425,22 +393,27 @@ Call \`finish_task\` when ALL of these are true:
 </task_completion>
 
 <critical_rules>
-1. **Edit surgically, verify automatically.** Prefer \`multi_replace_file_content\`
-   (short unique anchors) or \`replace_lines\` (large contiguous blocks, addressed by
-   line number — no re-typing) over rewriting a whole file with \`write_file\`; full
-   rewrites routinely drop content. Every edit is auto-syntax-checked (.json/.js) and
+1. **Edit surgically, verify automatically.** Prefer \`apply_patch\` (a unified diff;
+   context lines are copied from \`read_file\` output and the @@ numbers are only a
+   hint), \`multi_replace_file_content\` (short unique anchors) or \`replace_lines\`
+   (large contiguous blocks, addressed by line number) over rewriting a whole file
+   with \`write_file\`; full rewrites routinely drop content. Every edit is auto-syntax-checked (.json/.js) and
    echoes the new content: if the result shows a \`❌ SYNTAX GATE\` block or dropped
    content, fix it before anything else. For .jsx/.tsx/.ts verify via the project
    build (e.g. \`run_command("npx vite build")\`), since node can't parse them.
 2. **Paths use forward slashes** (\`C:/proj/src/file.tsx\`), even on Windows. On a
    "not found", follow the error's "Did you mean?" hint instead of re-guessing.
-3. **Don't spin.** Don't re-read an unchanged file or repeat an action that made no
+3. **Investigate in batches.** When you already know you need several files, pass
+   them all to \`read_file\` as \`paths\` in ONE call — each extra call re-sends the
+   whole prompt. Same for independent investigations: issue the \`run_subtask\`
+   calls together so they run in parallel.
+4. **Don't spin.** Don't re-read an unchanged file or repeat an action that made no
    progress — change approach. If ~3 approaches fail on the same subproblem, call
    \`ask_user\` (what you tried / what failed / what you need) instead of looping.
 4. **Language:** user-facing replies in ${outputLanguage}; code / plans / commit messages in English.
 
 (Tool mechanics — which edit tool to use, encoding, keeping \`old_text\` short — live
-in each tool's own description. \`task_plan\` / \`task_progress\` help you hold state
+in each tool's own description. \`task_progress\` helps you hold state
 across long tasks. A user message after "done" means it isn't done — address it.)
 </critical_rules>
 ${subagentsEnabled ? `
@@ -489,8 +462,7 @@ user's request and your own knowledge of the code; discard out-of-scope opinions
         //     run-constant query), user-selected + active-file context.
         //
         //   VOLATILE region (after the sentinel) → sent uncached
-        //     Changes during the run: task_plan (mutated by task_progress),
-        //     workflow phase, artifacts (written by the agent). Keeping these
+        //     Changes during the run: the workflow phase. Keeping this
         //     OUT of the cached prefix is what lets the big static block — and
         //     the conversation history — stay cache-hits step after step.
         //
@@ -561,34 +533,6 @@ ${projectInfo}
 
         // ── Volatile region (per-turn changing — kept uncached) ──
         let volatilePart = '';
-
-        // task_plan.md gets its own highlighted section so the agent doesn't
-        // re-read it after compaction. It mutates as the agent updates the
-        // checklist, so it lives in the volatile (uncached) region.
-        if (taskPlanContent) {
-            // Budget at most 20% of system prompt for the plan (it can grow as the
-            // agent updates checklists; trim if it gets out of hand).
-            let planBody = taskPlanContent;
-            const planBudget = Math.floor(systemBudget * 0.2);
-            const planTokens = tokenEstimator.estimateTokens(planBody);
-            if (planTokens > planBudget) {
-                planBody = tokenEstimator.trimToFit(planBody, planBudget);
-            }
-            volatilePart += `
-<task_plan source="artifact:task_plan.md">
-<!-- IMPORTANT: This is the FULL current task_plan.md. Do NOT call read_file on it —
-     it is already provided here in every prompt. Use the task_progress tool to mark
-     items complete; do NOT mutate this artifact directly to track checkbox state. -->
-<![CDATA[
-${planBody}
-]]>
-</task_plan>
-`;
-        }
-
-        if (artifactContext) {
-            volatilePart += `\n${artifactContext}\n`;
-        }
 
         // Only emit the sentinel when there's a volatile region to separate;
         // otherwise the whole prompt is the cacheable prefix.

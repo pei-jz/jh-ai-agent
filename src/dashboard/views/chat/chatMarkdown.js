@@ -1,3 +1,8 @@
+// One implementation for all of these — see utils/html.js for what the
+// nine local copies disagreed about.
+import { escapeHtml } from '../../utils/html.js';
+export { escapeHtml };
+
 // chatMarkdown — pure string→HTML helpers extracted from ChatView (Part A
 // refactor). These render chat message content: HTML escaping, <think> block
 // formatting, a lightweight markdown→HTML pass (code blocks, tables, headers,
@@ -125,14 +130,7 @@ export function ensureChatMarkdownStyles() {
     document.head.appendChild(style);
 }
 
-export function escapeHtml(str) {
-    if (!str) return '';
-    return str.replace(/&/g, "&amp;")
-              .replace(/</g, "&lt;")
-              .replace(/>/g, "&gt;")
-              .replace(/"/g, "&quot;")
-              .replace(/'/g, "&#039;");
-}
+
 
 export function formatMessageContent(text) {
     if (!text) return '';

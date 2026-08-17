@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { sanitizeXmlTags, relevanceScore, scoreMessageImportance, textUnits } from '../MemoryScoring.js';
+import { sanitizeXmlTags, relevanceScore, scoreMessageImportance, textUnits, conceptUnits } from '../MemoryScoring.js';
 
 describe('sanitizeXmlTags', () => {
     it('neutralizes active tags', () => {
@@ -68,5 +68,87 @@ describe('scoreMessageImportance', () => {
     it('handles empty/missing content', () => {
         expect(scoreMessageImportance({})).toBe(0);
         expect(scoreMessageImportance({ role: 'assistant', content: '' })).toBe(0);
+    });
+});
+
+// ── Cross-language recall ─────────────────────────────────────────────────
+//
+// Memory cards are minted from tool names and error text, so they are English
+// ("write_file|edit_mismatch|.svelte"). Prompts in this product are usually
+// Japanese. The two describe the same work and share no character, so unit
+// overlap scored exactly 0 and the whole memory layer was invisible from the
+// language most of its users write in.
+describe('relevanceScore — a Japanese prompt can reach an English card', () => {
+    const card = (summary) => ({ summary });
+
+    it('scores above the injection floor for a matching concept', () => {
+        // MEMORY_MIN_RELEVANCE is 0.08; this used to be a flat 0.
+        const s = relevanceScore(card('run_command failed: test suite did not pass'), 'テストを追加してください');
+        expect(s).toBeGreaterThan(0.08);
+    });
+
+    it('still scores 0 when the concepts genuinely differ', () => {
+        // The guard against a glossary that makes everything look relevant.
+        const s = relevanceScore(card('git commit and branch handling'), 'エクセルの集計表を作って');
+        expect(s).toBe(0);
+    });
+
+    it('matches an English prompt against an English card at least as well', () => {
+        const c = card('run_command failed: test suite did not pass');
+        expect(relevanceScore(c, 'add a test')).toBeGreaterThan(0.08);
+    });
+
+    it('does not let a concept match outrank a literal one', () => {
+        const literal = card('MonitorView.js render loop');
+        const conceptOnly = card('test suite');
+        const q = 'MonitorView.js';
+        expect(relevanceScore(literal, q)).toBeGreaterThan(relevanceScore(conceptOnly, q));
+    });
+});
+
+describe('textUnits — identifiers and width folding', () => {
+    it('splits camelCase so a card about MonitorView matches "monitor"', () => {
+        const u = textUnits('MonitorView.js');
+        expect(u.has('monitor')).toBe(true);
+        expect(u.has('view')).toBe(true);
+    });
+
+    it('splits snake_case tool names', () => {
+        const u = textUnits('multi_replace_file_content');
+        expect(u.has('replace')).toBe(true);
+        expect(u.has('file')).toBe(true);
+    });
+
+    it('folds full-width ASCII, which Japanese IMEs produce for filenames', () => {
+        const u = textUnits('ＭｏｎｉｔｏｒＶｉｅｗ．ｊｓ');
+        expect(u.has('monitor')).toBe(true);
+    });
+
+    it('still produces CJK bigrams', () => {
+        expect(textUnits('タスク一覧').has('タス')).toBe(true);
+    });
+});
+
+describe('conceptUnits', () => {
+    it('reads concepts out of Japanese without word boundaries', () => {
+        const c = conceptUnits('テストを修正して');
+        expect(c.has('test')).toBe(true);
+        expect(c.has('edit')).toBe(true);
+    });
+
+    it('reads the same concepts out of English', () => {
+        const c = conceptUnits('fix the failing test');
+        expect(c.has('test')).toBe(true);
+        expect(c.has('edit')).toBe(true);
+    });
+
+    it('does not match a latin term inside an unrelated word', () => {
+        // "add" inside "address" — the reason latin terms are checked against
+        // extracted words rather than by substring.
+        expect(conceptUnits('the address parser').has('add')).toBe(false);
+    });
+
+    it('is empty for text with no domain terms', () => {
+        expect(conceptUnits('こんにちは').size).toBe(0);
     });
 });

@@ -1,5 +1,6 @@
 // editHandlers — file-mutating tool handlers extracted from ToolExecutor
-// (Part A refactor). write_file / multi_replace_file_content / replace_lines.
+// (Part A refactor). write_file / multi_replace_file_content / replace_lines /
+// apply_patch.
 //
 // These are the most state-coupled handlers: each takes the ToolExecutor
 // instance as `ctx` and uses its helpers/fields verbatim (resolvePath,
@@ -13,6 +14,8 @@
 // I/O glue (excluded from the unit-coverage gate).
 
 import { invoke } from '@tauri-apps/api/core';
+// Patch parsing/application is pure and lives in ../UnifiedDiff.js.
+import { applyPatch } from '../UnifiedDiff.js';
 import {
     detectLineEnding, normalizeLE, countOccurrences, replaceAllLiteral,
     findClosestRegion, visualizeWS
@@ -450,4 +453,63 @@ export async function handleReplaceLines(ctx, args, onConfirm, onAgentStatus) {
         : `Replaced lines ${start}-${end} (${removed} → ${newSeg.length} line(s))`;
 
     return rlPathNote + await ctx._finalizeEdit(editPath, currentContent, finalEditedContent, onConfirm, opSummary);
+}
+
+
+/**
+ * apply_patch — edit a file with a unified diff.
+ *
+ * The third editing mechanism, and the one that asks least of the model.
+ * `multi_replace_file_content` requires it to REPRODUCE existing text exactly
+ * (which is why that handler needs a three-strikes recovery path), and
+ * `replace_lines` requires line numbers that are still accurate when the call
+ * lands. A patch requires neither: the context lines are copied straight out of
+ * read_file output, and the @@ position is a hint the matcher searches around.
+ *
+ * Everything after the patch is applied — approval, write, read-back, the syntax
+ * gate, the edit-count warning — is `_finalizeEdit`, shared with the other edit
+ * tools, so this cannot drift away from their safety behaviour.
+ */
+export async function handleApplyPatch(ctx, args, onConfirm, onAgentStatus) {
+    onAgentStatus?.(`Patching: ${ctx.resolvePath(args.path)}...`);
+
+    if (typeof args?.patch !== 'string' || !args.patch.trim()) {
+        return `Error: apply_patch requires a 'patch' string in unified diff format `
+            + `(at least one "@@ -old,count +new,count @@" hunk, with every body line `
+            + `prefixed by " ", "+" or "-").`;
+    }
+
+    const read = await ctx._readFileSmart(ctx.resolvePath(args.path));
+    if (!read.ok) return read.error;
+    const editPath = read.path;
+    const pathNote = read.note || '';
+    const currentContent = read.content;
+
+    const result = applyPatch(currentContent, args.patch);
+    if (!result.ok) {
+        // Reuse multi_replace's escalation: after three consecutive failures on
+        // one file it evicts the cache, re-reads and returns the live content, so
+        // a model that keeps patching a stale mental copy is handed the real one.
+        const normPath = editPath.replace(/\\/g, '/');
+        return pathNote + await ctx._handleMultiReplaceFailure(
+            editPath, normPath, `Error: apply_patch failed on ${editPath} — ${result.error}`);
+    }
+
+    if (result.content === currentContent) {
+        return pathNote + `Error: apply_patch produced no change to ${editPath}. `
+            + `The patch matched, but the result is identical to the current file — `
+            + `it has probably been applied already. Read the file before patching again.`;
+    }
+
+    // A clean apply clears the failure streak, exactly as a successful
+    // multi_replace does.
+    ctx._multiReplaceFailCount?.set(editPath.replace(/\\/g, '/'), 0);
+
+    const fuzzNote = result.fuzzy > 0
+        ? ` (${result.fuzzy} hunk(s) matched on trimmed whitespace — verify the indentation below)`
+        : '';
+    const opSummary = `Applied ${result.applied} hunk(s)${fuzzNote}`;
+
+    return pathNote + await ctx._finalizeEdit(
+        editPath, currentContent, result.content, onConfirm, opSummary);
 }

@@ -90,20 +90,38 @@ describe('SettingsGeneral — the fields report normalized patches', () => {
         expect(onChange).toHaveBeenCalledWith({ subagent_review: 'on' });
     });
 
-    it('reports the memory-recall arm, and defaults to measuring', () => {
+    it('reports the memory-recall arm, and defaults to RECALLING', () => {
         // The A/B control group is only reachable if this select saves — the
         // switch existed in the agent before it existed in the UI, which made it
         // unusable outside tests.
+        //
+        // The default is 'on', not 'auto'. 'auto' withholds memory from half of
+        // all runs to build a control group; enrolling every user in that by
+        // default means someone is told their workspace learned something and
+        // then, on a coin flip, does not get it, with no way to tell why.
         const onChange = vi.fn();
         const el = general({ onChange });
-        expect(el.querySelector('#cfg-memory-recall').value).toBe('auto');
-        pick(el.querySelector('#cfg-memory-recall'), 'on');
-        expect(onChange).toHaveBeenCalledWith({ memory_recall: 'on' });
+        expect(el.querySelector('#cfg-memory-recall').value).toBe('on');
+        pick(el.querySelector('#cfg-memory-recall'), 'auto');
+        expect(onChange).toHaveBeenCalledWith({ memory_recall: 'auto' });
     });
 
-    it('offers all three memory-recall arms', () => {
+    it('offers all three memory-recall arms, default first', () => {
         const opts = [...general().querySelector('#cfg-memory-recall').options].map(o => o.value);
-        expect(opts).toEqual(['auto', 'on', 'off']);
+        expect(opts).toEqual(['on', 'auto', 'off']);
+    });
+
+    it('exposes past-session injection, defaulting off', () => {
+        // ConversationMemory had setEpisodeInjectionConfig with no caller outside
+        // tests, so the heaviest memory layer could not be turned off by anyone.
+        const onChange = vi.fn();
+        const el = general({ onChange });
+        const sel = el.querySelector('#cfg-episode-injection');
+        expect(sel).toBeTruthy();
+        expect(sel.value).toBe('off');
+        expect([...sel.options].map(o => o.value)).toEqual(['off', 'on']);
+        pick(sel, 'on');
+        expect(onChange).toHaveBeenCalledWith({ episode_injection: 'on' });
     });
 
     it('lists the connections in both routing selects', () => {

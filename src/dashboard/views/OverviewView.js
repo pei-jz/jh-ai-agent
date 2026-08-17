@@ -16,6 +16,10 @@ import { reduceRun, phaseRail, runCost, runCostBreakdown } from './overview/runF
 import { costOf, per1m } from './monitor/inspector.js';
 import { t } from '../../i18n/index.js';
 
+
+// One implementation for all of these — see utils/html.js for what the
+// nine local copies disagreed about.
+import { esc } from '../utils/html.js';
 // Dashboard — a cockpit whose second half is the agent's memory.
 //
 // The shape came out of nine competing proposals (docs/design/dashboard-*,
@@ -1404,13 +1408,7 @@ function safeTemplates() {
     try { return promptTemplateManager.getAll() || []; } catch (_) { return []; }
 }
 
-function esc(str) {
-    if (str === 0) return '0';
-    if (!str) return '';
-    return String(str)
-        .replace(/&/g, '&amp;').replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
+
 
 function clip(s, n) {
     const v = String(s || '').replace(/\s+/g, ' ').trim();
