@@ -48,8 +48,50 @@ export function targetPath(target) {
     return String(target || '').replace(/:\d+$/, '');
 }
 
-/** Files parsed per pass. A cap, not a target — the point is breadth, not depth. */
-export const STUDY_FILE_CAP = 1000;
+/**
+ * Files parsed per pass. A cap, not a target — the point is breadth, not depth.
+ * Pass `fileCap: 0` to lift it entirely (see runStudyPass).
+ *
+ * Raised from 1000 once the read loop stopped being one-file-at-a-time: the old
+ * value was chosen against a sequential IPC round-trip per file, which made a
+ * large tree take minutes. With STUDY_READ_CONCURRENCY the same wall-clock buys
+ * several times as many files.
+ */
+export const STUDY_FILE_CAP = 5000;
+/**
+ * Ceiling on the "how big is this tree really" glob. Deliberately far above the
+ * file cap: the pass needs to SEE the whole tree to spread its fair share over
+ * it, and a glob that stops early biases the index toward whatever the walker
+ * reached first. (The Rust side clamps this too — commands/search.rs.)
+ */
+export const STUDY_GLOB_MAX = 50000;
+/** Files read+parsed concurrently. Each read is an IPC round-trip. */
+export const STUDY_READ_CONCURRENCY = 8;
+
+/**
+ * The change-detection stamp for a file, from what the OS already knows.
+ *
+ * Content hashing answers "did this change" exactly, but it has to READ the
+ * file to do it — so a second pass over an unchanged tree still paid the full
+ * I/O, every time, forever. size+mtime answers the same question well enough
+ * from metadata the directory walk already collected, which is what makes a
+ * repeat pass over tens of thousands of files cheap instead of linear.
+ *
+ * The `m:` prefix keeps stamps and content hashes distinguishable in the index:
+ * rows written by an older build hold a content hash, will not match a stamp,
+ * and are simply re-read once — the upgrade heals itself on the next pass.
+ *
+ * Weaker than a hash in one direction: a write that preserves BOTH size and
+ * mtime is invisible to it (an archive restore, a deliberate touch back in
+ * time). `force: true` re-reads everything for exactly that case.
+ */
+export function fileStamp(meta) {
+    if (!meta) return '';
+    const size = Number(meta.size) || 0;
+    const mtime = Number(meta.mtime_ms ?? meta.mtimeMs) || 0;
+    if (!mtime && !size) return '';
+    return `m:${mtime}-${size}`;
+}
 /** Symbols kept per file. A 2000-line module does not need 300 entries here. */
 export const SYMBOLS_PER_FILE = 12;
 /** Source types SymbolIndex can actually parse. */
@@ -107,8 +149,10 @@ export function dirOf(path, depth = FAIRSHARE_DEPTH) {
  * @returns {{selected: string[], omitted: number}} the kept paths and how many were skipped
  */
 export function fairShare(files, cap = STUDY_FILE_CAP) {
-    if (!Array.isArray(files) || files.length <= cap) {
-        return { selected: files || [], omitted: 0 };
+    // cap 0 / negative / non-finite ⇒ no cap: keep the whole tree.
+    if (!Array.isArray(files)) return { selected: [], omitted: 0 };
+    if (!Number.isFinite(cap) || cap <= 0 || files.length <= cap) {
+        return { selected: files, omitted: 0 };
     }
     const buckets = new Map();
     for (const f of files) {
@@ -283,9 +327,15 @@ export function coverageByDir(cards, depth = 2) {
  *
  * @param {{workspacePath:string, invoke:Function, onProgress?:Function,
  *          fileCap?:number, commit?:string}} opts
+ *   fileCap — 0 (or any non-positive/non-finite value) parses EVERY matching
+ *   file the glob returned. Safe for the index (symbols are capped per file and
+ *   writes are batched), but the pass still READS every file on every run —
+ *   change detection hashes content — so the cost is linear in tree size each
+ *   time, not just the first.
  */
 export async function runStudyPass({
     workspacePath, invoke, onProgress = null, fileCap = STUDY_FILE_CAP, commit = '',
+    force = false,
 } = {}) {
     if (!workspacePath || typeof invoke !== 'function') {
         return { files: 0, parsed: 0, symbols: 0, edges: 0, paths: [], areas: [] };
@@ -298,12 +348,20 @@ export async function runStudyPass({
     // share: keep `fileCap` files, spread across directories.
     let all = [];
     let truncated = false;
+    // path → "m:<mtime>-<size>". Empty when the backend predates `withStamps`,
+    // in which case the pass falls back to content hashing (read everything).
+    const stampOf = new Map();
     try {
         const res = await invoke('glob_files', {
-            pattern: STUDY_GLOB, path: workspacePath, maxResults: 5000,
+            pattern: STUDY_GLOB, path: workspacePath, maxResults: STUDY_GLOB_MAX,
+            withStamps: true,
         });
         all = Array.isArray(res?.files) ? res.files : (Array.isArray(res) ? res : []);
         truncated = !!(res && res.truncated);
+        for (const s of (Array.isArray(res?.stamps) ? res.stamps : [])) {
+            const stamp = fileStamp(s);
+            if (s?.path && stamp) stampOf.set(s.path, stamp);
+        }
     } catch (e) {
         return { files: 0, parsed: 0, symbols: 0, edges: 0, paths: [], areas: [], error: String(e?.message || e) };
     }
@@ -321,33 +379,42 @@ export async function runStudyPass({
     let read = 0, symbolCount = 0, edgeCount = 0;
     const batch = [];
 
-    for (const path of paths) {
-        let content = '';
-        try { content = String(await invoke('read_file', { path }) || ''); }
-        catch (_) { read++; continue; }
+    // Reads run in small CONCURRENT groups. One await per file made the pass a
+    // queue of IPC round-trips — the single reason the file cap had to be small,
+    // since a tree of tens of thousands of files would otherwise take many
+    // minutes of pure waiting. Parsing stays sequential per group so the batch,
+    // counters and progress stay in a deterministic order.
+    for (let i = 0; i < paths.length; i += STUDY_READ_CONCURRENCY) {
+        const group = paths.slice(i, i + STUDY_READ_CONCURRENCY);
+        const contents = await Promise.all(group.map(async (path) => {
+            try { return { path, content: String(await invoke('read_file', { path }) || ''), ok: true }; }
+            catch (_) { return { path, content: '', ok: false }; }
+        }));
 
-        const hash = contentHash(content);
-        seen.push({ path, hash });
-        read++;
+        for (const { path, content, ok } of contents) {
+            read++;
+            if (!ok) continue;
 
-        if (onProgress && (read % 20 === 0 || read === paths.length)) {
-            onProgress({ read, total: paths.length, symbols: symbolCount });
+            const hash = contentHash(content);
+            seen.push({ path, hash });
+
+            // Unchanged since the last pass ⇒ nothing to re-parse.
+            if (known.get(path) !== hash) {
+                const found = extractSymbols(path, content).filter(isLandmark);
+                found.sort((a, b) => (b.exported === true) - (a.exported === true));
+                const symbols = found.slice(0, SYMBOLS_PER_FILE).map(s => ({
+                    name: s.name, kind: s.kind || '', line: s.line || 0, exported: !!s.exported,
+                }));
+                const deps = importEdges(path, content).map(dst => [dst, 'imports']);
+
+                symbolCount += symbols.length;
+                edgeCount += deps.length;
+                batch.push({ path, hash, lang: langOf(path), symbols, deps });
+                areas.push({ path, names: symbols.map(s => s.name) });
+            }
         }
-        // Unchanged since the last pass ⇒ nothing to re-parse.
-        if (known.get(path) !== hash) {
-            const found = extractSymbols(path, content).filter(isLandmark);
-            found.sort((a, b) => (b.exported === true) - (a.exported === true));
-            const symbols = found.slice(0, SYMBOLS_PER_FILE).map(s => ({
-                name: s.name, kind: s.kind || '', line: s.line || 0, exported: !!s.exported,
-            }));
-            const deps = importEdges(path, content).map(dst => [dst, 'imports']);
 
-            symbolCount += symbols.length;
-            edgeCount += deps.length;
-            batch.push({ path, hash, lang: langOf(path), symbols, deps });
-            areas.push({ path, names: symbols.map(s => s.name) });
-        }
-
+        if (onProgress) onProgress({ read, total: paths.length, symbols: symbolCount });
         // Flush in chunks so a huge tree does not build one enormous IPC payload.
         if (batch.length >= 100) { await index.putFiles(batch.splice(0)); }
     }

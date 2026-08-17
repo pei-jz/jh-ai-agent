@@ -69,6 +69,26 @@ describe('supportsNativeTools — provider allowlist', () => {
         expect(llmService.supportsNativeTools('anthropic:claude-x')).toBe(true);
         expect(llmService.supportsNativeTools('ollama:llama3')).toBe(false);
     });
+
+    it('falls back to the resolved provider when the models list is unavailable', () => {
+        // The id prefix of a configured connection is the INSTANCE id, never a
+        // provider name. With no cached registry (getModels failed / not run
+        // yet), the prefix alone would answer "no native tools" and the request
+        // would be sent WITHOUT tools — silently, with no error to see.
+        llmService._models = [];
+        llmService.currentProvider = 'azure';
+        llmService.currentModel = 'inst_1716:gpt-4o-deploy';
+        expect(llmService.supportsNativeTools('inst_1716:gpt-4o-deploy')).toBe(true);
+    });
+
+    it('does not apply that fallback to a DIFFERENT model id', () => {
+        llmService._models = [];
+        llmService.currentProvider = 'azure';
+        llmService.currentModel = 'inst_1716:gpt-4o-deploy';
+        // A per-task override for another (unknown) connection must not inherit
+        // the active connection's provider.
+        expect(llmService.supportsNativeTools('inst_9999:llama3')).toBe(false);
+    });
 });
 
 describe('supportsNativeTools — per-model JSON-mode opt-out', () => {

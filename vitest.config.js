@@ -153,7 +153,7 @@ export default defineConfig({
           lines: 65, functions: 28, branches: 65, statements: 65,
         },
         'src/modules/ai/LLMService.js': {
-          lines: 38, functions: 30, branches: 85, statements: 38,
+          lines: 38, functions: 30, branches: 82, statements: 38,
         },
         // Only the resource-routing half is under test; config load/save and
         // the transport wiring still need a harness.

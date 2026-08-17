@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { mcpManager } from './McpManager.js';
-import { toStrictSchema } from './strictSchema.js';
+import { toStrictSchema, isStrictCompliant } from './strictSchema.js';
 import { levenshtein, pickClosestFile } from './tools/FuzzyPath.js';
 import {
     detectLineEnding, normalizeLE, countOccurrences, replaceAllLiteral,
@@ -10,6 +10,7 @@ import { TOOL_DEFINITIONS } from './tools/toolSchemas.js';
 import { isToolAdvertised, readToolGroupState } from './tools/toolGroups.js';
 import { decorateRunCommand } from './tools/shellEnv.js';
 import { selectMcpTools } from './tools/ToolRelevance.js';
+import { validateMcpArgs } from './tools/McpArgValidator.js';
 import { classifyCommand, suggestApprovalPattern, isApprovedByPatterns } from './tools/commandPolicy.js';
 import {
     handleListFiles, handleReadFile, handleGrepSearch, handleGlob, handleFetchUrl, handleWebSearch,
@@ -38,6 +39,25 @@ import {
     handleAskUser
 } from './tools/handlers/agentMetaHandlers.js';
 import { isPathInScope, WRITE_ENFORCED_TOOLS } from './agent/SubagentRoles.js';
+
+// ── Per-tool watchdog budgets (ms) ─────────────────────────────────────────
+// Only INVESTIGATION tools appear here: they cannot prompt the user and have a
+// bounded amount of honest work to do, so exceeding these means something is
+// stuck rather than slow. See ToolExecutor._withToolTimeout for what is
+// deliberately left out (run_command / run_subtask / the approval-gated write
+// tools) and why a timeout here cannot cancel the underlying work.
+const TOOL_TIMEOUT_MS = {
+    symbol_search: 60000,
+    code_deps: 60000,
+    grep_search: 60000,
+    glob: 30000,
+    list_files: 30000,
+    read_file: 60000,
+    read_office: 120000,
+    verify_syntax: 60000,
+    fetch_url: 60000,
+    web_search: 60000,
+};
 
 // ── Built-in tool dispatch table ───────────────────────────────────────────
 // Replaces the long switch in executeTool: tool name → a thin adapter that
@@ -1059,9 +1079,15 @@ export class ToolExecutor {
         // permission wall. (Mirrors getActiveToolDefinitions filtering.)
         const allow = this._toolAllowlist;
 
-        // Built-in tool schemas are authored strict-compliant, so they are
-        // always eligible for OpenAI Structured Outputs. The `_strict_ok` hint
-        // is read by the Rust layer, which sets function.strict per provider.
+        // Built-in tool schemas are authored strict-compliant — but MOSTLY, not
+        // always: an open-ended map (write_xlsx's `styles` / `col_widths`) or an
+        // untyped `items: {}` cannot be expressed in OpenAI Structured Outputs.
+        // Claiming `_strict_ok` for those made the Rust layer set
+        // function.strict = true, and Azure/OpenAI then rejected the ENTIRE
+        // request with a 400 — which the agent loop swallowed into its JSON-mode
+        // fallback, so the retry went out with NO tools at all. Verify each
+        // schema instead of asserting compliance. The `_strict_ok` hint is read
+        // by the Rust layer, which sets function.strict per provider.
         const groupState = readToolGroupState({ hasResources: resourceRegistry.size > 0 });
         const nativeTools = decorateRunCommand(this.toolDefinitions, SHELL_INFO)
             .filter(t => !allow || allow.has(t.name))
@@ -1070,7 +1096,7 @@ export class ToolExecutor {
             .filter(t => isToolAdvertised(t.name, groupState))
             .map(t => ({
                 type: 'function',
-                _strict_ok: true,
+                _strict_ok: isStrictCompliant(t.parameters),
                 function: {
                     name: t.name,
                     description: t.description,
@@ -1178,6 +1204,45 @@ export class ToolExecutor {
         return `${safeRoot}/${relativePart}`.replace(/\/+/g, '/');
     }
 
+    /**
+     * Watchdog for tools that can neither prompt the user nor legitimately run
+     * long. Nothing above this point has a timeout: the agent loop's wall-clock
+     * and token budgets are only evaluated at the TOP of an iteration, and the
+     * LLM client sets a connect timeout but no read timeout. So one stuck await
+     * inside a tool freezes the entire run, silently, forever — which is exactly
+     * what a hung symbol_search did (a wasm init that never settled).
+     *
+     * Deliberately NOT applied to everything:
+     *   • run_command  — has its own configurable timeout, and may be long
+     *   • run_subtask  — a whole sub-agent run
+     *   • the write/edit tools — they await USER APPROVAL inside the handler,
+     *     and a person taking five minutes to click is not a hang
+     * MCP tools keep their own transport-level timeout.
+     *
+     * A timeout cannot cancel the underlying work (JS has no such primitive) —
+     * it unblocks the LOOP and hands the model a readable error it can act on.
+     */
+    _withToolTimeout(name, promise) {
+        const ms = TOOL_TIMEOUT_MS[name];
+        if (!ms) return promise;
+        return new Promise((resolve) => {
+            let settled = false;
+            const timer = setTimeout(() => {
+                if (settled) return;
+                settled = true;
+                resolve(
+                    `Error: ${name} timed out after ${Math.round(ms / 1000)}s and was abandoned. ` +
+                    `The work may still be running in the background. Narrow the request ` +
+                    `(a smaller path / more specific query) or use a different tool.`
+                );
+            }, ms);
+            Promise.resolve(promise).then(
+                (v) => { if (!settled) { settled = true; clearTimeout(timer); resolve(v); } },
+                (e) => { if (!settled) { settled = true; clearTimeout(timer); resolve(`Error executing ${name}: ${e?.message || e}`); } },
+            );
+        });
+    }
+
     async executeTool(call, onAgentStatus, onConfirm) {
         const { name } = call;
         const args = call.args || {};
@@ -1232,7 +1297,10 @@ export class ToolExecutor {
                 // promise without awaiting, so a rejection (e.g. read_dir → os
                 // error 3 on a missing path) escapes this try/catch and aborts the
                 // whole agent run instead of being returned as a tool-error string.
-                return await handler(this, { args, onConfirm, onAgentStatus, resolvedPath, name });
+                return await this._withToolTimeout(
+                    name,
+                    handler(this, { args, onConfirm, onAgentStatus, resolvedPath, name }),
+                );
             }
             return await this._dispatchMcpTool(name, args, onAgentStatus);
         } catch (e) {
@@ -1258,13 +1326,24 @@ export class ToolExecutor {
                 return `Error: Tool "${name}" is provided by a connected external app and is not available in this task.`;
             }
         }
-        onAgentStatus?.(`Calling MCP tool: ${name} (${targetTool._serverName})...`);
         // Strict Structured Outputs forces the model to emit every (now-required)
         // optional field as null. Drop top-level null args so MCP servers that
         // distinguish "absent" from "null" see the field as omitted.
         const cleanArgs = Object.fromEntries(
             Object.entries(args || {}).filter(([, v]) => v !== null)
         );
+        // Runtime argument validation (P5): the schema was advertised to the LLM,
+        // so a call that violates it fails HERE with a readable reason instead of
+        // a cryptic server-side parse error. Missing/opaque schemas are skipped.
+        // Validate what is ACTUALLY SENT (post-null-strip) — checking the raw
+        // args would reject the strict-mode nulls this very code path removes.
+        const check = validateMcpArgs(cleanArgs, targetTool.inputSchema || targetTool.parameters);
+        if (!check.valid) {
+            const detail = check.errors.slice(0, 5).join('; ');
+            return `Error: Invalid arguments for MCP tool "${name}": ${detail}. Fix the call and retry.`;
+        }
+
+        onAgentStatus?.(`Calling MCP tool: ${name} (${targetTool._serverName})...`);
         const meta = this._mcpContext ? { jhai: this._mcpContext } : null;
         const response = await mcpManager.callTool(targetTool._serverName, name, cleanArgs, meta);
 
