@@ -36,6 +36,15 @@
         autoApproveWorkspaces = [],
         storageUsage = '',
         exportStatus = '',
+        /**
+         * Where API keys are actually kept: {kind: 'keychain'|'file', name, available}.
+         *
+         * Shown because the fallback is real. On a machine with no usable
+         * credential store the keys stay in ai_config.json, and a user who
+         * believes otherwise would be wrong about the one thing this feature
+         * exists to change.
+         */
+        secretStorage = null,
         /** (patch) => void — a partial config update, already normalized. */
         onChange = null,
         onToggleSection = null,
@@ -145,6 +154,19 @@
                 value={config.proxy_url || ''} placeholder="http://127.0.0.1:7890"
                 oninput={(e) => patch('proxy_url', normalizeText(e.currentTarget.value))}>
         </div>
+        {#if secretStorage}
+            <div class="cfg-secret-note" class:is-fallback={!secretStorage.available}>
+                {#if secretStorage.available}
+                    🔐 API keys are stored in <strong>{secretStorage.name}</strong>, not in
+                    <code>ai_config.json</code>.
+                {:else}
+                    ⚠ <strong>{secretStorage.name}</strong> is not available on this machine, so
+                    API keys stay in <code>ai_config.json</code> in plain text. Anything that copies
+                    that file — a synced profile, a backup, sending it to someone — carries the keys
+                    with it.
+                {/if}
+            </div>
+        {/if}
         <div class="input-group">
             <!-- A masked value must not be saved back over the real key. -->
             <label class="input-label" for="cfg-tavily-key">{t('settings.tavily')}</label>
@@ -501,3 +523,18 @@
         {@render section('license', false, 'shield', t('license.section'), licenseBody)}
     {/if}
 </div>
+
+<style>
+    .cfg-secret-note {
+        margin-bottom: 12px;
+        padding: 8px 12px;
+        border: 1px solid var(--border-light);
+        border-left: 3px solid var(--accent);
+        border-radius: var(--radius-sm);
+        background: var(--bg-tertiary);
+        font-size: 11.5px; line-height: 1.55;
+        color: var(--text-secondary);
+    }
+    .cfg-secret-note.is-fallback { border-left-color: var(--error, #c0392b); }
+    .cfg-secret-note code { font-family: var(--font-mono); font-size: 11px; }
+</style>

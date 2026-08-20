@@ -38,6 +38,12 @@ tauri-plugin-process = "2"
 # the plugin skips it when running from target\debug|release, which makes Windows
 # attribute the toast to "Windows PowerShell" instead of the app name.
 notify-rust = "4"
+# API keys live in the OS credential store, not in ai_config.json. `keyring`
+# abstracts the three real backends — Windows Credential Manager, macOS Keychain,
+# Linux libsecret — which is the same place VS Code's SecretStorage and Electron's
+# safeStorage put them. Nothing here rolls its own crypto: a key the app can
+# decrypt unaided is not protected, only obscured. See commands/secrets.rs.
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

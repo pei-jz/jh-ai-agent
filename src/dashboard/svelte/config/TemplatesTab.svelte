@@ -25,15 +25,43 @@
     } = $props();
 
     const PREVIEW = 80;
-    // Seeded once — see the note in ConnectionModal.svelte. untrack() says so to the
-    // compiler instead of tripping its "only the initial value" warning.
-    let form = $state(untrack(() => ({
-        key: editing?.key || '',
-        label: editing?.label || '',
-        prompt: editing?.prompt || '',
-        icon: editing?.icon || '📝',
-    })));
+
+    const blank = () => ({ key: '', label: '', prompt: '', icon: '📝' });
+    let form = $state(untrack(blank));
     let error = $state('');
+
+    /** Which row the form currently holds; null while it is closed. */
+    let seededFor = $state(null);
+
+    /**
+     * Re-seed the form when it OPENS, and only then.
+     *
+     * `untrack` seeding was copied from ConnectionModal, where it is right: that
+     * modal lives inside an `{#if}` and is mounted fresh on every open, so its
+     * first read of the prop IS the current row. This tab is not — it is the tab
+     * body, mounted once and kept. Clicking Edit changes the `editing` prop on an
+     * already-mounted component, and a form seeded at mount (when `editing` was
+     * null) stayed empty forever: every Edit showed a blank New form.
+     *
+     * The key is what is being edited, so typing does not re-seed — a $derived
+     * would throw the draft away on every keystroke — while switching rows, or
+     * closing and reopening, does.
+     */
+    $effect(() => {
+        const key = showForm ? (editing?.key ?? '\u0000new') : null;
+        if (key === seededFor) return;
+        seededFor = key;
+        if (key === null) return;
+        error = '';
+        form = editing
+            ? {
+                key: editing.key || '',
+                label: editing.label || '',
+                prompt: editing.prompt || '',
+                icon: editing.icon || '📝',
+            }
+            : blank();
+    });
     const isEdit = $derived(!!editing);
 
     const submit = () => {

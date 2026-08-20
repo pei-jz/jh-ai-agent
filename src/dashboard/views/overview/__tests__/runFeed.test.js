@@ -5,7 +5,7 @@
 // produces, so a divergence fails rather than quietly drifting.
 
 import { describe, it, expect } from 'vitest';
-import { reduceRun, phaseRail, runCost, FEED_LIMIT, PHASES } from '../runFeed.js';
+import { reduceRun, phaseRail, runCost, affectsRun, RUN_EVENTS, FEED_LIMIT, PHASES } from '../runFeed.js';
 import { toolLineText } from '../../monitor/toolLine.js';
 
 const log = (event, data, ts = '2026-08-12T10:00:00Z') => ({ event, data, timestamp: ts });
@@ -178,5 +178,117 @@ describe('terminal and blocked states', () => {
     it('survives junk in the log array', () => {
         expect(() => reduceRun([null, 'nope', {}, log('unknown', {})])).not.toThrow();
         expect(reduceRun(undefined).steps).toEqual([]);
+    });
+});
+
+// The Run pane used to be rebuilt for EVERY packet on the socket. `stream`
+// arrives once per token and `command_chunk` once per line of stdout, so a
+// generating task rebuilt the whole run object and re-rendered dozens of times a
+// second — which is what made the tab flicker — and, because every rebuild walks
+// the entire log array, the cost was quadratic in the length of the run.
+describe('affectsRun', () => {
+    it('accepts every event the reducer has a case for', () => {
+        for (const event of ['log', 'status', 'phase', 'memory_recall', 'token_usage',
+                             'confirm', 'ask_user', 'complete', 'error']) {
+            expect(affectsRun({ event })).toBe(true);
+        }
+    });
+
+    // These are the high-volume ones, and the reducer ignores them entirely.
+    it('rejects the per-token and per-line traffic', () => {
+        for (const event of ['stream', 'command_chunk']) {
+            expect(affectsRun({ event })).toBe(false);
+        }
+    });
+
+    it('rejects the other events the reducer does not read', () => {
+        for (const event of ['thought', 'tool_call', 'file_modified', 'result',
+                             'result_update', 'task_progress', 'replay_done', 'confirm_resolved']) {
+            expect(affectsRun({ event })).toBe(false);
+        }
+    });
+
+    it('survives a malformed packet', () => {
+        expect(affectsRun(null)).toBe(false);
+        expect(affectsRun({})).toBe(false);
+    });
+
+    // The guard and the switch are two lists of the same thing, one file apart.
+    // Dropping an event the reducer reads would make it silently stop arriving.
+    it('names nothing the reducer cannot use, and nothing it can is missing', () => {
+        const rejected = [...RUN_EVENTS].filter(e => !affectsRun({ event: e }));
+        expect(rejected).toEqual([]);
+        // A packet of each listed kind must actually reach the reducer's output.
+        const before = reduceRun([]);
+        const after = reduceRun([{ event: 'status', data: { message: 'Thinking... (step 2)' } }]);
+        expect(after.step).not.toBe(before.step);
+    });
+});
+
+describe('what the reducer ignores', () => {
+    // Belt and braces: even if a stream packet did get through, it must not move
+    // anything the pane shows.
+    it('is unmoved by a burst of stream packets', () => {
+        const base = reduceRun([{ event: 'status', data: { message: 'Thinking... (step 4)' } }]);
+        const withNoise = reduceRun([
+            { event: 'status', data: { message: 'Thinking... (step 4)' } },
+            ...Array.from({ length: 200 }, () => ({ event: 'stream', data: { chunk: 'x' } })),
+        ]);
+        expect(withNoise.step).toBe(base.step);
+        expect(withNoise.steps).toEqual(base.steps);
+    });
+});
+
+// `finished` drives the Dashboard: it closes the socket, reloads, and clears the
+// pane's tab. Getting it wrong on a CONTINUED task is what made every tab snap
+// back to Run — the server replays the whole log on connect, an old `complete`
+// set the flag, the reload found the task still running, the socket reopened,
+// and the whole thing went round again about once a second.
+describe('when a run counts as finished', () => {
+    const step = (n) => ({ event: 'status', data: { status: 'running', message: `Thinking... (step ${n})` } });
+    const done = { event: 'complete', data: {} };
+
+    it('is finished when the last thing that happened was the end', () => {
+        expect(reduceRun([step(1), done]).finished).toBe(true);
+    });
+
+    // The shape of a continued task: a previous turn ended, and a new one is
+    // under way.
+    it('is NOT finished when work resumed after an earlier completion', () => {
+        expect(reduceRun([step(1), done, step(1), step(2)]).finished).toBe(false);
+    });
+
+    it('is finished again once the new turn also ends', () => {
+        expect(reduceRun([step(1), done, step(1), done]).finished).toBe(true);
+    });
+
+    it('treats a phase event as work in progress too', () => {
+        expect(reduceRun([done, { event: 'phase', data: { phase: 'execute', model: 'm' } }]).finished).toBe(false);
+    });
+
+    // These fire AFTER a completion while the result summary is assembled, so
+    // they must not un-finish the run — the same trap Monitor hit with its
+    // ask_user state.
+    it('stays finished through the bookkeeping that follows a completion', () => {
+        expect(reduceRun([step(1), done, { event: 'token_usage', data: { prompt_tokens: 10 } }]).finished).toBe(true);
+        expect(reduceRun([step(1), done, { event: 'result_update', data: { files: [] } }]).finished).toBe(true);
+    });
+
+    it('an aborted or completed status ends it as well', () => {
+        expect(reduceRun([step(1), { event: 'status', data: { status: 'aborted' } }]).finished).toBe(true);
+        expect(reduceRun([step(1), { event: 'status', data: { status: 'completed' } }]).finished).toBe(true);
+    });
+
+    it('a run that never ended is not finished', () => {
+        expect(reduceRun([step(1), step(2)]).finished).toBe(false);
+        expect(reduceRun([]).finished).toBe(false);
+    });
+
+    // ask_user pauses a run and returns through `complete`. The pane needs both
+    // facts: it ended, and it is waiting on an answer.
+    it('keeps the awaiting flag alongside a completion', () => {
+        const out = reduceRun([step(1), { event: 'ask_user', data: { question: 'which one?' } }, done]);
+        expect(out.finished).toBe(true);
+        expect(out.awaiting).toBe(true);
     });
 });

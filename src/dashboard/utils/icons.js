@@ -89,6 +89,9 @@ const PATHS = {
     paper: `<path d="M4.5 2.5h8L16 6v11.5a1 1 0 01-1 1H4.5a1 1 0 01-1-1v-14a1 1 0 011-1z"/>
         <path d="M12.2 2.6V6.2h3.7"/><path d="M6 9.5h7M6 12h7M6 14.5h4.5"/>`,
 
+    // Bamboo slip theme — a bound bundle of slats (two binding cords)
+    bamboo: `<path d="M6 3v14M10 3v14M14 3v14"/><path d="M4.5 7h11M4.5 13h11"/>`,
+
     // Monitor / Task view — a screen with a live pulse, matching the sidebar's
     // monitor glyph. The chart-on-a-baseline it replaces filled only 9 of the
     // 20 grid (every other glyph fills ~15) and duplicated the analytics idea.

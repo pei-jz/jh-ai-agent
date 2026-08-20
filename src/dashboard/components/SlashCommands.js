@@ -20,10 +20,14 @@ export class SlashCommands {
      * @param {HTMLElement} popup   absolutely-positioned container for the list
      * @param {HTMLElement} [chips] container for attached-skill chips (optional)
      */
-    constructor(textarea, popup, chips = null) {
+    constructor(textarea, popup, chips = null, { onSkillsChange = null } = {}) {
         this.ta = textarea;
         this.popup = popup;
         this.chips = chips;
+        // Attaching a skill is a reason to re-evaluate whether there is anything
+        // to send: a skill ALONE is a valid message. A Svelte caller cannot see
+        // `activeSkills` mutate, so it is told.
+        this.onSkillsChange = onSkillsChange;
         this.items = [];
         this.index = 0;
         this.activeSkills = [];   // [{ name, title }]
@@ -41,7 +45,7 @@ export class SlashCommands {
         if (!v.startsWith('/')) { this._hide(); return; }
         const q = v.slice(1);
         const templates = promptTemplateManager.search(q).map(t => ({ type: 'template', key: t.key, label: t.label, icon: t.icon || '📝', prompt: t.prompt }));
-        const skills = skillManager.search(q).map(s => ({ type: 'skill', key: s.name, label: s.title, icon: '⚡' }));
+        const skills = skillManager.search(q).map(s => ({ type: 'skill', key: s.name, label: s.title, hint: s.description, icon: '⚡' }));
         this.items = [...templates, ...skills];
         this.index = 0;
         this._render();
@@ -57,7 +61,11 @@ export class SlashCommands {
             <div class="slash-popup-item${i === this.index ? ' selected' : ''}" data-idx="${i}">
                 <span class="slash-popup-icon">${it.icon}</span>
                 <span class="slash-popup-key">/${esc(it.key)}</span>
-                <span class="slash-popup-label">${esc(it.label)}</span>
+                <span class="slash-popup-label" title="${esc(it.hint || it.label)}">${esc(it.label)}${
+                    // The description says WHEN to use a skill, which is what the
+                    // name rarely does. It was collected but never shown.
+                    it.hint ? `<span class="slash-popup-hint">— ${esc(it.hint)}</span>` : ''
+                }</span>
                 <span class="slash-popup-type">${it.type}</span>
             </div>`).join('');
         this.popup.style.display = 'flex';
@@ -69,7 +77,11 @@ export class SlashCommands {
             });
         });
         const sel = this.popup.querySelector('.slash-popup-item.selected');
-        if (sel) sel.scrollIntoView({ block: 'nearest' });
+        // Guarded the same way SlashPopup.svelte guards its own call: this runs
+        // from the textarea's input handler, so a throw here (scrollIntoView is
+        // missing in jsdom) takes the rest of that handler with it. A popup that
+        // fails to scroll is far better than one that fails to render.
+        if (typeof sel?.scrollIntoView === 'function') sel.scrollIntoView({ block: 'nearest' });
     }
 
     _key(e) {
@@ -104,6 +116,7 @@ export class SlashCommands {
 
     /** Render removable chips for the attached skills. */
     _renderChips() {
+        this.onSkillsChange?.([...this.activeSkills]);
         if (!this.chips) return;
         if (this.activeSkills.length === 0) { this.chips.style.display = 'none'; this.chips.innerHTML = ''; return; }
         this.chips.style.display = 'flex';
@@ -163,6 +176,7 @@ export class SlashCommands {
             .slash-popup-icon { font-size:16px; flex-shrink:0; }
             .slash-popup-key { font-family:var(--font-mono); font-size:12px; color:var(--accent); font-weight:600; min-width:80px; }
             .slash-popup-label { color:var(--text-secondary); flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+            .slash-popup-hint { color:var(--text-tertiary); font-size:11px; margin-left:6px; }
             .slash-popup-type { font-size:10px; color:var(--text-tertiary); background:var(--bg-tertiary); border:1px solid var(--border-light);
                 border-radius:3px; padding:1px 5px; flex-shrink:0; }
             .slash-popup-empty { padding:12px; text-align:center; font-size:12px; color:var(--text-tertiary); }

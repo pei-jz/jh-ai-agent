@@ -40,6 +40,11 @@ export const READ_ONLY_TOOLS = [
     // Office documents are unreadable via read_file (binary), so an agent
     // without this one has no choice but to shell out.
     'read_office',
+    // A skill is READ, never executed: running what one bundles goes through
+    // run_command like any other shell call. So these belong with the readers,
+    // and every role that can look at anything can consult a procedure.
+    'read_skill',
+    'read_skill_file',
     // Live documents published by a connected app; hidden by the group gate
     // when there are none.
     'list_resources',
@@ -84,8 +89,15 @@ export const OUTPUT_TOOLS = ['write_xlsx', 'write_docx', 'update_xlsx'];
 
 export const WEB_TOOLS = ['fetch_url', 'web_search'];
 
-/** Loop control every preset needs. */
-export const TASK_TOOLS = ['task_progress', 'finish_task'];
+/**
+ * Loop control every preset needs.
+ *
+ * `open_question` is bookkeeping in the same sense `task_progress` is — it
+ * records state about the RUN rather than touching the workspace — and it has to
+ * reach every preset: the investigation it exists to deepen can happen in any of
+ * them, not only in a mode called "research".
+ */
+export const TASK_TOOLS = ['task_progress', 'finish_task', 'open_question'];
 
 /**
  * Termination / delivery / clarification. `setToolAllowlist` adds these

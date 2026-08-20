@@ -9,6 +9,7 @@
 import { describe, it, expect } from 'vitest';
 import {
     memoryPaths, readOverview, writeOverview, parseCardsJsonl, serializeCardsJsonl,
+    writeFacts, writeEpisodes, writeCards,
 } from '../workspaceMemory.js';
 
 const invoke = (impl) => impl;
@@ -78,5 +79,75 @@ describe('cards jsonl', () => {
         const cards = parseCardsJsonl(body);
         expect(cards).toEqual([{ a: 1 }, { b: 2 }]);
         expect(serializeCardsJsonl(cards)).toBe('{"a":1}\n{"b":2}\n');
+    });
+});
+
+// Editing memory writes into <workspace>/.agent, which the path guard only knows
+// about for workspaces an AGENT SESSION has opened. Without registering it first,
+// correcting a fact for a project the agent has not run in this app session
+// failed outright: "outside all allowed roots".
+//
+// Ported from views/__tests__/configView.test.js, which asserted this by driving
+// ConfigView.saveMemoryFacts() — but the ordering is this module's contract.
+describe('the path guard is granted BEFORE any write', () => {
+    function recorder(overrides = {}) {
+        const calls = [];
+        const fn = async (cmd, args) => {
+            calls.push({ cmd, args });
+            if (overrides[cmd]) return overrides[cmd](args);
+            return null;
+        };
+        fn.calls = calls;
+        fn.of = (cmd) => calls.filter(c => c.cmd === cmd);
+        fn.order = () => calls.map(c => c.cmd);
+        return fn;
+    }
+
+    const cases = [
+        ['facts', writeFacts, [{ fact: 'a' }], 'C:/ws/.agent/long_term/facts.json'],
+        ['episodes', writeEpisodes, [{ topic: 't' }], 'C:/ws/.agent/memory.json'],
+        ['cards', writeCards, [{ id: 'L-1' }], 'C:/ws/.agent/memory/cards.jsonl'],
+    ];
+
+    for (const [name, writer, data, path] of cases) {
+        it(`grants .agent then writes ${name} to its own file`, async () => {
+            const inv = recorder();
+            await writer('C:/ws', data, inv);
+            expect(inv.of('set_allowed_roots')[0].args).toEqual({ roots: ['C:/ws/.agent'] });
+            expect(inv.order().indexOf('set_allowed_roots'))
+                .toBeLessThan(inv.order().indexOf('write_file'));
+            expect(inv.of('write_file')[0].args.path).toBe(path);
+        });
+    }
+
+    it('grants ONLY .agent, never the whole workspace', async () => {
+        const inv = recorder();
+        await writeFacts('C:/ws', [], inv);
+        expect(inv.of('set_allowed_roots')[0].args.roots).not.toContain('C:/ws');
+    });
+
+    it('strips a trailing separator from the workspace path', async () => {
+        const inv = recorder();
+        await writeFacts('C:/ws/', [], inv);
+        expect(inv.of('set_allowed_roots')[0].args).toEqual({ roots: ['C:/ws/.agent'] });
+    });
+
+    // An older backend would otherwise turn a recoverable save into a failure.
+    it('still attempts the write when the backend has no such command', async () => {
+        const inv = recorder({
+            set_allowed_roots: () => { throw new Error('no such command'); },
+        });
+        await expect(writeFacts('C:/ws', [], inv)).resolves.toBeUndefined();
+        expect(inv.of('write_file')).toHaveLength(1);
+    });
+
+    it('writes the overview through the same guard', async () => {
+        const inv = recorder();
+        await writeOverview('C:/ws', '- a note', inv, { generatedAt: '2026-08-18T00:00:00.000Z' });
+        expect(inv.of('set_allowed_roots')[0].args).toEqual({ roots: ['C:/ws/.agent'] });
+        const wf = inv.of('write_file')[0].args;
+        expect(wf.path).toBe('C:/ws/.agent/memory/overview.md');
+        expect(wf.content).toContain('<!-- generated: ');
+        expect(wf.content).toContain('- a note');
     });
 });

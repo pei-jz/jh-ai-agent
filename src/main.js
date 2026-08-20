@@ -172,7 +172,12 @@ function initTitlebar() {
 async function handleRoute() {
     const hash = window.location.hash || '#overview';
     const route = hash.split('?')[0].substring(1);
-    
+    // The query half was parsed off and thrown away, so every `#config?tab=…`
+    // link in the app — the Dashboard's memory panel and its "Add a template"
+    // chip among them — landed on Settings' default tab instead of the one it
+    // named. Monitor reads `?id=` itself; only the tab was going nowhere.
+    const params = new URLSearchParams(hash.split('?')[1] || '');
+
     // Destroy previous view if needed
     if (currentView && typeof currentView.destroy === 'function') {
         currentView.destroy();
@@ -199,7 +204,7 @@ async function handleRoute() {
             viewInstance = new ScheduleView();
             break;
         case 'config':
-            viewInstance = new ConfigView();
+            viewInstance = new ConfigView(params.get('tab') || 'llm');
             break;
         default:
             viewInstance = new OverviewView();

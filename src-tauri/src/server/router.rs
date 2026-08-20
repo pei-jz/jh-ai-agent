@@ -333,6 +333,32 @@ async fn create_task(
     Json(CreateTaskResponse { task_id, ws_url })
 }
 
+/// Clone a task's METADATA — every field except `logs`.
+///
+/// `t.clone()` followed by `t.logs = Vec::new()` reads the same but is not: the
+/// clone deep-copies the whole log vector FIRST, and a long task's cached logs
+/// run to hundreds of MB of `serde_json::Value` (the sidecar for one task in a
+/// real install is 552 MB). Both /tasks and /tasks/:id were paying that copy on
+/// every call, only to drop it again.
+fn task_meta(t: &TaskInfo) -> TaskInfo {
+    TaskInfo {
+        id: t.id.clone(),
+        prompt: t.prompt.clone(),
+        status: t.status.clone(),
+        progress: t.progress,
+        token_usage: t.token_usage.clone(),
+        model_usage: t.model_usage.clone(),
+        started_at: t.started_at.clone(),
+        completed_at: t.completed_at.clone(),
+        workspace_path: t.workspace_path.clone(),
+        caller: t.caller.clone(),
+        mcp_servers: t.mcp_servers.clone(),
+        result_summary: t.result_summary.clone(),
+        modified_files: t.modified_files.clone(),
+        logs: Vec::new(),
+    }
+}
+
 async fn list_tasks(State(state): State<AppState>) -> Json<Vec<TaskInfo>> {
     let tasks = state.tasks.lock().unwrap();
     // The list view needs METADATA only (id / status / prompt / tokens /
@@ -342,11 +368,7 @@ async fn list_tasks(State(state): State<AppState>) -> Json<Vec<TaskInfo>> {
     // heavy" (both call listTasks). The detail view loads logs on demand via
     // GET /tasks/:id. (`logs` has skip_serializing_if = Vec::is_empty, so an empty
     // vec is simply omitted from the JSON.)
-    let list: Vec<TaskInfo> = tasks.values().map(|t| {
-        let mut t = t.clone();
-        t.logs = Vec::new();
-        t
-    }).collect();
+    let list: Vec<TaskInfo> = tasks.values().map(task_meta).collect();
     Json(list)
 }
 
@@ -356,7 +378,12 @@ async fn get_task(
 ) -> Result<Json<TaskInfo>, (StatusCode, String)> {
     let tasks = state.tasks.lock().unwrap();
     if let Some(task) = tasks.get(&id) {
-        Ok(Json(task.clone()))
+        // METADATA only, like /tasks. Logs are served by GET /tasks/:id/logs,
+        // which pages and slims them; once a big task's logs had been read into
+        // the cache, this endpoint serialized the WHOLE un-slimmed vector on
+        // every call — and the Monitor calls it on every task switch, for the
+        // id and status alone.
+        Ok(Json(task_meta(task)))
     } else {
         Err((StatusCode::NOT_FOUND, "Task not found".to_string()))
     }
@@ -428,12 +455,28 @@ async fn get_task_logs(
     axum::extract::Query(q): axum::extract::Query<LogsQuery>,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
-    // Snapshot the in-memory state quickly, then release the lock before
-    // doing any disk I/O (avoids holding the mutex during sidecar file read).
-    let (exists, in_mem_logs) = {
+    // ONE index space over the sidecar followed by whatever the running task has
+    // not checkpointed yet, so `_idx` means the same thing whichever side an
+    // entry comes from. The alternative — "serve memory if it has anything, else
+    // the file" — silently hid the whole earlier history of a task continued
+    // after a restart, because memory then holds ONLY the new entries.
+    //
+    // And ONE index for both halves of the request: the count that sizes the
+    // window and the entries it returns. Taking them separately scanned the file
+    // twice — 0.9 s of the 1.0 s a real 552 MB sidecar cost to open.
+    let index = crate::task_log_index(&state.history_path, &id);
+    let on_disk = index.as_ref().map(|i| i.len()).unwrap_or(0);
+    let (exists, tail) = {
         let tasks = state.tasks.lock().unwrap();
         match tasks.get(&id) {
-            Some(task) => (true, task.logs.clone()),
+            Some(task) => {
+                // Only the un-checkpointed tail is copied. Cloning `task.logs`
+                // (which is what stood here) deep-copies every entry to hand
+                // back 400 of them — on a task with a 552 MB sidecar, per
+                // request, and the Monitor issues one on every open.
+                let p = crate::persisted_log_count(&id).min(task.logs.len());
+                (true, task.logs[p..].to_vec())
+            }
             None => (false, vec![]),
         }
     };
@@ -442,30 +485,25 @@ async fn get_task_logs(
         return Err((StatusCode::NOT_FOUND, "Task not found".to_string()));
     }
 
-    // If the task still has logs in memory (live or recently completed in this
-    // session), return them (slimmed). Otherwise it's a task loaded from disk
-    // after an app restart — load its logs from the sidecar file lazily.
-    if !in_mem_logs.is_empty() {
-        let (start, end) = log_window(in_mem_logs.len(), &q);
-        let slim: Vec<serde_json::Value> = in_mem_logs[start..end].iter().enumerate()
-            .map(|(i, l)| slim_log_entry(l, start + i)).collect();
-        return Ok(Json(slim));
+    let total = on_disk + tail.len();
+    let (start, end) = log_window(total, &q);
+    let mut entries: Vec<serde_json::Value> = Vec::new();
+    // The file part: only these entries are parsed, the rest of the file having
+    // been a byte scan. What stood here parsed EVERY entry of the whole file to
+    // return the last 400, then kept the result in `task.logs` — which is why
+    // opening a task with a long history cost both seconds and hundreds of MB of
+    // resident memory for the life of the process.
+    if let Some(index) = index.as_ref() {
+        entries.extend(index.read_range(start, on_disk.min(end)));
+    }
+    // The live part.
+    if end > on_disk {
+        let from = start.saturating_sub(on_disk);
+        let to = end - on_disk;
+        entries.extend(tail[from.min(tail.len())..to.min(tail.len())].iter().cloned());
     }
 
-    let disk_logs = crate::load_task_logs(&state.history_path, &id);
-
-    // Cache the loaded logs back into memory so subsequent calls don't re-read disk.
-    if !disk_logs.is_empty() {
-        let mut tasks = state.tasks.lock().unwrap();
-        if let Some(task) = tasks.get_mut(&id) {
-            if task.logs.is_empty() {
-                task.logs = disk_logs.clone();
-            }
-        }
-    }
-
-    let (start, end) = log_window(disk_logs.len(), &q);
-    let slim: Vec<serde_json::Value> = disk_logs[start..end].iter().enumerate()
+    let slim: Vec<serde_json::Value> = entries.iter().enumerate()
         .map(|(i, l)| slim_log_entry(l, start + i)).collect();
     Ok(Json(slim))
 }
@@ -477,10 +515,17 @@ async fn get_task_log_entry(
     Path((id, idx)): Path<(String, usize)>,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // `idx` is absolute over (sidecar ++ un-checkpointed tail), the same space
+    // GET /tasks/:id/logs indexes with. Reading it as a plain offset into
+    // `task.logs` was only right while memory happened to hold the whole log.
+    let on_disk = crate::task_log_line_count(&state.history_path, &id);
     let (exists, entry) = {
         let tasks = state.tasks.lock().unwrap();
         match tasks.get(&id) {
-            Some(task) => (true, task.logs.get(idx).cloned()),
+            Some(task) => {
+                let base = on_disk.saturating_sub(crate::persisted_log_count(&id).min(task.logs.len()));
+                (true, idx.checked_sub(base).and_then(|j| task.logs.get(j)).cloned())
+            }
             None => (false, None),
         }
     };
@@ -490,9 +535,11 @@ async fn get_task_log_entry(
     if let Some(e) = entry {
         return Ok(Json(e));
     }
-    // Memory empty (restart) — read from the sidecar file.
-    let disk_logs = crate::load_task_logs(&state.history_path, &id);
-    disk_logs.get(idx).cloned()
+    // Not in memory — take the ONE entry out of the sidecar rather than parsing
+    // the whole file for it.
+    let q = LogsQuery { limit: Some(1), before: Some(idx + 1) };
+    let (_total, _start, entries) = crate::load_task_logs_window(&state.history_path, &id, &q);
+    entries.into_iter().next()
         .map(Json)
         .ok_or((StatusCode::NOT_FOUND, format!("log index {} out of range", idx)))
 }
@@ -896,6 +943,57 @@ mod slim_log_tests {
     fn an_entry_with_nothing_heavy_is_not_flagged_slim() {
         let e = slim_log_entry(&serde_json::json!({ "event": "log", "data": { "request": { "purpose": "x" } } }), 1);
         assert!(e["data"]["request"].get("_slim").is_none());
+    }
+}
+
+#[cfg(test)]
+mod task_meta_tests {
+    use super::*;
+
+    fn task_with_logs(n: usize) -> TaskInfo {
+        TaskInfo {
+            id: "t1".into(),
+            prompt: "p".into(),
+            status: "completed".into(),
+            progress: 1.0,
+            token_usage: TokenUsage::default(),
+            model_usage: HashMap::new(),
+            started_at: "2026-08-19T00:00:00+09:00".into(),
+            completed_at: None,
+            workspace_path: Some("C:/ws".into()),
+            caller: Some("monitor".into()),
+            mcp_servers: Some(vec!["backlog".into()]),
+            result_summary: Some(serde_json::json!({ "summary": "done" })),
+            modified_files: vec![serde_json::json!({ "path": "a.js" })],
+            logs: (0..n).map(|i| serde_json::json!({ "event": "status", "i": i })).collect(),
+        }
+    }
+
+    /// The listing and the detail endpoint both need everything BUT the logs.
+    #[test]
+    fn the_metadata_survives_and_the_logs_do_not() {
+        let t = task_with_logs(1000);
+        let m = task_meta(&t);
+
+        assert!(m.logs.is_empty());
+        assert_eq!(m.id, t.id);
+        assert_eq!(m.status, t.status);
+        assert_eq!(m.token_usage.total_tokens, t.token_usage.total_tokens);
+        assert_eq!(m.workspace_path, t.workspace_path);
+        assert_eq!(m.caller, t.caller);
+        assert_eq!(m.mcp_servers, t.mcp_servers);
+        assert_eq!(m.result_summary, t.result_summary);
+        assert_eq!(m.modified_files, t.modified_files);
+    }
+
+    /// `logs` is skip_serializing_if = is_empty, so dropping it removes the
+    /// field entirely — that is what keeps a cached 552 MB log out of a response
+    /// whose caller only wants the status.
+    #[test]
+    fn the_serialized_response_carries_no_logs_field() {
+        let json = serde_json::to_value(task_meta(&task_with_logs(10))).unwrap();
+        assert!(json.get("logs").is_none());
+        assert_eq!(json["id"], "t1");
     }
 }
 

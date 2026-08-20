@@ -32,12 +32,15 @@ import {
 } from './tools/handlers/gitHandlers.js';
 import { handleReadOffice, handleWriteXlsx, handleWriteDocx, handleUpdateXlsx } from './tools/handlers/officeHandlers.js';
 import { handleListResources, handleReadResource } from './tools/handlers/resourceHandlers.js';
+import { handleReadSkill, handleReadSkillFile } from './tools/handlers/skillHandlers.js';
 import { resourceRegistry } from './agent/ResourceRegistry.js';
 import {
     handleFinishTask,
     handleVerifySyntax, handleTaskProgress, handlePresentResult,
     handleAskUser
 } from './tools/handlers/agentMetaHandlers.js';
+import { handleOpenQuestion } from './tools/handlers/openQuestionHandlers.js';
+import { OpenQuestions } from './agent/OpenQuestions.js';
 import { isPathInScope, WRITE_ENFORCED_TOOLS } from './agent/SubagentRoles.js';
 
 // ── Per-tool watchdog budgets (ms) ─────────────────────────────────────────
@@ -66,6 +69,22 @@ const TOOL_TIMEOUT_MS = {
 // surrounding try/catch in executeTool behaves identically to the old switch.
 // MCP/unknown tools fall through to _dispatchMcpTool. Keep this in sync when
 // adding/removing a built-in tool.
+/**
+ * Tools whose call names a file the run READ. Used only for the investigation
+ * audit's "what did you actually look at" list — not a security boundary.
+ */
+const READ_PATH_TOOLS = new Set(['read_file', 'read_office', 'code_deps', 'verify_syntax']);
+
+/**
+ * Tools that INSPECT the workspace. Counted so the investigation gate can tell
+ * a traced answer from a long one composed out of context — auditing the latter
+ * only spends tokens confirming that nobody looked anything up.
+ */
+const INSPECT_TOOLS = new Set([
+    'read_file', 'read_office', 'grep_search', 'glob', 'list_files',
+    'symbol_search', 'code_deps', 'git_diff', 'git_log', 'read_resource',
+]);
+
 const TOOL_HANDLERS = {
     list_files:  (ex, c) => handleListFiles(ex, c.args, c.onAgentStatus, c.resolvedPath),
     read_file:   (ex, c) => handleReadFile(ex, c.args, c.onAgentStatus, c.resolvedPath),
@@ -78,6 +97,10 @@ const TOOL_HANDLERS = {
     write_xlsx:  (ex, c) => handleWriteXlsx(ex, c.args, c.onConfirm, c.onAgentStatus),
     write_docx:  (ex, c) => handleWriteDocx(ex, c.args, c.onConfirm, c.onAgentStatus),
     update_xlsx: (ex, c) => handleUpdateXlsx(ex, c.args, c.onConfirm, c.onAgentStatus),
+    // Written procedures the user maintains. The catalogue in the system prompt
+    // carries names and descriptions; these fetch the actual steps.
+    read_skill:      (ex, c) => handleReadSkill(ex, c.args, c.onAgentStatus),
+    read_skill_file: (ex, c) => handleReadSkillFile(ex, c.args, c.onAgentStatus),
     // Live documents published by connected apps (MCP resources)
     list_resources: (ex, c) => handleListResources(ex, c.args, c.onAgentStatus),
     read_resource:  (ex, c) => handleReadResource(ex, c.args, c.onAgentStatus),
@@ -101,6 +124,8 @@ const TOOL_HANDLERS = {
         : 'Error: run_subtask is not available in this context.',
     verify_syntax:   (ex, c) => handleVerifySyntax(ex, c.args, c.onAgentStatus, c.resolvedPath),
     task_progress:   (ex, c) => handleTaskProgress(ex, c.args),
+    // The investigation frontier — run-local, touches nothing on disk.
+    open_question:   (ex, c) => handleOpenQuestion(ex, c.args, c.onAgentStatus),
     // Browser automation (Phase 2)
     browser_navigate:   (ex, c) => handleBrowserNavigate(ex, c.args, c.onAgentStatus),
     browser_content:    (ex, c) => handleBrowserContent(ex, c.args, c.onAgentStatus),
@@ -158,6 +183,15 @@ export class ToolExecutor {
         // when it's been hammering the same file repeatedly (often a sign of
         // a fundamentally wrong approach).
         this._fileEditCount = new Map();
+        // The investigation frontier — determinants the run has noticed but not
+        // traced. Per-RUN, unlike task_progress: an untraced dependency belongs
+        // to the question being answered now, and carrying one into an unrelated
+        // later run would only produce a stale nag.
+        this.openQuestions = new OpenQuestions();
+        // Paths read this run — see READ_PATH_TOOLS.
+        this.readFiles = new Set();
+        // How many times this run looked at the workspace — see INSPECT_TOOLS.
+        this.inspectionCount = 0;
         // task_progress tool state (now workspace-persistent across sessions).
         this._taskProgressItems = [];   // [{ id, title, status, note }, ...]
         this._taskProgressLoaded = false;
@@ -352,6 +386,9 @@ export class ToolExecutor {
         // file (rather than wiping it).
         this._taskProgressItems = [];
         this._taskProgressLoaded = false;
+        this.openQuestions = new OpenQuestions();   // frontier is per-run, see ctor
+        this.readFiles = new Set();
+        this.inspectionCount = 0;
         this._taskProgressCarriedOver = false; // reset; set true if prior-session items load
         this._taskCompleted = false;
         this._awaitingUser = false;    // reset ask_user pause flag per session
@@ -1316,6 +1353,17 @@ export class ToolExecutor {
             // so this try/catch wraps them exactly as the old switch did.
             const handler = TOOL_HANDLERS[name];
             if (handler) {
+                // Record WHICH files this run actually looked at. The investigation
+                // audit needs it: "the answer explains a screen and every file read
+                // was a template" is the strongest available signal that a trace
+                // stopped at a layer boundary, and it cannot be recovered after the
+                // fact. Recorded here rather than in each handler so a newly added
+                // reader cannot forget to.
+                if (READ_PATH_TOOLS.has(name)) {
+                    const p = resolvedPath || args?.path || args?.file_path;
+                    if (p) this.readFiles.add(String(p));
+                }
+                if (INSPECT_TOOLS.has(name)) this.inspectionCount++;
                 // MUST await: a bare `return handler(...)` returns the handler's
                 // promise without awaiting, so a rejection (e.g. read_dir → os
                 // error 3 on a missing path) escapes this try/catch and aborts the

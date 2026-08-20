@@ -6,17 +6,19 @@
 // Dark is the token DEFAULT in dashboard.css, so it is the one theme expressed
 // by the ABSENCE of `data-theme` — see themeAttr().
 
-/** In cycle order. The two paper variants are ported from JHEditor / the Task app. */
-export const THEMES = ['light', 'dark', 'paper', 'paper-subtle'];
+/** In cycle order. The paper variants are ported from JHEditor / the Task app;
+    bamboo-ancient is the adopted bamboo-slip proposal (#3). */
+export const THEMES = ['light', 'dark', 'paper', 'paper-subtle', 'bamboo-ancient'];
 
-const NEXT = { light: 'dark', dark: 'paper', paper: 'paper-subtle', 'paper-subtle': 'light' };
+const NEXT = { light: 'dark', dark: 'paper', paper: 'paper-subtle', 'paper-subtle': 'bamboo-ancient', 'bamboo-ancient': 'light' };
 // The button shows the theme you would switch TO, not the one you are in.
-const ICON = { light: 'moon', dark: 'paper', paper: 'template', 'paper-subtle': 'sun' };
+const ICON = { light: 'moon', dark: 'paper', paper: 'template', 'paper-subtle': 'bamboo', 'bamboo-ancient': 'sun' };
 const LABEL = {
     light: 'ダークモードへ / Switch to dark',
     dark: 'ペーパーへ / Switch to paper',
     paper: 'ペーパー(Subtle)へ / Switch to paper (subtle)',
-    'paper-subtle': 'ライトモードへ / Switch to light',
+    'paper-subtle': '竹簡(古文)へ / Switch to bamboo (ancient)',
+    'bamboo-ancient': 'ライトモードへ / Switch to light',
 };
 
 /** Anything unrecognised (or absent) falls back to the shipped default. */

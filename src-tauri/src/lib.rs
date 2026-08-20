@@ -159,6 +159,387 @@ fn task_logs_dir(history_path: &std::path::Path) -> PathBuf {
         .join("task_logs")
 }
 
+/// The sidecar: ONE JSON value per line (JSONL), appended as the task runs.
+///
+/// It used to be a single JSON array rewritten in full on every checkpoint. A
+/// step's log entry embeds the whole conversation up to that step, so the array
+/// grows O(steps^2) - in a real install one task's sidecar reached 552 MB, and
+/// every checkpoint serialized and rewrote all of it while opening the task
+/// parsed all of it to show the last 400 entries. One line per entry makes a
+/// save an append of what is new, and a read a byte scan plus the window the
+/// caller asked for.
+fn task_logs_path(logs_dir: &std::path::Path, task_id: &str) -> PathBuf {
+    logs_dir.join(format!("{}.jsonl", task_id))
+}
+
+/// The pre-JSONL sidecar (one big array). Still read, and converted in place the
+/// first time a task using it is saved or read.
+fn legacy_task_logs_path(logs_dir: &std::path::Path, task_id: &str) -> PathBuf {
+    logs_dir.join(format!("{}.json", task_id))
+}
+
+/// task id -> how many entries of that task's IN-MEMORY `logs` vec are already
+/// on disk. It is an index into that vector, not a line count of the file: a
+/// task continued after a restart holds only its new entries in memory while the
+/// file already holds the old ones.
+///
+/// "Not tracked" therefore means "nothing in this vector has been written yet",
+/// which is why the append path may write the whole vector in that case. That
+/// holds because NOTHING seeds `TaskInfo.logs` from disk - the sidecar is read
+/// into responses, never back into the task.
+static PERSISTED_LOG_LINES: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+
+fn persisted_lines() -> &'static Mutex<HashMap<String, usize>> {
+    PERSISTED_LOG_LINES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Rewrite a legacy array sidecar as JSONL, then drop the original.
+///
+/// Costs one full parse - the same one every open used to pay - and only ever
+/// happens once per task.
+fn migrate_legacy_logs(logs_dir: &std::path::Path, task_id: &str) {
+    let legacy = legacy_task_logs_path(logs_dir, task_id);
+    let jsonl = task_logs_path(logs_dir, task_id);
+    if jsonl.exists() || !legacy.exists() {
+        return;
+    }
+    let entries: Vec<serde_json::Value> = match std::fs::read_to_string(&legacy)
+        .ok()
+        .and_then(|c| serde_json::from_str(&c).ok())
+    {
+        Some(v) => v,
+        // Unreadable or corrupt: leave it alone rather than deleting the only copy.
+        None => return,
+    };
+    let mut out = String::new();
+    for e in &entries {
+        if let Ok(line) = serde_json::to_string(e) {
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
+    if write_atomic(&jsonl, out.as_bytes()).is_ok() {
+        let _ = std::fs::remove_file(&legacy);
+    }
+}
+
+/// Append the entries of `task.logs` that are not on disk yet.
+///
+/// Called under HISTORY_WRITE_LOCK, so reading the persisted count and appending
+/// cannot interleave with another writer. A snapshot taken before an earlier
+/// save (they are spawned per checkpoint) simply has nothing left to add - it
+/// can never duplicate or truncate what is already written.
+fn append_task_logs(logs_dir: &std::path::Path, task: &TaskInfo) {
+    // Owned here rather than assumed: an append to a path whose directory does
+    // not exist fails silently, and this is the only writer of that directory.
+    let _ = std::fs::create_dir_all(logs_dir);
+    let mut counts = persisted_lines().lock().unwrap_or_else(|p| p.into_inner());
+    let start = match counts.get(&task.id) {
+        Some(n) => (*n).min(task.logs.len()),
+        None => {
+            // First save of this task in this process: carry a legacy array file
+            // over first, so the append lands after what it already holds.
+            migrate_legacy_logs(logs_dir, &task.id);
+            0
+        }
+    };
+    if start >= task.logs.len() {
+        counts.insert(task.id.clone(), task.logs.len());
+        return;
+    }
+
+    let mut out = String::new();
+    for e in &task.logs[start..] {
+        if let Ok(line) = serde_json::to_string(e) {
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
+    // Appending rather than replacing also removes the truncation window a crash
+    // could land in; a torn final line is skipped on read instead of costing the
+    // whole file.
+    let path = task_logs_path(logs_dir, &task.id);
+    let appended = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut f| {
+            use std::io::Write;
+            f.write_all(out.as_bytes())
+        })
+        .is_ok();
+    if appended {
+        counts.insert(task.id.clone(), task.logs.len());
+    }
+}
+
+/// Where each entry of a sidecar begins and ends, found by a byte scan.
+///
+/// No JSON is parsed, and that is the point: knowing how many entries a file
+/// holds — and where the last N of them start — must not cost a parse of the
+/// whole file. Works on BOTH sidecar formats, which is what lets a legacy array
+/// file be read as cheaply as a JSONL one instead of being converted first. The
+/// first open of a 552 MB task used to pay that conversion (a full parse plus a
+/// full rewrite) before it could show anything.
+enum Sidecar {
+    /// One entry per line.
+    Lines,
+    /// One JSON array holding every entry (written by builds before the
+    /// append-only sidecar).
+    Array,
+}
+
+fn scan_entry_ranges(
+    path: &std::path::Path,
+    kind: &Sidecar,
+) -> std::io::Result<Vec<(u64, u64)>> {
+    use std::io::Read;
+    let f = std::fs::File::open(path)?;
+    let mut reader = std::io::BufReader::with_capacity(1 << 20, f);
+    let mut buf = vec![0u8; 1 << 20];
+    let mut pos: u64 = 0;
+
+    let mut ranges: Vec<(u64, u64)> = Vec::new();
+    // Lines: where the current line started — the first one starts at byte 0.
+    // Array: where the current top-level element started, and nothing is open
+    // until the outer `[` has been passed. Seeding this with Some(0) for an
+    // array swallowed the opening bracket into the first element, which then
+    // failed to parse and vanished from the window.
+    let mut start: Option<u64> = match kind {
+        Sidecar::Lines => Some(0),
+        Sidecar::Array => None,
+    };
+    // Array only. A quoted string can hold any bracket, so depth may only move
+    // outside one.
+    let mut depth: i32 = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        for (k, byte) in buf[..n].iter().enumerate() {
+            let at = pos + k as u64;
+            let b = *byte;
+            match kind {
+                Sidecar::Lines => {
+                    if b == b'\n' {
+                        // The newline itself is not part of the entry. A \r left
+                        // at the end of a range is harmless — serde_json treats
+                        // trailing whitespace as whitespace.
+                        ranges.push((start.unwrap_or(at), at));
+                        start = Some(at + 1);
+                    }
+                }
+                Sidecar::Array => {
+                    if in_string {
+                        if escaped {
+                            escaped = false;
+                        } else if b == b'\\' {
+                            escaped = true;
+                        } else if b == b'"' {
+                            in_string = false;
+                        }
+                        continue;
+                    }
+                    match b {
+                        b'"' => {
+                            if depth == 1 && start.is_none() {
+                                start = Some(at);
+                            }
+                            in_string = true;
+                        }
+                        b'[' | b'{' => {
+                            if depth == 1 && start.is_none() {
+                                start = Some(at);
+                            }
+                            depth += 1;
+                        }
+                        b']' | b'}' => {
+                            depth -= 1;
+                            if depth == 1 {
+                                // A nested value closed: the element ends WITH it.
+                                if let Some(s) = start.take() {
+                                    ranges.push((s, at + 1));
+                                }
+                            } else if depth == 0 {
+                                // The outer array closed on a bare scalar.
+                                if let Some(s) = start.take() {
+                                    ranges.push((s, at));
+                                }
+                            }
+                        }
+                        b',' if depth == 1 => {
+                            if let Some(s) = start.take() {
+                                ranges.push((s, at));
+                            }
+                        }
+                        b' ' | b'\t' | b'\r' | b'\n' => {}
+                        _ => {
+                            if depth == 1 && start.is_none() {
+                                start = Some(at);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        pos += n as u64;
+    }
+
+    if let Sidecar::Lines = kind {
+        // A file not ending in a newline still holds that last entry.
+        if let Some(s) = start {
+            if s < pos {
+                ranges.push((s, pos));
+            }
+        }
+    }
+    Ok(ranges)
+}
+
+/// A sidecar's entry index, and the file it belongs to.
+///
+/// Handed out behind an `Arc` because it is CACHED: the scan that produces it is
+/// a pass over the whole file (0.45 s for a real 552 MB sidecar in a release
+/// build), and the Task view asks for the count and then for a window — two
+/// calls that used to scan twice. One scan per file per session, reused until
+/// the file changes.
+pub struct LogIndex {
+    path: PathBuf,
+    ranges: std::sync::Arc<Vec<(u64, u64)>>,
+}
+
+struct CachedIndex {
+    path: PathBuf,
+    len: u64,
+    mtime: Option<std::time::SystemTime>,
+    ranges: std::sync::Arc<Vec<(u64, u64)>>,
+}
+
+static SIDECAR_INDEX: OnceLock<Mutex<HashMap<String, CachedIndex>>> = OnceLock::new();
+
+impl LogIndex {
+    pub fn len(&self) -> usize {
+        self.ranges.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ranges.is_empty()
+    }
+
+    /// Parse the entries in `[start, end)`. One seek, one read of exactly those
+    /// bytes, and a parse of each entry from ITS OWN range — a legacy array may
+    /// be pretty-printed, so splitting the block on newlines would not do.
+    pub fn read_range(&self, start: usize, end: usize) -> Vec<serde_json::Value> {
+        use std::io::{Read, Seek, SeekFrom};
+        if start >= end || end > self.ranges.len() {
+            return vec![];
+        }
+        let from = self.ranges[start].0;
+        let to = self.ranges[end - 1].1;
+        let mut buf = vec![0u8; (to - from) as usize];
+        if std::fs::File::open(&self.path)
+            .and_then(|mut f| {
+                f.seek(SeekFrom::Start(from))?;
+                f.read_exact(&mut buf)
+            })
+            .is_err()
+        {
+            return vec![];
+        }
+        self.ranges[start..end]
+            .iter()
+            .filter_map(|(s, e)| {
+                // An entry that does not parse is a torn append, not a reason to
+                // fail the whole read.
+                serde_json::from_slice(&buf[(s - from) as usize..(e - from) as usize]).ok()
+            })
+            .collect()
+    }
+}
+
+/// Index a task's sidecar — JSONL if one exists, otherwise the legacy array.
+/// `None` when the task has no sidecar at all.
+pub fn task_log_index(history_path: &std::path::Path, task_id: &str) -> Option<LogIndex> {
+    let logs_dir = task_logs_dir(history_path);
+    let jsonl = task_logs_path(&logs_dir, task_id);
+    let (path, kind) = if jsonl.exists() {
+        (jsonl, Sidecar::Lines)
+    } else {
+        let legacy = legacy_task_logs_path(&logs_dir, task_id);
+        if !legacy.exists() {
+            return None;
+        }
+        (legacy, Sidecar::Array)
+    };
+
+    // A stat is what decides whether the cached scan still describes the file.
+    // An append moves both, so a live task re-indexes; a finished one never does.
+    let meta = std::fs::metadata(&path).ok()?;
+    let len = meta.len();
+    let mtime = meta.modified().ok();
+
+    let mut cache = SIDECAR_INDEX
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    if let Some(c) = cache.get(task_id) {
+        if c.path == path && c.len == len && c.mtime == mtime {
+            return Some(LogIndex { path, ranges: c.ranges.clone() });
+        }
+    }
+
+    let ranges = std::sync::Arc::new(scan_entry_ranges(&path, &kind).ok()?);
+    cache.insert(
+        task_id.to_string(),
+        CachedIndex { path: path.clone(), len, mtime, ranges: ranges.clone() },
+    );
+    Some(LogIndex { path, ranges })
+}
+
+/// How many entries the sidecar holds, without parsing any of them.
+pub fn task_log_line_count(history_path: &std::path::Path, task_id: &str) -> usize {
+    task_log_index(history_path, task_id).map(|i| i.len()).unwrap_or(0)
+}
+
+/// How many entries of a task's IN-MEMORY `logs` vec are already on disk.
+///
+/// The persisted ones are the sidecar's LAST `n` entries (they were appended),
+/// so a caller can place the whole in-memory vec in the file's index space:
+/// `absolute(logs[j]) == (entry_count - n) + j`. That is what lets a task
+/// continued after a restart — whose memory holds only the new entries — page
+/// through its full history.
+pub fn persisted_log_count(task_id: &str) -> usize {
+    persisted_lines()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(task_id)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Load a WINDOW of a task's persisted logs.
+///
+/// Returns `(total_entries, index_of_first_returned, entries)`; the absolute
+/// index is what the client pages backwards from. Only the requested entries are
+/// parsed — everything before them is a byte scan, in either sidecar format.
+pub fn load_task_logs_window(
+    history_path: &std::path::Path,
+    task_id: &str,
+    q: &crate::server::router::LogsQuery,
+) -> (usize, usize, Vec<serde_json::Value>) {
+    let index = match task_log_index(history_path, task_id) {
+        Some(i) => i,
+        None => return (0, 0, vec![]),
+    };
+    let total = index.len();
+    let (start, end) = crate::server::router::log_window(total, q);
+    (total, start, index.read_range(start, end))
+}
+
 /// Serialize ALL writes to task_history.json.
 ///
 /// `save_task_to_history` is a read-modify-write over one shared file and is
@@ -254,7 +635,9 @@ fn save_task_to_history(path: &std::path::Path, task: &TaskInfo) {
             .filter_map(|e| e.get("id").and_then(|id| id.as_str()).map(String::from))
             .collect();
         for id in evicted {
-            let _ = std::fs::remove_file(logs_dir.join(format!("{}.json", id)));
+            let _ = std::fs::remove_file(task_logs_path(&logs_dir, &id));
+            let _ = std::fs::remove_file(legacy_task_logs_path(&logs_dir, &id));
+            persisted_lines().lock().unwrap_or_else(|p| p.into_inner()).remove(&id);
         }
     }
 
@@ -263,33 +646,33 @@ fn save_task_to_history(path: &std::path::Path, task: &TaskInfo) {
     }
 
     // Write the per-task logs sidecar. Best-effort; failures are silent so
-    // they don't break the metadata write.
+    // they don't break the metadata write. APPEND-ONLY (see task_logs_path):
+    // this used to re-serialize and rewrite every entry on every checkpoint,
+    // which on a long task means writing hundreds of MB per checkpoint.
     let logs_dir = task_logs_dir(path);
-    if !logs_dir.exists() {
-        let _ = std::fs::create_dir_all(&logs_dir);
-    }
-    let logs_path = logs_dir.join(format!("{}.json", task.id));
-    if let Ok(logs_json) = serde_json::to_string(&task.logs) {
-        let _ = write_atomic(&logs_path, logs_json.as_bytes());
-    }
+    append_task_logs(&logs_dir, task);
 }
 
 /// Load the persisted logs for a task from its sidecar file.
 /// Returns an empty Vec on any error (file missing, parse failure, etc.) —
 /// the caller treats "no logs found" and "task has no logs" the same way.
 pub fn load_task_logs(history_path: &std::path::Path, task_id: &str) -> Vec<serde_json::Value> {
-    let logs_path = task_logs_dir(history_path).join(format!("{}.json", task_id));
-    if !logs_path.exists() { return vec![]; }
-    std::fs::read_to_string(&logs_path)
-        .ok()
-        .and_then(|c| serde_json::from_str(&c).ok())
-        .unwrap_or_default()
+    // Whole-file read, for the callers that genuinely need every entry (the WS
+    // replay of a task restored after a restart). Anything paging or peeking
+    // should use load_task_logs_window, which parses only what it returns.
+    let (_total, _start, all) =
+        load_task_logs_window(history_path, task_id, &crate::server::router::LogsQuery::default());
+    all
 }
 
 /// Delete the persisted logs sidecar for a task (called on history deletion).
 pub fn delete_task_logs(history_path: &std::path::Path, task_id: &str) {
-    let logs_path = task_logs_dir(history_path).join(format!("{}.json", task_id));
-    let _ = std::fs::remove_file(logs_path);
+    let logs_dir = task_logs_dir(history_path);
+    let _ = std::fs::remove_file(task_logs_path(&logs_dir, task_id));
+    let _ = std::fs::remove_file(legacy_task_logs_path(&logs_dir, task_id));
+    // Drop the append bookkeeping too, or a task recreated under the same id
+    // would start writing from the deleted file's length.
+    persisted_lines().lock().unwrap_or_else(|p| p.into_inner()).remove(task_id);
 }
 
 fn load_task_history(path: &std::path::Path) -> Vec<TaskInfo> {
@@ -817,10 +1200,252 @@ pub fn run() {
             commands::ai_config::list_skill_files,
             commands::ai_config::read_skill_file,
             commands::ai_config::write_skill_file,
-            commands::ai_config::delete_skill_file
+            commands::ai_config::delete_skill_file,
+            commands::ai_config::read_skill_resource,
+            commands::ai_config::promote_skill_to_dir,
+            commands::secrets::get_secret_storage_info
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod task_log_sidecar_tests {
+    use super::*;
+    use crate::server::router::LogsQuery;
+
+    fn task_with(id: &str, n: usize) -> TaskInfo {
+        let mut t = TaskInfo {
+            id: id.to_string(),
+            prompt: "p".to_string(),
+            status: "running".to_string(),
+            progress: 0.0,
+            token_usage: crate::server::router::TokenUsage::default(),
+            model_usage: HashMap::new(),
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            completed_at: None,
+            workspace_path: None,
+            caller: None,
+            mcp_servers: None,
+            result_summary: None,
+            modified_files: vec![],
+            logs: vec![],
+        };
+        t.logs = (0..n).map(|i| serde_json::json!({ "event": "status", "n": i })).collect();
+        t
+    }
+
+    /// A fresh temp dir per test, and a clean bookkeeping slot for its task id:
+    /// the persisted-line map is process-global, so a reused id would carry a
+    /// previous test's count.
+    fn fixture(name: &str) -> (std::path::PathBuf, String) {
+        let dir = std::env::temp_dir()
+            .join(format!("jhai_logs_{}_{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+        let id = format!("task-{}", name);
+        persisted_lines().lock().unwrap().remove(&id);
+        (dir.join("task_history.json"), id)
+    }
+
+    fn nth(v: &serde_json::Value) -> i64 {
+        v.get("n").and_then(|x| x.as_i64()).unwrap_or(-1)
+    }
+
+    /// The point of the format: a checkpoint writes only what is new. The old
+    /// sidecar re-serialized every entry every time, so a long task rewrote
+    /// hundreds of MB per checkpoint.
+    #[test]
+    fn a_second_save_appends_only_the_new_entries() {
+        let (hist, id) = fixture("append");
+        let logs_dir = task_logs_dir(&hist);
+
+        let mut t = task_with(&id, 3);
+        append_task_logs(&logs_dir, &t);
+        let after_first = std::fs::metadata(task_logs_path(&logs_dir, &id)).unwrap().len();
+
+        t.logs.push(serde_json::json!({ "event": "status", "n": 3 }));
+        append_task_logs(&logs_dir, &t);
+        let after_second = std::fs::metadata(task_logs_path(&logs_dir, &id)).unwrap().len();
+
+        let all = load_task_logs(&hist, &id);
+        assert_eq!(all.len(), 4, "every entry survives");
+        assert_eq!(all.iter().map(nth).collect::<Vec<_>>(), vec![0, 1, 2, 3]);
+        // One entry's worth of growth, not a rewrite of all four.
+        assert!(after_second > after_first);
+        assert!(after_second < after_first * 2, "the second save rewrote the file");
+    }
+
+    /// A snapshot is taken per checkpoint and saved on a background thread, so a
+    /// stale one can reach the writer after a newer save already landed. It must
+    /// add nothing rather than duplicate or truncate.
+    #[test]
+    fn a_stale_snapshot_adds_nothing() {
+        let (hist, id) = fixture("stale");
+        let logs_dir = task_logs_dir(&hist);
+
+        let stale = task_with(&id, 2);
+        let fresh = task_with(&id, 5);
+        append_task_logs(&logs_dir, &fresh);
+        append_task_logs(&logs_dir, &stale);
+
+        let all = load_task_logs(&hist, &id);
+        assert_eq!(all.iter().map(nth).collect::<Vec<_>>(), vec![0, 1, 2, 3, 4]);
+    }
+
+    /// Sidecars written by earlier builds are a single JSON array. Reading one
+    /// must cost the same as reading JSONL — a byte scan plus the window — and
+    /// must NOT rewrite the file: converting on open is what made the FIRST open
+    /// of a large task slow (a full parse plus a full rewrite before anything
+    /// could be shown), which is exactly what the byte scan removes.
+    #[test]
+    fn a_legacy_array_sidecar_is_read_in_place() {
+        let (hist, id) = fixture("legacy");
+        let logs_dir = task_logs_dir(&hist);
+        let _ = std::fs::create_dir_all(&logs_dir);
+        let legacy = legacy_task_logs_path(&logs_dir, &id);
+        let entries: Vec<serde_json::Value> =
+            (0..4).map(|i| serde_json::json!({ "event": "status", "n": i })).collect();
+        std::fs::write(&legacy, serde_json::to_string(&entries).unwrap()).unwrap();
+
+        assert_eq!(task_log_line_count(&hist, &id), 4, "counted without parsing");
+        let (total, start, got) = load_task_logs_window(&hist, &id, &LogsQuery::default());
+        assert_eq!((total, start), (4, 0));
+        assert_eq!(got.iter().map(nth).collect::<Vec<_>>(), vec![0, 1, 2, 3]);
+
+        let (_, start, tail) = load_task_logs_window(
+            &hist, &id, &LogsQuery { limit: Some(2), before: None },
+        );
+        assert_eq!(start, 2);
+        assert_eq!(tail.iter().map(nth).collect::<Vec<_>>(), vec![2, 3]);
+
+        assert!(legacy.exists(), "reading must not rewrite the file");
+        assert!(!task_logs_path(&logs_dir, &id).exists());
+    }
+
+    /// Pretty-printed and scalar-bearing arrays are still indexed correctly: the
+    /// scanner tracks JSON structure, not newlines, and a bracket inside a string
+    /// must not move the depth.
+    #[test]
+    fn the_array_scanner_handles_whitespace_strings_and_scalars() {
+        let (hist, id) = fixture("scanner");
+        let logs_dir = task_logs_dir(&hist);
+        let _ = std::fs::create_dir_all(&logs_dir);
+        std::fs::write(
+            legacy_task_logs_path(&logs_dir, &id),
+            "[\n  {\"n\": 0, \"text\": \"a ] } \\\" [ {\"},\n  42,\n  {\"n\": 2}\n]\n",
+        ).unwrap();
+
+        let (total, _, got) = load_task_logs_window(&hist, &id, &LogsQuery::default());
+        assert_eq!(total, 3);
+        assert_eq!(got[0]["text"], "a ] } \" [ {");
+        assert_eq!(got[1], serde_json::json!(42));
+        assert_eq!(got[2]["n"], 2);
+    }
+
+    /// Continuing a task IS a write, and an array file cannot be appended to —
+    /// so that path converts, once.
+    #[test]
+    fn saving_converts_a_legacy_sidecar() {
+        let (hist, id) = fixture("convert");
+        let logs_dir = task_logs_dir(&hist);
+        let _ = std::fs::create_dir_all(&logs_dir);
+        let entries: Vec<serde_json::Value> =
+            (0..2).map(|i| serde_json::json!({ "event": "status", "n": i })).collect();
+        std::fs::write(
+            legacy_task_logs_path(&logs_dir, &id),
+            serde_json::to_string(&entries).unwrap(),
+        ).unwrap();
+
+        let mut t = task_with(&id, 0);
+        t.logs = vec![serde_json::json!({ "event": "status", "n": 2 })];
+        append_task_logs(&logs_dir, &t);
+
+        assert!(task_logs_path(&logs_dir, &id).exists());
+        assert!(!legacy_task_logs_path(&logs_dir, &id).exists());
+        assert_eq!(
+            load_task_logs(&hist, &id).iter().map(nth).collect::<Vec<_>>(),
+            vec![0, 1, 2],
+        );
+    }
+
+    /// Continuing a task whose entries are already on disk must append after
+    /// them, not overwrite them: in memory the task holds ONLY its new entries.
+    #[test]
+    fn continuing_a_migrated_task_keeps_the_old_entries() {
+        let (hist, id) = fixture("continue");
+        let logs_dir = task_logs_dir(&hist);
+        let _ = std::fs::create_dir_all(&logs_dir);
+        let entries: Vec<serde_json::Value> =
+            (0..3).map(|i| serde_json::json!({ "event": "status", "n": i })).collect();
+        std::fs::write(
+            legacy_task_logs_path(&logs_dir, &id),
+            serde_json::to_string(&entries).unwrap(),
+        ).unwrap();
+
+        let mut t = task_with(&id, 0);
+        t.logs = vec![serde_json::json!({ "event": "status", "n": 99 })];
+        append_task_logs(&logs_dir, &t);
+
+        let all = load_task_logs(&hist, &id);
+        assert_eq!(all.iter().map(nth).collect::<Vec<_>>(), vec![0, 1, 2, 99]);
+    }
+
+    /// The Task view opens on the newest slice and pages backwards from it.
+    #[test]
+    fn the_window_is_the_tail_with_an_absolute_start() {
+        let (hist, id) = fixture("window");
+        let logs_dir = task_logs_dir(&hist);
+        append_task_logs(&logs_dir, &task_with(&id, 10));
+
+        let (total, start, got) = load_task_logs_window(
+            &hist, &id, &LogsQuery { limit: Some(3), before: None },
+        );
+        assert_eq!((total, start), (10, 7));
+        assert_eq!(got.iter().map(nth).collect::<Vec<_>>(), vec![7, 8, 9]);
+
+        let (_, start, older) = load_task_logs_window(
+            &hist, &id, &LogsQuery { limit: Some(3), before: Some(7) },
+        );
+        assert_eq!(start, 4);
+        assert_eq!(older.iter().map(nth).collect::<Vec<_>>(), vec![4, 5, 6]);
+    }
+
+    /// A crash mid-append leaves a partial last line. It costs that entry, not
+    /// the file — which is the whole reason an append beats a rewrite here.
+    #[test]
+    fn a_torn_final_line_costs_only_itself() {
+        let (hist, id) = fixture("torn");
+        let logs_dir = task_logs_dir(&hist);
+        append_task_logs(&logs_dir, &task_with(&id, 3));
+
+        let path = task_logs_path(&logs_dir, &id);
+        let mut raw = std::fs::read_to_string(&path).unwrap();
+        raw.push_str("{\"event\":\"status\",\"n\":");   // cut off mid-entry
+        std::fs::write(&path, raw).unwrap();
+
+        let all = load_task_logs(&hist, &id);
+        assert_eq!(all.iter().map(nth).collect::<Vec<_>>(), vec![0, 1, 2]);
+        let (total, _, got) = load_task_logs_window(&hist, &id, &LogsQuery::default());
+        assert_eq!(total, 4, "the torn line still occupies a line");
+        assert_eq!(got.len(), 3, "but it does not parse into an entry");
+    }
+
+    /// Deleting a task's history must take BOTH sidecar formats with it.
+    #[test]
+    fn deleting_removes_the_sidecar_in_either_format() {
+        let (hist, id) = fixture("delete");
+        let logs_dir = task_logs_dir(&hist);
+        let _ = std::fs::create_dir_all(&logs_dir);
+        append_task_logs(&logs_dir, &task_with(&id, 2));
+        std::fs::write(legacy_task_logs_path(&logs_dir, &id), "[]").unwrap();
+
+        delete_task_logs(&hist, &id);
+
+        assert!(!task_logs_path(&logs_dir, &id).exists());
+        assert!(!legacy_task_logs_path(&logs_dir, &id).exists());
+        assert!(load_task_logs(&hist, &id).is_empty());
+    }
 }
 
 #[cfg(test)]

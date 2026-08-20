@@ -428,3 +428,26 @@ describe('SettingsGeneral — unconfigured build shows only what it can do', () 
         }
     });
 });
+
+// Where the keys actually live has to be visible: the fallback to plaintext is
+// real (a machine with no usable credential store), and a user who believes
+// otherwise would be wrong about the one thing this feature exists to change.
+describe('where API keys are stored', () => {
+    it('names the store when one is in use', () => {
+        const el = general({ secretStorage: { kind: 'keychain', name: 'Windows Credential Manager', available: true } });
+        expect(el.textContent).toContain('Windows Credential Manager');
+        expect(el.querySelector('.cfg-secret-note.is-fallback')).toBeNull();
+    });
+
+    it('warns, and says what the consequence is, when there is none', () => {
+        const el = general({ secretStorage: { kind: 'file', name: 'Secret Service (libsecret)', available: false } });
+        expect(el.querySelector('.cfg-secret-note.is-fallback')).toBeTruthy();
+        expect(el.textContent).toContain('ai_config.json');
+        expect(el.textContent).toMatch(/plain text/i);
+    });
+
+    // An older backend has no such command; guessing would be worse than silence.
+    it('says nothing when the backend did not report', () => {
+        expect(general().querySelector('.cfg-secret-note')).toBeNull();
+    });
+});

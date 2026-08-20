@@ -17,6 +17,19 @@
 // is told to finish, so a mis-scripted test terminates instead of spinning.
 
 import { vi } from 'vitest';
+import { OpenQuestions } from '../agent/OpenQuestions.js';
+import { handleOpenQuestion } from '../tools/handlers/openQuestionHandlers.js';
+
+/**
+ * Tools that count as looking at the workspace. Mirrors INSPECT_TOOLS in the
+ * real ToolExecutor — the investigation gate reads this count to tell a traced
+ * answer from a long one written out of context, so a harness that never
+ * incremented it made the gate untestable (and silently un-fired).
+ */
+const HARNESS_INSPECT_TOOLS = new Set([
+    'read_file', 'read_office', 'grep_search', 'glob', 'list_files',
+    'symbol_search', 'code_deps', 'git_diff', 'git_log', 'read_resource',
+]);
 
 // ── Script builders ────────────────────────────────────────────────────────
 
@@ -172,7 +185,7 @@ export function makeHarness(opts = {}) {
             { name: 'read_file' }, { name: 'write_file' }, { name: 'run_command' },
             { name: 'grep_search' }, { name: 'glob' }, { name: 'list_files' },
             { name: 'present_result' }, { name: 'ask_user' }, { name: 'finish_task' },
-            { name: 'task_progress' },
+            { name: 'task_progress' }, { name: 'open_question' },
         ],
         _mcpBypassesAllowlist: false,
         startSession: vi.fn(async () => {}),
@@ -189,6 +202,10 @@ export function makeHarness(opts = {}) {
         setSubtaskRunner: vi.fn(),
         setWriteScope: vi.fn(),
         onToolEvent: null,
+        // Investigation-gate state, mirroring the real executor.
+        openQuestions: new OpenQuestions(),
+        readFiles: new Set(),
+        inspectionCount: 0,
         // Images a tool produced. Tests push onto `pendingImages` (as a handler
         // would) to exercise the attach path; the loop drains it each step.
         pendingImages: [],
@@ -208,6 +225,16 @@ export function makeHarness(opts = {}) {
         getUserQuestionMulti: () => false,
         executeTool: vi.fn(async (call) => {
             state.toolCalls.push({ name: call.name, args: call.args });
+            if (HARNESS_INSPECT_TOOLS.has(call.name)) {
+                toolExecutor.inspectionCount++;
+                const p = call.args?.path;
+                if (p) toolExecutor.readFiles.add(String(p));
+            }
+            // Run the REAL handler: the frontier is what the gate reads, so a
+            // canned string here would test the gate against an empty one.
+            if (call.name === 'open_question') {
+                return handleOpenQuestion(toolExecutor, call.args || {}, () => {});
+            }
             if (call.name === 'finish_task') {
                 taskCompleted = true;
                 return `Task marked complete: ${call.args?.summary || ''}`;

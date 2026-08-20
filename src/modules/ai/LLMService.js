@@ -181,7 +181,17 @@ class LLMService {
         // their result (and clean it up) so the Monitor modal can display it.
         await listen('llm-request-sent', (event) => {
             const p = event.payload || {};
-            if (p.request_id) this._sentRequests.set(p.request_id, p.body ?? p);
+            if (!p.request_id) return;
+            // The headers and the url arrive ALREADY REDACTED — ai.rs destroys the
+            // credential at the only place that holds it, so nothing here has to
+            // remember to mask. `p` itself is never stashed whole: the raw payload
+            // is the one shape that could carry something unredacted if a future
+            // field is added, and `?? p` used to do exactly that.
+            this._sentRequests.set(p.request_id, {
+                body: p.body ?? null,
+                headers: p.headers ?? null,
+                url: p.url ?? null,
+            });
         });
         await listen('llm-chunk', (event) => {
             const { request_id, delta, done, error, usage } = event.payload;
@@ -441,8 +451,15 @@ class LLMService {
                 if (error) {
                     // Per-call LLM logging is now consolidated into per-task logs
                     // (MonitorView). The old global ApiLogStore (localStorage) was retired.
+                    //
+                    // The sent-request record travels ON the error: a FAILED call is
+                    // exactly when you want to see which url and headers went out,
+                    // and this used to be dropped before the reject.
+                    const rec = this._sentRequests.get(requestId) || null;
                     this._sentRequests.delete(requestId);
-                    reject(new Error(error));
+                    const err = new Error(error);
+                    err.sentRequest = rec;
+                    reject(err);
                 } else if (done) {
                     const usage = this._resolveUsage(reportedUsage, messages, systemPrompt, fullResponse);
                     const sentRequest = this._sentRequests.get(requestId) || null;

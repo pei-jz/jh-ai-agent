@@ -90,6 +90,28 @@ export const OVERVIEW_STYLES = `
 .dr-chip .n { font-family: var(--font-mono); font-size: 9px; color: var(--text-tertiary); }
 .dr-chip.is-add { color: var(--text-tertiary); }
 
+/* ── Status dots ──────────────────────────────────────────────
+   NOTE: this file is a JS template literal, so no backticks below.
+
+   .drow-dot is used in six places on this page (the queue rows, the Run tab,
+   the failing-card list, the task sample) and had NO rule anywhere — not here,
+   not in dashboard.css. It rendered 0x0 with no background, so every status dot
+   on the Dashboard was invisible from the first commit.
+
+   The colours existed only in MonitorView.styles.js, keyed off .mtask-dot for
+   the sizing. Since the old views injected their <style> into the page and those
+   blocks persisted across navigation, the colour classes were sometimes present
+   after visiting Monitor — but the size never was, so the dot stayed invisible
+   either way. Values match Monitor's so the two views agree about what a status
+   colour means. */
+.drow-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+.drow-dot.dot-running   { background: var(--accent); box-shadow: 0 0 4px var(--accent); animation: dotPulse 1s infinite; }
+.drow-dot.dot-paused    { background: var(--warning); }
+.drow-dot.dot-completed { background: var(--success); }
+.drow-dot.dot-failed    { background: var(--error); }
+.drow-dot.dot-aborted   { background: var(--text-tertiary); }
+@keyframes dotPulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.4 } }
+
 /* ── Queue ────────────────────────────────────────────────── */
 .dq { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
 .dq-lab { margin: 8px 0 2px; display: block; }

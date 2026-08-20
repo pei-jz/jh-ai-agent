@@ -1,5 +1,6 @@
 import { planApprovalQuestion, isPlanRevision } from './agent/PlanFirstApproval.js';
 import llmService from './LLMService.js';
+import { skillManager } from './SkillManager.js';
 import { ToolExecutor } from './ToolExecutor.js';
 import { contextBuilder, ContextBuilder } from './ContextBuilder.js';
 import { conversationMemory } from './ConversationMemory.js';
@@ -26,6 +27,10 @@ import { RunState } from './agent/RunState.js';
 // what it always printed rather than a key name.
 import { t } from '../../i18n/index.js';
 import { initialPhase, advancePhase, modelForPhase, phaseLabel, PLAN_PHASE_MAX_STEPS } from './agent/ModelPhaseRouter.js';
+import {
+    isInvestigation, evidenceCheck, frontierCheck, buildAuditBrief,
+} from './agent/InvestigationGate.js';
+import { renderQuestions } from './agent/OpenQuestions.js';
 import { buildRecoveryHint } from './agent/RecoveryHints.js';
 import {
     resolveRole, composeSubtaskPrompt, buildReviewBrief, parseReviewVerdict, clipText, childTokenBudget,
@@ -510,24 +515,13 @@ export class AgentController {
                     console.error("Agent generate error:", err);
                     const duration = Date.now() - startTime;
                     if (onLog) {
-                        let url = undefined;
-                        let headers = undefined;
-                        try {
-                            const currentModel = llmService.getCurrentModel() || '';
-                            const [providerName] = currentModel.split(':');
-                            const config = await invoke('get_ai_config');
-                            if (providerName === 'openai') {
-                                url = 'https://api.openai.com/v1/chat/completions';
-                            } else if (providerName === 'anthropic') {
-                                url = 'https://api.anthropic.com/v1/messages';
-                            } else if (providerName === 'gemini') {
-                                url = 'https://generativelanguage.googleapis.com/v1beta/models/...';
-                            } else if (providerName === 'ollama') {
-                                url = 'http://localhost:11434/api/chat';
-                            } else if (providerName === 'azure') {
-                                url = `${config.azure_endpoint}/openai/deployments/...`;
-                            }
-                        } catch (e) {}
+                        // Redacted in ai.rs and carried on the error, so a FAILED
+                        // call can be inspected — that is exactly when the url and
+                        // the auth scheme are what you need. The guesswork this
+                        // replaces produced a hardcoded string per provider and
+                        // never set the headers at all.
+                        const url = err?.sentRequest?.url || undefined;
+                        const headers = err?.sentRequest?.headers || undefined;
 
                         onLog({
                             method: 'CHAT',
@@ -602,24 +596,18 @@ export class AgentController {
             });
 
             if (onLog) {
-                let url = undefined;
-                let headers = undefined;
-                try {
-                    const currentModel = llmService.getCurrentModel() || '';
-                    const [providerName] = currentModel.split(':');
-                    const config = await invoke('get_ai_config');
-                    if (providerName === 'openai') {
-                        url = 'https://api.openai.com/v1/chat/completions';
-                    } else if (providerName === 'anthropic') {
-                        url = 'https://api.anthropic.com/v1/messages';
-                    } else if (providerName === 'gemini') {
-                        url = 'https://generativelanguage.googleapis.com/v1beta/models/...';
-                    } else if (providerName === 'ollama') {
-                        url = 'http://localhost:11434/api/chat';
-                    } else if (providerName === 'azure') {
-                        url = `${config.azure_endpoint}/openai/deployments/...`;
-                    }
-                } catch (e) {}
+                // The url and headers the request ACTUALLY went out with, redacted
+                // in ai.rs where the credential lives.
+                //
+                // This used to GUESS them from the provider name — a hardcoded
+                // string per provider, two of them ending in "..." — and never set
+                // `headers` at all, which is why the modal's Headers tab could
+                // never appear. A guessed URL is worse than none: it hides a
+                // misconfigured base_url, which is the thing you open this panel
+                // to find.
+                const sent = genResult.sentRequest || null;
+                const url = sent?.url || undefined;
+                const headers = sent?.headers || undefined;
 
                 // Capture the FULL raw request payload for the per-task Monitor view
                 // (replaces the old global Settings → API Logs). tools are only sent
@@ -677,7 +665,7 @@ export class AgentController {
                         images: imageDiag.images,
                         // The EXACT assembled body sent to the provider (cache_control,
                         // system split, trailing volatile msg, messages in send order).
-                        sent_request: genResult.sentRequest || null,
+                        sent_request: genResult.sentRequest?.body ?? genResult.sentRequest ?? null,
                         system_prompt: systemPrompt,
                         history: history,
                         tools: reqTools,
@@ -1189,6 +1177,110 @@ export class AgentController {
                         onAgentStatus?.({ event: 'status', status: 'running', message: 'ℹ レビューをスキップ（このモデルはJSONツールモード）/ Review skipped — model in JSON-tool mode' });
                     }
 
+                    // ── Investigation gate (read-only runs) ────────────────────
+                    //
+                    // The code review above is conditioned on hasReviewableChanges,
+                    // so a run that only READ files skipped every check except
+                    // "did you produce text". An investigation's deliverable IS
+                    // its claim, and nothing was in a position to ask whether the
+                    // claim was supported, or whether the trace stopped at a layer
+                    // boundary — which is exactly how an answer about a screen gets
+                    // delivered without the backend state that actually governs it.
+                    //
+                    // Three checks, cheapest first: two deterministic ones that
+                    // cost no tokens, then one auditor sub-agent. All soft and
+                    // one-shot, matching the deliverable nudge above — the model is
+                    // told once and then trusted, because hard-blocking would
+                    // deadlock a run whose model cannot satisfy the check.
+                    const investigationText = [ftSummaryArg, richThought,
+                        this._extractEnvelopeAnswer(this._lastResultEnvelope) || '']
+                        .filter(Boolean).sort((a, b) => b.length - a.length)[0] || '';
+                    const isInvestigationRun = !hasReviewableChanges
+                        && isInvestigation({
+                            hasReviewableChanges,
+                            deliverable: investigationText,
+                            inspections: this.toolExecutor.inspectionCount || 0,
+                        });
+
+                    if (isInvestigationRun) {
+                        // (a+b) One bounce, not two. Both checks say the same
+                        // thing — the answer is not showing its working — and
+                        // splitting them cost a second round trip to deliver the
+                        // second half of one message.
+                        const evidence = evidenceCheck(investigationText);
+                        const frontier = frontierCheck(
+                            this.toolExecutor.openQuestions?.snapshot() || [], investigationText);
+                        if ((evidence.needed || frontier.needed) && !this._investigationNudged) {
+                            this._investigationNudged = true;
+                            this.toolExecutor.resetTaskCompleted?.();
+                            const parts = [];
+                            if (evidence.needed) {
+                                parts.push('**Sources.** Your answer describes how the system behaves but cites '
+                                    + (evidence.citations.length
+                                        ? `only ${evidence.citations.length} source (${evidence.citations.join(', ')})`
+                                        : 'no sources at all')
+                                    + '. A reader cannot tell which parts you verified and which you inferred. '
+                                    + 'Revise it so every claim about what the system DOES carries the file that shows it, with a line number where you have one — `path/to/file.ext:123`. '
+                                    + 'Where you did not verify something, say so in that sentence rather than leaving it in the same voice as the rest. '
+                                    + 'If a claim turns out to have nothing behind it, go and read the file now rather than softening the wording.');
+                            }
+                            if (frontier.needed) {
+                                parts.push('**Open questions.** You recorded these as things the answer depends on, and you are finishing without either answering them or mentioning them:\n\n'
+                                    + renderQuestions(frontier.open, { heading: 'Still open' })
+                                    + '\n\nFor each: either investigate it now and close it with `open_question` action:"resolve", folding what you found into the answer — or, if it genuinely does not change the conclusion, say plainly IN the answer that it is unverified and why that is acceptable.');
+                            }
+                            const label = evidence.needed && frontier.needed
+                                ? '🔍 根拠と未解決の論点 — 追記を促しています'
+                                : (evidence.needed ? '🔍 根拠が未提示 — 出典の付与を促しています' : `❓ 未解決の論点が ${frontier.open.length} 件残っています`);
+                            onAgentStatus?.({ event: 'status', status: 'running', message: label });
+                            this._pushAssistantToolTurn(history, response, toolCall, genResult, callIdOf);
+                            if (callIdOf.size > 0) this._pushToolResultsTurn(history, results, true, null);
+                            history.push({
+                                role: 'user',
+                                content: '[Investigation Incomplete] Before this answer is accepted:\n\n'
+                                    + parts.join('\n\n')
+                                    + '\n\nRe-state the COMPLETE answer when you are done — the revised version replaces the previous one, so anything you leave out is lost. Then call finish_task again.'
+                            });
+                            continue;
+                        }
+
+                        // (c) Independent audit. Same config switch as the code
+                        // review (subagent_review) and the same weak-model skip:
+                        // this is that feature applied to the other half of the
+                        // work, not a second policy with its own settings.
+                        if (!this._isSubagent && !this._auditDone && safety.subagentReview === 'on'
+                            && modelReliableForReview) {
+                            this._auditDone = true;
+                            onAgentStatus?.({ event: 'status', status: 'running', message: '🔎 調査内容を独立監査中… / Independent audit of the investigation…' });
+                            const auditBrief = buildAuditBrief({
+                                goal: prompt,
+                                report: investigationText,
+                                openQuestions: this.toolExecutor.openQuestions?.snapshot() || [],
+                                filesRead: this._filesReadThisRun(),
+                            });
+                            const auditText = await this._runSubtask(
+                                { role: 'auditor', brief: auditBrief },
+                                { workspacePath, onAgentStatus, onConfirm, onLog, abortSignal, safety }
+                            );
+                            const { verdict, findings, reason } = parseReviewVerdict(String(auditText || ''));
+                            const auditSummary = summarizeReview(verdict, findings);
+                            if (onLog) { try { onLog({ method: 'AUDIT', status: 200, stepLabel: '🔎 Audit Verdict', response: { verdict, reason, findings: String(findings).slice(0, 2000), summary: auditSummary } }); } catch (_) {} }
+                            if (verdict === 'fail') {
+                                this.toolExecutor.resetTaskCompleted?.();
+                                onAgentStatus?.({ event: 'status', status: 'running', message: `🔎 監査で指摘あり — 調査を継続 / Audit FAIL — investigating further\n${auditSummary}` });
+                                this._phaseEvent('reopen', {}, onAgentStatus);
+                                this._pushAssistantToolTurn(history, response, toolCall, genResult, callIdOf);
+                                if (callIdOf.size > 0) this._pushToolResultsTurn(history, results, true, null);
+                                history.push({
+                                    role: 'user',
+                                    content: `[Audit — FAIL] An independent auditor checked your answer against the codebase and found it incomplete or unsupported. Address ONLY the [CRITERIA-VIOLATION] and [BUG] findings ([STYLE] is informational). Where a finding says the trace stopped short, go and read the layer it names — do not simply reword the answer. Then call finish_task again.\n\n${clipText(findings, 6000)}`
+                                });
+                                continue;
+                            }
+                            onAgentStatus?.({ event: 'status', status: 'running', message: verdict === 'pass' ? '🔎 監査PASS ✅' : '🔎 監査結果を取得できず（空レポート）— 完了を続行' });
+                        }
+                    }
+
                     // Longest substantive candidate wins (reports are long; the
                     // OBSERVE/PLAN/CALL thought is short meta-text).
                     finalResponse = [ftSummaryArg, richThought]
@@ -1566,6 +1658,12 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
         this._lastResultEnvelope = null;
         // One-time soft nudge if finish_task is called with no deliverable (reset per run).
         this._deliverableNudged = false;
+        // ── Investigation gate per-run state (see agent/InvestigationGate.js) ──
+        // A run that only READS never reaches the code-review gate below, so
+        // until these existed nothing checked an investigation at all. All three
+        // are one-shot and soft, like the deliverable nudge.
+        this._investigationNudged = false;
+        this._auditDone = false;
         // ── Sub-agent engine per-run state ────────────────────────────
         // _isSubagent is set by the PARENT before child.run() — children never
         // spawn further sub-agents and skip the review gate.
@@ -1976,26 +2074,43 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
             onAgentStatus?.({ event, ...data });
         };
 
-        // Phase 4: Load KIs (Skills & Workflows) if not provided
+        // Phase 4: what procedures this run can consult.
+        //
+        // The SKILLS half is a CATALOGUE — one line per skill, name and
+        // description — and the agent loads a body with `read_skill` when one
+        // applies. That is the difference between offering a skill and paying
+        // for it: a ten-page procedure costs one line until it is needed.
+        //
+        // It used to read `.agent/skills.json`: a per-project store of
+        // name/description pairs with NO bodies to load, which the Skills tab
+        // could not edit and `/…` could not see. A skill the user wrote was
+        // therefore invisible to a running agent. That JSON is still read as
+        // project knowledge — a workspace can have conventions that are not
+        // skills — but the skills themselves now come from one place.
         if (!kisContext) {
             try {
+                const parts = [];
+                try {
+                    await skillManager.refresh();
+                    const catalogue = skillManager.catalogue();
+                    if (catalogue) parts.push(catalogue);
+                } catch (e) {
+                    console.warn('Failed to load skills:', e);
+                }
+
                 const root = workspacePath;
                 if (root) {
-                    let loadedKis = [];
-                    try {
-                        const skillsData = await invoke('read_file', { path: `${root}/.agent/skills.json` });
-                        if (skillsData) loadedKis.push('--- SKILLS ---\n' + skillsData);
-                    } catch (e) { /* ignore */ }
-                    
-                    try {
-                        const workflowsData = await invoke('read_file', { path: `${root}/.agent/workflows.json` });
-                        if (workflowsData) loadedKis.push('--- WORKFLOWS ---\n' + workflowsData);
-                    } catch (e) { /* ignore */ }
-
-                    if (loadedKis.length > 0) {
-                        kisContext = loadedKis.join('\n\n');
-                        onAgentStatus?.({ event: 'status', status: 'running', message: 'Loaded project knowledge items.' });
+                    for (const [file, label] of [['skills.json', 'PROJECT NOTES'], ['workflows.json', 'WORKFLOWS']]) {
+                        try {
+                            const data = await invoke('read_file', { path: `${root}/.agent/${file}` });
+                            if (data) parts.push(`--- ${label} ---\n${data}`);
+                        } catch (e) { /* the file is optional */ }
                     }
+                }
+
+                if (parts.length) {
+                    kisContext = parts.join('\n\n');
+                    onAgentStatus?.({ event: 'status', status: 'running', message: 'Loaded skills and project knowledge.' });
                 }
             } catch (e) {
                 console.warn('Failed to load KIs:', e);
@@ -2795,6 +2910,24 @@ ${String(finalResponse || '').slice(0, 2000)}`;
         return best.length > 40000 ? `${best.slice(0, 40000)}
 
 …（以下省略）` : best;
+    }
+
+    /**
+     * Paths this run READ, workspace-relative where possible.
+     *
+     * Handed to the auditor so it can see the SHAPE of the investigation, not
+     * just its conclusion. An answer about screen behaviour whose entire read
+     * list is templates has stopped at a layer boundary, and that is visible
+     * here even when every individual statement in the answer is true.
+     */
+    _filesReadThisRun() {
+        const root = String(this.toolExecutor?.workspacePath || '').replace(/\\/g, '/');
+        const out = [];
+        for (const raw of (this.toolExecutor?.readFiles || [])) {
+            const p = String(raw).replace(/\\/g, '/');
+            out.push(root && p.startsWith(root + '/') ? p.slice(root.length + 1) : p);
+        }
+        return out;
     }
 
     _isReportOnlyFile(path) {

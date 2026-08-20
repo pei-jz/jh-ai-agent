@@ -252,3 +252,26 @@ describe('developer memory (localMemory, P5)', () => {
         expect(after).not.toContain('version one');
     });
 });
+
+// The catalogue is the whole progressive-disclosure mechanism: the agent is
+// given every skill's NAME and DESCRIPTION, and reads a body with `read_skill`
+// only when one applies. It travels as kisContext, so what matters here is that
+// it survives the trip and lands in the CACHEABLE half of the prompt — a
+// catalogue that moved between steps would break the prefix cache on every run.
+describe('the skill catalogue', () => {
+    const CATALOGUE = ['The following SKILLS are available.', '', '- report: Build the monthly report.'].join('\n');
+
+    it('reaches the model', async () => {
+        expect(await build({ kis: CATALOGUE })).toContain('- report: Build the monthly report.');
+    });
+
+    it('is wrapped so the model can tell it apart from the task', async () => {
+        const p = await build({ kis: CATALOGUE });
+        expect(p).toContain('<knowledge_items>');
+        expect(p.indexOf('- report:')).toBeGreaterThan(p.indexOf('<knowledge_items>'));
+    });
+
+    it('adds nothing when no skills are installed', async () => {
+        expect(await build({ kis: '' })).not.toContain('<knowledge_items>');
+    });
+});

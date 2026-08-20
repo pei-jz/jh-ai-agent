@@ -211,48 +211,56 @@
   --font-hand: "Segoe Print", "Bradley Hand", "Comic Sans MS", "Chalkboard SE", cursive;
 }
 
-/* ── Paper (Subtle) ────────────────────────────────────────────
-   JHEditor's second paper: clean recycled stock, muted terracotta instead of red
-   pen, and the decorations off (no rules, no margin line). It inherits nothing —
-   CSS custom properties do not cascade between sibling selectors — so the block
-   is complete on its own. */
+/* ── Paper (Subtle) — "和紙と墨" (Washi & Ink) ────────────────
+   Adopted redesign (docs/design/paper-subtle-proposals/02-washi-ink.html, #2).
+   Fixes the old "too white / washed out" feel: unbleached washi base (#e8e2d3),
+   a faint fibre-grain texture (single SVG data-URI, no new dependency), ink-black
+   text (#2f2b24) and a deep moss-green accent (緑青 #6d8f6f) in place of
+   terracotta. It inherits nothing — CSS custom properties do not cascade between
+   sibling selectors — so the block is complete on its own. */
 :root[data-theme="paper-subtle"] {
-  --bg-primary:   #f4efe3;
-  --bg-secondary: #fbf7ec;
-  --bg-tertiary:  #efe8d7;
-  --bg-card:      rgba(251, 247, 236, 0.85);
-  --bg-card-solid:#fbf7ec;
-  --bg-input:     #f6f1e4;
-  --bg-hover:     rgba(240, 234, 217, 0.8);
+  /* Background palette — unbleached washi */
+  --bg-primary:   #e8e2d3;
+  --bg-secondary: #f2ecdc;
+  --bg-tertiary:  #dcd4c0;
+  --bg-card:      rgba(242, 236, 220, 0.92);
+  --bg-card-solid:#f2ecdc;
+  --bg-input:     #ece5d2;
+  --bg-hover:     rgba(214, 204, 180, 0.35);
 
-  --text-primary:   #33372e;
-  --text-secondary: #7a7566;
-  --text-tertiary:  #a49c88;
-  --text-inverse:   #fbf7ec;
+  /* Text — ink, ink-wash grey, faded ink */
+  --text-primary:   #2f2b24;
+  --text-secondary: #6d6759;
+  --text-tertiary:  #98917f;
+  --text-inverse:   #f6f1e3;
 
-  --accent:        #a6685a;
-  --accent-hover:  #8f574a;
-  --accent-dim:    #c9a89f;
-  --accent-glow:   rgba(166, 104, 90, 0.20);
-  --accent-glow-lg:rgba(166, 104, 90, 0.07);
+  /* Accent — 緑青 (mossy verdigris): ink-friendly, quieter than terracotta */
+  --accent:        #6d8f6f;
+  --accent-hover:  #567457;
+  --accent-dim:    #a3b9a4;
+  --accent-glow:   rgba(109, 143, 111, 0.22);
+  --accent-glow-lg:rgba(109, 143, 111, 0.08);
 
-  --border:       #e2dac6;
-  --border-light: rgba(226, 218, 198, 0.7);
-  --border-focus: rgba(166, 104, 90, 0.5);
+  /* Borders — 籐 (rattan) */
+  --border:       #cfc5a9;
+  --border-light: rgba(207, 197, 169, 0.55);
+  --border-focus: rgba(109, 143, 111, 0.55);
 
-  --success:     #5f7d4f;
-  --success-bg:  rgba(95, 125, 79, 0.12);
-  --warning:     #b07d2b;
-  --warning-bg:  rgba(176, 125, 43, 0.13);
-  /* Pulled away from the terracotta accent so a failure never reads as emphasis. */
-  --error:       #8c4038;
-  --error-bg:    rgba(140, 64, 56, 0.12);
-  --info:        #5f7593;
-  --info-bg:     rgba(95, 117, 147, 0.12);
+  /* Status — inks. `error` stays in the red family, pulled away from the moss
+     accent so a failure never reads as "the app is emphasising this". */
+  --success:     #5a7d52;
+  --success-bg:  rgba(90, 125, 82, 0.14);
+  --warning:     #b07a2e;
+  --warning-bg:  rgba(176, 122, 46, 0.14);
+  --error:       #93403a;
+  --error-bg:    rgba(147, 64, 58, 0.13);
+  --info:        #5b6e8c;
+  --info-bg:     rgba(91, 110, 140, 0.13);
 
-  --shadow-sm:  0 1px 2px  rgba(90, 65, 25, 0.10);
-  --shadow-md:  0 3px 10px rgba(90, 65, 25, 0.12);
-  --shadow-lg:  0 8px 26px rgba(90, 65, 25, 0.16);
+  /* Shadows — warm and shallow, a touch deeper than before so cards sit on the desk */
+  --shadow-sm:  0 1px 2px  rgba(70, 60, 40, 0.14);
+  --shadow-md:  0 3px 10px rgba(70, 60, 40, 0.16);
+  --shadow-lg:  0 8px 26px rgba(70, 60, 40, 0.20);
   --shadow-glow:0 0 16px var(--accent-glow);
 
   /* Decorations off — that is what makes this variant "subtle". */
@@ -261,6 +269,74 @@
   --paper-margin-color: transparent;
   /* A textbook serif rather than handwriting; still chrome-only. */
   --font-hand: "Yu Mincho", "YuMincho", "Hiragino Mincho ProN", "Noto Serif JP", "Noto Serif", Georgia, "Times New Roman", serif;
+
+  /* Washi fibre grain (faint fractal noise; layered via body/.card/#result-panel) */
+  --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='w'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3CfeComponentTransfer%3E%3CfeFuncA type='linear' slope='0.035'/%3E%3C/feComponentTransfer%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23w)'/%3E%3C/svg%3E");
+}
+
+/* ── Bamboo Slip — "簡牘古文" (bamboo-ancient, proposal #3) ────────
+   Adopted from docs/design/bamboo-slip-proposals/03-bamboo-ancient.html.
+   An unearthed bamboo-slip manuscript: charred near-black dark brown, faint
+   ivory ink, and a bronze-verdigris (銅青) accent. The canvas is a bundle of
+   vertically bound bamboo slats — individual slats separated by grooves and
+   tied with two cords — layered as `--grain` (fibre noise) + `--slip`
+   (slat/cord texture). Self-contained: no new dependency. */
+:root[data-theme="bamboo-ancient"] {
+  /* Background palette — charred bamboo slips */
+  --bg-primary:   #3a2e1e;
+  --bg-secondary: #463a26;
+  --bg-tertiary:  #2f2518;
+  --bg-card:      rgba(70, 58, 38, 0.92);
+  --bg-card-solid:#463a26;
+  --bg-input:     #3a2e1e;
+  --bg-hover:     rgba(92, 76, 50, 0.45);
+
+  /* Text — faint ivory ink on darkened slips */
+  --text-primary:   #e8e0cc;
+  --text-secondary: #c2b89f;
+  --text-tertiary:  #8f8570;
+  --text-inverse:   #201708;
+
+  /* Accent — 銅青 (bronze verdigris), the patina of unearthed bronzes */
+  --accent:        #7fc4b8;
+  --accent-hover:  #96d6cb;
+  --accent-dim:    #58958c;
+  --accent-glow:   rgba(127, 196, 184, 0.30);
+  --accent-glow-lg:rgba(127, 196, 184, 0.13);
+
+  /* Borders — old bamboo, darkened */
+  --border:       #6b5a3c;
+  --border-light: rgba(107, 90, 60, 0.55);
+  --border-focus: rgba(127, 196, 184, 0.60);
+
+  /* Status — kept distinct from the verdigris accent so a failure never
+     reads as "the app is emphasising this". */
+  --success:     #86c68a;
+  --success-bg:  rgba(134, 198, 138, 0.16);
+  --warning:     #d9a44a;
+  --warning-bg:  rgba(217, 164, 74, 0.16);
+  --error:       #e06a52;
+  --error-bg:    rgba(224, 106, 82, 0.16);
+  --info:        #7fa8cc;
+  --info-bg:     rgba(127, 168, 204, 0.16);
+
+  /* Shadows — deep, like a bundle resting on a dark shelf */
+  --shadow-sm:  0 1px 2px  rgba(0, 0, 0, 0.40);
+  --shadow-md:  0 3px 10px rgba(0, 0, 0, 0.45);
+  --shadow-lg:  0 8px 26px rgba(0, 0, 0, 0.55);
+  --shadow-glow:0 0 16px var(--accent-glow);
+
+  /* Decorations off — the ruled-paper treatment belongs to the paper themes. */
+  --paper-rule-color:   transparent;
+  --paper-rule-size:    27px;
+  --paper-margin-color: transparent;
+  /* A classical serif rather than handwriting; still chrome-only. */
+  --font-hand: "Yu Mincho", "YuMincho", "Hiragino Mincho ProN", "Noto Serif JP", "Noto Serif", Georgia, "Times New Roman", serif;
+
+  /* Bamboo fibre grain (faint fractal noise; layered via body/.card/#result-panel) */
+  --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='a'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.4 0.06' numOctaves='4' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3CfeComponentTransfer%3E%3CfeFuncA type='linear' slope='0.09'/%3E%3C/feComponentTransfer%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23a)'/%3E%3C/svg%3E");
+  /* A bundle of vertically bound slats + two binding cords. */
+  --slip: linear-gradient(180deg,transparent 0%,transparent 17%,rgba(0,0,0,0.55) 17%,rgba(0,0,0,0.55) calc(17% + 3px),rgba(220,205,160,0.08) calc(17% + 4px),transparent calc(17% + 6px),transparent 82%,rgba(0,0,0,0.55) 82%,rgba(0,0,0,0.55) calc(82% + 3px),rgba(220,205,160,0.08) calc(82% + 4px),transparent calc(82% + 6px),transparent 100%),repeating-linear-gradient(90deg,transparent 0px,transparent 42px,rgba(0,0,0,0.65) 42px,rgba(0,0,0,0.65) 46px),repeating-linear-gradient(90deg,rgba(0,0,0,0.35) 0px,rgba(0,0,0,0) 5px,rgba(220,205,160,0.10) 14px,rgba(255,255,255,0) 24px,rgba(0,0,0,0.15) 38px,rgba(0,0,0,0.35) 46px),radial-gradient(130% 95% at 50% 42%,rgba(225,205,165,0.04) 0%,rgba(0,0,0,0) 42%,rgba(0,0,0,0.6) 100%);
 }
 
 /* The reading surface gets the ruled sheet — the one place in the app that is
@@ -276,8 +352,27 @@
     var(--paper-rule-color) var(--paper-rule-size)
   );
 }
+/* Washi grain on the reading surface — paper-subtle only. Its ruled sheet is
+   transparent there, so the grain replaces it instead of stacking. */
+:root[data-theme="paper-subtle"] #result-panel {
+  background-image: var(--grain);
+}
 :root[data-theme="paper"] .titlebar-title,
 :root[data-theme="paper-subtle"] .titlebar-title { font-family: var(--font-hand); letter-spacing: 0; }
+
+/* Bamboo slip texture lives on the app canvas and the reading surface, not on
+   cards — the slats would fight the dense data there. The cursor is left at the
+   OS default for legibility and pointing precision. */
+:root[data-theme="bamboo-ancient"] body {
+  background-image: var(--grain), var(--slip);
+}
+:root[data-theme="bamboo-ancient"] #result-panel {
+  background-image: var(--grain), var(--slip);
+}
+:root[data-theme="bamboo-ancient"] .titlebar-title {
+  font-family: var(--font-hand);
+  letter-spacing: 0;
+}
 
 /* ── Reset & Base ──────────────────────────────────────────── */
 *,
@@ -297,6 +392,7 @@ html {
 body {
   font-family: var(--font-sans);
   background: var(--bg-primary);
+  background-image: var(--grain, none);
   color: var(--text-primary);
   line-height: 1.6;
   overflow: hidden;
@@ -570,6 +666,7 @@ body {
 /* ── Glassmorphism Card ────────────────────────────────────── */
 .card {
   background: var(--bg-card);
+  background-image: var(--grain, none);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   padding: 24px;
