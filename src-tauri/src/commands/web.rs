@@ -6,7 +6,6 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 use tauri::Manager;
 
-use crate::commands::ai_config::AiConfig;
 use serde_json::Value;
 
 // ── SSRF guard ─────────────────────────────────────────────────────────────
@@ -151,16 +150,12 @@ pub async fn web_search<R: tauri::Runtime>(
         return Err("web_search requires a non-empty query".to_string());
     }
 
-    // Read Tavily API key from config
+    // Read the Tavily key through the resolver, not the file: it lives in the OS
+    // credential store now, and the JSON's copy is removed once it is migrated.
+    // Reading the file directly would find nothing and report "key not set".
     let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
-    let config_path = config_dir.join("ai_config.json");
-    let api_key = if config_path.exists() {
-        let json = std::fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
-        let config: AiConfig = serde_json::from_str(&json).map_err(|e| e.to_string())?;
-        config.tavily_api_key
-    } else {
-        None
-    };
+    let api_key = super::ai_config::load_config_with_secrets(&config_dir)
+        .and_then(|c| c.tavily_api_key);
 
     let api_key = match api_key {
         Some(k) if !k.is_empty() && k != "********" => k,

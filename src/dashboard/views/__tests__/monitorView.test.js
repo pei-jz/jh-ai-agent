@@ -29,6 +29,7 @@ vi.mock('../../../modules/ai/PromptTemplateManager.js', () => ({ promptTemplateM
 vi.mock('../../../modules/ai/SkillManager.js', () => ({ skillManager: { list: () => [], listSkills: async () => [], refresh: vi.fn(async () => []) } }));
 
 const { MonitorView } = await import('../MonitorView.js');
+const { destroyComponent } = await import('../../svelte/mount.svelte.js');
 
 const task = (id, over = {}) => ({
     id, prompt: `prompt ${id}`, status: 'completed', progress: 1,
@@ -38,9 +39,36 @@ const task = (id, over = {}) => ({
 
 let v;
 beforeEach(() => {
+    // Tear the previous test's root down BEFORE its host disappears. Wiping
+    // innerHTML alone leaves the component mounted as far as the seam is
+    // concerned, and its effects keep running against a detached tree — which is
+    // how three chapter-jump tests passed alone and failed inside the file.
+    destroyComponent(document.getElementById('monitor-root'));
     document.body.innerHTML = '';
     v = new MonitorView();
 });
+
+/**
+ * Put the view on a page.
+ *
+ * Everything the Monitor draws is MonitorRoot.svelte now, so a test that needs
+ * the DOM mounts the real component instead of hand-building a stand-in — the
+ * fixtures used to be a guess at the markup, and drifted from it.
+ */
+function mount(over = {}) {
+    document.body.innerHTML = '<div id="monitor-root"></div>';
+    Object.assign(v, over);
+    // The selected task has to EXIST in the list, or the right column is the
+    // empty-state placeholder and there is nothing to assert against.
+    if (!v.tasks?.length) v.tasks = [task(v.selectedTaskId || 'T1')];
+    if (!v.selectedTaskId) v.selectedTaskId = v.tasks[0].id;
+    if (!v.tasks.some(t => t.id === v.selectedTaskId)) v.tasks = [...v.tasks, task(v.selectedTaskId)];
+    v._sync();
+    return document.getElementById('monitor-root');
+}
+
+/** The story column — a keyed projection of the timeline. */
+const storyEl = () => document.querySelector('.mresult');
 
 describe('default task selection', () => {
     it('picks the MOST RECENT task — the server list is unsorted', () => {
@@ -107,7 +135,7 @@ describe('run results — deduplication', () => {
 // dashboard/svelte/monitor/__tests__/TimelineItem.test.js ("TimelineItem — request").
 
 describe('in-progress view survives navigation (snapshot/restore)', () => {
-    const page = () => { document.body.innerHTML = '<div id="task-timeline"></div>'; };
+    const page = () => mount({ selectedTaskId: v.selectedTaskId || 'T1' });
 
     it('restores the in-flight trace after re-opening a RUNNING task', () => {
         page();
@@ -119,8 +147,8 @@ describe('in-progress view survives navigation (snapshot/restore)', () => {
         v._snapshotLiveState();          // navigating away
         page();                          // fresh DOM, as a new view would build
         expect(v._restoreLiveState('T1')).toBe(true);
-        expect(document.getElementById('task-timeline').textContent).toContain('考えています');
-        expect(document.getElementById('task-timeline').textContent).toContain('read_file: a.js');
+        expect(storyEl().textContent).toContain('考えています');
+        expect(storyEl().textContent).toContain('read_file: a.js');
     });
 
     it('KEEPS grouping working after a restore', async () => {
@@ -135,8 +163,9 @@ describe('in-progress view survives navigation (snapshot/restore)', () => {
         v._restoreLiveState('T3');
         v._setResultLive('後続ツール', 'tool');
         await tick();
+        await tick();
 
-        const group = document.querySelector('#task-timeline .tl-step');
+        const group = document.querySelector('.mtl .tl-card-step');
         expect(group.querySelectorAll('.tl-step-body .mtask-feed-item')).toHaveLength(1);
     });
 
@@ -157,12 +186,12 @@ describe('in-progress view survives navigation (snapshot/restore)', () => {
 
 describe('live activity feed — reasoning groups', () => {
     beforeEach(() => {
-        document.body.innerHTML = '<div id="task-timeline"></div>';
+        mount();
         v._taskFinished = false;
     });
 
     // Steps are chapters on the rail now.
-    const groups = () => document.querySelectorAll('#task-timeline .tl-step');
+    const groups = () => document.querySelectorAll('.mtl .tl-step');
 
     it('nests the tool lines that follow a reasoning line inside its group', async () => {
         v._setResultLive('考えています', 'thought');
@@ -190,7 +219,7 @@ describe('live activity feed — reasoning groups', () => {
         await tick();
         // The tool line after the question is NOT swallowed into the group.
         expect(groups()[0].querySelectorAll('.tl-step-body .mtask-feed-item')).toHaveLength(0);
-        expect(document.querySelector('#task-timeline .mask-q').textContent).toContain('どちらにしますか？');
+        expect(document.querySelector('.mtl .mask-q').textContent).toContain('どちらにしますか？');
     });
 
     it('does NOT cap the steps — a long run has to show all of them', async () => {
@@ -199,23 +228,24 @@ describe('live activity feed — reasoning groups', () => {
         // transient lines.
         for (let i = 0; i < 120; i++) v._setResultLive(`推論 ${i}`, 'thought');
         await tick();
-        expect(document.querySelectorAll('#task-timeline .tl-step')).toHaveLength(120);
+        expect(document.querySelectorAll('.mtl .tl-step')).toHaveLength(120);
     });
 
     it('still caps the transient lines that arrive before any reasoning', () => {
         for (let i = 0; i < 120; i++) v._setResultLive(`tool line ${i}`, 'tool');
-        expect(document.querySelectorAll('#task-timeline .tl-bare').length).toBeLessThanOrEqual(40);
+        expect(document.querySelectorAll('.mtl .tl-bare').length).toBeLessThanOrEqual(40);
     });
 
-    it('a FREE-TEXT question is visible — it used to render nowhere', () => {
+    it('a FREE-TEXT question is visible — it used to render nowhere', async () => {
         v._showAskCard({ message: 'シート名を教えてください' });
-        expect(document.getElementById('task-timeline').textContent).toContain('シート名を教えてください');
+        await tick();
+        expect(storyEl().textContent).toContain('シート名を教えてください');
     });
 });
 
 describe('task_progress becomes a chapter in the story', () => {
     beforeEach(() => {
-        document.body.innerHTML = '<div id="task-timeline"></div>';
+        mount();
         v._taskFinished = false;
     });
 
@@ -233,7 +263,7 @@ describe('task_progress becomes a chapter in the story', () => {
             { id: '3', title: 'テスト', status: 'pending' },
         ]);
         await tick();
-        const el = document.getElementById('task-timeline');
+        const el = document.querySelector('.mtl');
         expect(el.textContent).toContain('task_progress (1/3 complete)');
         expect(el.querySelectorAll('.tl-progress-row')).toHaveLength(3);
     });
@@ -243,7 +273,7 @@ describe('task_progress becomes a chapter in the story', () => {
         await tick();
         pushProgress([{ id: '1', title: '調査', status: 'completed' }]);
         await tick();
-        const el = document.getElementById('task-timeline');
+        const el = document.querySelector('.mtl');
         expect(el.querySelectorAll('.tl-card-progress')).toHaveLength(1);
         expect(el.textContent).toContain('task_progress (1/1 complete)');
         expect(el.querySelectorAll('.tl-progress-row')).toHaveLength(1);
@@ -257,7 +287,7 @@ describe('task_progress becomes a chapter in the story', () => {
             { id: 'b', title: '新計画2', status: 'pending' },
         ]);
         await tick();
-        const el = document.getElementById('task-timeline');
+        const el = document.querySelector('.mtl');
         expect(el.querySelectorAll('.tl-card-progress')).toHaveLength(2);
         // The LATEST card carries the newest plan.
         expect(el.textContent).toContain('task_progress (0/2 complete)');
@@ -268,7 +298,7 @@ describe('task_progress becomes a chapter in the story', () => {
 describe('header mini progress bar follows the task_progress card', () => {
     beforeEach(() => {
         // A header mount point plus the timeline host, as _renderDetail builds.
-        document.body.innerHTML = '<div id="task-header"></div><div id="task-timeline"></div>';
+        mount();
         v.tasks = [task('t1', { status: 'running' })];
         v.selectedTaskId = 't1';
         v.currentStatus = 'running';
@@ -305,7 +335,7 @@ describe('header mini progress bar follows the task_progress card', () => {
         pushProgress([{ id: '1', title: 'a', status: 'completed' }, { id: '2', title: 'b', status: 'completed' }]);
         await tick();
         v.currentStatus = 'completed';
-        v._syncHeader();
+        v._sync();
         await tick();
         expect(document.querySelector('.mdh-progress')).toBe(null);
     });
@@ -431,15 +461,9 @@ describe('project-instructions button', () => {
 // behaviours to the timeline, which is where the cards actually render now.
 describe('approval buttons work in the Story view', () => {
     const page = () => {
-        document.body.innerHTML = `
-            <div class="mconsole mresult" id="result-panel">
-                <div id="task-timeline" class="mtl"></div>
-            </div>`;
-        v.tasks = [task('t1')];
-        v.selectedTaskId = 't1';
         v.sendConfirmResponse = vi.fn();
-        v._bindDetailEvents();
-        return document.getElementById('task-timeline');
+        mount({ tasks: [task('t1')], selectedTaskId: 't1' });
+        return document.querySelector('.mtl');
     };
 
     const card = (cid) => `<div data-confirm-card="${cid}"><div class="mconfirm-actions">`
@@ -540,15 +564,9 @@ describe('a follow-up request appears immediately', () => {
 });
 
 describe('load earlier logs', () => {
-    const page = () => {
-        document.body.innerHTML = `
-            <div id="result-earlier" style="display:none">
-                <button id="btn-load-earlier"></button>
-                <div id="result-earlier-note"></div>
-            </div>
-            <div id="task-timeline"></div>
-            <div id="console-logs"></div>`;
-    };
+    const page = () => mount();
+    /** The Load-earlier button, present only while something precedes. */
+    const earlierBtn = () => document.querySelector('.mresult-earlier button');
 
     const entry = (idx, over = {}) => ({
         event: 'status', timestamp: `t${idx}`,
@@ -599,7 +617,7 @@ describe('load earlier logs', () => {
         v.logs = [];
         v.__next = [completeAt(10, 'the earlier request')];
         await v.loadEarlierLogs();
-        expect(document.getElementById('task-timeline').textContent).toContain('the earlier request');
+        expect(storyEl().textContent).toContain('the earlier request');
     });
 
     it('says so when the page held no completions — it is not broken, just step logs', async () => {
@@ -608,7 +626,7 @@ describe('load earlier logs', () => {
         v._logStart = 400;
         v.__next = [entry(10), entry(11)];
         await v.loadEarlierLogs();
-        const note = document.getElementById('result-earlier-note').textContent;
+        const note = document.querySelector('.mresult-earlier-note').textContent;
         expect(note).toContain('Loaded 2 entries');
         expect(note).toContain('All Logs');
     });
@@ -618,7 +636,8 @@ describe('load earlier logs', () => {
         v.__next = [{ event: 'status', data: { message: 'no idx here' } }];
         await v.loadEarlierLogs();
         expect(v._logStart).toBe(0);
-        expect(document.getElementById('btn-load-earlier').style.display).toBe('none');
+        // Nothing earlier remains, so the button is gone — only the note stays.
+        expect(document.querySelectorAll('.mresult-earlier button')).toHaveLength(0);
     });
 
     it('reports reaching the beginning', async () => {
@@ -626,95 +645,158 @@ describe('load earlier logs', () => {
         v.__next = [];
         await v.loadEarlierLogs();
         expect(v._logStart).toBe(0);
-        expect(document.getElementById('result-earlier-note').textContent).toContain('No earlier logs');
+        expect(document.querySelector('.mresult-earlier-note').textContent).toContain('No earlier logs');
     });
 
     it('reports a failure instead of silently doing nothing', async () => {
         v._logStart = 50;
         window.apiClient.getTaskLogs = vi.fn(async () => { throw new Error('network down'); });
         await v.loadEarlierLogs();
-        expect(document.getElementById('result-earlier-note').textContent).toContain('network down');
+        expect(document.querySelector('.mresult-earlier-note').textContent).toContain('network down');
     });
 
     it('re-enables the button afterwards', async () => {
         v._logStart = 400;
         v.__next = [entry(300)];
         await v.loadEarlierLogs();
-        expect(document.getElementById('btn-load-earlier').disabled).toBe(false);
+        // The row is usable again: the button is back and not disabled.
+        expect(document.querySelector('.mresult-earlier button')?.disabled).toBeFalsy();
+    });
+});
+
+describe('switching task from the list', () => {
+    // The reported "selecting a task in the list shows nothing": _switchTask still
+    // ended with `right.innerHTML = this._renderDetail(task)` after both `right`
+    // and `_renderDetail` were removed with the string renderers. That threw
+    // BEFORE _autoConnect(), so the incoming task's logs were never fetched and
+    // the story column stayed empty under the outgoing task's chrome.
+    const completeLog = (idx, request) => ({
+        event: 'complete', timestamp: `t${idx}`,
+        data: { _idx: idx, resultSummary: { request, answer: `answer ${request}` } },
+    });
+
+    beforeEach(() => {
+        mount({ selectedTaskId: 'T1', tasks: [task('T1'), task('T2')] });
+        window.apiClient = {
+            getTask: vi.fn(async (id) => ({ id, status: 'completed' })),
+            getTaskLogs: vi.fn(async (id) => [completeLog(0, `request for ${id}`)]),
+        };
+    });
+
+    /** Let _autoConnect's async chain and the batched prop push both land. */
+    const settle = async () => { for (let i = 0; i < 4; i++) await tick(); await tick(); };
+
+    it('fetches the logs of the incoming task and draws its story', async () => {
+        v._switchTask('T2');
+        await settle();
+
+        expect(window.apiClient.getTaskLogs).toHaveBeenCalledWith('T2', expect.anything());
+        expect(v.selectedTaskId).toBe('T2');
+        expect(storyEl().textContent).toContain('request for T2');
+    });
+
+    it('does not carry the chrome of the previous task over', async () => {
+        // Paging state, the live label and a question parked on the steer box all
+        // belong to the task being left.
+        v._logStart = 400;
+        v._earlierNote = 'Loaded 12 entries';
+        v._working = true;
+        v._steerAskPlaceholder = '❓ どのシートですか';
+        v._filter = 'all';
+
+        v._switchTask('T2');
+        await tick();
+
+        expect(v._logStart).toBe(0);
+        expect(v._earlierNote).toBe('');
+        expect(v._working).toBe(false);
+        expect(v._steerAskPlaceholder).toBe('');
+        expect(v._filter).toBe('result');
+        expect(document.querySelector('.mresult-earlier button')).toBeNull();
+        expect(document.querySelector('.mresult-live-label')).toBeNull();
+    });
+
+    it('says it is loading while the logs are in flight', async () => {
+        let release;
+        window.apiClient.getTaskLogs = vi.fn(() => new Promise(r => { release = r; }));
+        v._switchTask('T2');
+        await tick();
+        expect(document.querySelector('.mload')).toBeTruthy();
+
+        release([completeLog(0, 'request for T2')]);
+        await settle();
+        expect(document.querySelector('.mload')).toBeNull();
     });
 });
 
 describe('pending question banner', () => {
-    const page = () => {
-        document.body.innerHTML = `
-            <div id="task-pending-ask" style="display:none"></div>
-            <div id="task-timeline"></div>`;
-    };
+    const page = () => mount({ selectedTaskId: 'T1', tasks: [task('T1')], _taskFinished: false });
 
-    beforeEach(() => {
-        page();
-        v.selectedTaskId = 'T1';
-        v.tasks = [task('T1')];
-        v._taskFinished = false;
-    });
+    beforeEach(() => { page(); });
 
-    const slot = () => document.getElementById('task-pending-ask');
+    /** The banner is derived from the items, so it exists only while one waits. */
+    const slot = () => document.querySelector('.mask-pending');
 
-    it('appears while a question is unanswered', () => {
+    it('appears while a question is unanswered', async () => {
         v._showAskCard({ message: 'どのシートですか' });
-        expect(slot().style.display).toBe('block');
+        await tick();
+        expect(slot()).toBeTruthy();
         expect(slot().textContent).toContain('Waiting for your answer');
     });
 
-    it('disappears once the question is answered', () => {
+    it('disappears once the question is answered', async () => {
         v._showAskCard({ message: 'q' });
         v._clearAskCard();
-        expect(slot().style.display).toBe('none');
+        await tick();
+        expect(slot()).toBeNull();
     });
 
-    it('is absent when nothing was asked', () => {
+    it('is absent when nothing was asked', async () => {
         v._setResultLive('thinking', 'thought');
-        expect(slot().style.display).toBe('none');
+        await tick();
+        expect(slot()).toBeNull();
     });
 
-    it('scrolls the question into view when clicked', () => {
+    it('scrolls the question into view when clicked', async () => {
         v._showAskCard({ message: 'q' });
-        v._scrollStoryTo = vi.fn();
-        slot().querySelector('.mask-pending').click();
-        expect(v._scrollStoryTo).toHaveBeenCalledWith(
-            document.querySelector('#task-timeline .tl-question'),
-            'center',
-        );
+        await tick();
+        // The banner scrolls the question into view itself now — it knows the
+        // item's id, so it does not need the view to find the row for it.
+        const target = document.querySelector('.mtl [data-item-id]');
+        const into = vi.fn();
+        if (target) target.scrollIntoView = into;
+        slot().click();
+        expect(into).toHaveBeenCalled();
     });
 });
 
 describe('auto-follow respects the reader', () => {
     beforeEach(() => {
-        document.body.innerHTML = `
-            <div id="result-panel"><div id="task-pending-ask"></div><div id="task-timeline"></div></div>
-            <button id="result-jump" style="display:none"></button>`;
-        v.selectedTaskId = 'T1';
-        v.tasks = [task('T1')];
-        v._taskFinished = false;
+        mount({ selectedTaskId: 'T1', tasks: [task('T1')], _taskFinished: false });
     });
 
-    it('does not yank the view once the reader has scrolled up', () => {
-        const rp = document.getElementById('result-panel');
+    it('does not yank the view once the reader has scrolled up', async () => {
+        const rp = document.querySelector('.mresult');
         Object.defineProperty(rp, 'scrollHeight', { value: 5000, configurable: true });
         Object.defineProperty(rp, 'clientHeight', { value: 500, configurable: true });
         rp.scrollTop = 100;
-        v._userScrolledUp = true;
+        // A REAL scroll: the panel owns "am I at the bottom" — it is the element
+        // that knows — and tells the view, which is how auto-follow learns to
+        // stop. Setting the flag by hand would test the flag, not the wiring.
+        rp.dispatchEvent(new Event('scroll'));
+        expect(v._userScrolledUp).toBe(true);
 
         v._setResultLive('a new step arrives', 'thought');
+        await tick();
         expect(rp.scrollTop).toBe(100);
-        expect(document.getElementById('result-jump').style.display).toBe('block');
+        expect(document.querySelector('.mresult-jump')).toBeTruthy();
     });
 
     it('jumping back to the bottom re-arms following', () => {
         v._userScrolledUp = true;
         v._scrollTaskToBottom();
         expect(v._userScrolledUp).toBe(false);
-        expect(document.getElementById('result-jump').style.display).toBe('none');
+        expect(document.querySelector('.mresult-jump')).toBeNull();
     });
 });
 
@@ -770,79 +852,61 @@ describe('token totals come from one place', () => {
     });
 });
 
-describe('new-task modal — MCP selection reaches behavior.mcp_servers', () => {
-    // Regression: NewTask's modal lets the user pick MCP servers, but the send()
-    // path deliberately did NOT pass them through behavior.mcp_servers (a stale
-    // note claimed that flags the run as an external caller and strips the
-    // built-in toolset). AgentController no longer treats mcp_servers that way,
-    // so the selection must be forwarded — Schedule already does.
+// The new-task modal moved to svelte/monitor/NewTaskModal.svelte; its tests are
+// in svelte/monitor/__tests__/newTaskModal.test.js, and the payload's rules
+// (mcp_servers explicitly empty, images omitted rather than sent empty) in
+// views/monitor/__tests__/newTaskRequest.test.js.
 
-    beforeEach(() => {
-        document.body.innerHTML = '';
-        invoke.mockReset();
-        invoke.mockResolvedValueOnce({
-            approved_projects: ['C:/work/proj'],
-            mcp_servers: { backlog: { command: 'npx' }, er_app: { command: 'npx' } },
-        });
-        window.apiClient = {
-            request: vi.fn(async () => ({ task_id: 'T-NEW' })),
-        };
-        window.location.hash = '';
+// Reported: the approval card appeared in the Raw Log but not in the Story, and
+// its buttons did nothing. Both follow from ONE cause — a confirm_request whose
+// data carries no confirmId. The raw log renders the packet unconditionally,
+// while the story path returned early on the missing id; and the buttons the raw
+// log did draw carried `data-confirm-id="undefined"`, which the server cannot
+// match to anything.
+describe('an approval that arrives without an id', () => {
+    const bad = {
+        type: 'command_confirm', command: 'npm test',
+        message: 'AI wants to run this terminal command:', risk: 'normal', allowAlways: true,
+    };
+
+    it('still reaches the Story, rather than vanishing from it', async () => {
+        mount({ selectedTaskId: 'T1', tasks: [task('T1')] });
+        v._showTaskConfirm(bad);
+        await tick();
+        expect(document.querySelector('.mresult .mconfirm-box')).toBeTruthy();
     });
 
-    it('passes the checked servers as behavior.mcp_servers', async () => {
-        await v._openNewTaskModal(null, 'do the thing');
-        const overlay = document.getElementById('mnt-modal-overlay');
-        expect(overlay).toBeTruthy();
-
-        // Check the "backlog" server only.
-        const backlogCb = overlay.querySelector('.nt-mcp-cb[data-name="backlog"]');
-        expect(backlogCb).toBeTruthy();
-        backlogCb.checked = true;
-
-        overlay.querySelector('#nt-ws').value = 'C:/work/proj';
-        overlay.querySelector('#nt-prompt').value = 'run the analysis';
-        overlay.querySelector('.nt-send').click();
-
-        await new Promise(r => setTimeout(r, 0));
-        expect(window.apiClient.request).toHaveBeenCalledTimes(1);
-        const [, opts] = window.apiClient.request.mock.calls[0];
-        const body = JSON.parse(opts.body);
-        expect(body.caller).toBe('NewTask');
-        expect(body.behavior.mcp_servers).toEqual(['backlog']);
-    });
-
-    it('sends an EXPLICIT empty mcp_servers when nothing is checked', async () => {
-        // Regression: omitting mcp_servers entirely meant "all servers" on the
-        // agent side — a server connecting mid-task (ChatView's async
-        // _startEnabledMcpServers) would then leak its tools into later turns.
-        // The unchecked state must mean "NO MCP tools": an explicit [].
-        await v._openNewTaskModal(null, 'do the thing');
-        const overlay = document.getElementById('mnt-modal-overlay');
-        overlay.querySelector('#nt-ws').value = 'C:/work/proj';
-        overlay.querySelector('#nt-prompt').value = 'run the analysis';
-        overlay.querySelector('.nt-send').click();
-
-        await new Promise(r => setTimeout(r, 0));
-        const [, opts] = window.apiClient.request.mock.calls[0];
-        const body = JSON.parse(opts.body);
-        expect(body.behavior.mcp_servers).toEqual([]);
-        // The built-in toolset fields are intact — the run stays interactive.
-        expect(body.behavior.mode).toBe('iterative_agent');
-    });
-
-    it('does not swallow an API failure — the modal reports it', async () => {
-        window.apiClient.request = vi.fn(async () => { throw new Error('boom'); });
+    // A button that silently does nothing is the worst of the options: the user
+    // waits for a run that will never resume.
+    it('says why it cannot be answered instead of doing nothing', () => {
         const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
-        await v._openNewTaskModal(null, 'do the thing');
-        const overlay = document.getElementById('mnt-modal-overlay');
-        overlay.querySelector('#nt-ws').value = 'C:/work/proj';
-        overlay.querySelector('#nt-prompt').value = 'run the analysis';
-        overlay.querySelector('.nt-send').click();
-
-        await new Promise(r => setTimeout(r, 0));
-        expect(alertSpy).toHaveBeenCalledWith(expect.stringContaining('boom'));
+        v.socket = { readyState: 1, send: vi.fn() };
+        v.sendConfirmResponse(undefined, true);
+        expect(v.socket.send).not.toHaveBeenCalled();
+        expect(alertSpy).toHaveBeenCalledWith(expect.stringMatching(/no id/i));
         alertSpy.mockRestore();
+    });
+
+    // The id arrives through the DOM, so it is the STRING "undefined" that a
+    // button ends up carrying — not the value.
+    it('recognises the string forms too', () => {
+        const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+        v.socket = { readyState: 1, send: vi.fn() };
+        for (const id of ['undefined', 'null', '']) {
+            v.sendConfirmResponse(id, true);
+        }
+        expect(v.socket.send).not.toHaveBeenCalled();
+        expect(alertSpy).toHaveBeenCalledTimes(3);
+        alertSpy.mockRestore();
+    });
+
+    it('sends normally when the id is real', () => {
+        v.socket = { readyState: 1, send: vi.fn() };
+        v.sendConfirmResponse('c1', true);
+        expect(v.socket.send).toHaveBeenCalledTimes(1);
+        expect(JSON.parse(v.socket.send.mock.calls[0][0])).toMatchObject({
+            event: 'confirm_response', data: { confirmId: 'c1', approved: true },
+        });
     });
 });
 
@@ -852,22 +916,10 @@ describe('pane dividers — drag-resizable edges', () => {
     // localStorage (jhai_monitor_left_width / _insp_width) and applied to the
     // layout root as CSS variables so every pane reads them consistently.
 
-    const layoutHtml = () => `
-        <div class="monitor-layout">
-            <div class="mpanel-left"><div id="mtask-list"></div></div>
-            <div id="mpane-divider-left" class="mpane-divider"></div>
-            <div class="mpanel-right"><div id="result-panel"></div></div>
-            <div id="mpane-divider-insp" class="mpane-divider" style="display:none"></div>
-            <aside id="task-inspector" class="mtl-insp" style="display:none"></aside>
-        </div>`;
-
     beforeEach(() => {
         localStorage.clear();
-        document.body.innerHTML = layoutHtml();
         // Defaults: 240 (task list) / 264 (inspector) from the module vars.
-        v._leftPaneWidth = 240;
-        v._inspPaneWidth = 264;
-        v._bindPaneDividers();
+        mount({ _leftPaneWidth: 240, _inspPaneWidth: 264, selectedTaskId: 'T1', tasks: [task('T1')] });
     });
 
     // jsdom has no PointerEvent constructor — MouseEvent carries clientX, and
@@ -876,8 +928,11 @@ describe('pane dividers — drag-resizable edges', () => {
     const pointer = (type, clientX) =>
         new MouseEvent(type, { clientX, bubbles: true, cancelable: true });
 
-    const drag = (dividerId, dx, startX = 100) => {
-        const divider = document.getElementById(dividerId);
+    /** 0 = the task-list edge, 1 = the inspector edge (only while it is open). */
+    const dividerAt = (i) => document.querySelectorAll('.mpane-divider')[i];
+
+    const drag = (which, dx, startX = 100) => {
+        const divider = dividerAt(which);
         divider.dispatchEvent(pointer('pointerdown', startX));
         document.dispatchEvent(pointer('pointermove', startX + dx));
         document.dispatchEvent(pointer('pointerup', startX + dx));
@@ -890,7 +945,7 @@ describe('pane dividers — drag-resizable edges', () => {
     });
 
     it('left divider grows the task list and persists the width', () => {
-        drag('mpane-divider-left', 60);
+        drag(0, 60);
         const layout = document.querySelector('.monitor-layout');
         expect(layout.style.getPropertyValue('--mpane-left-w')).toBe('300px');
         expect(localStorage.getItem('jhai_monitor_left_width')).toBe('300');
@@ -900,7 +955,7 @@ describe('pane dividers — drag-resizable edges', () => {
         // Each move applies base + dx from the pointerdown snapshot, not the
         // previously-updated width — otherwise a fast drag (many moves) runs
         // ahead of the cursor and snaps between positions.
-        const divider = document.getElementById('mpane-divider-left');
+        const divider = dividerAt(0);
         divider.dispatchEvent(pointer('pointerdown', 100));
         document.dispatchEvent(pointer('pointermove', 130));   // dx=30 → 270
         document.dispatchEvent(pointer('pointermove', 140));   // dx=40 → 280 (NOT 270+40)
@@ -912,8 +967,8 @@ describe('pane dividers — drag-resizable edges', () => {
     });
 
     it('inspector drag tracks the cursor too', () => {
-        document.getElementById('mpane-divider-insp').style.display = '';
-        const divider = document.getElementById('mpane-divider-insp');
+        mount({ _inspectorOpen: true });
+        const divider = dividerAt(1);
         divider.dispatchEvent(pointer('pointerdown', 200));
         document.dispatchEvent(pointer('pointermove', 180));   // dx=-20 → 284
         document.dispatchEvent(pointer('pointermove', 170));   // dx=-30 → 294
@@ -926,25 +981,25 @@ describe('pane dividers — drag-resizable edges', () => {
     it('left divider clamps to PANE_W_MIN/PANE_W_MAX', () => {
         // Dragging far beyond the limits never APPLIES the out-of-range width
         // (the handler refuses the update, so the pane stays at the boundary).
-        drag('mpane-divider-left', -60);   // 240 - 60 → 180 (min boundary)
+        drag(0, -60);   // 240 - 60 → 180 (min boundary)
         expect(document.querySelector('.monitor-layout').style.getPropertyValue('--mpane-left-w')).toBe('180px');
-        drag('mpane-divider-left', -500);  // 180 - 500 → refused, stays 180
+        drag(0, -500);  // 180 - 500 → refused, stays 180
         expect(document.querySelector('.monitor-layout').style.getPropertyValue('--mpane-left-w')).toBe('180px');
-        drag('mpane-divider-left', 460);   // 180 + 460 → 640 (max boundary)
+        drag(0, 460);   // 180 + 460 → 640 (max boundary)
         expect(document.querySelector('.monitor-layout').style.getPropertyValue('--mpane-left-w')).toBe('640px');
-        drag('mpane-divider-left', 500);   // 640 + 500 → refused, stays 640
+        drag(0, 500);   // 640 + 500 → refused, stays 640
         expect(document.querySelector('.monitor-layout').style.getPropertyValue('--mpane-left-w')).toBe('640px');
     });
 
     it('inspector divider shrinks the inspector and persists the width', () => {
-        document.getElementById('mpane-divider-insp').style.display = '';
-        drag('mpane-divider-insp', 40);     // dragging right → inspector NARROWS
+        mount({ _inspectorOpen: true });
+        drag(1, 40);     // dragging right → inspector NARROWS
         expect(document.querySelector('.monitor-layout').style.getPropertyValue('--mpane-insp-w')).toBe('224px');
         expect(localStorage.getItem('jhai_monitor_insp_width')).toBe('224');
     });
 
     it('removes the resizing class and listeners after pointerup', () => {
-        const divider = document.getElementById('mpane-divider-left');
+        const divider = dividerAt(0);
         divider.dispatchEvent(pointer('pointerdown', 100));
         expect(document.body.classList.contains('resizing-panes')).toBe(true);
         document.dispatchEvent(pointer('pointerup', 100));
@@ -955,10 +1010,10 @@ describe('pane dividers — drag-resizable edges', () => {
     });
 
     it('re-binds after a re-render that replaces the layout', () => {
-        document.body.innerHTML = layoutHtml();
+        mount({ selectedTaskId: 'T1', tasks: [task('T1')] });
         v._leftPaneWidth = 240;
-        v._bindPaneDividers();
-        drag('mpane-divider-left', 30);
+        v._sync();
+        drag(0, 30);
         expect(document.querySelector('.monitor-layout').style.getPropertyValue('--mpane-left-w')).toBe('270px');
     });
 });
@@ -968,13 +1023,17 @@ describe('chapter jump scrolls ONLY the story panel', () => {
     // the app shell's .main-content — so a chapter jump yanked the whole page up
     // and hid the task header behind the top edge. _scrollStoryTo must move only
     // #result-panel and never touch an outer container.
+    // NOTE the class: .mtl is what MonitorRoot renders around the timeline. This
+    // fixture used to say id="task-timeline" — the mount host from before the
+    // migration — so it kept passing after the selector it stands in for had
+    // stopped matching anything in the real view.
     const page = () => {
         document.body.innerHTML = `
             <div class="main-content">
                 <div class="monitor-layout">
                     <div class="mpanel-right">
-                        <div class="mconsole mresult" id="result-panel">
-                            <div id="task-timeline">
+                        <div class="mconsole mresult">
+                            <div class="mtl">
                                 <div data-item-id="req1" style="height:60px">request</div>
                                 <div data-item-id="deliv1" style="height:60px">deliverable</div>
                             </div>
@@ -988,13 +1047,10 @@ describe('chapter jump scrolls ONLY the story panel', () => {
         el.getBoundingClientRect = () => ({ top, height, bottom: top + height });
     };
 
-    beforeEach(() => {
-        page();
-        v._inspector = { update: vi.fn() };
-    });
+    beforeEach(() => { page(); });
 
     it('positions the target under the filter bar in #result-panel', () => {
-        const panel = document.getElementById('result-panel');
+        const panel = document.querySelector('.mresult');
         rect(panel, 100, 600);          // panel viewport starts at y=100
         panel.scrollTop = 0;
         const scrollTo = vi.fn();
@@ -1008,13 +1064,14 @@ describe('chapter jump scrolls ONLY the story panel', () => {
             top: 1250 - 100 - 8,        // rel (1250-100) − 8px air under the bar
             behavior: 'smooth',
         });
-        expect(v._inspector.update).toHaveBeenCalledWith({ activeChapter: 'deliv1' });
+        // The rail reads the active chapter off its props.
+        expect(v._activeChapter).toBe('deliv1');
     });
 
     it('never calls scrollIntoView, so outer containers cannot move', () => {
         const row = document.querySelector('[data-item-id="req1"]');
         rect(row, 300);
-        const panel = document.getElementById('result-panel');
+        const panel = document.querySelector('.mresult');
         rect(panel, 100, 600);
         panel.scrollTop = 0;
         const scrollTo = vi.fn();
@@ -1029,7 +1086,7 @@ describe('chapter jump scrolls ONLY the story panel', () => {
     });
 
     it('clamps to the top and tolerates a missing row', () => {
-        const panel = document.getElementById('result-panel');
+        const panel = document.querySelector('.mresult');
         rect(panel, 100, 600);
         panel.scrollTop = 50;
         const scrollTo = vi.fn();
@@ -1055,7 +1112,7 @@ describe('chapter jump scrolls ONLY the story panel', () => {
 // silently vanished from the Story while Raw Log still showed it.
 describe('Story rebuild restores a pending approval card', () => {
     const page = () => {
-        document.body.innerHTML = '<div id="task-timeline"></div>';
+        mount();
         v.tasks = [task('t1')];
         v.selectedTaskId = 't1';
         v._renderResultPanel();
@@ -1080,7 +1137,7 @@ describe('Story rebuild restores a pending approval card', () => {
         v._renderResultPanel();
         await tick();
 
-        const timeline = document.getElementById('task-timeline');
+        const timeline = document.querySelector('.mtl');
         expect(timeline.textContent).toContain('🛡 Command Approval');
         expect(timeline.textContent).toContain('git push --force');
         expect(timeline.querySelector('.btn-approve')).not.toBe(null);
@@ -1098,13 +1155,13 @@ describe('Story rebuild restores a pending approval card', () => {
         v._renderResultPanel();
         await tick();
 
-        expect(document.getElementById('task-timeline').textContent).not.toContain('🛡 Command Approval');
+        expect(storyEl().textContent).not.toContain('🛡 Command Approval');
     });
 });
 
 describe('live approval card renders in the Story (the _showTaskConfirm path)', () => {
     const page = () => {
-        document.body.innerHTML = '<div id="task-timeline"></div>';
+        mount();
         v.tasks = [task('t1')];
         v.selectedTaskId = 't1';
         v._renderResultPanel();
@@ -1119,7 +1176,7 @@ describe('live approval card renders in the Story (the _showTaskConfirm path)', 
         });
         await tick();
 
-        const timeline = document.getElementById('task-timeline');
+        const timeline = document.querySelector('.mtl');
         expect(timeline.textContent).toContain('🛡 Command Approval');
         expect(timeline.textContent).toContain('Remove-Item -Recurse tmp');
         expect(timeline.querySelector('[data-confirm-card="conf_live_1"]')).not.toBe(null);
@@ -1143,25 +1200,12 @@ describe('live approval card renders in the Story (the _showTaskConfirm path)', 
         v._renderResultPanel();
         await tick();
 
-        expect(document.getElementById('task-timeline').textContent).toContain('🛡 Command Approval');
-        expect(document.getElementById('task-timeline').textContent).toContain('git push --force');
+        expect(storyEl().textContent).toContain('🛡 Command Approval');
+        expect(storyEl().textContent).toContain('git push --force');
     });
 });
 
-describe('All-Logs request dividers', () => {
-    it('renders one divider per request, with the prompt preview separated once', () => {
-        // The preview separator lives in requestDividerHtml (P4). While the view
-        // ALSO prepended " — ", wiring the module version would have produced
-        // "— — prompt"; this pins the single-separator output.
-        v.logs = [
-            { event: 'status', timestamp: '2026-07-01T00:00:00Z', data: { status: 'running', message: 'Thinking... (step 1)' } },
-            { event: 'status', timestamp: '2026-07-01T00:00:01Z', data: { status: 'running', message: 'Thinking... (step 2)' } },
-        ];
-        v.resultSummaries = [{ request: 'fix the login bug' }];
-        const html = v.renderAllLogs();
-        const dividers = html.match(/mturn-request/g) || [];
-        expect(dividers.length).toBeGreaterThan(0);
-        expect(html).toContain('fix the login bug');
-        expect(html).not.toContain('— — ');
-    });
-});
+// The raw log moved to svelte/monitor/RawLog.svelte — one model over `this.logs`
+// (monitor/logs.js buildLogSteps) instead of the string renderer and the
+// incremental DOM builder that both derived it. Its tests, including the request
+// divider's single separator, are in svelte/monitor/__tests__/rawLog.test.js.

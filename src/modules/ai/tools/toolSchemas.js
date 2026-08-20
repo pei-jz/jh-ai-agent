@@ -61,6 +61,33 @@ export const TOOL_DEFINITIONS = [
         }
     },
     {
+        name: 'read_skill',
+        isSafe: true,
+        description: 'Load one SKILL — a written procedure for a recurring job. Your instructions list the available skills by name and description ONLY; call this to get the actual steps before doing work a skill covers. Do not guess a skill\'s contents from its description, and do not re-read one you already loaded this run.',
+        parameters: {
+            type: 'object',
+            properties: {
+                name: { type: 'string', description: 'The skill name exactly as listed in your instructions (no leading slash).' }
+            },
+            required: ['name'],
+            additionalProperties: false
+        }
+    },
+    {
+        name: 'read_skill_file',
+        isSafe: true,
+        description: 'Read a file bundled with a skill (e.g. "scripts/sort.py", "references/schema.md"). read_skill lists what a skill bundles. To RUN a bundled script, pass the absolute path read_skill gave you to run_command instead.',
+        parameters: {
+            type: 'object',
+            properties: {
+                name: { type: 'string', description: 'The skill that bundles the file.' },
+                path: { type: 'string', description: 'Path relative to the skill directory, e.g. "scripts/sort.py".' }
+            },
+            required: ['name', 'path'],
+            additionalProperties: false
+        }
+    },
+    {
         name: 'list_resources',
         isSafe: true,
         description: 'List the live documents that connected apps are currently exposing (the buffer open in the editor, a board, a query result). These are NOT files on disk — read them with read_resource, not read_file. Only advertised when at least one app publishes something.',
@@ -482,6 +509,27 @@ export const TOOL_DEFINITIONS = [
                 }
             },
             required: ['url', 'headers'],
+            additionalProperties: false
+        }
+    },
+    {
+        name: 'open_question',
+        isSafe: true,
+        description: 'Record something the answer DEPENDS ON that you have not traced yet, then close it when you have. Use this the moment reading a file raises a new question — "this branches on a flag, where is the flag set?", "this reads a config key, what sets it?", "this posts to a URL, what handles it?". An investigation that only ever answers its first question stops at whatever layer that question was about; this is how you carry the next one forward. Finishing with a question still open, and not mentioned in your answer, is flagged. Lives for this run only.',
+        parameters: {
+            type: 'object',
+            properties: {
+                action: {
+                    type: 'string',
+                    enum: ['add', 'resolve', 'list'],
+                    description: '"add" records an untraced dependency. "resolve" closes one with what you found. "list" shows the current frontier.'
+                },
+                question: { type: ['string', 'null'], description: 'For "add": what you do not yet know, phrased as a question. Null otherwise.' },
+                why: { type: ['string', 'null'], description: 'For "add": optional — why the answer depends on it (e.g. "the screen renders differently when it is off").' },
+                id: { type: ['string', 'null'], description: 'For "resolve": the id returned by "add". Null otherwise.' },
+                answer: { type: ['string', 'null'], description: 'For "resolve": what you found, WITH the file:line that shows it. Required for "resolve" — closing a question with nothing to show for it defeats the purpose.' }
+            },
+            required: ['action', 'question', 'why', 'id', 'answer'],
             additionalProperties: false
         }
     },

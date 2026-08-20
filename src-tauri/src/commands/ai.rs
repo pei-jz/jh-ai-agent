@@ -145,6 +145,69 @@ async fn get_client(proxy_url: Option<String>) -> Result<Client, String> {
     builder.build().map_err(|e| format!("Failed to build HTTP client: {}", e))
 }
 
+// ─── Redaction ─────────────────────────────────────────────────────────────
+//
+// The request headers are worth SEEING — which auth scheme was used, whether a
+// key was attached at all, which `anthropic-beta` flags were on (prompt caching
+// is judged from those) — and never worth STORING. Task logs are written to disk
+// and shown in the API-call modal, so anything that leaves this function is
+// permanent and visible.
+//
+// So the value is destroyed here, at the only place that has it, rather than
+// masked later where a new caller could bypass the masking. `(set)` / `(not set)`
+// is what a reader actually needs from a credential header: the question is
+// almost always "did my key get attached", not "what is it".
+
+/// Header names whose VALUE is a credential.
+const SECRET_HEADERS: [&str; 5] = ["authorization", "x-api-key", "api-key", "x-goog-api-key", "cookie"];
+
+/// Query parameters that carry a credential. Gemini puts the key in the URL.
+const SECRET_QUERY: [&str; 5] = ["key", "api_key", "apikey", "access_token", "token"];
+
+/// The headers as they can safely be recorded: names intact, secrets destroyed.
+fn redacted_headers(headers: &reqwest::header::HeaderMap) -> serde_json::Value {
+    let mut out = serde_json::Map::new();
+    for (name, value) in headers.iter() {
+        let key = name.as_str().to_string();
+        let is_secret = SECRET_HEADERS.iter().any(|s| key.eq_ignore_ascii_case(s));
+        if is_secret {
+            // Keep the SCHEME ("Bearer", "Basic") — it is part of what went wrong
+            // when a provider rejects the call — and nothing else.
+            let raw = value.to_str().unwrap_or("");
+            let scheme = raw.split_whitespace().next().unwrap_or("");
+            let shown = if scheme.eq_ignore_ascii_case("bearer") || scheme.eq_ignore_ascii_case("basic") {
+                format!("{} ****  (set)", scheme)
+            } else {
+                "****  (set)".to_string()
+            };
+            out.insert(key, serde_json::Value::String(shown));
+        } else {
+            out.insert(key, serde_json::Value::String(value.to_str().unwrap_or("<binary>").to_string()));
+        }
+    }
+    serde_json::Value::Object(out)
+}
+
+/// A URL safe to record: credential-bearing query parameters are emptied.
+///
+/// Gemini takes the key as `?key=…`, so the raw URL is as sensitive as the
+/// Authorization header — and it was being emitted verbatim.
+fn redacted_url(url: &str) -> String {
+    let Some((base, query)) = url.split_once('?') else { return url.to_string() };
+    let cleaned: Vec<String> = query
+        .split('&')
+        .map(|pair| {
+            let (k, _) = pair.split_once('=').unwrap_or((pair, ""));
+            if SECRET_QUERY.iter().any(|s| k.eq_ignore_ascii_case(s)) {
+                format!("{}=****", k)
+            } else {
+                pair.to_string()
+            }
+        })
+        .collect();
+    format!("{}?{}", base, cleaned.join("&"))
+}
+
 #[tauri::command]
 pub async fn llm_chat_native<R: Runtime>(
     app: AppHandle<R>,
@@ -153,15 +216,16 @@ pub async fn llm_chat_native<R: Runtime>(
     let client = get_client(payload.proxy).await?;
     let request_id = payload.request_id.clone();
 
-    // Load Config for API Keys
+    // Load the config WITH real keys.
+    //
+    // `load_config_with_secrets` is the only reader that returns them: it fills
+    // them in from the OS credential store, which is where they live now. Reading
+    // the JSON directly — as this used to — gets a config whose key fields are
+    // empty, because the migration removes them from the file once the store has
+    // them.
     let config_dir = app.path().app_config_dir().map_err(|e: tauri::Error| e.to_string())?;
-    let config_path = config_dir.join("ai_config.json");
-    let config: AiConfig = if config_path.exists() {
-        let json = std::fs::read_to_string(config_path).map_err(|e| e.to_string())?;
-        serde_json::from_str(&json).map_err(|e| e.to_string())?
-    } else {
-        return Err("AI configuration not found. Please set API keys in settings.".to_string());
-    };
+    let config: AiConfig = super::ai_config::load_config_with_secrets(&config_dir)
+        .ok_or_else(|| "AI configuration not found. Please set API keys in settings.".to_string())?;
 
     // Lookup LLM Instance configuration
     let mut resolved_provider = payload.provider.clone();
@@ -191,6 +255,7 @@ pub async fn llm_chat_native<R: Runtime>(
             }
         }
     }
+
 
     // Determine target URL and headers based on provider
     let (url, headers, _api_key) = match resolved_provider.as_str() {
@@ -283,7 +348,11 @@ pub async fn llm_chat_native<R: Runtime>(
         truncate_base64_in_place(&mut sent);
         let _ = app.emit("llm-request-sent", serde_json::json!({
             "request_id": payload.request_id,
-            "url": url,
+            // Redacted HERE, at the only place that holds the secret. The raw URL
+            // carries the key for Gemini (`?key=…`), and the headers carry it for
+            // everyone else; both end up in a task log on disk.
+            "url": redacted_url(&url),
+            "headers": redacted_headers(&headers),
             "provider": resolved_provider,
             "model": payload.model,
             "body": sent,
@@ -826,5 +895,102 @@ mod message_deserialize_tests {
     fn string_content_is_unchanged() {
         let m: LlmMessage = serde_json::from_str(r#"{"role":"user","content":"hi"}"#).unwrap();
         assert_eq!(m.content, "hi");
+    }
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::*;
+    use reqwest::header::HeaderMap;
+
+    fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(*k, v.parse().unwrap());
+        }
+        h
+    }
+
+    #[test]
+    fn a_bearer_token_never_survives() {
+        let out = redacted_headers(&headers(&[("authorization", "Bearer sk-proj-abcdef123456")]));
+        let shown = out["authorization"].as_str().unwrap();
+        assert!(!shown.contains("sk-proj"));
+        assert!(!shown.contains("abcdef123456"));
+    }
+
+    // Which scheme was used is part of what went wrong when a provider rejects
+    // the call, so it is kept.
+    #[test]
+    fn the_auth_scheme_is_kept() {
+        let out = redacted_headers(&headers(&[("authorization", "Bearer sk-1")]));
+        assert!(out["authorization"].as_str().unwrap().starts_with("Bearer "));
+    }
+
+    // The question a reader actually has is "did my key get attached at all".
+    #[test]
+    fn a_credential_header_says_that_it_is_set() {
+        let out = redacted_headers(&headers(&[("x-api-key", "sk-ant-secret")]));
+        assert!(out["x-api-key"].as_str().unwrap().contains("(set)"));
+        assert!(!out["x-api-key"].as_str().unwrap().contains("secret"));
+    }
+
+    #[test]
+    fn every_credential_header_shape_is_covered() {
+        for name in ["authorization", "x-api-key", "api-key", "x-goog-api-key", "cookie"] {
+            let out = redacted_headers(&headers(&[(name, "TOPSECRET")]));
+            assert!(!out[name].as_str().unwrap().contains("TOPSECRET"), "{name} leaked");
+        }
+    }
+
+    // These are the ones worth showing: prompt caching is judged from the beta
+    // flags, and content-type explains a 400.
+    #[test]
+    fn ordinary_headers_are_shown_in_full() {
+        let out = redacted_headers(&headers(&[
+            ("content-type", "application/json"),
+            ("anthropic-version", "2023-06-01"),
+            ("anthropic-beta", "prompt-caching-2024-07-31"),
+        ]));
+        assert_eq!(out["content-type"], "application/json");
+        assert_eq!(out["anthropic-version"], "2023-06-01");
+        assert_eq!(out["anthropic-beta"], "prompt-caching-2024-07-31");
+    }
+
+    #[test]
+    fn an_empty_map_redacts_to_an_empty_object() {
+        assert_eq!(redacted_headers(&HeaderMap::new()), serde_json::json!({}));
+    }
+
+    // Gemini takes the key as a query parameter, which made the raw URL as
+    // sensitive as an Authorization header — and it was emitted verbatim.
+    #[test]
+    fn a_key_in_the_query_string_is_removed() {
+        let out = redacted_url("https://generativelanguage.googleapis.com/v1beta/models/x:stream?alt=sse&key=AIzaSECRET");
+        assert!(!out.contains("AIzaSECRET"));
+        assert!(out.contains("key=****"));
+        // What is left still identifies the call.
+        assert!(out.contains("alt=sse"));
+        assert!(out.contains("models/x:stream"));
+    }
+
+    #[test]
+    fn other_credential_parameter_names_are_covered() {
+        for name in ["api_key", "apikey", "access_token", "token"] {
+            let out = redacted_url(&format!("https://x/y?{}=SECRET", name));
+            assert!(!out.contains("SECRET"), "{name} leaked");
+        }
+    }
+
+    #[test]
+    fn a_url_without_a_query_is_untouched() {
+        let url = "https://api.openai.com/v1/chat/completions";
+        assert_eq!(redacted_url(url), url);
+    }
+
+    #[test]
+    fn a_harmless_query_survives() {
+        let url = "https://x/openai/deployments/d/chat/completions?api-version=2024-10-21";
+        assert_eq!(redacted_url(url), url);
     }
 }

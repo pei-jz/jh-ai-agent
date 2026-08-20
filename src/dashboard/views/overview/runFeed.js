@@ -29,6 +29,29 @@ export const PHASES = ['plan', 'execute', 'review'];
 const arr = (v) => (Array.isArray(v) ? v : []);
 
 /**
+ * The events `reduceRun` actually consumes.
+ *
+ * Everything else on the socket leaves its result identical, and the Run pane
+ * used to be rebuilt for all of them — `stream` fires ONCE PER TOKEN and
+ * `command_chunk` once per line of stdout, so a generating task rebuilt the
+ * whole run object and re-rendered the pane dozens of times a second. That is
+ * what made the tab flicker, and on a long task it was quadratic as well: every
+ * one of those packets walked the entire log array again.
+ *
+ * Kept next to the switch below so the two cannot drift: a new `case` there
+ * needs a name here or its events will be dropped.
+ */
+export const RUN_EVENTS = new Set([
+    'log', 'status', 'phase', 'memory_recall', 'token_usage',
+    'confirm', 'ask_user', 'complete', 'error',
+]);
+
+/** Can this packet change what the Run pane shows? */
+export function affectsRun(packet) {
+    return RUN_EVENTS.has(packet?.event);
+}
+
+/**
  * Reduce a task's log array into everything the Run tab draws.
  *
  * One pass, one reducer. The alternative — a function per widget, each walking
@@ -83,7 +106,14 @@ export function reduceRun(logs) {
                 if (d.status === 'aborted' || d.status === 'completed') out.finished = true;
                 if (!d.message) break;
                 const n = replayStepNo(d.message);
-                if (n) out.step = n;
+                if (n) {
+                    out.step = n;
+                    // A step boundary means a run is WORKING, so any earlier
+                    // completion belonged to a previous turn. See the note on
+                    // `finished` below: without this, a continued task looked
+                    // finished for as long as its replay lasted.
+                    out.finished = false;
+                }
                 const kind = replayLineType(d.message);
                 // "Thinking… (step 12)" is bookkeeping, not activity. Monitor
                 // classifies it as 'tool' for the same reason; here it only
@@ -93,6 +123,8 @@ export function reduceRun(logs) {
                 break;
             }
             case 'phase': {
+                // Phase routing only happens inside a live run.
+                out.finished = false;
                 out.phase = d.phase || out.phase;
                 out.phaseModel = d.model || out.phaseModel;
                 out.escalated = !!d.escalated;
@@ -147,6 +179,19 @@ export function reduceRun(logs) {
                 out.question = d.question || d.message || out.question;
                 break;
             }
+            // ── The end of a run — not necessarily the end of the TASK ──────
+            //
+            // A continued task's log holds one of these per previous turn, and
+            // the server replays the whole log on connect. Setting this and never
+            // clearing it meant a task that was actively running read as finished
+            // the moment its replay reached an old completion.
+            //
+            // The Dashboard acts on `finished`: it closes the socket, reloads and
+            // clears the pane's tab. With the task still running it reopened the
+            // socket, replayed, and did it again — a loop that reset the tab about
+            // once a second, so choosing Memory or Stats snapped straight back to
+            // Run. The two cases above clear the flag when work resumes, which
+            // makes this mean "the last thing that happened was the end".
             case 'complete':
             case 'error':
                 out.finished = true;

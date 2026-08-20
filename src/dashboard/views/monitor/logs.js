@@ -117,6 +117,27 @@ export function buildLogSteps(logs, fmt) {
 }
 
 /**
+ * What a step's CHAT button says: the calls it covers, totalled.
+ *
+ * Data rather than markup, so the component that draws it does not have to
+ * parse it back out again. chatButtonHtml below is the string form, kept for
+ * the raw-log path that still assembles HTML.
+ */
+export function chatButtonLabel(entries = []) {
+    const sum = (f) => entries.reduce((s, c) => s + (f(c) || 0), 0);
+    const prompt = sum(c => c.usage?.prompt_tokens);
+    const completion = sum(c => c.usage?.completion_tokens);
+    const cached = sum(c => c.usage?.cache_read_input_tokens);
+    const ms = sum(c => c.duration);
+    const last = entries[entries.length - 1] || {};
+    const status = last.status || 200;
+    return {
+        text: `CHAT ${status} · ↑${prompt}t${cached > 0 ? ` ⚡${cached}t` : ''} ↓${completion}t · ${ms}ms`,
+        isError: status >= 400 || !!last.error,
+    };
+}
+
+/**
  * Build the CHAT button markup for a step (pure).
  */
 export function chatButtonHtml(chatUid, entries) {

@@ -54,9 +54,16 @@
             >
                 <span class="slash-popup-icon">{item.icon}</span>
                 <span class="slash-popup-key">/{item.key}</span>
-                <span class="slash-popup-label">{item.label}</span>
+                <span class="slash-popup-label" title={item.hint || item.label}>{item.label}<!--
+                    The description says WHEN to use a skill, which the name
+                    rarely does. It was collected but never shown.
+                -->{#if item.hint}<span class="slash-popup-hint">— {item.hint}</span>{/if}</span>
                 <span class="slash-popup-type">{typeLabel(item.type)}</span>
             </div>
         {/each}
     </div>
 {/if}
+
+<style>
+    .slash-popup-hint { color: var(--text-tertiary); font-size: 11px; margin-left: 6px; }
+</style>

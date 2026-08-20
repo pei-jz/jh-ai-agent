@@ -6,7 +6,7 @@ describe('the theme cycle', () => {
         const seen = [];
         let t = 'light';
         for (let i = 0; i < THEMES.length; i++) { seen.push(t); t = nextTheme(t); }
-        expect(seen).toEqual(['light', 'dark', 'paper', 'paper-subtle']);
+        expect(seen).toEqual(['light', 'dark', 'paper', 'paper-subtle', 'bamboo-ancient']);
         expect(t).toBe('light');          // back where it began
     });
 
@@ -33,6 +33,7 @@ describe('themeAttr', () => {
         expect(themeAttr('light')).toBe('light');
         expect(themeAttr('paper')).toBe('paper');
         expect(themeAttr('paper-subtle')).toBe('paper-subtle');
+        expect(themeAttr('bamboo-ancient')).toBe('bamboo-ancient');
     });
 
     it('returns null for DARK — the stylesheet default must stay unnamed', () => {
@@ -47,14 +48,16 @@ describe('the button reflects where you would GO, not where you are', () => {
         expect(themeIcon('light')).toBe('moon');            // → dark
         expect(themeIcon('dark')).toBe('paper');            // → paper
         expect(themeIcon('paper')).toBe('template');        // → paper (subtle)
-        expect(themeIcon('paper-subtle')).toBe('sun');      // → light
+        expect(themeIcon('paper-subtle')).toBe('bamboo');   // → bamboo (ancient)
+        expect(themeIcon('bamboo-ancient')).toBe('sun');    // → light
     });
 
     it('labels every theme, and the label names the destination', () => {
         expect(themeLabel('light')).toMatch(/dark/i);
         expect(themeLabel('dark')).toMatch(/paper/i);
         expect(themeLabel('paper')).toMatch(/subtle/i);
-        expect(themeLabel('paper-subtle')).toMatch(/light/i);
+        expect(themeLabel('paper-subtle')).toMatch(/bamboo/i);
+        expect(themeLabel('bamboo-ancient')).toMatch(/light/i);
     });
 
     it('has an icon and a label for every theme in the cycle', () => {

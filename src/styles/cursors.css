@@ -1,0 +1,51 @@
+/* cursors - the bamboo-slip theme's mouse cursors.
+ *
+ * GENERATED FILE - do not edit. Run `python scripts/gen_cursors.py` instead; the
+ * drawings and the reasoning behind them live there. Invariants are pinned in
+ * src/styles/__tests__/cursors.test.js.
+ *
+ * Applied when <html> carries BOTH data-theme="bamboo-ancient" and
+ * data-cursor="bamboo". src/index.html sets the latter before first paint.
+ *
+ *   default  筆    a brush along the arrow diagonal: pointed tip, swelling
+ *                  belly, tail tapering to nothing
+ *   pointer  簡策  one slip standing proud of a rolled bundle of slips
+ *   text     竹簡  a bound slat - an I-beam already IS a vertical bar
+ *
+ * Every glyph is filled PALE and outlined dark because the theme's ground is
+ * charred bamboo; a dark cursor disappears into it. Every rule ends in a keyword
+ * fallback because a data URI that fails to parse reverts silently rather than
+ * erroring. Hotspots are inset from the edge because Chromium discards a cursor
+ * whose hotspot falls outside its image.
+ *
+ * Only `cursor` is set here, and only under the bamboo theme. No other theme is
+ * touched, and removing `data-cursor` restores the system cursors.
+ */
+
+/* default */
+:root[data-theme="bamboo-ancient"][data-cursor="bamboo"],
+:root[data-theme="bamboo-ancient"][data-cursor="bamboo"] * {
+  cursor: url("data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22%20width=%2228%22%20height=%2228%22%20viewBox=%220%200%2028%2028%22%3E%3Cpath%20d=%22M10.4%2012.6%20L25.22%2025.78%20L25.78%2025.22%20L12.6%2010.4%20Z%22%20fill=%22%23d9c9a3%22%20stroke=%22%231a1208%22%20stroke-width=%221.2%22%20stroke-linejoin=%22round%22/%3E%3Cpath%20d=%22M2%202%20C3.2%205.4%204.4%209.4%205.7%2011.4%20C7.2%2013.2%208.6%2013.4%2010.1%2012.9%20L12.9%2010.1%20C13.4%208.6%2013.2%207.2%2011.4%205.7%20C9.4%204.4%205.4%203.2%202%202%20Z%22%20fill=%22%23f2ead6%22%20stroke=%22%231a1208%22%20stroke-width=%221.2%22%20stroke-linejoin=%22round%22/%3E%3Cpath%20d=%22M3.2%203.2%20C4.5%206.3%205.5%209.2%206.5%2011.4%22%20fill=%22none%22%20stroke=%22%23a8905f%22%20stroke-width=%220.8%22%20opacity=%220.75%22%20stroke-linecap=%22round%22/%3E%3Cpath%20d=%22M3.2%203.2%20C6.3%204.5%209.2%205.5%2011.4%206.5%22%20fill=%22none%22%20stroke=%22%23a8905f%22%20stroke-width=%220.8%22%20opacity=%220.75%22%20stroke-linecap=%22round%22/%3E%3Cpath%20d=%22M2.9%202.9%20L8.6%208.6%22%20fill=%22none%22%20stroke=%22%23a8905f%22%20stroke-width=%220.75%22%20opacity=%220.6%22%20stroke-linecap=%22round%22/%3E%3Cpath%20d=%22M10.5%2013.0%20L13.0%2010.5%22%20stroke=%22%238a6f45%22%20stroke-width=%223.0%22%20stroke-linecap=%22round%22/%3E%3Cpath%20d=%22M10.5%2013.0%20L13.0%2010.5%22%20stroke=%22%231a1208%22%20stroke-width=%223.0%22%20stroke-linecap=%22round%22%20opacity=%220.22%22/%3E%3C/svg%3E") 2 2, default;
+}
+
+/* pointer */
+:root[data-theme="bamboo-ancient"][data-cursor="bamboo"] a,
+:root[data-theme="bamboo-ancient"][data-cursor="bamboo"] button,
+:root[data-theme="bamboo-ancient"][data-cursor="bamboo"] [role="button"],
+:root[data-theme="bamboo-ancient"][data-cursor="bamboo"] summary,
+:root[data-theme="bamboo-ancient"][data-cursor="bamboo"] select,
+:root[data-theme="bamboo-ancient"][data-cursor="bamboo"] label,
+:root[data-theme="bamboo-ancient"][data-cursor="bamboo"] .dt-tab,
+:root[data-theme="bamboo-ancient"][data-cursor="bamboo"] .mfilter-btn,
+:root[data-theme="bamboo-ancient"][data-cursor="bamboo"] .mstep-header,
+:root[data-theme="bamboo-ancient"][data-cursor="bamboo"] .mpanel-toggle,
+:root[data-theme="bamboo-ancient"][data-cursor="bamboo"] .mtask-row {
+  cursor: url("data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22%20width=%2228%22%20height=%2228%22%20viewBox=%220%200%2028%2028%22%3E%3Crect%20x=%222.4%22%20y=%2213.4%22%20width=%2218.2%22%20height=%2211.6%22%20rx=%222.4%22%20fill=%22%23d9c9a3%22%20stroke=%22%231a1208%22%20stroke-width=%221.2%22%20stroke-linejoin=%22round%22/%3E%3Cpath%20d=%22M6.0%2014.2%20L6.0%2024.2%20M9.4%2014.2%20L9.4%2024.2%20M12.8%2014.2%20L12.8%2024.2%20M16.2%2014.2%20L16.2%2024.2%22%20stroke=%22%23a8905f%22%20stroke-width=%220.85%22%20opacity=%220.75%22%20stroke-linecap=%22round%22/%3E%3Cpath%20d=%22M3.5%2019.2%20L19.5%2019.2%22%20stroke=%22%237fc4b8%22%20stroke-width=%221.8%22%20stroke-linecap=%22round%22/%3E%3Crect%20x=%225.5%22%20y=%222.0%22%20width=%227.0%22%20height=%2212.6%22%20rx=%222.4%22%20fill=%22%23f2ead6%22%20stroke=%22%231a1208%22%20stroke-width=%221.2%22%20stroke-linejoin=%22round%22/%3E%3Cpath%20d=%22M5.7%206.4%20L12.3%206.4%20M5.7%2010.4%20L12.3%2010.4%22%20stroke=%22%238a6f45%22%20stroke-width=%221.3%22/%3E%3Cpath%20d=%22M9.0%203.4%20L9.0%2013.4%22%20stroke=%22%23a8905f%22%20stroke-width=%220.7%22%20opacity=%220.65%22/%3E%3C/svg%3E") 9 2, pointer;
+}
+
+/* text */
+:root[data-theme="bamboo-ancient"][data-cursor="bamboo"] input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]):not([type="submit"]):not([type="button"]),
+:root[data-theme="bamboo-ancient"][data-cursor="bamboo"] textarea,
+:root[data-theme="bamboo-ancient"][data-cursor="bamboo"] [contenteditable="true"] {
+  cursor: url("data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22%20width=%2212%22%20height=%2230%22%20viewBox=%220%200%2012%2030%22%3E%3Crect%20x=%223%22%20y=%222%22%20width=%226%22%20height=%2226%22%20rx=%221.4%22%20fill=%22%23d9c9a3%22%20stroke=%22%231a1208%22%20stroke-width=%221.2%22/%3E%3Cpath%20d=%22M3%209%20L9%209%20M3%2021%20L9%2021%22%20stroke=%22%238a6f45%22%20stroke-width=%221.6%22/%3E%3Cpath%20d=%22M6%203.5%20L6%2026.5%22%20stroke=%22%23a8905f%22%20stroke-width=%220.7%22%20opacity=%220.7%22/%3E%3C/svg%3E") 6 15, text;
+}

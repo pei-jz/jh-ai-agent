@@ -12,6 +12,22 @@
       try {
         if (localStorage.getItem('jhai_theme') !== 'dark') document.documentElement.dataset.theme = 'light';
       } catch (e) { document.documentElement.dataset.theme = 'light'; }
+
+      // Turn on the bamboo theme's cursors. Set HERE rather than in main.js
+      // because a cursor that arrives after first paint visibly swaps under the
+      // pointer. cursors.css also requires data-theme="bamboo-ancient", so this
+      // attribute is inert under every other theme and can always be set.
+      // '' means "leave the system cursors alone".
+      try {
+        // Validated against the sets cursors.css actually defines. A stale or
+        // hand-edited value would otherwise set an attribute that matches no
+        // rule, and the theme would silently show system cursors with nothing
+        // to indicate why. '' is the one legitimate way to ask for that.
+        var SETS = ['bamboo', ''];
+        var cs = localStorage.getItem('jhai_cursor');
+        if (SETS.indexOf(cs) === -1) cs = 'bamboo';
+        if (cs) document.documentElement.dataset.cursor = cs;
+      } catch (e) { document.documentElement.dataset.cursor = 'bamboo'; }
     </script>
 
     <!-- Google Fonts: Inter -->
@@ -24,6 +40,8 @@
 
     <!-- Dashboard Styles -->
     <link rel="stylesheet" href="./styles/dashboard.css" />
+    <!-- Pointers for the bamboo-slip theme; inert under the other themes. -->
+    <link rel="stylesheet" href="./styles/cursors.css" />
   </head>
 
   <body>

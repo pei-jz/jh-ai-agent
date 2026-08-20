@@ -75,6 +75,20 @@ export async function handleMoveFile(ctx, args, onConfirm, onAgentStatus) {
 
 /** run_command — always-gated shell execution with live streaming + timeout. */
 export async function handleRunCommand(ctx, args, onConfirm, onAgentStatus) {
+    // A call with no command must FAIL, not prompt.
+    //
+    // Without this the missing value flowed straight into the approval dialog,
+    // which asked the user to approve "AI wants to run this terminal command:
+    // undefined" over an empty code block. That happens when the model's tool
+    // call is cut off mid-generation — it hits the output-token cap — so the
+    // error names that cause: the model can only recover by retrying smaller,
+    // and "denied" would send it looking for a permission problem instead.
+    const command = typeof args?.command === 'string' ? args.command.trim() : '';
+    if (!command) {
+        return "Error: run_command requires a 'command' string, and none arrived. "
+            + 'If this call was long, it was probably truncated at the output limit — '
+            + 'reissue it with a shorter command, or write the content with write_file instead.';
+    }
     // Arbitrary shell execution is ALWAYS gated — EXCEPT for commands the user
     // explicitly added to the "always allow" whitelist via the approval dialog.
     // Fail-closed: if no approval channel is wired (e.g. a headless caller) and

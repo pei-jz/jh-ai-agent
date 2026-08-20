@@ -8,7 +8,7 @@
 // directory cascade (it was a DOM walk), and validation that names the problem.
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { render, cleanup } from '@testing-library/svelte';
+import { render, cleanup, waitFor } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import TemplatesTab from '../TemplatesTab.svelte';
 import SkillsTab from '../SkillsTab.svelte';
@@ -24,6 +24,8 @@ __setLocaleForTest('en');
 afterEach(() => cleanup());
 
 const mount = (Comp, props = {}) => render(Comp, { props }).container;
+/** Mount and keep the handle, so props can be pushed the way a click does. */
+const mountLive = (Comp, props = {}) => render(Comp, { props });
 const type = (el, v) => { el.value = v; el.dispatchEvent(new Event('input', { bubbles: true })); };
 
 describe('TemplatesTab', () => {
@@ -550,5 +552,68 @@ describe('MemoryTab — orientation note', () => {
     it('shows nothing before a study has written one', () => {
         const el = mount(MemoryTab, { workspace: 'C:/ws', overview: { text: '', generatedAt: '' } });
         expect(el.querySelector('.cfg-mem-ov')).toBe(null);
+    });
+});
+
+// Reported: clicking Edit always showed a blank New form.
+//
+// These tabs are the tab BODY — mounted once and kept — while ConnectionModal,
+// whose "seed the form once" pattern they copied, lives inside an `{#if}` and is
+// mounted fresh on every open. Seeding at mount here captured `editing` while it
+// was still null, so the fields stayed empty no matter which row was clicked.
+describe('the edit form is filled from the row that was clicked', () => {
+    const tpl = { key: 'backlog', label: 'Backlog', prompt: 'Register this task', icon: '📝' };
+    const other = { key: 'wiki', label: 'Wiki search', prompt: 'Search the wiki', icon: '🔎' };
+
+    it('fills the template form when Edit opens it', async () => {
+        const h = mountLive(TemplatesTab, { templates: [tpl], editing: null, showForm: false });
+        await h.rerender({ templates: [tpl], editing: tpl, showForm: true });
+        await waitFor(() => expect(h.container.querySelector('#tpl-key').value).toBe('backlog'));
+        expect(h.container.querySelector('#tpl-label').value).toBe('Backlog');
+        expect(h.container.querySelector('#tpl-prompt').value).toBe('Register this task');
+    });
+
+    it('swaps the values when a DIFFERENT row is edited', async () => {
+        const h = mountLive(TemplatesTab, { templates: [tpl, other], editing: tpl, showForm: true });
+        await waitFor(() => expect(h.container.querySelector('#tpl-key').value).toBe('backlog'));
+        await h.rerender({ templates: [tpl, other], editing: other, showForm: true });
+        await waitFor(() => expect(h.container.querySelector('#tpl-key').value).toBe('wiki'));
+    });
+
+    it('opens EMPTY for a new template after an edit', async () => {
+        const h = mountLive(TemplatesTab, { templates: [tpl], editing: tpl, showForm: true });
+        await waitFor(() => expect(h.container.querySelector('#tpl-key').value).toBe('backlog'));
+        await h.rerender({ templates: [tpl], editing: null, showForm: true });
+        await waitFor(() => expect(h.container.querySelector('#tpl-key').value).toBe(''));
+    });
+
+    // A $derived would do this on every keystroke, which is why the form is
+    // seeded rather than bound.
+    it('does not throw away what is being typed', async () => {
+        const h = mountLive(TemplatesTab, { templates: [tpl], editing: tpl, showForm: true });
+        await waitFor(() => expect(h.container.querySelector('#tpl-label').value).toBe('Backlog'));
+        type(h.container.querySelector('#tpl-label'), 'Backlog (edited)');
+        // The parent re-pushes props for unrelated reasons all the time.
+        await h.rerender({ templates: [tpl], editing: tpl, showForm: true });
+        await waitFor(() => expect(h.container.querySelector('#tpl-label').value).toBe('Backlog (edited)'));
+    });
+
+    it('fills the skill form when Edit opens it', async () => {
+        const skill = { name: 'triage', title: 'Triage', description: '', dir: '', files: [] };
+        const h = mountLive(SkillsTab, { skills: [skill], editing: null, showForm: false });
+        await h.rerender({
+            skills: [skill], editing: { name: 'triage', content: '# Triage\nSort issues.' }, showForm: true,
+        });
+        await waitFor(() => expect(h.container.querySelector('#skill-content').value).toContain('Sort issues.'));
+    });
+
+    it('opens the skill form empty for a new one', async () => {
+        const skill = { name: 'triage', title: 'Triage', description: '', dir: '', files: [] };
+        const h = mountLive(SkillsTab, {
+            skills: [skill], editing: { name: 'triage', content: 'OLD' }, showForm: true,
+        });
+        await waitFor(() => expect(h.container.querySelector('#skill-content').value).toBe('OLD'));
+        await h.rerender({ skills: [skill], editing: null, showForm: true });
+        await waitFor(() => expect(h.container.querySelector('#skill-content').value).toBe(''));
     });
 });
