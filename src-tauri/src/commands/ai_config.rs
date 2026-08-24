@@ -194,6 +194,12 @@ pub struct AiConfig {
     #[serde(default)]
     pub phase_routing: Option<String>,
 
+    /// Inject the extracted per-file-kind procedure (Step 6): "off" | "on".
+    /// None => frontend default ("off"). Off because its precondition — a
+    /// positive follow-through lift — is not met yet; see memory/Playbook.js.
+    #[serde(default)]
+    pub playbook: Option<String>,
+
     /// Inject summaries of PAST SESSIONS into the system prompt: "off" | "on".
     /// None => frontend default ("off"). The knob existed in ConversationMemory
     /// with no caller, so the heaviest memory layer was not adjustable at all.
@@ -397,6 +403,7 @@ pub async fn get_ai_config<R: tauri::Runtime>(
             subagent_review: None,
             memory_recall: None,
             phase_routing: None,
+            playbook: None,
             episode_injection: None,
         });
     }
@@ -547,6 +554,9 @@ pub async fn save_ai_config<R: tauri::Runtime>(
                 if final_config.phase_routing.is_none() {
                     final_config.phase_routing = old_config.phase_routing.clone();
                 }
+                if final_config.playbook.is_none() {
+                    final_config.playbook = old_config.playbook.clone();
+                }
                 if final_config.memory_recall.is_none() {
                     final_config.memory_recall = old_config.memory_recall;
                 }
@@ -622,6 +632,7 @@ pub async fn set_rag_approval<R: tauri::Runtime>(
             subagent_review: None,
             memory_recall: None,
             phase_routing: None,
+            playbook: None,
             episode_injection: None,
         }
     };

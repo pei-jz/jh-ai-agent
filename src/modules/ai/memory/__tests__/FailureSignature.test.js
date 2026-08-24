@@ -6,7 +6,7 @@
 import { describe, it, expect } from 'vitest';
 import {
     redact, errorKind, extractLoc, normalizeMessage, normalizeError,
-    signatureOf, extOf, targetOf, argShapeOf, fingerprint,
+    signatureOf, extOf, targetOf, argShapeOf, fingerprint, relativeTarget,
     SECRET_PATTERNS, ERROR_KINDS,
 } from '../FailureSignature.js';
 
@@ -163,6 +163,44 @@ describe('extOf / targetOf / argShapeOf', () => {
     it('describes argument SHAPE, never values', () => {
         expect(argShapeOf({ path: 'secret/path', anchor: 'x' })).toBe('anchor,path');
         expect(argShapeOf({ path: 'p', unused: null })).toBe('path');
+    });
+});
+
+// The same file arrives named three ways, because a tool call carries whatever
+// the model happened to write. Stored raw, the store grows one card per spelling
+// — measured on the real store, 18 files existed under two or three names.
+describe('relativeTarget', () => {
+    it('gives one spelling to every way of naming the same file', () => {
+        for (const p of ['C:/ws/src/a.js', 'C:\\ws\\src\\a.js', 'src/a.js', 'src\\a.js']) {
+            expect(relativeTarget(p, 'C:/ws')).toBe('src/a.js');
+        }
+    });
+
+    it('matches the workspace case-insensitively, as Windows does', () => {
+        expect(relativeTarget('c:\\WS\\src\\a.js', 'C:/ws')).toBe('src/a.js');
+    });
+
+    it('preserves the file\'s OWN casing — it still has to be openable', () => {
+        expect(relativeTarget('C:/ws/src/MemoryTab.svelte', 'C:/ws')).toBe('src/MemoryTab.svelte');
+    });
+
+    it('leaves a path outside the workspace absolute rather than mangling it', () => {
+        expect(relativeTarget('D:/other/x.js', 'C:/ws')).toBe('D:/other/x.js');
+    });
+
+    it('tolerates a trailing separator on the workspace', () => {
+        expect(relativeTarget('C:/ws/src/a.js', 'C:/ws/')).toBe('src/a.js');
+    });
+
+    it('is a no-op without a workspace, and survives junk', () => {
+        expect(relativeTarget('C:/ws/src/a.js')).toBe('C:/ws/src/a.js');
+        expect(relativeTarget(null, 'C:/ws')).toBe('');
+        expect(relativeTarget('src/a.js', null)).toBe('src/a.js');
+    });
+
+    it('does not treat a same-prefixed sibling as inside the workspace', () => {
+        // "C:/ws2/..." starts with "C:/ws" as a STRING but is a different folder.
+        expect(relativeTarget('C:/ws2/src/a.js', 'C:/ws')).toBe('C:/ws2/src/a.js');
     });
 });
 

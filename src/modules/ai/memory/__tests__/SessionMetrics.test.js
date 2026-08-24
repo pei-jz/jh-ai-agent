@@ -189,6 +189,42 @@ describe('compareArms', () => {
         expect(compareArms([]).comparable).toBe(false);
         expect(compareArms(null).on.runs).toBe(0);
     });
+
+    // Rewording the injection starts a new experiment. Pooling the generations
+    // would report the mean of two different treatments as the result of one —
+    // and would do it silently, which is the worst version of that mistake.
+    describe('wording generations', () => {
+        const mixed = [
+            row({ recall: 'on', iterations: 30, injectionVariant: 'v1' }),
+            row({ recall: 'off', iterations: 30, injectionVariant: 'v1' }),
+            row({ recall: 'on', iterations: 10, injectionVariant: 'v2-do-lines' }),
+            row({ recall: 'off', iterations: 20, injectionVariant: 'v2-do-lines' }),
+        ];
+
+        it('compares only within the requested generation', () => {
+            const out = compareArms(mixed, { variant: 'v2-do-lines' });
+            expect(out.on.iterations).toBe(10);
+            expect(out.off.iterations).toBe(20);
+            expect(out.delta.iterations).toBe(-10);
+        });
+
+        it('reports how many rows it set aside, so 0 runs is not read as a bug', () => {
+            expect(compareArms(mixed, { variant: 'v2-do-lines' }).skipped).toBe(2);
+            expect(compareArms(mixed, { variant: 'v3' }).skipped).toBe(4);
+            expect(compareArms(mixed, { variant: 'v3' }).comparable).toBe(false);
+        });
+
+        it('treats rows written before the field existed as the first generation', () => {
+            const out = compareArms([row({ recall: 'on' }), row({ recall: 'off' })], { variant: 'v1' });
+            expect(out.skipped).toBe(0);
+            expect(out.comparable).toBe(true);
+        });
+
+        it('pools everything when no generation is named', () => {
+            expect(compareArms(mixed).on.runs).toBe(2);
+            expect(compareArms(mixed).skipped).toBe(0);
+        });
+    });
 });
 
 describe('runsNeeded', () => {

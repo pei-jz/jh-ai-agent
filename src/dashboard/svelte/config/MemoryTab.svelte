@@ -166,13 +166,22 @@
                  only place they are read. Progress toward a readable answer is
                  shown alongside the numbers because for most of the collection
                  period the numbers should NOT be acted on. -->
-            {#if abStats?.rows}
+            {#if abStats}
                 <div class="cfg-mem-ab">
                     <div class="cfg-mem-cov-h">
                         {t('memory.ab.arms', {
                             rows: abStats.rows, on: abStats.on?.runs || 0, off: abStats.off?.runs || 0,
                         })}
                     </div>
+                    <!-- Rows measured under earlier wording. Shown rather than
+                         silently dropped: "0 runs" with no explanation reads as
+                         a bug, and the set-aside runs are the reason the count
+                         restarted. -->
+                    {#if abStats.skipped}
+                        <div class="cfg-mem-summary">
+                            {t('memory.ab.variantReset', { skipped: abStats.skipped, variant: abStats.variant })}
+                        </div>
+                    {/if}
                     {#if abProgress()}
                         <div class="cfg-mem-cov-row">
                             <span class="d">{t('memory.ab.progress')}</span>

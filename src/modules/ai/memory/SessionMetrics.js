@@ -24,7 +24,7 @@
  * is not the moment exploration ended, and counting it as one would make
  * "explored, then ran the tests, then explored more" look like a short run.
  */
-const EDIT_TOOLS = new Set([
+export const EDIT_TOOLS = new Set([
     'write_file', 'multi_replace_file_content', 'replace_lines', 'apply_patch',
     'delete_file', 'move_file', 'write_xlsx', 'update_xlsx', 'write_docx',
 ]);
@@ -124,6 +124,7 @@ export function followThrough(events, shownLog) {
 export function sessionMetrics({
     events = [], shownLog = [], iterations = 0, recall = 'on',
     memoryChars = 0, sessionId = '', date = '', failures = [],
+    injectionVariant = '',
 } = {}) {
     const ft = followThrough(events, shownLog);
     return {
@@ -131,6 +132,10 @@ export function sessionMetrics({
         date: date || new Date().toISOString().split('T')[0],
         // The arm this run belongs to. Without it the rows cannot be compared.
         recall,
+        // Which generation of the injected wording this run saw. Rows written
+        // before variants existed carry '' and are treated as v1 — see
+        // CardStore.INJECTION_VARIANT for why they must not be pooled.
+        injectionVariant,
         iterations,
         toolCalls: events.length,
         failures: failures.length,
@@ -163,8 +168,15 @@ const mean = (rows, key) => {
  * arms have rows: an A/B with one arm is not a result, and reporting it as one
  * is how a memory layer gets declared a success without evidence.
  */
-export function compareArms(rows) {
-    const all = Array.isArray(rows) ? rows : [];
+export function compareArms(rows, { variant = null } = {}) {
+    let all = Array.isArray(rows) ? rows : [];
+    // Comparing across wording generations would average a fixed injection with
+    // the one it replaced, so a variant filter is a precondition of the answer,
+    // not a refinement of it. Rows predating the field are the first generation.
+    const generationOf = (r) => r.injectionVariant || 'v1';
+    const skipped = variant ? all.filter(r => generationOf(r) !== variant).length : 0;
+    if (variant) all = all.filter(r => generationOf(r) === variant);
+
     const on = all.filter(r => r.recall !== 'off');
     const off = all.filter(r => r.recall === 'off');
     const KEYS = ['iterations', 'toolCalls', 'explorationCost', 'reReads', 'failures'];
@@ -212,6 +224,9 @@ export function compareArms(rows) {
         },
         /** Both arms need rows before any delta means anything. */
         comparable: on.length > 0 && off.length > 0,
+        /** Rows excluded because they were measured under other wording. */
+        variant,
+        skipped,
     };
 }
 

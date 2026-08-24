@@ -478,10 +478,41 @@ describe('spend', () => {
         expect(h.container.querySelector('.ds-v').textContent).toBe('$3.00');
     });
 
-    it('is absent entirely when nothing has been spent', async () => {
+    it('says why it is empty instead of vanishing', async () => {
+        // It used to render NOTHING here. That was deliberate — empty sections
+        // were removed in the dashboard redesign — but it makes "nothing was
+        // spent" and "this panel is broken" look identical from the outside,
+        // and the bug report that prompted this was exactly that ambiguity:
+        // "the stats at the bottom left have disappeared." Staying on screen
+        // with a reason costs one line and answers the question in a glance.
         const h = mountRoot({ tasks: [task({ token_usage: {}, model_usage: {} })] });
-        await settle();
-        expect(h.container.querySelector('.ds')).toBeFalsy();
+        // Wait for the QUEUE to show the task. The panel is on screen from first
+        // paint now, so waiting for `.ds` would assert against the pre-load
+        // state — which says "no tasks in this window" for every fixture and
+        // would pass whatever the loaded panel did.
+        await waitFor(() => expect(h.container.querySelector('.dqi')).toBeTruthy());
+        expect(h.container.querySelector('.ds-v').textContent).toBe('$0');
+        expect(h.container.querySelector('.ds-tip').textContent)
+            .toMatch(/トークン使用量を記録していません/);
+        // The table is what is absent — not the panel.
+        expect(h.container.querySelector('.ds-tbl')).toBeFalsy();
+    });
+
+    it('distinguishes an empty window from tasks that reported no usage', async () => {
+        // Different problems, different fixes: one is solved by widening the
+        // range picker, the other is not solved by anything the user can do here.
+        const stale = new Date(NOW - 40 * 86400000).toISOString();
+        const h = mountRoot({ tasks: [task({ started_at: stale, completed_at: stale })] });
+        await waitFor(() => expect(h.container.querySelector('.dqi')).toBeTruthy());
+        expect(h.container.querySelector('.ds-tip').textContent).toMatch(/実行されたタスクはありません/);
+    });
+
+    it('leaves the range picker usable while empty', async () => {
+        // The likeliest fix for an empty window is right here, so removing it
+        // along with the table would strand the user.
+        const h = mountRoot({ tasks: [task({ token_usage: {}, model_usage: {} })] });
+        await waitFor(() => expect(h.container.querySelector('.dqi')).toBeTruthy());
+        expect(h.container.querySelectorAll('.ds-range-btn')).toHaveLength(3);
     });
 
     it('persists the window pick', async () => {
@@ -489,7 +520,12 @@ describe('spend', () => {
             tasks: [task({ model_usage: { 'i2:k3': { prompt_tokens: 1_000_000 } } })],
             config: { llm_instances: RATED },
         });
-        await waitFor(() => expect(h.container.querySelector('.ds-range-btn')).toBeTruthy());
+        // Wait for the TABLE, not for a range button. The panel now stays on
+        // screen while empty, so a button exists before the task list has
+        // loaded — and clicking it then hits a node that the empty→loaded swap
+        // immediately detaches, so Svelte's delegated handler never fires and
+        // the click silently does nothing.
+        await waitFor(() => expect(h.container.querySelector('.ds-tbl')).toBeTruthy());
         await fireEvent.click([...h.container.querySelectorAll('.ds-range-btn')].find(b => b.textContent === '30d'));
         expect(localStorage.getItem('jhai_dash_spend_range')).toBe('30d');
     });

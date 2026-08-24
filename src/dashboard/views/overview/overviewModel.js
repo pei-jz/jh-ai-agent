@@ -204,6 +204,11 @@ export function metricsOf(tasks, { spendRange = '7d', rateFor, flatRate = 0, now
         running, paused, freshFailures,
         staleFailures: failures.length - freshFailures.length,
         recent, successRate, done7, rangeDays,
+        // How many tasks the spend window actually covers. Without it, an empty
+        // breakdown cannot say WHY it is empty — "nothing ran in this window" and
+        // "things ran but reported no usage" are different problems with
+        // different fixes, and a panel that just disappears says neither.
+        rangeTasks: inRange.length,
         spend: rateFor ? spendOf(inRange, { rateFor, flatRate }) : { total: 0, rows: [], unpriced: 0, tokens: 0 },
     };
 }

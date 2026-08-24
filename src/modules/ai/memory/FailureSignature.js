@@ -145,6 +145,28 @@ export function extOf(path) {
 }
 
 /**
+ * One spelling per file: workspace-relative, forward slashes.
+ *
+ * Tool calls name files however the model happened to write them, so the same
+ * file arrives as `src/a.js`, `C:/ws/src/a.js` and `C:\ws\src\a.js`. Stored raw,
+ * those became THREE cards for one location — measured on the real store: 85 of
+ * 131 locator cards held an absolute path, and 18 files existed under two or
+ * three spellings, each consuming a slot in a three-slot brief.
+ *
+ * Also makes the store portable: a card keyed on `C:\cusor_workspace\...` is
+ * dead the moment the workspace moves.
+ *
+ * Comparison is case-insensitive because Windows paths are, but the ORIGINAL
+ * casing is preserved — `MemoryTab.svelte` has to stay openable.
+ */
+export function relativeTarget(target, root = '') {
+    const p = String(target ?? '').split('\\').join('/');
+    const r = String(root ?? '').split('\\').join('/').replace(/\/+$/, '');
+    if (!r || !p) return p;
+    return p.toLowerCase().startsWith(`${r.toLowerCase()}/`) ? p.slice(r.length + 1) : p;
+}
+
+/**
  * The failure key: which tool, what kind of error, on what type of file.
  * Readable on purpose (see the header note on hashing).
  * @param {{tool?: string, kind?: string, ext?: string}} parts

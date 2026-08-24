@@ -162,6 +162,10 @@ export const ja = {
     'settings.memoryRecall.auto': '自動 — オンだが半数の実行を対照群として除外し効果を測定',
     'settings.memoryRecall.off': 'オフ — 学習はするが想起しない（対照群）',
     'settings.memoryRecall.hint': 'このワークスペースの過去の実行から得た教訓・知見をエージェントに見せるかどうかを決めます（設定 → Memory → Experience）。<strong>どのモードでも学習自体は続きます</strong>——止まるのは想起だけなので、「オフ」の実行もデータには寄与します。メモリが実際に効いているか知りたい場合は<strong>自動</strong>を選んでください。実行ごとにランダムに群が割り当てられ、比較の元になる1行が <code>.agent/trace/metrics.jsonl</code> に記録されます。<strong>自動では約半数の実行でメモリが使われません</strong>——これが答えを得るための代償で、必要な実行数が約900回ではなく約180回で済む理由です。この代償があるため自動はオプトインです。数値が必要でなければ<strong>オン</strong>のままにしてください。',
+    'settings.playbook': 'タスク手順書（実験的）',
+    'settings.playbook.off': 'オフ — 抽出した手順を注入しない（既定）',
+    'settings.playbook.on': 'オン — その種類のファイルでの進め方を提示する',
+    'settings.playbook.hint': '同じ種類のファイルを扱った成功実行の共通手順を抽出し（例: Rustの変更は 読む→編集→ビルド→再読 の順）、その種類に言及したタスクの冒頭で提示します。<strong>既定はオフですが、未完成だからではありません。</strong>ツールの順序という形の助言は、現時点では何も見せない場合と同程度にしか従われていないと測定結果が示しています（設定 → Memory）。つまり有効にしてもトークンが増えるだけで何も変わらない可能性が高い。さらに、注入内容に対する3つ目の同時変更となり、進行中の比較が読めなくなります。その比較に答えが出てから有効にする価値があります。',
 
     'settings.routing.unset': '（未設定 — アクティブなモデルを使う）',
     'settings.routing.fast': 'モデルルーティング — Fast tier',
@@ -287,6 +291,7 @@ export const ja = {
     'memory.index.summary': '索引: {files} ファイル · シンボル {symbols} · 依存 {edges}',
     'memory.index.guessHint': '行の無い領域はエージェントが推測で答える領域です — 結果を信じる前に検証することをおすすめします。',
     'memory.ab.arms': '効果測定: 記録済み {rows} 実行 · 想起あり {on} / 対照 {off}',
+    'memory.ab.variantReset': '過去 {skipped} 実行は集計から除外しています。注入文面が異なる状態で測定されたもので、混ぜると別々の実験の平均を出すことになるためです。{variant} から数え直します。',
     'memory.ab.progress': '群あたりの実行数',
     'memory.ab.need': '探索コストは平均 {mean} ステップ、ばらつきは ±{sd} です。このため 25% の改善をノイズと区別するには各群およそ {perArm} 実行が必要になります。数字が大きいのはこのばらつきが理由です。',
     'memory.ab.exploration': '探索コスト（想起 / 対照）',
