@@ -56,8 +56,21 @@ class TaskBridge {
             console.log("TaskBridge: Received confirm-response event:", confirmId, approved, always ? '(always)' : '');
 
             const promise = this.pendingConfirmations.get(confirmId);
+            if (!promise) {
+                // Answering something already settled. Not an error — a stale
+                // approval card is easy to click twice — but it must not be
+                // swallowed in silence: the card that produced this click looked
+                // live, and the user is owed the knowledge that it was not.
+                console.warn('TaskBridge: confirm-response for an unknown or already-settled confirmation:', confirmId);
+                return;
+            }
             if (promise) {
                 this.pendingConfirmations.delete(confirmId);
+                // Tell every view the question is closed. Without this the only
+                // evidence was circumstantial — "did work happen afterwards?" —
+                // which the Story guessed at and the Raw Log never checked, so an
+                // approved card stayed clickable there for the life of the task.
+                this.emitTaskEvent(promise.taskId, 'confirm_resolved', { confirmId, approved: !!approved });
                 if (approved) {
                     // "Always allow" → resolve with an object carrying the flag so the
                     // run_command handler can persist the command to the whitelist.
@@ -235,7 +248,9 @@ class TaskBridge {
                 async (confirmData) => {
                     return new Promise((resolve, reject) => {
                         const confirmId = `conf_${Date.now()}_${Math.random().toString(36).substring(4)}`;
-                        this.pendingConfirmations.set(confirmId, { resolve, reject });
+                        // taskId is kept so aborting a run can settle whatever it
+                        // was parked on — see abortAgentTask.
+                        this.pendingConfirmations.set(confirmId, { resolve, reject, taskId });
                         
                         this.emitTaskEvent(taskId, 'confirm_request', {
                             confirmId,
@@ -275,7 +290,35 @@ class TaskBridge {
                 terminal: true
             });
         } finally {
+            // A run can also end while an approval is outstanding — an abort
+            // signal caught elsewhere in the loop, or a throw. Leaving the entry
+            // behind would keep a dead task's dialog live in the registry.
+            this._settlePendingConfirmations(taskId);
             this.activeAgents.delete(taskId);
+        }
+    }
+
+    /**
+     * Settle anything this task is parked on, so Stop actually stops it.
+     *
+     * A pending approval is a bare Promise with no timeout and no abort wiring:
+     * the only thing that ever settles it is a `confirm-response` carrying its
+     * exact confirmId. So a run waiting on "may I run this command?" was sitting
+     * inside `await onConfirm(...)`, never reaching the loop's next abort check
+     * — Stop marked the task aborted in the UI while the agent stayed stuck on
+     * the question forever, and the entry leaked.
+     *
+     * Resolved false rather than rejected: every handler already reads false as
+     * "the user said no" and returns a clean `Error: User Denied`, which lets the
+     * loop unwind normally and see the abort signal. A rejection would surface as
+     * a tool crash for something the user deliberately did.
+     */
+    _settlePendingConfirmations(taskId) {
+        for (const [id, entry] of [...this.pendingConfirmations]) {
+            if (entry?.taskId !== taskId) continue;
+            this.pendingConfirmations.delete(id);
+            this.emitTaskEvent(taskId, 'confirm_resolved', { confirmId: id, approved: false });
+            try { entry.resolve(false); } catch (_) { /* already settled */ }
         }
     }
 
@@ -284,6 +327,7 @@ class TaskBridge {
         const agent = this.activeAgents.get(taskId);
         if (agent) {
             agent.abortController.abort();
+            this._settlePendingConfirmations(taskId);
             this.activeAgents.delete(taskId);
             this.emitTaskEvent(taskId, 'status', { status: 'aborted', message: 'Task aborted by user.' });
             return;

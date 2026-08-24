@@ -157,6 +157,10 @@ export const en = {
     'settings.playbook.off': 'Off — do not inject extracted procedures (default)',
     'settings.playbook.on': 'On — show how this kind of file has been worked on here',
     'settings.playbook.hint': 'Extracts the procedure that several successful runs on the same kind of file had in common — for example that Rust changes here go read → edit → build → re-read — and shows it at the start of a task that names that file kind. <strong>Off by default, and not because it is unfinished.</strong> The measurement says advice shaped as a tool ordering is currently followed no more often than it would be with nothing shown at all (Settings → Memory), so this would most likely add tokens and change nothing. It is also a third simultaneous change to what gets injected, which would make the comparison in flight unreadable. Worth turning on once that comparison has an answer.',
+    'settings.readBatchHint': 'Read-batching nudge (experimental)',
+    'settings.readBatchHint.off': 'Off — say nothing (default)',
+    'settings.readBatchHint.on': 'On — point out a run of one-file-at-a-time reads',
+    'settings.readBatchHint.hint': '<code>read_file</code> can take several files in one call, and the agent mostly does not use that. Measured over 93 real runs here: <strong>930 single reads against 58 batched ones</strong>, and <strong>52% of the single reads sat inside a burst that one batched call could have replaced</strong> (the longest was 17 in a row). That waste lands straight on exploration cost and step count. When on, the agent is told once per run after three consecutive single reads. <strong>Off by default only because of the measurement in flight</strong> — it would be a fourth injected text and would make the current comparison unattributable (Settings → Memory). Worth turning on once that has an answer.',
 
     'settings.routing.unset': '(not set — use the active model)',
     'settings.routing.fast': 'Model routing — Fast tier',
