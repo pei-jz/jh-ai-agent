@@ -56,8 +56,21 @@ class TaskBridge {
             console.log("TaskBridge: Received confirm-response event:", confirmId, approved, always ? '(always)' : '');
 
             const promise = this.pendingConfirmations.get(confirmId);
+            if (!promise) {
+                // Answering something already settled. Not an error — a stale
+                // approval card is easy to click twice — but it must not be
+                // swallowed in silence: the card that produced this click looked
+                // live, and the user is owed the knowledge that it was not.
+                console.warn('TaskBridge: confirm-response for an unknown or already-settled confirmation:', confirmId);
+                return;
+            }
             if (promise) {
                 this.pendingConfirmations.delete(confirmId);
+                // Tell every view the question is closed. Without this the only
+                // evidence was circumstantial — "did work happen afterwards?" —
+                // which the Story guessed at and the Raw Log never checked, so an
+                // approved card stayed clickable there for the life of the task.
+                this.emitTaskEvent(promise.taskId, 'confirm_resolved', { confirmId, approved: !!approved });
                 if (approved) {
                     // "Always allow" → resolve with an object carrying the flag so the
                     // run_command handler can persist the command to the whitelist.
@@ -304,6 +317,7 @@ class TaskBridge {
         for (const [id, entry] of [...this.pendingConfirmations]) {
             if (entry?.taskId !== taskId) continue;
             this.pendingConfirmations.delete(id);
+            this.emitTaskEvent(taskId, 'confirm_resolved', { confirmId: id, approved: false });
             try { entry.resolve(false); } catch (_) { /* already settled */ }
         }
     }

@@ -29,7 +29,7 @@ import { extractThoughtSummary, fmtThought, formatThoughtDetail, fmtTool, fmtFil
 // P4 monolith split: approval-card markup, token-usage aggregation and the
 // All-Logs step-grouping loop live in monitor/ pure modules; this file keeps
 // the view orchestration (DOM + WS + Svelte mounts).
-import { fmtConfirm, renderSimpleDiff, isWsAutoApprove, setWsAutoApprove } from './monitor/confirmCards.js';
+import { fmtConfirm, fmtConfirmResolved, resolvedConfirmIds, renderSimpleDiff, isWsAutoApprove, setWsAutoApprove } from './monitor/confirmCards.js';
 import { usageTotals as resolveUsageTotals } from './monitor/usageTotals.js';
 import { buildLogSteps, chatButtonHtml, requestDividerHtml } from './monitor/logs.js';
 // The task socket's GATE — replay discard, the timestamp fallback, token
@@ -471,6 +471,9 @@ export class MonitorView {
                 if (log.data?.method === 'REVIEW') return fmtReview(log.data);
                 return ''; // CHAT handled by renderAllLogs / connectWebSocket
             case 'confirm_request': return this._fmtConfirm(log.data);
+            // A marker, not a line: the outcome it carries is already shown by
+            // the request it closes, which renders as history once resolved.
+            case 'confirm_resolved': return '';
             default:                return `<div class="mlog mlog-status log-status"><span class="mlog-icon" style="opacity:0.5">·</span><span class="mlog-body">${escapeHtml(JSON.stringify(log.data).slice(0,120))}</span></div>`;
         }
     }
@@ -479,8 +482,36 @@ export class MonitorView {
     // now live in monitor/confirmCards.js (P4 split). The workspace + its
     // auto-approve state are resolved here (view state) and passed in.
     _fmtConfirm(data, idPrefix = 'confirm') {
+        // A settled approval renders as history, never as buttons. The Raw Log
+        // rendered this unconditionally, so an approved command came back as a
+        // live card every time the task was opened — and clicking it did nothing
+        // at all, because the bridge had long since dropped that confirmId.
+        // Meanwhile the run it belonged to was away doing the work.
+        if (data?.confirmId && this._resolvedConfirms().has(data.confirmId)) {
+            return fmtConfirmResolved(data, this._confirmOutcome(data.confirmId));
+        }
         const ws = this.tasks?.find(t => t.id === this.selectedTaskId)?.workspace_path || '';
         return fmtConfirm(data, idPrefix, isWsAutoApprove(ws), ws);
+    }
+
+    /**
+     * Settled approvals, recomputed only when the log actually changes.
+     * `formatLogLine` runs per entry, so scanning the whole log inside it would
+     * be quadratic on a long task.
+     */
+    _resolvedConfirms() {
+        if (this._resolvedConfirmsAt !== this._logVersion) {
+            this._resolvedConfirmsCache = resolvedConfirmIds(this.logs);
+            this._resolvedConfirmsAt = this._logVersion;
+        }
+        return this._resolvedConfirmsCache;
+    }
+
+    /** true = approved, false = denied, undefined = only inferred from later work. */
+    _confirmOutcome(confirmId) {
+        const row = [...(this.logs || [])].reverse()
+            .find(l => l?.event === 'confirm_resolved' && l.data?.confirmId === confirmId);
+        return row ? row.data.approved : undefined;
     }
 
     /** localStorage-backed per-workspace "auto-approve commands" set (shared with
@@ -638,16 +669,16 @@ export class MonitorView {
                 this._setSteerEnabled(true);
             }
         } else if (status === 'running') {
-            // A confirm_request with NO later activity is genuinely pending —
-            // re-surface the approval card. (One followed by further tool/log
-            // events was already answered; don't show a stale card.)
-            let lastConfirm = -1;
-            this.logs.forEach((l, i) => { if (l.event === 'confirm_request') lastConfirm = i; });
-            if (lastConfirm >= 0) {
-                const after = this.logs.slice(lastConfirm + 1);
-                const answered = after.some(l => l.event === 'tool_call' || l.event === 'log' || l.event === 'complete');
-                if (!answered) this._showTaskConfirm(this.logs[lastConfirm].data);
-            }
+            // Re-surface an approval the run is genuinely still waiting on.
+            // The same rule as the Story and the Raw Log — this used to be a
+            // third, weaker copy that judged only by "did work happen after?",
+            // which cannot see a refusal (nothing runs after one) and so would
+            // re-open a card for a question the user had already answered.
+            const settled = resolvedConfirmIds(this.logs);
+            const open = [...this.logs].reverse()
+                .find(l => l.event === 'confirm_request' && l.data?.confirmId
+                    && !settled.has(l.data.confirmId));
+            if (open) this._showTaskConfirm(open.data);
         }
     }
 

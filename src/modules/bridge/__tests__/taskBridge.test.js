@@ -229,6 +229,31 @@ describe('approval flow', () => {
         expect(taskBridge.pendingConfirmations.has('conf_t-abort')).toBe(false);
     });
 
+    it('announces the outcome so views can stop showing a live card', async () => {
+        // The only evidence a question was closed used to be circumstantial —
+        // "did work happen afterwards?" — which the Story guessed at and the Raw
+        // Log never checked, so an approved card stayed clickable for the life
+        // of the task. This event is what makes the answer knowable.
+        const held = park('t-ok');
+        emitted.length = 0;
+        listeners.get('confirm-response')({ payload: { confirmId: 'conf_t-ok', approved: true } });
+        await held.promise;
+
+        const ev = emitted.find(e => JSON.stringify(e.payload || {}).includes('confirm_resolved'));
+        expect(ev).toBeTruthy();
+        expect(JSON.stringify(ev.payload)).toContain('conf_t-ok');
+    });
+
+    it('does not silently swallow an answer to a settled approval', () => {
+        // Clicking a stale card is easy and used to do nothing at all: no
+        // resolution, no error, no trace. The user is owed the knowledge that
+        // the card they clicked was not live.
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        listeners.get('confirm-response')({ payload: { confirmId: 'conf_gone', approved: true } });
+        expect(warn).toHaveBeenCalled();
+        warn.mockRestore();
+    });
+
     it('leaves another task\'s pending approval alone', async () => {
         const mine = park('t-a');
         const theirs = park('t-b');

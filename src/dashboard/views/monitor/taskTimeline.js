@@ -28,6 +28,7 @@
 //   {kind:'error',       text}
 
 import { toolTarget, toolLineText } from './toolLine.js';
+import { resolvedConfirmIds } from './confirmCards.js';
 
 /**
  * The human-readable body of a present_result envelope.
@@ -624,6 +625,9 @@ function findLastIndex(arr, pred) {
 export function buildTimeline(logs, opts = {}) {
     const tl = new TaskTimeline({ maxLive: opts.maxLive });
     const seenRun = new Set();
+    // Settled approvals never become cards. The rule is shared with the Raw Log
+    // so the two surfaces cannot disagree about whether a question is still open.
+    const settled = resolvedConfirmIds(logs);
 
     for (const l of (Array.isArray(logs) ? logs : [])) {
         if (!l || typeof l !== 'object') continue;
@@ -672,7 +676,9 @@ export function buildTimeline(logs, opts = {}) {
             // calls _showTaskConfirm directly; this is the replay twin). The
             // real markup is rendered by the view via _fmtConfirm; here we only
             // carry the confirmId so the two surfaces stay consistent.
-            tl.pushConfirm(`<!--confirm:${d.confirmId}-->`, { confirmId: d.confirmId });
+            if (!settled.has(d.confirmId)) {
+                tl.pushConfirm(`<!--confirm:${d.confirmId}-->`, { confirmId: d.confirmId });
+            }
         }
 
         // The run RESUMED after a question — so the user answered it. (The answer
@@ -723,18 +729,12 @@ export function buildTimeline(logs, opts = {}) {
         }
     }
 
-    // A confirm_request that was followed by further work was ANSWERED (the agent
-    // cannot proceed past an approval without one). Keeping the card would show a
-    // resolved approval as still pending — the exact stale-card confusion. The
-    // same answered-check the live flush (_flushReplay) applies: only a trailing
-    // confirm_request with NO later tool/log/complete activity is genuinely
-    // pending and stays in the story.
-    const lastConfirm = findLastIndex(logs, l => l?.event === 'confirm_request');
-    if (lastConfirm >= 0) {
-        const after = logs.slice(lastConfirm + 1);
-        const answered = after.some(l => l?.event === 'tool_call' || l?.event === 'log' || l?.event === 'complete');
-        if (answered) tl.resolveConfirm();
-    }
+    // The answered-check that used to live here is now `resolvedConfirmIds`,
+    // applied at the point the card would be created (above) and shared with the
+    // Raw Log. Two reasons for moving it: the Raw Log had no such check at all
+    // and re-rendered settled approvals as live cards, and this version could
+    // only ever settle the LAST request — an approval denied at the end of a run
+    // has no later activity, so it stayed "pending" forever.
     return tl;
 }
 

@@ -1545,3 +1545,26 @@ describe('closeAsk', () => {
         expect(tl.items.find(i => i.kind === 'ask').answer).toBe('yes');
     });
 });
+
+// The Story and the Raw Log now share one rule for "is this approval still
+// open" (confirmCards.resolvedConfirmIds). They used to disagree: the Story
+// guessed from later activity and the Raw Log never checked at all.
+describe('buildTimeline — settled approvals', () => {
+    const req = (id) => ({ event: 'confirm_request', timestamp: 1, data: { confirmId: id, command: 'npm test' } });
+    const res = (id, approved) => ({ event: 'confirm_resolved', timestamp: 2, data: { confirmId: id, approved } });
+    const confirms = (logs) => buildTimeline(logs).items.filter(i => i.kind === 'confirm');
+
+    it('drops the card once the approval is granted', () => {
+        expect(confirms([req('c1'), res('c1', true)])).toHaveLength(0);
+    });
+
+    // Nothing runs after a refusal that ends the run, so the old "was there
+    // later activity?" test kept this card alive for the life of the task.
+    it('drops the card when the approval was REFUSED', () => {
+        expect(confirms([req('c1'), res('c1', false)])).toHaveLength(0);
+    });
+
+    it('keeps a card the run is genuinely still waiting on', () => {
+        expect(confirms([req('c1')])).toHaveLength(1);
+    });
+});
