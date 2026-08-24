@@ -537,6 +537,41 @@ describe('buildTimeline (replay)', () => {
     const ask = (text) => ({ event: 'status', data: { status: 'waiting', message: text } });
     const teardown = (message) => ({ event: 'status', data: { status: 'running', phase: 'teardown', message } });
 
+    // The Story is rebuilt from stored logs on completion and on reload, and the
+    // rebuild draws tool rows from TOOL telemetry ONLY — `tool_call` is a
+    // live-only event with no branch here. A call blocked by the user's
+    // permission settings emitted `tool_call` and nothing else, so it showed
+    // while the run was going and vanished the moment it finished: the one case
+    // where the user most needs to see what was attempted.
+    const toolLog = (name, request, status) => ({
+        event: 'log', timestamp: 1, data: { method: 'TOOL', name, request, status },
+    });
+    const rowsOf = (logs) => {
+        const s = buildTimeline(logs).snapshot();
+        return [...(s.live || []), ...(s.items || [])];
+    };
+
+    it('replays a call the permission settings blocked', () => {
+        const rows = rowsOf([
+            { event: 'tool_call', timestamp: 1, data: { name: 'run_command', args: { command: 'rm -rf build' }, status: 'denied' } },
+            toolLog('run_command', { command: 'rm -rf build' }, 500),
+        ]);
+        expect(rows.map(r => r.text).join('\n')).toContain('run_command');
+    });
+
+    // The telemetry carried `status: 500` and the line threw it away, so every
+    // replayed step wore a tick whether it had worked or not. The Overview feed
+    // had been reading that status all along — the same run therefore read as
+    // failed in one surface and clean in the other.
+    it('distinguishes a failed call from a successful one', () => {
+        const ok = rowsOf([toolLog('run_command', { command: 'npm test' }, 200)]);
+        const bad = rowsOf([toolLog('run_command', { command: 'npm test' }, 500)]);
+        expect(ok[0].type).toBe('tool');
+        expect(ok[0].text).toContain('✓');
+        expect(bad[0].type).toBe('error');
+        expect(bad[0].text).toContain('✗');
+    });
+
     it('keeps an open question when only teardown bookkeeping follows it', () => {
         const tl2 = buildTimeline([ask('この計画で進めてよいですか'), teardown('🧠 学習を記録: 7 件')]);
         const card = tl2.items.find(i => i.kind === 'ask');

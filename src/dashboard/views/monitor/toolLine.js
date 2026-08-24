@@ -59,9 +59,18 @@ export function toolTarget(name, req = {}) {
  * `prefix` carries a forwarded sub-agent marker so a child's work stays
  * attributable ("🤖 [sub:reviewer#1] ✓ run_command: cargo build").
  */
-export function toolLineText(name, req, { done = true, prefix = '' } = {}) {
+/**
+ * `ok: false` marks a call that ran and FAILED, or was blocked before it ran.
+ *
+ * Without it the only marks were ✓ (done) and ⚙ (running), so a replayed step
+ * carried a tick whether the tool had succeeded or errored — the telemetry knew
+ * (`status: 500`) and the line threw the distinction away. The Overview feed had
+ * been reading that status all along, so the same run read as failed in one
+ * surface and clean in the other.
+ */
+export function toolLineText(name, req, { done = true, prefix = '', ok = true } = {}) {
     const { tool, label } = toolTarget(name, req);
-    const mark = done ? '✓' : '⚙';
+    const mark = !ok ? '✗' : (done ? '✓' : '⚙');
     const head = `${prefix ? prefix + ' ' : ''}${mark} ${tool}`;
     return label ? `${head}: ${label}` : head;
 }

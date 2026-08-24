@@ -196,3 +196,49 @@ describe('concurrent tasks', () => {
         expect(ids.size).toBeLessThanOrEqual(1);
     });
 });
+
+// A pending approval is a bare Promise: no timeout, no abort wiring, settled
+// only by a `confirm-response` carrying its exact confirmId. So a run parked on
+// "may I run this command?" sat inside `await onConfirm(...)` and never reached
+// the loop's next abort check — Stop marked the task aborted in the UI while the
+// agent stayed stuck on the question, and the registry entry leaked.
+describe('approval flow', () => {
+    /** Park a fake confirmation for `taskId`, as onConfirm would. */
+    const park = (taskId) => {
+        let settled;
+        const p = new Promise((resolve, reject) => {
+            taskBridge.pendingConfirmations.set(`conf_${taskId}`, {
+                resolve: (v) => { settled = v; resolve(v); },
+                reject,
+                taskId,
+            });
+        });
+        return { promise: p, value: () => settled };
+    };
+
+    it('settles a pending approval when the task is aborted', async () => {
+        const held = park('t-abort');
+        taskBridge.activeAgents.set('t-abort', { controller: {}, abortController: { abort: () => {} } });
+
+        taskBridge.abortAgentTask('t-abort');
+        await held.promise;
+
+        // false, not a rejection: every handler already reads false as "the user
+        // said no" and returns a clean denial, letting the loop unwind.
+        expect(held.value()).toBe(false);
+        expect(taskBridge.pendingConfirmations.has('conf_t-abort')).toBe(false);
+    });
+
+    it('leaves another task\'s pending approval alone', async () => {
+        const mine = park('t-a');
+        const theirs = park('t-b');
+        taskBridge.activeAgents.set('t-a', { controller: {}, abortController: { abort: () => {} } });
+
+        taskBridge.abortAgentTask('t-a');
+        await mine.promise;
+
+        expect(taskBridge.pendingConfirmations.has('conf_t-b')).toBe(true);
+        expect(theirs.value()).toBeUndefined();
+        taskBridge.pendingConfirmations.clear();
+    });
+});
