@@ -153,6 +153,10 @@ export const en = {
     'settings.memoryRecall.auto': 'Auto — on, but hold back half of all runs to measure the effect',
     'settings.memoryRecall.off': 'Off — learn but never recall (control group)',
     'settings.memoryRecall.hint': 'Controls whether lessons and insights from earlier runs in this workspace are shown to the agent (Settings → Memory → Experience). <strong>The agent keeps learning in every mode</strong> — only recall is withheld — so an "off" run still contributes data. Pick <strong>Auto</strong> to find out whether memory is actually helping: each run is randomly assigned an arm and one row is written to <code>.agent/trace/metrics.jsonl</code>, which is what the comparison reads. <strong>Auto withholds memory from about half of your runs</strong> — that is the cost of getting an answer, and it is what makes ~180 runs enough instead of ~900. It is opt-in for that reason; leave this on <strong>On</strong> unless you want the number.',
+    'settings.playbook': 'Task playbooks (experimental)',
+    'settings.playbook.off': 'Off — do not inject extracted procedures (default)',
+    'settings.playbook.on': 'On — show how this kind of file has been worked on here',
+    'settings.playbook.hint': 'Extracts the procedure that several successful runs on the same kind of file had in common — for example that Rust changes here go read → edit → build → re-read — and shows it at the start of a task that names that file kind. <strong>Off by default, and not because it is unfinished.</strong> The measurement says advice shaped as a tool ordering is currently followed no more often than it would be with nothing shown at all (Settings → Memory), so this would most likely add tokens and change nothing. It is also a third simultaneous change to what gets injected, which would make the comparison in flight unreadable. Worth turning on once that comparison has an answer.',
 
     'settings.routing.unset': '(not set — use the active model)',
     'settings.routing.fast': 'Model routing — Fast tier',
@@ -278,6 +282,7 @@ export const en = {
     'memory.index.summary': 'Index: {files} files · {symbols} symbols · {edges} dependencies',
     'memory.index.guessHint': 'Areas with no rows are ones the agent answers by guessing — a good reason to trust a result only after verifying it.',
     'memory.ab.arms': 'Effect measurement: {rows} runs recorded · {on} with recall, {off} control',
+    'memory.ab.variantReset': '{skipped} earlier runs are set aside: they were measured with different injected wording, and pooling them would average two different experiments. Counting restarts at {variant}.',
     'memory.ab.progress': 'runs per arm',
     'memory.ab.need': 'Exploration cost averages {mean} steps with a spread of ±{sd}, so telling a 25% improvement from noise needs about {perArm} runs in EACH arm. That spread is why the number is this large.',
     'memory.ab.exploration': 'Exploration cost (recall / control)',

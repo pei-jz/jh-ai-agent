@@ -53,12 +53,26 @@ export const SAFETY_DEFAULTS = {
     // Off by default: it changes which model answers, and that is not a change
     // to make behind someone's back. See agent/ModelPhaseRouter.js.
     phaseRouting: 'off',
+    // 'off' | 'on' — inject the extracted per-file-kind procedure (Step 6).
+    //
+    // Off by default, and not because it is unfinished. Its own precondition is
+    // unmet: the plan gates Playbook on the follow-through LIFT being positive,
+    // and at 89 runs the lift is +3.8pt against a 50% base rate — i.e. nothing.
+    // Advice shaped as a tool ordering is currently not changing what the agent
+    // does, and a playbook is advice shaped as a tool ordering.
+    //
+    // Turning it on now would also confound the measurement in flight: the v2
+    // injection rework is being measured right now, and a third simultaneous
+    // change would make the result unattributable. Enable it as its own
+    // generation once v2 has an answer. See memory/Playbook.js.
+    playbook: 'off',
 };
 
 const PLAN_MODES = new Set(['off', 'auto', 'always']);
 const SUBAGENT_REVIEW_MODES = new Set(['off', 'on']);
 const MEMORY_RECALL_MODES = new Set(['off', 'on', 'auto']);
 const PHASE_ROUTING_MODES = new Set(['off', 'on']);
+const PLAYBOOK_MODES = new Set(['off', 'on']);
 const EPISODE_INJECTION_MODES = new Set(['off', 'on']);
 
 /**
@@ -142,6 +156,7 @@ export function normalizeSafetyLimits(cfg = {}) {
         escalateAtStep:           num(cfg.escalate_at_step,             d.escalateAtStep),
         memoryRecall: MEMORY_RECALL_MODES.has(cfg.memory_recall) ? cfg.memory_recall : d.memoryRecall,
         phaseRouting: PHASE_ROUTING_MODES.has(cfg.phase_routing) ? cfg.phase_routing : d.phaseRouting,
+        playbook: PLAYBOOK_MODES.has(cfg.playbook) ? cfg.playbook : d.playbook,
         episodeInjection: EPISODE_INJECTION_MODES.has(cfg.episode_injection) ? cfg.episode_injection : d.episodeInjection,
     };
 }

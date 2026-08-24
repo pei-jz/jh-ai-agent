@@ -215,6 +215,19 @@
             <p class="input-hint">{@html t('settings.memoryRecall.hint')}</p>
         </div>
 
+        <!-- Playbook (Step 6). Directly under memory recall because it is the
+             same mechanism at a larger grain, and because it is gated on that
+             mechanism being shown to work. See modules/ai/memory/Playbook.js. -->
+        <div class="input-group cfg-group-gap">
+            <label class="input-label" for="cfg-playbook">{t('settings.playbook')}</label>
+            <select id="cfg-playbook" class="input" value={config.playbook ?? 'off'}
+                onchange={(e) => patch('playbook', e.currentTarget.value)}>
+                <option value="off">{t('settings.playbook.off')}</option>
+                <option value="on">{t('settings.playbook.on')}</option>
+            </select>
+            <p class="input-hint">{@html t('settings.playbook.hint')}</p>
+        </div>
+
         <!-- Episodic injection. The knob existed in ConversationMemory with no
              caller outside tests, so the heaviest memory layer was not adjustable
              by anyone. Default off per agent-memory-layers.md §7. -->

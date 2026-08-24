@@ -64,9 +64,12 @@ import { partitionParallelCalls, serializationNotice } from './agent/ConflictDet
 import { TraceRecorder } from './memory/TraceRecorder.js';
 // Step 1: lessons (what went wrong) and insights (what worked / where things
 // are), minted from the trace and recalled at the moment they apply.
-import { CardStore, renderBrief, renderCard, cardSummary, summarizeMinted } from './memory/CardStore.js';
+import { CardStore, renderBrief, renderCard, cardSummary, summarizeMinted, INJECTION_VARIANT } from './memory/CardStore.js';
 import { targetOf } from './memory/FailureSignature.js';
-import { sessionMetrics, appendSessionMetrics } from './memory/SessionMetrics.js';
+import { sessionMetrics, appendSessionMetrics, EDIT_TOOLS } from './memory/SessionMetrics.js';
+
+/** Step 4b: dependants listed after an edit. Bounded — a 40-name list is not read. */
+const IMPACT_MAX_FILES = 8;
 
 // Tools blocked by the Plan-First gate until the user approves the plan —
 // anything that mutates the workspace or runs shell commands. Investigation
@@ -323,6 +326,12 @@ export class AgentController {
                         this._emitRecall(onAgentStatus, cards, iteration, 'brief');
                         onAgentStatus?.({ event: 'status', status: 'running', message: t('agent.memory.recalled', null, '🧠 過去セッションの学習を参照') });
                     }
+                }
+                const pb = await this._recallPlaybook(prompt, workspacePath);
+                if (pb && !shadow) {
+                    history.push({ role: 'user', content: pb });
+                    this._memoryChars = (this._memoryChars || 0) + pb.length;
+                    onAgentStatus?.({ event: 'status', status: 'running', message: `📘 ${pb.split('\n')[0]}` });
                 }
             }
 
@@ -892,7 +901,7 @@ export class AgentController {
                         this._trackReadEfficiency(call, result, isError);
                         this._trace?.record({ iteration, tool: call.name, args: call.args, result, isError, ms: duration });
                         if (onLog) this._logToolTelemetry(onLog, iteration, call, result, duration, isError);
-                        results.push({ tool_call_name: call.name, result: this._recallMemory(call, result, onAgentStatus, iteration), id: callIdOf.get(call) });
+                        results.push({ tool_call_name: call.name, result: await this._recallMemory(call, result, onAgentStatus, iteration), id: callIdOf.get(call) });
                     }
                 }
 
@@ -910,7 +919,7 @@ export class AgentController {
                     this._trackReadEfficiency(call, result, isError);
                     this._trace?.record({ iteration, tool: call.name, args: call.args, result, isError, ms: toolDuration });
                     if (onLog) this._logToolTelemetry(onLog, iteration, call, result, toolDuration, isError);
-                    results.push({ tool_call_name: call.name, result: this._recallMemory(call, result, onAgentStatus, iteration), id: callIdOf.get(call) });
+                    results.push({ tool_call_name: call.name, result: await this._recallMemory(call, result, onAgentStatus, iteration), id: callIdOf.get(call) });
 
                     if (isError) {
                         hasErrors = true;
@@ -1493,6 +1502,7 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
                         failures,
                         iterations: iteration,
                         recall: this._recallOn ? 'on' : 'off',
+                        injectionVariant: INJECTION_VARIANT,
                         memoryChars: this._memoryChars,
                         sessionId,
                     }),
@@ -1983,6 +1993,12 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
         // the control group forms itself instead of depending on someone
         // remembering to flip a switch. Learning runs in both arms.
         this._recallOn = resolveRecallArm(safety.memoryRecall);
+        /**
+         * Step 6. Off unless asked for: its own precondition (a positive
+         * follow-through lift) is unmet, and switching it on mid-measurement
+         * would make the v2 injection rework unattributable.
+         */
+        this._playbookOn = safety.playbook === 'on';
         /** [{ id, at, recipe }] — what was surfaced, and when. Feeds followThrough. */
         this._cardsShownLog = [];
         this._memoryChars = 0;
@@ -2609,8 +2625,83 @@ ${String(finalResponse || '').slice(0, 2000)}`;
         return true;
     }
 
-    _recallMemory(call, result, onAgentStatus, iteration = 0) {
+    /**
+     * Step 4b — the knowledge graph, injected at the moment it is actionable.
+     *
+     * Deliberately NOT a prompt prefix. Two things argued against that: a
+     * neighbourhood depends on the task, so putting it in the cached system
+     * prefix would break the prefix cache for every run; and the 89-run
+     * measurement of the card brief showed that advice delivered up front and
+     * then buried under twenty steps of history does not change behaviour. This
+     * fires straight after a successful edit, when "what else imports this" is
+     * a question the agent is about to need rather than one it has to remember.
+     *
+     * Under the A/B this is an INJECTION, so it belongs to the recall arm and is
+     * withheld from the control arm like everything else being tested.
+     */
+    /**
+     * Step 6 — the procedure this KIND of file has followed here, if there is one.
+     *
+     * Matched on an extension named in the PROMPT rather than guessed: at
+     * iteration 1 nothing has been edited yet, and a playbook delivered after the
+     * first edit is too late to shape the approach it describes. No extension in
+     * the request means no playbook, which is the honest answer rather than a
+     * default one.
+     */
+    async _recallPlaybook(prompt, workspacePath) {
+        if (!this._playbookOn || !this._recallOn) return '';
+        const ext = (String(prompt || '').match(/\.[a-z0-9]{1,6}\b/gi) || [])
+            .map(s => s.toLowerCase())
+            .find(s => s.length >= 3);
+        if (!ext) return '';
+        try {
+            const { extractFromTraces, playbookFor, renderPlaybook } = await import('./memory/Playbook.js');
+            const ws = workspacePath || this.toolExecutor?.workspacePath;
+            const pbs = await extractFromTraces({ workspacePath: ws, invoke });
+            return renderPlaybook(playbookFor(pbs, ext));
+        } catch (_) {
+            return '';   // extraction is an extra; a run must not fail over it
+        }
+    }
+
+    async _recallImpact(call, result, iteration = 0) {
+        if (!EDIT_TOOLS.has(call.name) || isErrorResult(result)) return '';
+        if (!this._recallOn) return '';           // control arm: inject nothing
+        const target = targetOf(call.args);
+        if (!target) return '';
+        this._impactSeen = this._impactSeen || new Set();
+        // Once per file per run. An edit-heavy run touches the same file five
+        // times, and repeating its dependants each time is the "more injection"
+        // reflex this whole step is supposed to avoid.
+        if (this._impactSeen.has(target)) return '';
+        this._impactSeen.add(target);
+
+        try {
+            const { CodeIndexClient } = await import('./memory/CodeIndex.js');
+            // The run's workspace lives on the executor — `run()` takes it as a
+            // parameter and never stores it on the controller.
+            const ws = this.toolExecutor?.workspacePath;
+            const idx = new CodeIndexClient({ workspacePath: ws, invoke });
+            if (!idx.enabled) return '';
+            const hits = await idx.deps(target, { direction: 'in', limit: IMPACT_MAX_FILES, depth: 1 });
+            if (!hits.length) return '';
+            const names = hits.map(h => h.path).join(', ');
+            const note = `[Impact — ${hits.length} file(s) import ${target}]\n  ${names}\n`
+                + '  DO: if you changed an export or its signature, check these before finishing.';
+            this._memoryChars = (this._memoryChars || 0) + note.length;
+            return note;
+        } catch (_) {
+            return '';   // no index, or none built yet — this is an extra, not a step
+        }
+    }
+
+    async _recallMemory(call, result, onAgentStatus, iteration = 0) {
         if (typeof result !== 'string') return result;
+        const impact = await this._recallImpact(call, result, iteration);
+        if (impact) {
+            onAgentStatus?.({ event: 'status', status: 'running', message: `🕸 ${impact.split('\n')[0]}` });
+            result = `${impact}\n${result}`;
+        }
         try {
             // Control arm: pick the card, log it, return the result untouched.
             // The card's recipe is still scored against what the agent does from

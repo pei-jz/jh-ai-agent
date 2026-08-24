@@ -19,13 +19,31 @@
 // Free-form "what I newly understood" from the session summary still goes to
 // facts.json for now; Step 3 unifies the two rather than duplicating them here.
 
-import { extOf, fingerprint } from './FailureSignature.js';
+import { extOf, fingerprint, relativeTarget } from './FailureSignature.js';
 // The same unit-overlap scorer the fact store recalls with (latin words + CJK
 // bigrams), so "which card is about THIS task" is judged one way across memory.
 import { relevanceScore } from './MemoryScoring.js';
 
 /** Injected text is a budget item, not a document. */
 export const CARD_MAX_CHARS = 240;
+/**
+ * Wording generation of the injected text, stamped on every metrics row.
+ *
+ * Changing how cards are phrased invalidates the rows measured under the old
+ * phrasing: pooling them would average a fixed injection with a broken one and
+ * report the mean of two different experiments. Bump this whenever renderCard or
+ * renderBrief changes materially, and the comparison will keep the generations
+ * apart instead of silently blending them.
+ *
+ *   v1  "Use these where they apply; ignore any that do not fit this task."
+ *       89 runs. Follow-through 53.8% vs a 50.0% control base rate — no effect.
+ *   v2  Three changes, shipped together and therefore measured together:
+ *       DO-lines instead of prose; skipping a card has to be stated rather than
+ *       being free; and a briefed card is re-asserted when its trigger actually
+ *       fires. Step 4b's post-edit impact note joins the same generation, since
+ *       it too is injected text under the same arm. Measurement restarts here.
+ */
+export const INJECTION_VARIANT = 'v2-do-lines';
 /** Same half-life as FactStore.retentionScore — one decay model for all memory. */
 export const HALF_LIFE_DAYS = 90;
 const DAY_MS = 86_400_000;
@@ -80,15 +98,20 @@ function mintLocators(events, meta) {
         const use = events.find(e => e.ok && e.i > s.i && e.i <= s.i + LOCATOR_WINDOW
             && READ_OR_EDIT.test(e.tool) && e.target);
         if (!use) continue;
-        const key = `${s.q}|${use.target}`;
+        // One spelling per file. Raw tool arguments give the same location three
+        // names, and the target is part of the card identity (see cardKey) — so
+        // without this the store grows a card per spelling instead of counting
+        // hits on one, and each spelling eats a slot in a three-slot brief.
+        const target = relativeTarget(use.target, meta.root);
+        const key = `${s.q}|${target}`;
         if (seen.has(key)) continue;
         seen.add(key);
         out.push(baseCard({
             type: 'insight', kind: 'locator',
-            signature: `locator|${extOf(use.target) || '-'}`,
-            trigger: { tool: s.tool, ext: extOf(use.target), scope: 'workspace' },
-            q: s.q, target: use.target,
-            what: `"${s.q}" → ${use.target}`,
+            signature: `locator|${extOf(target) || '-'}`,
+            trigger: { tool: s.tool, ext: extOf(target), scope: 'workspace' },
+            q: s.q, target,
+            what: `"${s.q}" → ${target}`,
             confidence: 0.7,
         }, meta));
     }
@@ -128,13 +151,15 @@ export function cardKey(card) {
 /**
  * Turn one session's trace into cards. Pure.
  *
- * @param {{rows: Array, events: Array, sessionId?: string, date?: string}} input
+ * @param {{rows: Array, events: Array, sessionId?: string, date?: string,
+ *          root?: string}} input
  *   rows   — TraceRecorder.summarizeFailures() output
  *   events — the raw trace events
+ *   root   — workspace path, so stored file targets get one spelling
  * @returns {Array} cards (lessons and insights)
  */
-export function mintCards({ rows = [], events = [], sessionId = '', date = '' } = {}) {
-    const meta = { sessionId, date: date || new Date().toISOString().split('T')[0] };
+export function mintCards({ rows = [], events = [], sessionId = '', date = '', root = '' } = {}) {
+    const meta = { sessionId, date: date || new Date().toISOString().split('T')[0], root };
     const cards = [];
 
     for (const row of rows) {
@@ -231,6 +256,149 @@ export function mergeCards(store, incoming, date = new Date().toISOString().spli
  *
  * @returns a NEW array; neither input is mutated.
  */
+// ── Consolidation (Step 5b) ────────────────────────────────────────────────
+//
+// Merging and minting keep the store CORRECT per event. Nothing keeps it
+// correct over time: a file moves and the locator that found it still points at
+// the old path; two runs learn different fixes for one failure and both sit
+// there claiming to be the answer; a lesson gets shown ten times and the failure
+// happens anyway every time.
+//
+// That last one is the important one. The store already records what it needs to
+// judge itself — `shown` and `recurrences_after_hit` — and until now nothing
+// read them except a dashboard. A memory layer that measures its own advice and
+// then keeps the advice that demonstrably does not work is not learning.
+
+/** Shows required before a recurrence rate is evidence rather than an accident. */
+export const CONTESTED_MIN_SHOWN = 3;
+/** A card whose warning failed this often has been tested and found wrong. */
+export const FAILED_ADVICE_RATE = 0.99;
+
+/**
+ * Fold the store's own history back into it. PURE — returns a report and mutates
+ * only the cards handed in.
+ *
+ * @returns {{stale:number, contested:number, retired:number}}
+ */
+export function consolidateCards(cards, { now = Date.now(), root = '' } = {}) {
+    const list = Array.isArray(cards) ? cards : [];
+    const report = { stale: 0, contested: 0, retired: 0, merged: 0 };
+    const dateOf = (c) => Date.parse(c.last_recurrence || c.first_seen || '') || 0;
+
+    // 0. One spelling per file, then fold together whatever that collapses.
+    //
+    // Cards written before targets were normalised hold absolute paths — on the
+    // real store, 85 of 131 locators, with 18 files present under two or three
+    // spellings. Rewriting them here rather than in a one-off migration means
+    // there is one code path, and a card that arrives hand-edited or from an
+    // older file version gets the same treatment.
+    if (root) {
+        for (const c of list) {
+            if (!c.target) continue;
+            const rel = relativeTarget(c.target, root);
+            if (rel === c.target) continue;
+            c.target = rel;
+            if (c.q) c.what = `"${c.q}" → ${rel}`;
+        }
+    }
+    // Fold exact duplicates (same identity, two rows). Hits add up, because two
+    // rows for one fact ARE two sightings of it; the survivor keeps the newest
+    // date and the union of the evidence.
+    const byKey = new Map();
+    for (const c of list) {
+        const k = cardKey(c);
+        const first = byKey.get(k);
+        if (!first) { byKey.set(k, c); continue; }
+        // Same identity but a DIFFERENT verified fix is not a duplicate — it is
+        // the disagreement rule 2 below exists to surface. Merging would pick one
+        // fix, drop the other, and destroy the evidence that they conflict.
+        if (first.fix && c.fix && first.fix !== c.fix) continue;
+        if (!first.fix && c.fix) { first.fix = c.fix; first.verified = true; }
+        first.hits = (first.hits || 1) + (c.hits || 1);
+        first.shown = (first.shown || 0) + (c.shown || 0);
+        first.recurrences_after_hit = (first.recurrences_after_hit || 0) + (c.recurrences_after_hit || 0);
+        if (dateOf(c) > dateOf(first)) first.last_recurrence = c.last_recurrence;
+        if (!Array.isArray(first.evidence)) first.evidence = [];
+        for (const ev of c.evidence || []) if (!first.evidence.includes(ev)) first.evidence.push(ev);
+        if (first.evidence.length > 10) first.evidence = first.evidence.slice(-10);
+        // A card the user switched off stays off however many rows merge into it.
+        if (c.disabled) first.disabled = true;
+        c._merged = true;
+        report.merged++;
+    }
+    if (report.merged) {
+        for (let i = list.length - 1; i >= 0; i--) if (list[i]._merged) list.splice(i, 1);
+    }
+
+    // 1. A locator whose FILE MOVED.
+    //
+    // The first version of this rule was wrong and this is the corrected one.
+    // It treated "same search term, two targets" as a move, and on the real
+    // store that retired 18 correct cards: `finish_task` genuinely lives in both
+    // ToolExecutor.js and AgentController.js, `isExternalCaller` in three files.
+    // A symbol appearing in several places is the normal case for a code search,
+    // not a contradiction — and both answers are worth keeping.
+    //
+    // A move leaves a narrower fingerprint: the same term, the same FILE NAME,
+    // a different directory. Different basenames mean the term is simply in more
+    // than one file. Anything wider than this retires knowledge that is true.
+    const baseOf = (p) => String(p || '').split('/').pop().split('\\').pop().toLowerCase();
+    const byQuery = new Map();
+    for (const c of list) {
+        if (c.kind !== 'locator' || c.disabled) continue;
+        const k = `${String(c.q || '').toLowerCase()}|${baseOf(c.target)}`;
+        if (!c.q) continue;
+        if (!byQuery.has(k)) byQuery.set(k, []);
+        byQuery.get(k).push(c);
+    }
+    for (const group of byQuery.values()) {
+        if (group.length < 2) continue;
+        const targets = new Set(group.map(c => c.target));
+        if (targets.size < 2) continue;
+        const newest = group.reduce((a, b) => (dateOf(b) > dateOf(a) ? b : a));
+        for (const c of group) {
+            if (c === newest || c.stale) continue;
+            c.stale = true;
+            report.stale++;
+        }
+    }
+
+    // 2. Two verified fixes for one failure. Not necessarily a contradiction —
+    //    there can be two routes — so neither is removed. Flagged, so the UI can
+    //    show it and a human can settle which one is right.
+    const bySignature = new Map();
+    for (const c of list) {
+        if (c.type !== 'lesson' || !c.signature || !c.verified || !c.fix) continue;
+        if (!bySignature.has(c.signature)) bySignature.set(c.signature, []);
+        bySignature.get(c.signature).push(c);
+    }
+    for (const group of bySignature.values()) {
+        const fixes = new Set(group.map(c => c.fix));
+        const contested = fixes.size > 1;
+        for (const c of group) {
+            if (!!c.contested === contested) continue;
+            c.contested = contested;
+            if (contested) report.contested++;
+        }
+    }
+
+    // 3. Advice that was tested and did not work. Shown repeatedly, and the
+    //    failure recurred EVERY time. Retired rather than deleted so the
+    //    evidence survives — and so it stops consuming an injection slot that a
+    //    card which might work could use.
+    for (const c of list) {
+        if (c.disabled || c.stale) continue;
+        const shown = c.shown || 0;
+        if (shown < CONTESTED_MIN_SHOWN) continue;
+        if (recurrenceRate(c) < FAILED_ADVICE_RATE) continue;
+        c.stale = true;
+        c.retiredReason = `warned ${shown}x, recurred every time`;
+        report.retired++;
+    }
+
+    return report;
+}
+
 export function reconcile(mine, theirs) {
     const out = new Map();
     for (const c of [...(theirs || []), ...(mine || [])]) {
@@ -334,6 +502,12 @@ export function selectBriefBudgeted(store, {
 } = {}) {
     if (!Array.isArray(store)) return [];
     const picked = [];
+    // One file may claim only one slot. Observed on the real store: MonitorView.js
+    // alone had 12 live locator cards, and a three-slot brief spent two of them
+    // saying "cfg-mem-summary is in MemoryTab.svelte" and "_syncListTabs is in
+    // MemoryTab.svelte". As a place to look those are the same sentence twice,
+    // and the second one costs a slot that another file could have used.
+    const claimed = new Set();
     for (const [kind, budget] of Object.entries(budgets)) {
         if (!budget) continue;
         const pool = store.filter(c => eligible(c, exclude) && c.type === kind && !picked.includes(c));
@@ -345,7 +519,18 @@ export function selectBriefBudgeted(store, {
             }
             return cardScore(b, now) - cardScore(a, now);
         });
-        picked.push(...pool.slice(0, budget));
+        let taken = 0;
+        for (const c of pool) {
+            if (taken >= budget) break;
+            // Only locators name a file; a lesson is about a failure, and two
+            // lessons on one file are two different failures.
+            if (c.target && c.kind === 'locator') {
+                if (claimed.has(c.target)) continue;
+                claimed.add(c.target);
+            }
+            picked.push(c);
+            taken++;
+        }
     }
     return picked;
 }
@@ -357,21 +542,45 @@ export function selectBriefBudgeted(store, {
  * A12) — "read the file first" rather than "don't use a stale anchor", because
  * a negation makes the model attend to the thing it should avoid.
  */
+/**
+ * Fit a card into its budget WITHOUT losing the instruction.
+ *
+ * The naive version truncated the finished string, which put the cap at the end
+ * — where the DO line lives. Measured on the real store, 14 of 37 lesson cards
+ * (38%) had their DO line cut off entirely: a long error message filled all 240
+ * characters and the one actionable part of the card never reached the model.
+ *
+ * The context is what gets shortened, because it is the part that degrades
+ * gracefully. A half-quoted error message still identifies the failure; a
+ * missing DO line makes the whole card ornamental. This mattered less before v2,
+ * where the advice was mid-sentence prose and truncation merely shortened it.
+ */
+function capCard(context, doLine) {
+    const room = CARD_MAX_CHARS - doLine.length - 1;   // 1 for the newline
+    // A DO line long enough to leave no room at all is itself the problem; cap
+    // it rather than emitting a card that is nothing but an ellipsis.
+    if (room < 40) return `${doLine.substring(0, CARD_MAX_CHARS - 1)}…`;
+    const head = context.length > room ? `${context.substring(0, room - 1)}…` : context;
+    return `${head}\n${doLine}`;
+}
+
 export function renderCard(card) {
     if (!card) return '';
-    let text;
     if (card.type === 'lesson') {
         const where = card.loc ? ` (${card.loc})` : '';
-        text = card.fix
-            ? `[Memory — cost ${card.costSteps} steps here before] ${card.trigger?.tool} hit "${card.symptom}"${where}. What worked: ${card.fix}. Do that first.`
-            : `[Memory — cost ${card.costSteps} steps here before] ${card.trigger?.tool} hit "${card.symptom}"${where}. No verified fix yet — check the current state before acting.`;
-    } else if (card.kind === 'locator') {
-        text = `[Memory — where things are] "${card.q}" was found in ${card.target}. Look there first.`;
-    } else {
-        text = `[Memory — what worked] For ${card.trigger?.tool}${card.trigger?.ext ? ` on ${card.trigger.ext}` : ''}: ${card.what}. Reuse that order.`;
+        return card.fix
+            ? capCard(`${card.trigger?.tool} hit "${card.symptom}"${where} — cost ${card.costSteps} steps.`,
+                `  DO: ${card.fix}`)
+            : capCard(`${card.trigger?.tool} hit "${card.symptom}"${where} — cost ${card.costSteps} steps, no verified fix.`,
+                '  DO: check the current state before acting.');
     }
-    return text.length > CARD_MAX_CHARS ? text.substring(0, CARD_MAX_CHARS - 1) + '…' : text;
+    if (card.kind === 'locator') {
+        return capCard(`"${card.q}" is in ${card.target}.`, '  DO: read that before searching.');
+    }
+    return capCard(`${card.trigger?.tool}${card.trigger?.ext ? ` on ${card.trigger.ext}` : ''} — what worked before.`,
+        `  DO: ${card.what}`);
 }
+
 
 /**
  * Recurrence rate: of the runs where this card WAS put in front of the agent,
@@ -453,12 +662,28 @@ export function summarizeMinted(cards) {
 }
 
 /** The opening brief as one message body, or '' when there is nothing to say. */
+/**
+ * The opening brief.
+ *
+ * The previous wording closed with "Use these where they apply; ignore any that
+ * do not fit this task." It was meant to prevent over-application. Measured over
+ * 89 runs it did something else: follow-through in the recall arm was 53.8%
+ * against a control base rate of 50.0% — i.e. the cards changed nothing, and the
+ * closing line handed the model a standing excuse to skip every one of them.
+ *
+ * This version keeps the escape hatch (advice that does not fit must not be
+ * forced) but makes skipping COSTLY rather than free: it has to be named. An
+ * opt-out that requires a sentence is used when it is true and ignored when it
+ * is not, which is the whole difference being tested.
+ */
 export function renderBrief(cards) {
     if (!Array.isArray(cards) || cards.length === 0) return '';
-    return '[Memory from earlier sessions in this workspace]\n'
-        + cards.map(c => `- ${renderCard(c)}`).join('\n')
-        + '\nUse these where they apply; ignore any that do not fit this task.';
+    return '[Verified from earlier runs in this workspace — each line cost real steps to learn]\n'
+        + cards.map((c, i) => `${i + 1}. ${renderCard(c)}`).join('\n')
+        + '\nEach DO line is an action that already worked here. Follow it unless this'
+        + '\ntask makes it wrong — and if you skip one, say which and why.';
 }
+
 
 // ── Persistence ────────────────────────────────────────────────────────────
 
@@ -486,6 +711,17 @@ export class CardStore {
         this.enabled = !!(this.workspacePath && typeof invoke === 'function');
         /** Ids surfaced this session — never the same card twice in one run. */
         this.injected = new Set();
+        /**
+         * Ids surfaced by the TOOL path specifically.
+         *
+         * Separate from `injected` because the opening brief was pre-empting the
+         * moment that matters. A card about write_file shown at step 1 was struck
+         * off for the rest of the run, so when write_file finally ran at step 18
+         * — buried under seventeen steps of history — nothing re-asserted it. A
+         * card may now appear twice: once in the brief, once when its trigger
+         * actually fires. It still counts as one "shown" for the statistics.
+         */
+        this.toolShown = new Set();
     }
 
     get path() { return `${this.workspacePath}/.agent/memory/cards.jsonl`; }
@@ -516,6 +752,11 @@ export class CardStore {
     async load() {
         if (!this.enabled) return this.cards;
         this.cards = (await this._read()).map(({ injected, ...card }) => card);
+        // Step 5b, at load rather than on a schedule. It is pure and runs over a
+        // few hundred rows, so the cost of doing it every run is smaller than the
+        // cost of a background job that can silently stop running — and it means
+        // a card retired by the last run cannot be recalled by this one.
+        this.lastConsolidation = consolidateCards(this.cards, { root: this.workspacePath });
         return this.cards;
     }
 
@@ -548,7 +789,7 @@ export class CardStore {
 
     /** Fold a session's trace in. Returns the cards that were minted. */
     learn({ rows, events, sessionId, date }) {
-        const minted = mintCards({ rows, events, sessionId, date });
+        const minted = mintCards({ rows, events, sessionId, date, root: this.workspacePath });
         mergeCards(this.cards, minted, date);
         return minted;
     }
@@ -559,9 +800,12 @@ export class CardStore {
      */
     recallForTool(tool, target, { shadow = false } = {}) {
         if (!this.enabled || this.cards.length === 0) return null;
-        if (this.injected.size >= this.maxPerRun) return null;
-        const card = selectForTool(this.cards, { tool, ext: extOf(target) }, { exclude: this.injected });
+        // Capped on the TOOL path's own count, so an opening brief cannot spend
+        // the whole run's budget before a single tool has been called.
+        if (this.toolShown.size >= this.maxPerRun) return null;
+        const card = selectForTool(this.cards, { tool, ext: extOf(target) }, { exclude: this.toolShown });
         if (!card) return null;
+        this.toolShown.add(card.id);
         this._markShown(card, shadow);
         return card;
     }
@@ -580,8 +824,13 @@ export class CardStore {
      * we are merely pretending to show.
      */
     _markShown(card, shadow = false) {
+        // A card re-asserted at its trigger was already counted by the brief.
+        // `shown` is the recurrence rate's DENOMINATOR — counting one card twice
+        // in one run would halve the apparent recurrence rate of exactly the
+        // cards the run leaned on hardest.
+        const alreadyThisRun = this.injected.has(card.id);
         this.injected.add(card.id);
-        if (shadow) return;
+        if (shadow || alreadyThisRun) return;
         card.injected = true;
         card.shown = (card.shown || 0) + 1;
     }

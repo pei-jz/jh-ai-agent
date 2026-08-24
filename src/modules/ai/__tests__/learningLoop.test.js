@@ -79,6 +79,17 @@ describe('learning from a session', () => {
     });
 });
 
+/**
+ * Did ANY memory reach the prompt this run?
+ *
+ * Checks both injection paths — the opening brief's header and the `DO:` line a
+ * mid-run tool nudge carries — because a negative assertion that watches only
+ * one of them passes while the other fires. Matching a single literal marker was
+ * also what made these tests pass vacuously the moment the brief was reworded.
+ */
+const memoryInjected = (h) => h.state.histories.flat()
+    .some(m => /\[Verified from earlier runs|\n {2}DO: /.test(String(m.content)));
+
 /** Cards on disk, as the previous run would have left them. */
 const stored = (over = {}) => JSON.stringify({
     id: 'L-1', type: 'lesson', signature: 'write_file|edit_mismatch|.svelte',
@@ -103,29 +114,31 @@ describe('recall in a later session', () => {
 
     it('briefs the agent before it acts', async () => {
         const h = await runWith(stored());
-        const briefed = h.state.histories.flat().some(m => String(m.content).includes('[Memory from earlier sessions'));
+        const briefed = memoryInjected(h);
         expect(briefed).toBe(true);
         expect(h.sawMessage(/過去セッションの学習を参照/)).toBe(true);
     });
 
     it('surfaces the verified fix, phrased as an action', async () => {
         const h = await runWith(stored());
-        const brief = h.state.histories.flat().map(m => String(m.content)).find(c => c.includes('[Memory from earlier'));
-        expect(brief).toContain('What worked: read_file → write_file');
-        expect(brief).toContain('Do that first');
+        const brief = h.state.histories.flat().map(m => String(m.content)).find(c => c.includes('[Verified from earlier runs'));
+        // On its own line behind DO:, not buried in a sentence — see the
+        // rendering tests in CardStore.test.js for why the prose form was dropped.
+        expect(brief).toContain('\n  DO: read_file → write_file');
+        expect(brief).toContain('cost 7 steps');
     });
 
     it('stays silent when the user disabled the card', async () => {
         // Step 2's UI writes this flag; the recall path has to honour it now, or
         // "delete the wrong lesson" would not actually stop it coming back.
         const h = await runWith(stored({ disabled: true }));
-        const briefed = h.state.histories.flat().some(m => String(m.content).includes('[Memory from earlier sessions'));
+        const briefed = memoryInjected(h);
         expect(briefed).toBe(false);
     });
 
     it('stays silent when there is nothing learned yet', async () => {
         const h = await runWith('');
-        expect(h.state.histories.flat().some(m => String(m.content).includes('[Memory'))).toBe(false);
+        expect(memoryInjected(h)).toBe(false);
     });
 
     it('does not change what the agent does', async () => {
@@ -145,8 +158,114 @@ describe('recall in a later session', () => {
         });
         await h.run('edit the component', { workspacePath: 'C:/ws' });
 
-        expect(h.state.histories.flat().some(m => String(m.content).includes('[Memory'))).toBe(false);
+        expect(memoryInjected(h)).toBe(false);
         expect(h.invokeCalls.some(c => c.cmd === 'write_file' && c.args?.path === CARDS)).toBe(true);
+    });
+});
+
+// Step 4b — the knowledge graph, delivered when it is actionable.
+//
+// Not a prompt prefix: a neighbourhood depends on the task, so a prefix would
+// break the cached system prompt for every run, and the 89-run measurement
+// showed that advice delivered up front and then buried does not change
+// behaviour. This lands right after the edit, when "what else imports this" is
+// the next question rather than a thing to have remembered.
+describe('impact of an edit (Step 4b)', () => {
+    const editRun = (extra = {}) => makeHarness({
+        config: RECALL_ON,
+        script: [toolStep('write_file', { path: 'src/a.js', content: 'x' }), finishStep('done')],
+        toolResults: { write_file: () => 'Success: wrote src/a.js' },
+        invokeResults: {
+            index_deps: () => [{ path: 'src/b.js', kind: 'imports' }, { path: 'src/c.js', kind: 'imports' }],
+        },
+        ...extra,
+    });
+
+    const toolResultText = (h) => h.state.histories.flat().map(m => JSON.stringify(m.content)).join('\n');
+
+    it('lists what imports the file that was just changed', async () => {
+        const h = editRun();
+        await h.run('edit a', { workspacePath: 'C:/ws' });
+        const seen = toolResultText(h);
+        expect(seen).toContain('src/b.js');
+        expect(seen).toContain('Impact');
+    });
+
+    it('withholds it from the control arm, like every other injection', async () => {
+        // It is injected text under the same A/B. Exempting it would make the
+        // control arm a control for only part of what is being tested.
+        const h = editRun({ config: { memory_recall: 'off' } });
+        await h.run('edit a', { workspacePath: 'C:/ws' });
+        expect(toolResultText(h)).not.toContain('Impact');
+    });
+
+    it('says nothing when the index knows of no dependants', async () => {
+        const h = editRun({ invokeResults: { index_deps: () => [] } });
+        await h.run('edit a', { workspacePath: 'C:/ws' });
+        expect(toolResultText(h)).not.toContain('Impact');
+    });
+
+    it('never fails the edit when the index is unavailable', async () => {
+        // The note is an extra, not a step. An unbuilt index must cost nothing.
+        const h = editRun({ invokeResults: { index_deps: () => { throw new Error('no such table'); } } });
+        await h.run('edit a', { workspacePath: 'C:/ws' });
+        expect(h.toolCalls.map(c => c.name)).toEqual(['write_file', 'finish_task']);
+    });
+});
+
+// Step 6. The gate is the point of these tests: the playbook is finished, and it
+// is off, because its own precondition (a positive follow-through lift) is unmet
+// and switching it on mid-measurement would make the v2 rework unattributable.
+describe('playbook (Step 6)', () => {
+    const TRACE = 'C:/ws/.agent/trace';
+    const rsSession = JSON.stringify({ i: 1, tool: 'read_file', target: 'a.rs', ok: true }) + '\n'
+        + JSON.stringify({ i: 2, tool: 'write_file', target: 'a.rs', ok: true }) + '\n'
+        + JSON.stringify({ i: 3, tool: 'run_command', target: '', ok: true });
+    const jsSession = JSON.stringify({ i: 1, tool: 'read_file', target: 'a.js', ok: true }) + '\n'
+        + JSON.stringify({ i: 2, tool: 'write_file', target: 'a.js', ok: true });
+
+    const withTraces = (config) => makeHarness({
+        config,
+        script: [toolStep('write_file', { path: 'x.rs', content: 'x' }), finishStep('done')],
+        toolResults: { write_file: () => 'Success' },
+        invokeResults: {
+            read_dir: () => [1, 2, 3, 4, 5, 6].map(n => ({ name: `sess_${n}.jsonl` })),
+            read_file: (args) => {
+                const p = String(args?.path || '');
+                if (!p.startsWith(TRACE)) return null;
+                return /sess_[123]\./.test(p) ? rsSession : jsSession;
+            },
+        },
+    });
+
+    const prompted = (h) => h.state.histories.flat().map(m => String(m.content)).join('\n');
+
+    it('stays out of the prompt while the flag is off — the default', async () => {
+        const h = withTraces(RECALL_ON);
+        await h.run('update the .rs module', { workspacePath: 'C:/ws' });
+        expect(prompted(h)).not.toContain('Playbook');
+    });
+
+    it('injects the procedure for that file kind once enabled', async () => {
+        const h = withTraces({ ...RECALL_ON, playbook: 'on' });
+        await h.run('update the .rs module', { workspacePath: 'C:/ws' });
+        const seen = prompted(h);
+        expect(seen).toContain('Playbook');
+        expect(seen).toContain('run_command');
+    });
+
+    it('says nothing when the request names no file kind to match on', async () => {
+        // Guessing an extension would be inventing the one fact that decides
+        // which procedure gets shown.
+        const h = withTraces({ ...RECALL_ON, playbook: 'on' });
+        await h.run('clean things up', { workspacePath: 'C:/ws' });
+        expect(prompted(h)).not.toContain('Playbook');
+    });
+
+    it('is withheld from the control arm like every other injection', async () => {
+        const h = withTraces({ memory_recall: 'off', playbook: 'on' });
+        await h.run('update the .rs module', { workspacePath: 'C:/ws' });
+        expect(prompted(h)).not.toContain('Playbook');
     });
 });
 
@@ -192,7 +311,7 @@ describe('measurement', () => {
         expect(row.followChecked).toBeGreaterThan(0);
         // Nothing reached the prompt, so nothing was spent on it.
         expect(row.memoryChars).toBe(0);
-        expect(h.state.histories.flat().some(m => String(m.content).includes('[Memory'))).toBe(false);
+        expect(memoryInjected(h)).toBe(false);
     });
 
     it('records how much looking around preceded the first edit', async () => {

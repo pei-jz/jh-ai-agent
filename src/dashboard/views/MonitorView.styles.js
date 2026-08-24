@@ -11,9 +11,14 @@ const BASE_STYLES = `
                 /* ── Layout ────────────────────────────────────── */
                 .monitor-layout {
                     display: flex;
-                    /* 24px = .main-content's top+bottom padding (4 + 20), plus
-                       this element's own 4px top. Both move together. */
-                    height: calc(100vh - var(--titlebar-height) - 28px);
+                    /* Bottom whitespace trimmed to match the top band (8px).
+                       .main-content leaves 20px of bottom padding; we extend the
+                       layout 12px into it (height +12) and pull the following
+                       flow back up with a -12px margin, so the bottom gap is
+                       20 - 12 = 8px and .main-content does not overflow. The
+                       top stays 8px = .main-content's 4px + this element's 4px. */
+                    height: calc(100vh - var(--titlebar-height) - 16px);
+                    margin-bottom: -12px;
                     /* The pane dividers live IN the gaps: each divider is a
                        12px hit area with -6px margins, so it needs 6px of gap
                        on each side to reconstruct the original 12px spacing. */

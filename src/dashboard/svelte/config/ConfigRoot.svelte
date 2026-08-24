@@ -336,9 +336,17 @@
         try {
             const { compareArms, parseMetrics, runsNeeded } =
                 await import('../../../modules/ai/memory/SessionMetrics.js');
+            const { INJECTION_VARIANT } = await import('../../../modules/ai/memory/CardStore.js');
             const text = await invoke('read_file', { path: `${memoryWorkspace}/.agent/trace/metrics.jsonl` });
             const rows = parseMetrics(text);
-            abStats = rows.length ? { ...compareArms(rows), rows: rows.length, needed: runsNeeded(rows) } : null;
+            // Only the CURRENT wording generation. Rows measured under earlier
+            // phrasing describe a different injection, and averaging them in
+            // would report the mean of two experiments as the result of one.
+            const cmp = compareArms(rows, { variant: INJECTION_VARIANT });
+            const live = rows.filter(r => (r.injectionVariant || 'v1') === INJECTION_VARIANT);
+            abStats = rows.length
+                ? { ...cmp, rows: live.length, needed: runsNeeded(live) || runsNeeded(rows) }
+                : null;
         } catch (_) { abStats = null; }   // no runs recorded yet
     }
 

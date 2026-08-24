@@ -25,6 +25,18 @@
     const leadShare = $derived(s.total > 0 && s.rows.length ? Math.round(s.rows[0].cost / s.total * 100) : 0);
     // Only worth saying when there IS somewhere cheaper to move the work to.
     const showTierTip = $derived(s.rows.length > 1 && leadShare >= 60 && s.rows[0]?.priced);
+
+    // Why the breakdown is empty, when it is. The panel used to render NOTHING
+    // in that case, which made "no spend in this window" and "the panel is
+    // broken" look identical — the user's report was literally "the stats at the
+    // bottom left have disappeared", and the layout gave no way to tell which it
+    // was. An empty state that names the reason, and keeps the range picker
+    // reachable, turns that into one glance.
+    const emptyWhy = $derived(
+        metrics.rangeTasks === 0
+            ? `この ${metrics.rangeDays} 日間に実行されたタスクはありません。期間を広げてください。`
+            : `この期間の ${metrics.rangeTasks} 件はトークン使用量を記録していません。`,
+    );
 </script>
 
 {#if s.rows.length}
@@ -87,5 +99,18 @@
                 <a class="cfg-link" href="#config">set $/1M rates</a> per connection.
             </p>
         {/if}
+    </div>
+{:else}
+    <div class="ds">
+        <div class="ds-top">
+            <span class="ds-v">{money(0)}</span>
+            <span class="ds-range" role="group" aria-label="Spend window">
+                {#each RANGES as [key, label]}
+                    <button type="button" class="ds-range-btn" class:is-on={range === key}
+                        onclick={() => onRange?.(key)}>{label}</button>
+                {/each}
+            </span>
+        </div>
+        <p class="ds-tip">{emptyWhy}</p>
     </div>
 {/if}

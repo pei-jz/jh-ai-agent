@@ -7,7 +7,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
     mintCards, mergeCards, cardScore, cardKey, selectForTool, selectBrief,
-    renderCard, renderBrief, reconcile, recurrenceRate, recurrenceStats, CardStore, HALF_LIFE_DAYS,
+    renderCard, renderBrief, reconcile, recurrenceRate, consolidateCards, recurrenceStats, CardStore, HALF_LIFE_DAYS,
     isDurableQuery, cardSummary, summarizeMinted, selectBriefBudgeted, BRIEF_BUDGET,
 } from '../CardStore.js';
 import { toEvent, summarizeFailures } from '../TraceRecorder.js';
@@ -258,7 +258,7 @@ describe('recall', () => {
     it('briefs with the highest-scoring cards, both kinds mixed', () => {
         const brief = selectBrief(store, { limit: 2 });
         expect(brief.map(c => c.id)).toEqual(['a', 'b']);
-        expect(renderBrief(brief)).toContain('[Memory from earlier sessions');
+        expect(renderBrief(brief)).toContain('[Verified from earlier runs');
     });
 
     it('says nothing when there is nothing to say', () => {
@@ -329,24 +329,82 @@ describe('brief budgets', () => {
 });
 
 describe('rendering', () => {
-    it('tells the agent what to DO, not what to avoid', () => {
+    // The action goes on its OWN line behind a `DO:` marker rather than inside a
+    // sentence. Measured over 89 runs, the prose form ("What worked: X. Do that
+    // first.") produced a follow-through of 53.8% against a 50.0% control base
+    // rate — i.e. the agent did what it would have done anyway. Prose buries the
+    // one part of a card that is actionable.
+    it('puts the action on its own line, as an instruction', () => {
         const text = renderCard({
             type: 'lesson', trigger: { tool: 'write_file' }, symptom: 'anchor does not match',
             fix: 'read_file → write_file', costSteps: 7, confidence: 0.8, last_recurrence: '2026-08-11',
         });
-        expect(text).toContain('What worked: read_file → write_file');
-        expect(text).toContain('Do that first');
+        expect(text).toContain('\n  DO: read_file → write_file');
         expect(text).not.toMatch(/\bdon't\b|\bdo not\b|\bnever\b/i);
+    });
+
+    it('still carries what it cost, which is why the card is worth reading', () => {
+        const text = renderCard({
+            type: 'lesson', trigger: { tool: 'write_file' }, symptom: 'anchor does not match',
+            fix: 'read_file → write_file', costSteps: 7,
+        });
+        expect(text).toContain('cost 7 steps');
     });
 
     it('is honest when there is no verified fix', () => {
         const text = renderCard({ type: 'lesson', trigger: { tool: 'write_file' }, symptom: 'x', fix: null, costSteps: 3 });
-        expect(text).toContain('No verified fix yet');
+        expect(text).toContain('no verified fix');
+        expect(text).toContain('\n  DO: check the current state');
+    });
+
+    // The old brief closed with "ignore any that do not fit this task", which
+    // gave the model a free pass on every card. The escape hatch has to stay —
+    // advice that does not fit must not be forced — but using it now costs a
+    // sentence, so it gets used when it is true rather than by default.
+    it('makes skipping a card cost something to say', () => {
+        const brief = renderBrief([{ type: 'lesson', trigger: { tool: 'write_file' }, symptom: 'x', fix: 'a → b', costSteps: 2 }]);
+        expect(brief).not.toMatch(/ignore any/i);
+        expect(brief).toMatch(/say which and why/i);
     });
 
     it('stays inside the injection budget', () => {
         const text = renderCard({ type: 'lesson', trigger: { tool: 'write_file' }, symptom: 'y'.repeat(500), fix: 'z'.repeat(500), costSteps: 1 });
         expect(text.length).toBeLessThanOrEqual(240);
+    });
+
+    // Measured on the real store BEFORE this fix: 14 of 37 lesson cards (38%)
+    // had no DO line at all. A long error message filled all 240 characters and
+    // the only actionable part of the card never reached the model. Truncating
+    // the finished string puts the cap exactly where the instruction lives.
+    it('keeps the DO line when the error message is long', () => {
+        const text = renderCard({
+            type: 'lesson', trigger: { tool: 'grep_search' },
+            symptom: 'Error: invalid glob — ' + 'x'.repeat(400),
+            fix: 'grep_search', costSteps: 3,
+        });
+        expect(text).toContain('\n  DO: grep_search');
+        expect(text.length).toBeLessThanOrEqual(240);
+        expect(text).toContain('…');   // the CONTEXT is what got shortened
+    });
+
+    it('keeps the DO line for every card kind', () => {
+        const long = 'q'.repeat(400);
+        const cards = [
+            { type: 'lesson', trigger: { tool: 't' }, symptom: long, fix: 'a → b', costSteps: 1 },
+            { type: 'lesson', trigger: { tool: 't' }, symptom: long, fix: null, costSteps: 1 },
+            { type: 'insight', kind: 'locator', q: long, target: 'src/a.js' },
+            { type: 'insight', kind: 'recovery', trigger: { tool: 't', ext: '.js' }, what: 'a → b' },
+        ];
+        for (const c of cards) {
+            expect(renderCard(c)).toContain('DO:');
+            expect(renderCard(c).length).toBeLessThanOrEqual(240);
+        }
+    });
+
+    it('caps a pathological DO line rather than emitting only an ellipsis', () => {
+        const text = renderCard({ type: 'lesson', trigger: { tool: 't' }, symptom: 'x', fix: 'z'.repeat(500), costSteps: 1 });
+        expect(text.length).toBeLessThanOrEqual(240);
+        expect(text).toContain('DO:');
     });
 });
 
@@ -406,6 +464,58 @@ describe('CardStore persistence', () => {
         await expect(store.save()).resolves.toBe(false);
     });
 
+    // The brief fires at step 1; the tool it warns about may not run until step
+    // 18, by which point the brief is buried under seventeen steps of history.
+    // Striking the card off at step 1 meant nothing re-asserted it at the one
+    // moment it was certain to be relevant.
+    it('re-asserts a briefed card when its trigger actually fires', () => {
+        const { store } = make('');
+        store.cards = [{ id: 'a', type: 'lesson', trigger: { tool: 'write_file', ext: '.js' }, costSteps: 5, hits: 1, confidence: 0.8, last_recurrence: '2026-08-11' }];
+        expect(store.recallBrief('anything')).toHaveLength(1);
+        expect(store.recallForTool('write_file', 'x.js')?.id).toBe('a');
+        // Twice is the limit — a third sighting would be nagging, not recall.
+        expect(store.recallForTool('write_file', 'y.js')).toBeNull();
+    });
+
+    it('counts a re-asserted card ONCE in the statistics', () => {
+        // `shown` is the recurrence rate's denominator. Counting one card twice
+        // in a run would halve the apparent recurrence rate of the cards the run
+        // leaned on hardest — the ones whose rate matters most.
+        const { store } = make('');
+        store.cards = [{ id: 'a', type: 'lesson', trigger: { tool: 'write_file', ext: '.js' }, costSteps: 5, hits: 1, confidence: 0.8, last_recurrence: '2026-08-11' }];
+        store.recallBrief('anything');
+        store.recallForTool('write_file', 'x.js');
+        expect(store.cards[0].shown).toBe(1);
+    });
+
+    // Observed on the real store: a three-slot brief spent two slots saying
+    // "X is in MemoryTab.svelte" and "Y is in MemoryTab.svelte". As a place to
+    // look those are one sentence, and the second cost a slot another file
+    // could have used — MonitorView.js alone had 12 live locator cards.
+    it('gives one file only one slot in the brief', () => {
+        const loc = (id, q, target) => ({
+            id, type: 'insight', kind: 'locator', q, target, what: `"${q}" → ${target}`,
+            hits: 5, confidence: 0.8, last_recurrence: '2026-08-11',
+        });
+        const store = [
+            loc('a', 'cfg-mem-summary', 'src/MemoryTab.svelte'),
+            loc('b', '_syncListTabs', 'src/MemoryTab.svelte'),
+            loc('c', 'runStudy', 'src/ConfigRoot.svelte'),
+        ];
+        const picked = selectBriefBudgeted(store, { budgets: { insight: 2 } });
+        expect(picked.map(c => c.target)).toEqual(['src/MemoryTab.svelte', 'src/ConfigRoot.svelte']);
+    });
+
+    it('still allows two lessons about one file — they are different failures', () => {
+        const lesson = (id, sig) => ({
+            id, type: 'lesson', signature: sig, target: 'src/a.js',
+            trigger: { tool: 'write_file' }, costSteps: 5, hits: 1, confidence: 0.8,
+            last_recurrence: '2026-08-11',
+        });
+        const picked = selectBriefBudgeted([lesson('a', 's1'), lesson('b', 's2')], { budgets: { lesson: 2 } });
+        expect(picked).toHaveLength(2);
+    });
+
     it('marks a recalled card injected so it is not repeated in one run', () => {
         const { store } = make('');
         store.cards = [{ id: 'a', type: 'lesson', trigger: { tool: 'write_file', ext: '.js' }, costSteps: 5, hits: 1, confidence: 0.8, last_recurrence: '2026-08-11' }];
@@ -458,6 +568,156 @@ describe('CardStore persistence', () => {
         expect(store.enabled).toBe(false);
         expect(store.recallForTool('write_file', 'a.js')).toBeNull();
         expect(store.recallBrief()).toEqual([]);
+    });
+});
+
+// Step 5b. Minting keeps the store correct per event; nothing kept it correct
+// over time. The third rule is the one that matters: the store already records
+// what it needs to judge its own advice, and until now nothing read it.
+describe('consolidateCards', () => {
+    const loc = (q, target, date) => ({
+        id: `I-${q}-${target}`, type: 'insight', kind: 'locator', q, target,
+        first_seen: date, last_recurrence: date,
+    });
+
+    it('retires a locator whose file MOVED, keeping the newest', () => {
+        // Same term, same file name, different directory — that is a move.
+        const cards = [
+            loc('licenseState', 'src/old/license.js', '2026-01-01'),
+            loc('licenseState', 'src/license.js', '2026-08-01'),
+        ];
+        const r = consolidateCards(cards);
+        expect(r.stale).toBe(1);
+        expect(cards[0].stale).toBe(true);
+        expect(cards[1].stale).toBeFalsy();
+    });
+
+    // The first version of this rule retired 18 correct cards on the real store.
+    // A symbol living in several files is the NORMAL case for a code search, and
+    // every one of those answers is true.
+    it('keeps every sighting when one term legitimately spans files', () => {
+        const cards = [
+            loc('finish_task', 'src/modules/ai/ToolExecutor.js', '2026-01-01'),
+            loc('finish_task', 'src/modules/ai/AgentController.js', '2026-08-01'),
+        ];
+        expect(consolidateCards(cards).stale).toBe(0);
+        expect(cards.every(c => !c.stale)).toBe(true);
+    });
+
+    it('leaves a locator alone when every sighting agrees', () => {
+        const cards = [loc('x', 'a.js', '2026-01-01'), loc('x', 'a.js', '2026-08-01')];
+        expect(consolidateCards(cards).stale).toBe(0);
+    });
+
+    // Two routes to a fix is not a contradiction, so neither is removed. But a
+    // human should get to settle it, which requires being told it exists.
+    it('flags two verified fixes for one failure without deleting either', () => {
+        const mk = (id, fix) => ({ id, type: 'lesson', signature: 'write_file|edit_mismatch|.js', fix, verified: true });
+        const cards = [mk('a', 'read_file → write_file'), mk('b', 'replace_lines')];
+        expect(consolidateCards(cards).contested).toBe(2);
+        expect(cards.every(c => c.contested)).toBe(true);
+    });
+
+    it('clears the flag once the disagreement is gone', () => {
+        const cards = [{ id: 'a', type: 'lesson', signature: 's', fix: 'x', verified: true, contested: true }];
+        consolidateCards(cards);
+        expect(cards[0].contested).toBe(false);
+    });
+
+    it('retires advice that was shown repeatedly and never worked', () => {
+        // The store measures its own advice. Keeping a warning that has been
+        // tested three times and failed three times is the opposite of learning
+        // — and it costs an injection slot a working card could use.
+        const cards = [{ id: 'a', type: 'lesson', signature: 's', shown: 3, recurrences_after_hit: 3 }];
+        const r = consolidateCards(cards);
+        expect(r.retired).toBe(1);
+        expect(cards[0].stale).toBe(true);
+        expect(cards[0].retiredReason).toContain('recurred every time');
+    });
+
+    it('does not retire on too little evidence, or on advice that works', () => {
+        const young = [{ id: 'a', type: 'lesson', signature: 's', shown: 2, recurrences_after_hit: 2 }];
+        const working = [{ id: 'b', type: 'lesson', signature: 's', shown: 9, recurrences_after_hit: 1 }];
+        expect(consolidateCards(young).retired).toBe(0);
+        expect(consolidateCards(working).retired).toBe(0);
+    });
+
+    it('is idempotent — a second pass changes nothing', () => {
+        const cards = [
+            loc('q', 'a.js', '2026-01-01'), loc('q', 'b.js', '2026-08-01'),
+            { id: 'x', type: 'lesson', signature: 's', shown: 5, recurrences_after_hit: 5 },
+        ];
+        consolidateCards(cards);
+        expect(consolidateCards(cards)).toEqual({ stale: 0, contested: 0, retired: 0, merged: 0 });
+    });
+
+    it('survives junk', () => {
+        expect(consolidateCards(null)).toEqual({ stale: 0, contested: 0, retired: 0, merged: 0 });
+        expect(consolidateCards([{}, { kind: 'locator' }])).toEqual({ stale: 0, contested: 0, retired: 0, merged: 0 });
+    });
+
+    // Measured on the real store: 85 of 131 locator cards held an absolute path,
+    // and 18 files existed under two or three spellings — each one eating a slot
+    // in a three-slot brief, and each looking to the model like a different file.
+    describe('one spelling per file', () => {
+        const at = (target, over = {}) => ({
+            id: 't', type: 'insight', kind: 'locator', q: 'foo', target,
+            what: `"foo" → ${target}`, hits: 1, first_seen: '2026-08-01', last_recurrence: '2026-08-01', ...over,
+        });
+
+        it('rewrites absolute targets to workspace-relative', () => {
+            const cards = [at('C:\\ws\\src\\a.js')];
+            consolidateCards(cards, { root: 'C:/ws' });
+            expect(cards[0].target).toBe('src/a.js');
+            expect(cards[0].what).toBe('"foo" → src/a.js');
+        });
+
+        it('folds the spellings of one file into a single card, summing hits', () => {
+            const cards = [
+                at('src/a.js', { hits: 2, shown: 1 }),
+                at('C:/ws/src/a.js', { hits: 3, shown: 2 }),
+                at('C:\\ws\\src\\a.js', { hits: 1 }),
+            ];
+            const r = consolidateCards(cards, { root: 'C:/ws' });
+            expect(r.merged).toBe(2);
+            expect(cards).toHaveLength(1);
+            expect(cards[0].hits).toBe(6);
+            expect(cards[0].shown).toBe(3);
+        });
+
+        it('keeps a card switched off, however many rows merge into it', () => {
+            const cards = [at('src/a.js'), at('C:/ws/src/a.js', { disabled: true })];
+            consolidateCards(cards, { root: 'C:/ws' });
+            expect(cards[0].disabled).toBe(true);
+        });
+
+        it('leaves paths alone with no workspace to make them relative to', () => {
+            const cards = [at('C:/ws/src/a.js')];
+            consolidateCards(cards);
+            expect(cards[0].target).toBe('C:/ws/src/a.js');
+        });
+
+        // The disagreement rule and the dedupe rule share a key. Merging first
+        // would pick one fix, drop the other, and erase the conflict.
+        it('does NOT fold two cards that disagree about the fix', () => {
+            const mk = (fix) => ({ type: 'lesson', signature: 's', fix, verified: true });
+            const cards = [mk('read_file → write_file'), mk('replace_lines')];
+            const r = consolidateCards(cards);
+            expect(r.merged).toBe(0);
+            expect(cards).toHaveLength(2);
+            expect(r.contested).toBe(2);
+        });
+
+        it('adopts a fix from a duplicate that has one when the survivor does not', () => {
+            const cards = [
+                { type: 'lesson', signature: 's', fix: null },
+                { type: 'lesson', signature: 's', fix: 'read_file → write_file' },
+            ];
+            consolidateCards(cards);
+            expect(cards).toHaveLength(1);
+            expect(cards[0].fix).toBe('read_file → write_file');
+            expect(cards[0].verified).toBe(true);
+        });
     });
 });
 
