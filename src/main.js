@@ -14,6 +14,7 @@ import { scheduleManager } from './modules/ai/ScheduleManager.js';
 import { mcpManager } from './modules/ai/McpManager.js';
 import llmService from './modules/ai/LLMService.js';
 import { ToolExecutor } from './modules/ai/ToolExecutor.js';
+import { isExternalCaller } from './modules/ai/agent/taskCaller.js';
 import { promptTemplateManager } from './modules/ai/PromptTemplateManager.js';
 import { skillManager } from './modules/ai/SkillManager.js';
 import { renderMarkdown, ensureResultViewStyles } from './dashboard/utils/resultView.js';
@@ -1179,6 +1180,22 @@ function _sendApprovalNotification(taskId, data) {
 }
 
 async function _sendTaskDoneNotification(taskId, data, isError) {
+    // External tools (JHEditor / JHER / …) confirm completion on their own side,
+    // so JHAI must not ALSO fire an OS toast for them — that is the reported
+    // double notification. The caller name rides on the task record (REST POST
+    // /tasks), and the WS `complete` event is left untouched either way, so a
+    // caller holding the task WS still gets its result exactly as before.
+    try {
+        const task = await window.apiClient?.getTask(taskId);
+        if (task && isExternalCaller(task.caller)) return;
+        if (task?.prompt) {
+            // (Resolved below, after the external-caller check, to avoid fetching
+            // prompt text we are not going to show.)
+        }
+    } catch (_) {
+        // Task lookup failed — keep notifying rather than swallow a completion.
+    }
+
     const title = isError ? '❌ タスク失敗 / Task failed' : '✅ タスク完了 / Task completed';
     let body = isError
         ? (data?.error || 'An error occurred').slice(0, 120)
