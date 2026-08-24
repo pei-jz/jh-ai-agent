@@ -228,6 +228,19 @@
             <p class="input-hint">{@html t('settings.playbook.hint')}</p>
         </div>
 
+        <!-- Read batching. Next to the playbook because both are off for the
+             same reason — not readiness, but an experiment in flight that a
+             fourth injected text would make unreadable. -->
+        <div class="input-group cfg-group-gap">
+            <label class="input-label" for="cfg-read-batch">{t('settings.readBatchHint')}</label>
+            <select id="cfg-read-batch" class="input" value={config.read_batch_hint ?? 'off'}
+                onchange={(e) => patch('read_batch_hint', e.currentTarget.value)}>
+                <option value="off">{t('settings.readBatchHint.off')}</option>
+                <option value="on">{t('settings.readBatchHint.on')}</option>
+            </select>
+            <p class="input-hint">{@html t('settings.readBatchHint.hint')}</p>
+        </div>
+
         <!-- Episodic injection. The knob existed in ConversationMemory with no
              caller outside tests, so the heaviest memory layer was not adjustable
              by anyone. Default off per agent-memory-layers.md §7. -->
