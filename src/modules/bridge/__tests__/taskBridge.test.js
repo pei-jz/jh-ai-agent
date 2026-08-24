@@ -196,3 +196,74 @@ describe('concurrent tasks', () => {
         expect(ids.size).toBeLessThanOrEqual(1);
     });
 });
+
+// A pending approval is a bare Promise: no timeout, no abort wiring, settled
+// only by a `confirm-response` carrying its exact confirmId. So a run parked on
+// "may I run this command?" sat inside `await onConfirm(...)` and never reached
+// the loop's next abort check — Stop marked the task aborted in the UI while the
+// agent stayed stuck on the question, and the registry entry leaked.
+describe('approval flow', () => {
+    /** Park a fake confirmation for `taskId`, as onConfirm would. */
+    const park = (taskId) => {
+        let settled;
+        const p = new Promise((resolve, reject) => {
+            taskBridge.pendingConfirmations.set(`conf_${taskId}`, {
+                resolve: (v) => { settled = v; resolve(v); },
+                reject,
+                taskId,
+            });
+        });
+        return { promise: p, value: () => settled };
+    };
+
+    it('settles a pending approval when the task is aborted', async () => {
+        const held = park('t-abort');
+        taskBridge.activeAgents.set('t-abort', { controller: {}, abortController: { abort: () => {} } });
+
+        taskBridge.abortAgentTask('t-abort');
+        await held.promise;
+
+        // false, not a rejection: every handler already reads false as "the user
+        // said no" and returns a clean denial, letting the loop unwind.
+        expect(held.value()).toBe(false);
+        expect(taskBridge.pendingConfirmations.has('conf_t-abort')).toBe(false);
+    });
+
+    it('announces the outcome so views can stop showing a live card', async () => {
+        // The only evidence a question was closed used to be circumstantial —
+        // "did work happen afterwards?" — which the Story guessed at and the Raw
+        // Log never checked, so an approved card stayed clickable for the life
+        // of the task. This event is what makes the answer knowable.
+        const held = park('t-ok');
+        emitted.length = 0;
+        listeners.get('confirm-response')({ payload: { confirmId: 'conf_t-ok', approved: true } });
+        await held.promise;
+
+        const ev = emitted.find(e => JSON.stringify(e.payload || {}).includes('confirm_resolved'));
+        expect(ev).toBeTruthy();
+        expect(JSON.stringify(ev.payload)).toContain('conf_t-ok');
+    });
+
+    it('does not silently swallow an answer to a settled approval', () => {
+        // Clicking a stale card is easy and used to do nothing at all: no
+        // resolution, no error, no trace. The user is owed the knowledge that
+        // the card they clicked was not live.
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        listeners.get('confirm-response')({ payload: { confirmId: 'conf_gone', approved: true } });
+        expect(warn).toHaveBeenCalled();
+        warn.mockRestore();
+    });
+
+    it('leaves another task\'s pending approval alone', async () => {
+        const mine = park('t-a');
+        const theirs = park('t-b');
+        taskBridge.activeAgents.set('t-a', { controller: {}, abortController: { abort: () => {} } });
+
+        taskBridge.abortAgentTask('t-a');
+        await mine.promise;
+
+        expect(taskBridge.pendingConfirmations.has('conf_t-b')).toBe(true);
+        expect(theirs.value()).toBeUndefined();
+        taskBridge.pendingConfirmations.clear();
+    });
+});

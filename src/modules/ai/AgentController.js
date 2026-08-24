@@ -67,6 +67,7 @@ import { TraceRecorder } from './memory/TraceRecorder.js';
 import { CardStore, renderBrief, renderCard, cardSummary, summarizeMinted, INJECTION_VARIANT } from './memory/CardStore.js';
 import { targetOf } from './memory/FailureSignature.js';
 import { sessionMetrics, appendSessionMetrics, EDIT_TOOLS } from './memory/SessionMetrics.js';
+import { foldRead, batchHint } from './agent/ReadBatching.js';
 
 /** Step 4b: dependants listed after an edit. Bounded — a 40-name list is not read. */
 const IMPACT_MAX_FILES = 8;
@@ -860,6 +861,14 @@ export class AgentController {
                     // a fix for. Step 1 excludes `denied` rows from card minting.
                     this._trace?.record({ iteration, tool: call.name, args: call.args, result: errorMsg, isError: true, ms: 0, denied: true });
                     onAgentStatus?.({ event: 'tool_call', name: call.name, args: call.args, status: 'denied' });
+                    // Telemetry too, and not only for symmetry: `tool_call` is a
+                    // LIVE-only event — the Story is rebuilt from stored logs on
+                    // completion and on reload, and that rebuild draws tool rows
+                    // from TOOL telemetry alone. Without this line a call the user's
+                    // permission settings blocked appeared while the run was going
+                    // and then vanished the moment it finished, which is the one
+                    // case where the user most needs to see what was attempted.
+                    if (onLog) this._logToolTelemetry(onLog, iteration, call, errorMsg, 0, true);
                 }
 
                 // Execute safe calls in parallel — but never two calls that
@@ -1999,9 +2008,16 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
          * would make the v2 injection rework unattributable.
          */
         this._playbookOn = safety.playbook === 'on';
+        /** Step-efficiency nudge. Off for the same reason as the playbook. */
+        this._readBatchOn = safety.readBatchHint === 'on';
+        /** Consecutive one-file-at-a-time reads, and whether we already spoke. */
+        this._readBurst = [];
+        this._readBatchSaid = false;
         /** [{ id, at, recipe }] — what was surfaced, and when. Feeds followThrough. */
         this._cardsShownLog = [];
         this._memoryChars = 0;
+        /** Files whose dependants were already listed this run (Step 4b). */
+        this._impactSeen = new Set();
 
         // Invalidate ContextBuilder's static cache so the new session gets a
         // fresh build (picks up any persona/config changes since last run).
@@ -2669,7 +2685,7 @@ ${String(finalResponse || '').slice(0, 2000)}`;
         if (!this._recallOn) return '';           // control arm: inject nothing
         const target = targetOf(call.args);
         if (!target) return '';
-        this._impactSeen = this._impactSeen || new Set();
+        
         // Once per file per run. An edit-heavy run touches the same file five
         // times, and repeating its dependants each time is the "more injection"
         // reflex this whole step is supposed to avoid.
@@ -2695,8 +2711,28 @@ ${String(finalResponse || '').slice(0, 2000)}`;
         }
     }
 
+    /**
+     * Notice a burst of one-file-at-a-time reads and say so, once.
+     *
+     * Tracked in EVERY run — the burst state is cheap and the counting is what
+     * makes the waste visible — but only spoken when the flag is on, so the v2
+     * injection experiment keeps measuring three injections rather than four.
+     */
+    _readBatchNudge(call) {
+        this._readBurst = foldRead(this._readBurst, call);
+        if (!this._readBatchOn) return '';
+        const note = batchHint(this._readBurst, { alreadySaid: this._readBatchSaid });
+        if (note) {
+            this._readBatchSaid = true;
+            this._memoryChars = (this._memoryChars || 0) + note.length;
+        }
+        return note;
+    }
+
     async _recallMemory(call, result, onAgentStatus, iteration = 0) {
         if (typeof result !== 'string') return result;
+        const nudge = this._readBatchNudge(call);
+        if (nudge) result = `${nudge}\n${result}`;
         const impact = await this._recallImpact(call, result, iteration);
         if (impact) {
             onAgentStatus?.({ event: 'status', status: 'running', message: `🕸 ${impact.split('\n')[0]}` });
@@ -2710,7 +2746,7 @@ ${String(finalResponse || '').slice(0, 2000)}`;
             const card = this._cards?.recallForTool(call.name, targetOf(call.args), { shadow });
             if (!card) return result;
             const note = renderCard(card);
-            this._noteCardsShown([card], iteration, note, shadow);
+            this._noteCardsShown([card], iteration, note, shadow, 'tool');
             if (shadow) return result;
             // Structured, so the Dashboard can show WHICH memory fired and WHEN.
             // That is the pairing that makes a useless lesson visible: you see it
@@ -2733,10 +2769,10 @@ ${String(finalResponse || '').slice(0, 2000)}`;
      * logged because they are the baseline; they add no `memoryChars`, because
      * no memory reached the prompt.
      */
-    _noteCardsShown(cards, iteration, text = '', shadow = false) {
+    _noteCardsShown(cards, iteration, text = '', shadow = false, source = 'brief') {
         if (!shadow) this._memoryChars = (this._memoryChars || 0) + String(text || '').length;
         for (const c of cards || []) {
-            const row = { id: c.id, at: iteration, recipe: c.fix || c.what || '' };
+            const row = { id: c.id, at: iteration, recipe: c.fix || c.what || '', source };
             if (shadow) row.shadow = true;
             this._cardsShownLog.push(row);
         }

@@ -30,8 +30,31 @@ export const SEARCH_RADIUS = 200;
  * @param {string} patch
  * @returns {{ok: true, hunks: Array} | {ok: false, error: string}}
  */
+/**
+ * Drop a markdown code fence wrapping the whole patch.
+ *
+ * Models fence diffs out of habit — ```` ```diff ```` is how a diff is written
+ * everywhere else. Unfenced, the closing ``` landed INSIDE the last hunk and was
+ * rejected as "not a diff marker", so a patch that was otherwise perfectly valid
+ * failed on punctuation the model added for readability.
+ *
+ * Only an opening fence on the FIRST line with a matching close on the last is
+ * removed: a stray ``` in the middle is content, and guessing at it would be the
+ * kind of cleverness that corrupts a file.
+ */
+export function stripFence(text) {
+    const lines = text.split('\n');
+    let a = 0;
+    let b = lines.length - 1;
+    while (a < lines.length && lines[a].trim() === '') a++;
+    while (b > a && lines[b].trim() === '') b--;
+    if (a >= b) return text;
+    if (!/^```/.test(lines[a].trim()) || lines[b].trim() !== '```') return text;
+    return lines.slice(a + 1, b).join('\n');
+}
+
 export function parsePatch(patch) {
-    const text = String(patch ?? '').replace(/\r\n/g, '\n');
+    const text = stripFence(String(patch ?? '').replace(/\r\n/g, '\n'));
     if (!text.trim()) return { ok: false, error: 'the patch is empty' };
 
     const lines = text.split('\n');
@@ -43,10 +66,17 @@ export function parsePatch(patch) {
 
         if (/^@@/.test(line)) {
             const m = /^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@/.exec(line);
-            if (!m) {
+            // A header with no usable line numbers ("@@", "@@ @@") is accepted
+            // rather than rejected. This module's whole premise is that the
+            // numbers are a HINT and the hunk is found by its context — so
+            // demanding a hint it never trusts was inconsistent, and it turned
+            // the `*** Update File:` envelope style (which writes a bare @@)
+            // into a hard failure over something the matcher does not use.
+            // `oldStart: null` means "no hint": search the whole file.
+            if (!m && !/^@@\s*@?@?\s*$/.test(line.trim())) {
                 return { ok: false, error: `malformed hunk header on line ${i + 1}: "${line}"` };
             }
-            current = { oldStart: parseInt(m[1], 10), lines: [], header: line };
+            current = { oldStart: m ? parseInt(m[1], 10) : null, lines: [], header: line };
             hunks.push(current);
             continue;
         }
@@ -66,6 +96,16 @@ export function parsePatch(patch) {
             continue;
         }
 
+        // Envelope lines from the `*** Begin Patch` dialect. They carry nothing
+        // this tool needs — the path arrives as its own argument — but the
+        // TRAILING one lands inside the last hunk, so a patch that was otherwise
+        // fine died on its own terminator. Matched against the known keywords
+        // only: an unrecognised `***` line is still a body line missing its
+        // marker, which is a real error worth reporting.
+        if (/^\*\*\* (Begin Patch|End Patch|Update File:|Add File:|Delete File:|End of File)/.test(line)) {
+            continue;
+        }
+
         const marker = line[0];
         if (marker === ' ' || marker === '+' || marker === '-') {
             current.lines.push({ kind: marker, text: line.slice(1) });
@@ -81,7 +121,24 @@ export function parsePatch(patch) {
     }
 
     if (hunks.length === 0) {
-        return { ok: false, error: 'no @@ hunk headers found — a unified diff needs at least one' };
+        // Name what WAS sent. The bare "needs at least one" left the model to
+        // guess which of its habits was wrong, and the three shapes that land
+        // here need three different corrections.
+        const body = lines.filter(l => l.trim() !== '');
+        const marked = body.filter(l => /^[+-]/.test(l) && !/^(\+\+\+|---)/.test(l)).length;
+        let hint;
+        if (marked > 0) {
+            hint = `The patch has ${marked} +/- line(s) but no "@@" header, so there is nothing `
+                + 'saying WHERE they go. Put "@@ -<line>,<count> +<line>,<count> @@" above them '
+                + 'and include 2-3 unchanged context lines (each prefixed with a space) around the change.';
+        } else if (body.some(l => /^(\+\+\+|---|diff --git)/.test(l))) {
+            hint = 'Only file headers were sent — the "---"/"+++" lines are ignored and the hunks are missing. '
+                + 'Every change needs an "@@" header followed by its context and +/- lines.';
+        } else {
+            hint = 'This looks like file CONTENT rather than a diff. To replace a file wholesale use '
+                + 'write_file; apply_patch takes a unified diff whose lines each start with " ", "+" or "-".';
+        }
+        return { ok: false, error: `no @@ hunk headers found. ${hint}` };
     }
     for (const h of hunks) {
         if (h.lines.length === 0) {
@@ -114,7 +171,7 @@ function resultLines(hunk) {
  *
  * @returns {{index: number, exact: boolean} | null}
  */
-export function locateHunk(haystack, needle, hint) {
+export function locateHunk(haystack, needle, hint, radius = SEARCH_RADIUS) {
     if (needle.length === 0) return null;
     const limit = haystack.length - needle.length;
     if (limit < 0) return null;
@@ -131,7 +188,7 @@ export function locateHunk(haystack, needle, hint) {
 
     for (const compare of [exact, loose]) {
         if (at(start, compare)) return { index: start, exact: compare === exact };
-        for (let d = 1; d <= SEARCH_RADIUS; d++) {
+        for (let d = 1; d <= radius; d++) {
             const lo = start - d;
             const hi = start + d;
             if (lo >= 0 && at(lo, compare)) return { index: lo, exact: compare === exact };
@@ -171,8 +228,13 @@ export function applyHunks(content, hunks) {
         // The header counts from 1 and is only a hint; never search behind the
         // previous hunk's result.
         const hint = Math.max(cursor, (hunk.oldStart || 1) - 1);
+        // No hint at all ⇒ search the whole file. The radius exists to stop a
+        // hunk matching a similar-looking block far from where the model SAID it
+        // was; with nothing said there is no "far from" to guard, and a window
+        // would just fail on any file longer than the radius.
+        const radius = hunk.oldStart === null ? Infinity : SEARCH_RADIUS;
 
-        const found = locateHunk(out, want, hint);
+        const found = locateHunk(out, want, hint, radius);
         if (!found) {
             const preview = want.slice(0, 3).map(l => `  |${l}`).join('\n');
             return {

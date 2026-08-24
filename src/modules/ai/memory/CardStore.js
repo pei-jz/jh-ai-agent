@@ -169,6 +169,17 @@ export function mintCards({ rows = [], events = [], sessionId = '', date = '', r
 
         const recipe = recoveryRecipe(events, row);
         const ext = extOf(row.target);
+        // A "recipe" that is just the failing tool again says nothing: it means
+        // the plain retry worked, with no action in between to learn from. As a
+        // DO line it is worse than nothing — "DO: multi_replace_file_content"
+        // after multi_replace_file_content failed is advice to do what the agent
+        // was already doing, and it filled 8 of the 15 stored fixes.
+        //
+        // The insight half already refuses this case (MIN_RECOVERY_STEPS); the
+        // lesson half did not, which is how a vacuous instruction became the
+        // most common kind of instruction in the store.
+        const vacuous = recipe.length === 1 && recipe[0] === row.tool;
+        const fix = recipe.length && !vacuous ? recipe.join(' → ') : null;
 
         cards.push(baseCard({
             type: 'lesson',
@@ -178,8 +189,8 @@ export function mintCards({ rows = [], events = [], sessionId = '', date = '', r
             loc: row.loc || '',
             // Observed, not inferred. Null when the failure was never resolved —
             // an honest "no known fix" beats a plausible invention.
-            fix: recipe.length ? recipe.join(' → ') : null,
-            verified: recipe.length > 0,
+            fix,
+            verified: !!fix,
             hypothesis: null,
             root_cause: null,
             costSteps: row.costSteps,
@@ -301,6 +312,18 @@ export function consolidateCards(cards, { now = Date.now(), root = '' } = {}) {
             if (c.q) c.what = `"${c.q}" → ${rel}`;
         }
     }
+    // Clear a "fix" that is only the failing tool again. Minting refuses these
+    // now, but 8 of the 15 stored fixes predate that rule, and each one puts
+    // "DO: <the tool that just failed>" in front of the agent while competing
+    // for one of three brief slots. The card itself is kept — the failure is
+    // still worth knowing about; only the empty instruction goes.
+    for (const c of list) {
+        if (c.type !== 'lesson' || !c.fix || !c.trigger?.tool) continue;
+        if (c.fix.trim() !== c.trigger.tool) continue;
+        c.fix = null;
+        c.verified = false;
+    }
+
     // Fold exact duplicates (same identity, two rows). Hits add up, because two
     // rows for one fact ARE two sightings of it; the survivor keeps the newest
     // date and the union of the evidence.
@@ -418,6 +441,14 @@ export function reconcile(mine, theirs) {
         if (merged.fix) merged.verified = true;
         // A card switched off by the user stays off, whichever side says so.
         merged.disabled = !!(prev.disabled || c.disabled);
+        // So does a retirement. save() reconciles the in-memory copy against the
+        // file, and `{...prev}` takes the FILE's row first — so without this a
+        // card retired by consolidateCards this run had its flag silently
+        // dropped on the way back to disk, along with the reason it was retired.
+        merged.stale = !!(prev.stale || c.stale);
+        merged.retiredReason = prev.retiredReason || c.retiredReason;
+        if (!merged.retiredReason) delete merged.retiredReason;
+        merged.contested = !!(prev.contested || c.contested);
         merged.evidence = [...new Set([...(prev.evidence || []), ...(c.evidence || [])])].slice(-10);
         out.set(key, merged);
     }
@@ -727,15 +758,36 @@ export class CardStore {
     get path() { return `${this.workspacePath}/.agent/memory/cards.jsonl`; }
 
     /** Parse the file. A missing or corrupt file reads as empty. */
+    /**
+     * The only path from disk into memory — and therefore the only place target
+     * normalisation can be applied once and be true everywhere.
+     *
+     * Doing it in load() alone was not enough: save() re-reads the file to
+     * reconcile against concurrent writers, and those raw rows still carried the
+     * old spellings. Since the target is part of a card's identity, the two
+     * spellings had different keys, so reconcile could not see them as the same
+     * card and faithfully wrote the un-normalised row back. The merge undid
+     * itself on every save.
+     */
     async _read() {
         try {
             const raw = await this._invoke('read_file', { path: this.path });
-            return String(raw || '')
+            const rows = String(raw || '')
                 .split('\n')
                 .map(l => l.trim())
                 .filter(Boolean)
                 .map(l => { try { return JSON.parse(l); } catch (_) { return null; } })
                 .filter(Boolean);
+            if (this.workspacePath) {
+                for (const c of rows) {
+                    if (!c?.target) continue;
+                    const rel = relativeTarget(c.target, this.workspacePath);
+                    if (rel === c.target) continue;
+                    c.target = rel;
+                    if (c.q) c.what = `"${c.q}" → ${rel}`;
+                }
+            }
+            return rows;
         } catch (_) {
             return [];
         }
@@ -771,10 +823,22 @@ export class CardStore {
         if (!this.enabled) return false;
         try {
             this.cards = reconcile(this.cards, await this._read());
-            if (this.cards.length > this.maxCards) {
-                this.cards.sort((a, b) => cardScore(b) - cardScore(a));
-                this.cards.length = this.maxCards;
+            // The cap governs ACTIVE memory. Culling by cardScore alone put the
+            // cards a user had switched off at the very bottom of the sort —
+            // score 0 — so they were the first rows deleted. Two things went
+            // wrong with that: the UI promises "disabled is not deleted, you can
+            // see why it stopped appearing", and worse, once the row was gone the
+            // next occurrence re-minted the same card with `disabled: false`, so
+            // the user's "stop showing me this" quietly undid itself. A switched
+            // off card is a decision, not low-value data; only the UI's delete
+            // button removes it.
+            const kept = this.cards.filter(c => c.disabled);
+            const cullable = this.cards.filter(c => !c.disabled);
+            if (cullable.length > this.maxCards) {
+                cullable.sort((a, b) => cardScore(b) - cardScore(a));
+                cullable.length = this.maxCards;
             }
+            this.cards = [...cullable, ...kept];
             try { await this._invoke('create_dir', { path: `${this.workspacePath}/.agent/memory` }); } catch (_) { /* exists */ }
             await this._invoke('write_file', {
                 path: this.path,

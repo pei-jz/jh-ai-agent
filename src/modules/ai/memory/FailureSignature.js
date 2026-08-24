@@ -161,9 +161,18 @@ export function extOf(path) {
  */
 export function relativeTarget(target, root = '') {
     const p = String(target ?? '').split('\\').join('/');
-    const r = String(root ?? '').split('\\').join('/').replace(/\/+$/, '');
-    if (!r || !p) return p;
-    return p.toLowerCase().startsWith(`${r.toLowerCase()}/`) ? p.slice(r.length + 1) : p;
+    const raw = String(root ?? '').split('\\').join('/').replace(/\/+$/, '');
+    if (!raw || !p) return p;
+    // The target reached us through redact(), the workspace root did not — so for
+    // a workspace under the user's home directory (`C:\Users\alice\projects\foo`,
+    // the ordinary case) the target reads `C:/Users/[REDACTED:user]/projects/foo/…`
+    // and never matches the raw root. Every locator then kept an absolute path.
+    // It went unnoticed because this project's own workspace sits outside the
+    // home directory, which is the one layout where the bug cannot appear.
+    for (const r of [raw, redact(raw)]) {
+        if (p.toLowerCase().startsWith(`${r.toLowerCase()}/`)) return p.slice(r.length + 1);
+    }
+    return p;
 }
 
 /**
