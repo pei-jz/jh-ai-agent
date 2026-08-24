@@ -68,6 +68,53 @@ export function renderSimpleDiff(oldText, newText) {
 }
 
 /**
+ * Which approvals in this log have already been answered?
+ *
+ * Two sources, because one of them cannot see the past. `confirm_resolved` is
+ * emitted the moment a confirmation settles and is authoritative — but tasks
+ * recorded before that event existed have none, so a request followed by
+ * further work is read as answered too. That fallback is what the Story panel
+ * had been doing inline; making it a rule both surfaces call is the point, since
+ * the Raw Log was not doing it at all and kept re-rendering settled approvals as
+ * live, clickable cards for the life of the task.
+ *
+ * @param {Array} logs the task's log entries
+ * @returns {Set<string>} confirmIds that must NOT render as actionable
+ */
+export function resolvedConfirmIds(logs) {
+    const list = Array.isArray(logs) ? logs : [];
+    const done = new Set();
+    for (const l of list) {
+        if (l?.event === 'confirm_resolved' && l.data?.confirmId) done.add(l.data.confirmId);
+    }
+    // Fallback for logs written before confirm_resolved existed: work happening
+    // after the request means it was answered. Only the LAST request can still
+    // be genuinely open, so every earlier one is settled by definition.
+    let lastOpen = -1;
+    for (let i = 0; i < list.length; i++) {
+        const l = list[i];
+        if (l?.event !== 'confirm_request' || !l.data?.confirmId) continue;
+        if (lastOpen >= 0) done.add(list[lastOpen].data.confirmId);
+        lastOpen = i;
+    }
+    if (lastOpen >= 0 && !done.has(list[lastOpen].data.confirmId)) {
+        const moved = list.slice(lastOpen + 1).some(l =>
+            l?.event === 'tool_call' || l?.event === 'log' || l?.event === 'complete');
+        if (moved) done.add(list[lastOpen].data.confirmId);
+    }
+    return done;
+}
+
+/** A settled approval, as history: legible, and with nothing left to click. */
+export function fmtConfirmResolved(data, approved) {
+    const what = data?.command || data?.path || data?.message || '';
+    const icon = approved === false ? '🚫' : '✅';
+    const label = approved === false ? '承認されませんでした' : '承認済み';
+    return `<div class="mlog mlog-status log-status"><span class="mlog-icon">${icon}</span>`
+        + `<span class="mlog-body"><strong>${label}:</strong> ${escapeHtml(String(what).slice(0, 160))}</span></div>`;
+}
+
+/**
  * Build the approval-card markup. Pure — the caller supplies everything the
  * card needs (the workspace's auto-approve state and its toggles).
  *
