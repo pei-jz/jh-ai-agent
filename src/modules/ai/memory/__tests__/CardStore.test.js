@@ -53,6 +53,30 @@ describe('minting lessons', () => {
         expect(lesson.hypothesis).toBeNull();
     });
 
+    // 8 of the 15 stored fixes were this: "DO: multi_replace_file_content" on a
+    // card triggered BY multi_replace_file_content failing. It advises the agent
+    // to do what it was already doing, and — because the triggering call sits
+    // inside the follow-through scoring window — it also scored as compliance
+    // for free. The insight half already refused this case; the lesson half did
+    // not, which is how a vacuous instruction became the commonest instruction.
+    it('does not record a "fix" that is just the failing tool again', () => {
+        const lesson = learn([
+            ev(2, 'multi_replace_file_content', 'a.js', { err: 'Error: old_text not found' }),
+            ev(3, 'multi_replace_file_content', 'a.js'),
+        ]).find(c => c.type === 'lesson');
+        expect(lesson.fix).toBeNull();
+        expect(lesson.verified).toBe(false);
+    });
+
+    it('still records a fix that involved doing something different', () => {
+        const lesson = learn([
+            ev(2, 'write_file', 'a.js', { err: 'Error: anchor does not match' }),
+            ev(3, 'read_file', 'a.js'),
+            ev(4, 'write_file', 'a.js'),
+        ]).find(c => c.type === 'lesson');
+        expect(lesson.fix).toBe('read_file → write_file');
+    });
+
     it('never mints a card for a user refusal', () => {
         const denied = toEvent({ iteration: 1, tool: 'delete_file', args: { path: 'a.js' }, result: 'Error: User Denied', isError: true, denied: true });
         expect(learn([denied])).toHaveLength(0);
@@ -563,6 +587,71 @@ describe('CardStore persistence', () => {
         expect(store.cards[0].injected).toBeUndefined();
     });
 
+    // The gap that let three of these bugs through: every rule was tested as a
+    // pure function, and nothing tested the ROUND TRIP those functions live in.
+    // load() mutates, save() reconciles against the file — and reconcile was
+    // quietly dropping what load() had just decided.
+    describe('persistence round trip', () => {
+        /** A store whose file contains `rows`, and which writes back to it. */
+        const withDisk = (rows) => {
+            let file = rows.map(r => JSON.stringify(r)).join('\n');
+            const invoke = vi.fn(async (cmd, args) => {
+                if (cmd === 'read_file') return file;
+                if (cmd === 'write_file') { file = args.content; return null; }
+                return null;
+            });
+            const store = new CardStore({ workspacePath: 'C:/ws', invoke });
+            return { store, read: () => file.split('\n').filter(Boolean).map(l => JSON.parse(l)) };
+        };
+
+        it('persists a retirement decided during load', async () => {
+            // consolidateCards retires advice that was shown three times and
+            // failed every time. reconcile took the FILE's row first and never
+            // copied `stale` off the in-memory one, so the decision evaporated
+            // on the way back to disk — every run re-deciding and re-forgetting.
+            const { store, read } = withDisk([
+                { id: 'a', type: 'lesson', signature: 's', shown: 3, recurrences_after_hit: 3, stale: false },
+            ]);
+            await store.load();
+            expect(store.cards[0].stale).toBe(true);
+            await store.save();
+            expect(read()[0].stale).toBe(true);
+            expect(read()[0].retiredReason).toContain('recurred every time');
+        });
+
+        it('persists the merge of two spellings of one file', async () => {
+            const loc = (target, hits) => ({
+                id: 'x', type: 'insight', kind: 'locator', q: 'foo', target,
+                what: `"foo" → ${target}`, hits, first_seen: '2026-08-01', last_recurrence: '2026-08-01',
+            });
+            const { store, read } = withDisk([loc('src/a.js', 2), loc('C:/ws/src/a.js', 3)]);
+            await store.load();
+            await store.save();
+            expect(read()).toHaveLength(1);
+            expect(read()[0].target).toBe('src/a.js');
+            expect(read()[0].hits).toBe(5);
+        });
+
+        it('keeps a card the user switched off, even past the cap', async () => {
+            // cardScore is 0 for a disabled card, so score-ordered culling put it
+            // at the very bottom and deleted it first. The next occurrence then
+            // re-minted the same card with disabled: false — silently undoing
+            // "stop showing me this", which is the one defence against a bad
+            // memory that the user actually controls.
+            const rows = Array.from({ length: 12 }, (_, i) => ({
+                id: `c${i}`, type: 'lesson', signature: `s${i}`, costSteps: 5, hits: 3,
+                confidence: 0.8, last_recurrence: '2026-08-20',
+            }));
+            rows.push({ id: 'off', type: 'lesson', signature: 'off', costSteps: 9, hits: 9, confidence: 0.9, last_recurrence: '2026-08-20', disabled: true });
+            const { store, read } = withDisk(rows);
+            store.maxCards = 5;
+            await store.load();
+            await store.save();
+            expect(read().some(c => c.id === 'off')).toBe(true);
+            expect(read().filter(c => !c.disabled)).toHaveLength(5);
+        });
+    });
+
     it('is inert without a workspace', () => {
         const store = new CardStore({ invoke: vi.fn() });
         expect(store.enabled).toBe(false);
@@ -640,6 +729,23 @@ describe('consolidateCards', () => {
         const working = [{ id: 'b', type: 'lesson', signature: 's', shown: 9, recurrences_after_hit: 1 }];
         expect(consolidateCards(young).retired).toBe(0);
         expect(consolidateCards(working).retired).toBe(0);
+    });
+
+    it('clears a stored fix that is only the failing tool again', () => {
+        // Minting refuses these now; these are the rows written before that rule.
+        // The card stays — the failure is worth knowing — but the empty
+        // instruction stops competing for a brief slot.
+        const cards = [{ type: 'lesson', signature: 's', trigger: { tool: 'grep_search' }, fix: 'grep_search', verified: true }];
+        consolidateCards(cards);
+        expect(cards[0].fix).toBeNull();
+        expect(cards[0].verified).toBe(false);
+        expect(cards).toHaveLength(1);
+    });
+
+    it('leaves a real recipe alone', () => {
+        const cards = [{ type: 'lesson', signature: 's', trigger: { tool: 'write_file' }, fix: 'read_file → write_file', verified: true }];
+        consolidateCards(cards);
+        expect(cards[0].fix).toBe('read_file → write_file');
     });
 
     it('is idempotent — a second pass changes nothing', () => {

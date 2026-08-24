@@ -86,6 +86,31 @@ describe('followThrough — did the agent do what the card said?', () => {
     it('is null — not zero — when nothing checkable was shown', () => {
         expect(followThrough([], []).rate).toBeNull();
     });
+
+    // A card from the tool path is surfaced AFTER its trigger call has run. With
+    // an inclusive window that call scored as compliance with advice the agent
+    // had not yet been given — and since a card's recipe often names its own
+    // trigger, that was a guaranteed free match inflating the rate.
+    it('does not score the call that triggered a card as following it', () => {
+        const events = [{ i: 5, tool: 'multi_replace_file_content', ok: false }];
+        const log = [{ id: 'L', at: 5, recipe: 'multi_replace_file_content', source: 'tool' }];
+        expect(followThrough(events, log)).toMatchObject({ checked: 1, followed: 0 });
+    });
+
+    it('counts the same tool when the agent runs it AFTER being told to', () => {
+        const events = [
+            { i: 5, tool: 'multi_replace_file_content', ok: false },
+            { i: 6, tool: 'multi_replace_file_content', ok: true },
+        ];
+        const log = [{ id: 'L', at: 5, recipe: 'multi_replace_file_content', source: 'tool' }];
+        expect(followThrough(events, log)).toMatchObject({ checked: 1, followed: 1 });
+    });
+
+    it('keeps the inclusive window for the opening brief, which precedes everything', () => {
+        const events = [{ i: 1, tool: 'read_file' }, { i: 2, tool: 'write_file' }];
+        const log = [{ id: 'B', at: 1, recipe: 'read_file → write_file', source: 'brief' }];
+        expect(followThrough(events, log)).toMatchObject({ checked: 1, followed: 1 });
+    });
 });
 
 describe('sessionMetrics', () => {

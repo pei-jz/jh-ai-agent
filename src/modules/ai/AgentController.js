@@ -2002,6 +2002,8 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
         /** [{ id, at, recipe }] — what was surfaced, and when. Feeds followThrough. */
         this._cardsShownLog = [];
         this._memoryChars = 0;
+        /** Files whose dependants were already listed this run (Step 4b). */
+        this._impactSeen = new Set();
 
         // Invalidate ContextBuilder's static cache so the new session gets a
         // fresh build (picks up any persona/config changes since last run).
@@ -2669,7 +2671,7 @@ ${String(finalResponse || '').slice(0, 2000)}`;
         if (!this._recallOn) return '';           // control arm: inject nothing
         const target = targetOf(call.args);
         if (!target) return '';
-        this._impactSeen = this._impactSeen || new Set();
+        
         // Once per file per run. An edit-heavy run touches the same file five
         // times, and repeating its dependants each time is the "more injection"
         // reflex this whole step is supposed to avoid.
@@ -2710,7 +2712,7 @@ ${String(finalResponse || '').slice(0, 2000)}`;
             const card = this._cards?.recallForTool(call.name, targetOf(call.args), { shadow });
             if (!card) return result;
             const note = renderCard(card);
-            this._noteCardsShown([card], iteration, note, shadow);
+            this._noteCardsShown([card], iteration, note, shadow, 'tool');
             if (shadow) return result;
             // Structured, so the Dashboard can show WHICH memory fired and WHEN.
             // That is the pairing that makes a useless lesson visible: you see it
@@ -2733,10 +2735,10 @@ ${String(finalResponse || '').slice(0, 2000)}`;
      * logged because they are the baseline; they add no `memoryChars`, because
      * no memory reached the prompt.
      */
-    _noteCardsShown(cards, iteration, text = '', shadow = false) {
+    _noteCardsShown(cards, iteration, text = '', shadow = false, source = 'brief') {
         if (!shadow) this._memoryChars = (this._memoryChars || 0) + String(text || '').length;
         for (const c of cards || []) {
-            const row = { id: c.id, at: iteration, recipe: c.fix || c.what || '' };
+            const row = { id: c.id, at: iteration, recipe: c.fix || c.what || '', source };
             if (shadow) row.shadow = true;
             this._cardsShownLog.push(row);
         }

@@ -73,11 +73,17 @@ export function parseRecipe(text) {
  * Matched as a SUBSEQUENCE, not a contiguous run: the agent may legitimately do
  * other things in between and still have followed the advice.
  */
-export function followsRecipe(events, recipe, fromIteration = 0) {
+export function followsRecipe(events, recipe, fromIteration = 0, { exclusive = false } = {}) {
     if (!Array.isArray(events) || !Array.isArray(recipe) || recipe.length === 0) return false;
     let i = 0;
     for (const e of events) {
-        if ((e.i || 0) < fromIteration) continue;
+        const at = e.i || 0;
+        // `exclusive` drops the iteration the card was shown ON, which matters
+        // only for the tool path: that card is surfaced AFTER its trigger call
+        // has already run, so an inclusive window let the triggering call score
+        // as compliance with advice the agent had not yet seen. With single-tool
+        // recipes naming their own trigger, that was a guaranteed free match.
+        if (exclusive ? at <= fromIteration : at < fromIteration) continue;
         if (e.tool === recipe[i]) i++;
         if (i === recipe.length) return true;
     }
@@ -107,7 +113,11 @@ export function followThrough(events, shownLog) {
         // A card with no tool sequence (a locator, a lesson with no verified fix)
         // makes no checkable claim, so counting it either way would be noise.
         .filter(s => s.steps.length > 0);
-    const followed = rows.filter(s => followsRecipe(events, s.steps, s.at || 0)).length;
+    // A card from the tool path was shown after its trigger already ran, so its
+    // own iteration is excluded; the opening brief precedes everything and keeps
+    // the inclusive window.
+    const followed = rows.filter(s =>
+        followsRecipe(events, s.steps, s.at || 0, { exclusive: s.source === 'tool' })).length;
     return {
         checked: rows.length,
         followed,
