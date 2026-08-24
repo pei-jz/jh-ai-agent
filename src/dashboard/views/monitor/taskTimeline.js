@@ -645,7 +645,12 @@ export function buildTimeline(logs, opts = {}) {
             // Tool telemetry carries the ARGUMENTS, so a replayed step can offer
             // the file it touched — a status line only ever had the basename.
             const t = toolTarget(d.name, d.request);
-            tl.pushActivity('tool', toolLineText(d.name, d.request), t);
+            // The status is what separates "ran" from "failed or was blocked".
+            // Ignoring it replayed every step with a tick — including the calls
+            // a permission setting refused. runFeed.js has always read it; this
+            // is the same rule on the Story side.
+            const ok = !(d.status >= 400 || d.isError);
+            tl.pushActivity(ok ? 'tool' : 'error', toolLineText(d.name, d.request, { ok }), t);
         } else if (l.event === 'status' && d.status === 'running' && d.message) {
             // Replay the run's ACTIVITY, not just its outcome. Without this the
             // steps existed only in the live socket's memory, so the moment

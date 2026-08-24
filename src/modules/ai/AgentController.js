@@ -860,6 +860,14 @@ export class AgentController {
                     // a fix for. Step 1 excludes `denied` rows from card minting.
                     this._trace?.record({ iteration, tool: call.name, args: call.args, result: errorMsg, isError: true, ms: 0, denied: true });
                     onAgentStatus?.({ event: 'tool_call', name: call.name, args: call.args, status: 'denied' });
+                    // Telemetry too, and not only for symmetry: `tool_call` is a
+                    // LIVE-only event — the Story is rebuilt from stored logs on
+                    // completion and on reload, and that rebuild draws tool rows
+                    // from TOOL telemetry alone. Without this line a call the user's
+                    // permission settings blocked appeared while the run was going
+                    // and then vanished the moment it finished, which is the one
+                    // case where the user most needs to see what was attempted.
+                    if (onLog) this._logToolTelemetry(onLog, iteration, call, errorMsg, 0, true);
                 }
 
                 // Execute safe calls in parallel — but never two calls that
