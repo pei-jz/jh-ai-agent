@@ -59,6 +59,29 @@ describe('personaFor', () => {
         expect(p).toContain('Verify after every change');
     });
 
+    // Reported by the user: the agent fixes the thing that was pointed at and
+    // nothing else. The prompt said so — "prefer doing the work over lengthy
+    // introspection" — and scoped root-cause thinking to failures only, so a
+    // symptom named in a REQUEST was simply a symptom fixed.
+    it('asks develop for the cause, not just the symptom it was handed', () => {
+        const p = personaFor('develop', 'English');
+        expect(p).toContain('Find the cause, not just the symptom');
+        expect(p).toContain('same fault exists elsewhere');
+        expect(p).not.toMatch(/over lengthy introspection/);
+    });
+
+    // The line it replaced was aimed at over-deliberation, and that aim was
+    // right — the fix must not turn the agent into a commentator.
+    it('still tells develop to act rather than narrate', () => {
+        expect(personaFor('develop', 'English')).toContain('Prefer acting over narrating');
+    });
+
+    // The same honesty the general tier already required. A gap left unmentioned
+    // reads as a gap that was missed.
+    it('asks develop to state what it did NOT do', () => {
+        expect(personaFor('develop', 'English')).toContain('did NOT do');
+    });
+
     it('describes GENERAL work on its own terms, not as a smaller develop', () => {
         // The old slim prompt told a report-writing agent nothing about how to do its
         // job. These are the four things it actually needs.

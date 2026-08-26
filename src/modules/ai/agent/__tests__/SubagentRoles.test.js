@@ -265,15 +265,19 @@ describe('scopesOverlap', () => {
 });
 
 describe('SafetyLimits subagent_review', () => {
-    it('defaults to off', () => {
-        expect(SAFETY_DEFAULTS.subagentReview).toBe('off');
-        expect(normalizeSafetyLimits({}).subagentReview).toBe('off');
+    // ON, changed from off. The reviewer reads the diff with a CLEAN context, so
+    // it is not carrying the history that made a narrow fix look complete to the
+    // agent that wrote it — that asymmetry is what the second opinion is for, and
+    // it was built, guarded and then never switched on.
+    it('defaults to ON', () => {
+        expect(SAFETY_DEFAULTS.subagentReview).toBe('on');
+        expect(normalizeSafetyLimits({}).subagentReview).toBe('on');
     });
-    it('accepts on/off, rejects junk', () => {
+    it('accepts on/off, and falls back to the default on junk', () => {
         expect(normalizeSafetyLimits({ subagent_review: 'on' }).subagentReview).toBe('on');
         expect(normalizeSafetyLimits({ subagent_review: 'off' }).subagentReview).toBe('off');
-        expect(normalizeSafetyLimits({ subagent_review: 'maybe' }).subagentReview).toBe('off');
-        expect(normalizeSafetyLimits({ subagent_review: 1 }).subagentReview).toBe('off');
+        expect(normalizeSafetyLimits({ subagent_review: 'maybe' }).subagentReview).toBe('on');
+        expect(normalizeSafetyLimits({ subagent_review: 1 }).subagentReview).toBe('on');
     });
 });
 
