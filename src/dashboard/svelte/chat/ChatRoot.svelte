@@ -384,6 +384,12 @@
         await executor.startSession('.');
         executor.setToolAllowlist(['web_search', 'fetch_url'], { agentControl: false });
         executor._mcpBypassesAllowlist = true;
+        // Chat is a JHAI-owned surface, so it excludes EXTERNAL-APP (WS) MCP
+        // tools for the same reason NewTask and Schedule do: `get_buffer` and
+        // friends read a connected editor's live state, and a person chatting
+        // here has not asked for the file they happen to have open to be sent.
+        // Without this the allowlist bypass above let those tools through.
+        executor.setExcludeExternalAppMcpTools(true);
         executor.setMcpRelevanceQuery(text);
         executor.setMcpPruneOptions({ minScore: 0.12, top: 5 });
 

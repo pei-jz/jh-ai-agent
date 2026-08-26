@@ -81,6 +81,14 @@ export const SAFETY_DEFAULTS = {
     // change would make the result unattributable. Enable it as its own
     // generation once v2 has an answer. See memory/Playbook.js.
     playbook: 'off',
+    // 'off' | 'on' — point out a burst of one-file-at-a-time read_file calls.
+    //
+    // Off by default for the same reason as `playbook`, and only that reason:
+    // the v2 injection experiment is in flight, and a fourth injected text would
+    // make its result unattributable. The waste it targets is real and measured
+    // — 52% of single reads on this workspace sat inside a burst one batched
+    // call could have replaced. See agent/ReadBatching.js.
+    readBatchHint: 'off',
 };
 
 const PLAN_MODES = new Set(['off', 'auto', 'always']);
@@ -88,6 +96,7 @@ const SUBAGENT_REVIEW_MODES = new Set(['off', 'on']);
 const MEMORY_RECALL_MODES = new Set(['off', 'on', 'auto']);
 const PHASE_ROUTING_MODES = new Set(['off', 'on']);
 const PLAYBOOK_MODES = new Set(['off', 'on']);
+const READ_BATCH_MODES = new Set(['off', 'on']);
 const EPISODE_INJECTION_MODES = new Set(['off', 'on']);
 
 /**
@@ -172,6 +181,7 @@ export function normalizeSafetyLimits(cfg = {}) {
         memoryRecall: MEMORY_RECALL_MODES.has(cfg.memory_recall) ? cfg.memory_recall : d.memoryRecall,
         phaseRouting: PHASE_ROUTING_MODES.has(cfg.phase_routing) ? cfg.phase_routing : d.phaseRouting,
         playbook: PLAYBOOK_MODES.has(cfg.playbook) ? cfg.playbook : d.playbook,
+        readBatchHint: READ_BATCH_MODES.has(cfg.read_batch_hint) ? cfg.read_batch_hint : d.readBatchHint,
         episodeInjection: EPISODE_INJECTION_MODES.has(cfg.episode_injection) ? cfg.episode_injection : d.episodeInjection,
     };
 }
