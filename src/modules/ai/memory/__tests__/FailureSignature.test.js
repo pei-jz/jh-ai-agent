@@ -198,6 +198,17 @@ describe('relativeTarget', () => {
         expect(relativeTarget('src/a.js', null)).toBe('src/a.js');
     });
 
+    // The target reaches this function through redact(); the workspace root does
+    // not. For a workspace under the user's home directory — the ordinary
+    // layout — the two therefore never matched, and every locator card kept an
+    // absolute path. It went unnoticed because THIS project's workspace sits
+    // outside the home directory, the one arrangement where it cannot happen.
+    it('still matches when the target was redacted and the root was not', () => {
+        const target = redact('C:\\Users\\alice\\projects\\foo\\src\\a.js');
+        expect(target).toContain('[REDACTED:user]');
+        expect(relativeTarget(target, 'C:\\Users\\alice\\projects\\foo')).toBe('src/a.js');
+    });
+
     it('does not treat a same-prefixed sibling as inside the workspace', () => {
         // "C:/ws2/..." starts with "C:/ws" as a STRING but is a different folder.
         expect(relativeTarget('C:/ws2/src/a.js', 'C:/ws')).toBe('C:/ws2/src/a.js');

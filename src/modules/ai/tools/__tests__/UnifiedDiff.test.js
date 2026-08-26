@@ -9,7 +9,7 @@
 // easy to "simplify" back into a strict-address applier.
 
 import { describe, it, expect } from 'vitest';
-import { parsePatch, applyPatch, applyHunks, locateHunk, SEARCH_RADIUS } from '../UnifiedDiff.js';
+import { parsePatch, applyPatch, applyHunks, locateHunk, stripFence, SEARCH_RADIUS } from '../UnifiedDiff.js';
 
 const FILE = [
     'function a() {',
@@ -235,5 +235,102 @@ describe('applyHunks preserves the input', () => {
         const parsed = parsePatch('@@ -1,3 +1,3 @@\n function a() {\n-    return 1;\n+    return 42;\n }');
         applyHunks(FILE, parsed.hunks);
         expect(FILE).toBe(before);
+    });
+});
+
+// Reported from a real run: "apply_patch failed — no @@ hunk headers found" on a
+// .css file. The parser was right to reject that input, but three shapes models
+// actually produce were being refused over punctuation rather than substance.
+describe('accepting what models actually send', () => {
+    const body = ' a\n-b\n+c';
+
+    it('unwraps a fenced diff', () => {
+        // ```diff is how a diff is written everywhere else, so models add it out
+        // of habit. Unfenced, the closing ``` landed inside the last hunk and
+        // was rejected as "not a diff marker".
+        for (const fence of ['```diff', '```', '```patch']) {
+            const r = parsePatch(`${fence}\n@@ -1,3 +1,3 @@\n${body}\n\`\`\``);
+            expect(r.ok).toBe(true);
+            expect(r.hunks).toHaveLength(1);
+        }
+    });
+
+    it('leaves a stray fence INSIDE the patch alone', () => {
+        // Guessing at a mid-patch fence would corrupt a file that legitimately
+        // contains one.
+        const r = parsePatch('@@ -1,3 +1,3 @@\n a\n+```\n-b');
+        expect(r.ok).toBe(true);
+        expect(r.hunks[0].lines.some(l => l.text === '```')).toBe(true);
+    });
+
+    it('accepts a header with no line numbers', () => {
+        // This module's premise is that the numbers are a HINT and the hunk is
+        // found by context, so demanding a hint it never trusts was incoherent.
+        const r = parsePatch(`@@\n${body}`);
+        expect(r.ok).toBe(true);
+        expect(r.hunks[0].oldStart).toBeNull();
+    });
+
+    it('searches the WHOLE file when the header gave no hint', () => {
+        // The radius guards against matching a lookalike far from where the
+        // model said the hunk was. With nothing said there is no "far from" —
+        // and a window would fail on any file longer than it.
+        const big = Array.from({ length: SEARCH_RADIUS * 4 }, (_, i) => `line${i}`).join('\n');
+        const at = SEARCH_RADIUS * 3;
+        const r = parsePatch(`@@\n line${at - 1}\n-line${at}\n+CHANGED\n line${at + 1}`);
+        const out = applyHunks(big, r.hunks);
+        expect(out.ok).toBe(true);
+        expect(out.content.split('\n')[at]).toBe('CHANGED');
+    });
+
+    it('ignores the *** Begin Patch envelope, including its terminator', () => {
+        // The leading lines were already skipped; the TRAILING one landed inside
+        // the last hunk, so the patch died on its own terminator.
+        const r = parsePatch(`*** Begin Patch\n*** Update File: a.css\n@@\n${body}\n*** End Patch`);
+        expect(r.ok).toBe(true);
+        expect(r.hunks[0].lines).toHaveLength(3);
+    });
+
+    it('still rejects an unrecognised *** line as a missing marker', () => {
+        const r = parsePatch('@@ -1,3 +1,3 @@\n a\n*** something else\n-b');
+        expect(r.ok).toBe(false);
+        expect(r.error).toContain('not a diff marker');
+    });
+
+    it('still rejects a genuinely malformed header', () => {
+        expect(parsePatch('@@@ -1,3 +1,3 @@@\n a\n-b').ok).toBe(false);
+    });
+});
+
+// The old message ("a unified diff needs at least one") was accurate and told
+// the model nothing about which of its habits to change. The three shapes that
+// land here need three different corrections.
+describe('the no-hunks error names what was sent', () => {
+    it('points at the missing header when +/- lines are present', () => {
+        const r = parsePatch('-  color: red;\n+  color: blue;');
+        expect(r.ok).toBe(false);
+        expect(r.error).toContain('2 +/- line(s) but no "@@" header');
+    });
+
+    it('points at the missing hunks when only file headers were sent', () => {
+        const r = parsePatch('--- a/x.css\n+++ b/x.css\ndiff --git a/x.css b/x.css');
+        expect(r.ok).toBe(false);
+        expect(r.error).toContain('Only file headers');
+    });
+
+    it('sends whole-file content to write_file instead', () => {
+        const r = parsePatch('.foo { color: blue; }\n.bar { color: red; }');
+        expect(r.ok).toBe(false);
+        expect(r.error).toContain('write_file');
+    });
+});
+
+describe('stripFence', () => {
+    it('is a no-op on an unfenced patch', () => {
+        expect(stripFence('@@ -1 +1 @@\n-a\n+b')).toBe('@@ -1 +1 @@\n-a\n+b');
+    });
+
+    it('needs a CLOSING fence before it strips anything', () => {
+        expect(stripFence('```diff\n@@ -1 +1 @@')).toBe('```diff\n@@ -1 +1 @@');
     });
 });

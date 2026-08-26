@@ -67,6 +67,7 @@ const toolsOf = () => ({
     setToolAllowlist: vi.fn(),
     setMcpRelevanceQuery: vi.fn(),
     setMcpPruneOptions: vi.fn(),
+    setExcludeExternalAppMcpTools: vi.fn(),
     getToolsForNativeAPI: () => [],
     executeTool: vi.fn(async () => 'ok'),
     endSession: vi.fn(),
@@ -167,6 +168,21 @@ describe('sending', () => {
             ['web_search', 'fetch_url'], { agentControl: false },
         );
         expect(tools.setMcpRelevanceQuery).toHaveBeenCalledWith('search something');
+    });
+
+    /* Chat sets `_mcpBypassesAllowlist`, so the allowlist above does not hold
+       MCP tools back — and EXTERNAL-APP tools (a connected JHEditor's
+       `get_buffer`, `read_workspace_file`) went through it. Someone chatting
+       here has not asked for the file they happen to have open to be sent to a
+       model, which is the same reason NewTask and Schedule exclude them. */
+    it("keeps a connected app’s live editor state out of chat", async () => {
+        const tools = toolsOf();
+        const h = mountRoot({ tools });
+        await waitFor(() => expect(box(h.container)).toBeTruthy());
+        await typeInto(box(h.container), 'hi');
+        await fireEvent.click(sendBtn(h.container));
+        await waitFor(() => expect(tools.setExcludeExternalAppMcpTools).toHaveBeenCalled());
+        expect(tools.setExcludeExternalAppMcpTools).toHaveBeenCalledWith(true);
     });
 
     it('sends on Enter but not on Shift+Enter', async () => {

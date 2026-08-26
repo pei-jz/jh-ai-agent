@@ -329,6 +329,71 @@ describe('measurement', () => {
     });
 });
 
+// The read-batching nudge. Measured over 93 real traces: 930 single reads
+// against 58 batched, with 52% of the single reads inside a burst one batched
+// call could have replaced. It is OFF by default — not because it is unready,
+// but because it would be a fourth injected text and would make the v2
+// injection experiment unattributable.
+describe('read-batching nudge', () => {
+    const threeReads = (config) => makeHarness({
+        config,
+        script: [
+            toolStep('read_file', { path: 'src/a.js' }),
+            toolStep('read_file', { path: 'src/b.js' }),
+            toolStep('read_file', { path: 'src/c.js' }),
+            finishStep('done'),
+        ],
+        toolResults: { read_file: () => 'file body' },
+    });
+    const prompted = (h) => h.state.histories.flat().map(m => JSON.stringify(m.content)).join('\n');
+
+    it('stays out of the prompt while the flag is off — the default', async () => {
+        const h = threeReads(RECALL_ON);
+        await h.run('look around', { workspacePath: 'C:/ws' });
+        expect(prompted(h)).not.toContain('Efficiency');
+    });
+
+    it('points out the burst once enabled', async () => {
+        const h = threeReads({ ...RECALL_ON, read_batch_hint: 'on' });
+        await h.run('look around', { workspacePath: 'C:/ws' });
+        const seen = prompted(h);
+        expect(seen).toContain('Efficiency');
+        expect(seen).toContain('paths');
+    });
+
+    it('says it once, however long the run goes on', async () => {
+        const h = makeHarness({
+            config: { ...RECALL_ON, read_batch_hint: 'on' },
+            script: [
+                ...['a', 'b', 'c', 'd', 'e'].map(n => toolStep('read_file', { path: `src/${n}.js` })),
+                finishStep('done'),
+            ],
+            toolResults: { read_file: () => 'body' },
+        });
+        await h.run('look around', { workspacePath: 'C:/ws' });
+        // The LAST snapshot only. `histories` holds the conversation as it stood
+        // at each LLM call, so a single note appears in every snapshot taken
+        // after it — counting across all of them measures the number of calls,
+        // not the number of notes.
+        const final = h.state.histories[h.state.histories.length - 1];
+        const hits = final.map(m => JSON.stringify(m.content)).join('\n').split('[Efficiency]').length - 1;
+        expect(hits).toBe(1);
+    });
+
+    it('stays quiet when the agent batched its reads', async () => {
+        const h = makeHarness({
+            config: { ...RECALL_ON, read_batch_hint: 'on' },
+            script: [
+                toolStep('read_file', { paths: ['src/a.js', 'src/b.js', 'src/c.js'] }),
+                finishStep('done'),
+            ],
+            toolResults: { read_file: () => 'body' },
+        });
+        await h.run('look around', { workspacePath: 'C:/ws' });
+        expect(prompted(h)).not.toContain('Efficiency');
+    });
+});
+
 // A sub-agent is not a run. It is one phase of its parent — short (its step cap
 // is 8), often read-only, and it drew its OWN A/B arm, so a parent in the recall
 // arm could spawn a child in the control arm inside the same task. Averaging

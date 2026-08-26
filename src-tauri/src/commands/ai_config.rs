@@ -200,6 +200,12 @@ pub struct AiConfig {
     #[serde(default)]
     pub playbook: Option<String>,
 
+    /// Point out a burst of one-file-at-a-time read_file calls: "off" | "on".
+    /// None => frontend default ("off"). Off only so the injection experiment
+    /// in flight keeps measuring three injections; see agent/ReadBatching.js.
+    #[serde(default)]
+    pub read_batch_hint: Option<String>,
+
     /// Inject summaries of PAST SESSIONS into the system prompt: "off" | "on".
     /// None => frontend default ("off"). The knob existed in ConversationMemory
     /// with no caller, so the heaviest memory layer was not adjustable at all.
@@ -404,6 +410,7 @@ pub async fn get_ai_config<R: tauri::Runtime>(
             memory_recall: None,
             phase_routing: None,
             playbook: None,
+            read_batch_hint: None,
             episode_injection: None,
         });
     }
@@ -557,6 +564,9 @@ pub async fn save_ai_config<R: tauri::Runtime>(
                 if final_config.playbook.is_none() {
                     final_config.playbook = old_config.playbook.clone();
                 }
+                if final_config.read_batch_hint.is_none() {
+                    final_config.read_batch_hint = old_config.read_batch_hint.clone();
+                }
                 if final_config.memory_recall.is_none() {
                     final_config.memory_recall = old_config.memory_recall;
                 }
@@ -633,6 +643,7 @@ pub async fn set_rag_approval<R: tauri::Runtime>(
             memory_recall: None,
             phase_routing: None,
             playbook: None,
+            read_batch_hint: None,
             episode_injection: None,
         }
     };
