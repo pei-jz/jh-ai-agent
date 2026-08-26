@@ -328,3 +328,38 @@ describe('measurement', () => {
         expect(metricsOf(h).explorationCost).toBe(2);
     });
 });
+
+// A sub-agent is not a run. It is one phase of its parent — short (its step cap
+// is 8), often read-only, and it drew its OWN A/B arm, so a parent in the recall
+// arm could spawn a child in the control arm inside the same task. Averaging
+// those rows in changes the unit the comparison is over and makes the arms
+// non-independent.
+describe('sub-agents do not write measurement rows', () => {
+    const metricsWrites = (h) => h.invokeCalls.filter(
+        c => c.cmd === 'write_file' && String(c.args?.path || '').endsWith('metrics.jsonl'));
+
+    it('writes one row for a normal run', async () => {
+        const h = recoveryRun();
+        await h.run('edit the component', { workspacePath: 'C:/ws' });
+        expect(metricsWrites(h).length).toBeGreaterThan(0);
+    });
+
+    /** The parent sets this flag on the child before calling child.run(). */
+    const runAsSubagent = async (h) => {
+        const agent = await h.build();
+        agent._isSubagent = true;
+        await agent.run('edit the component', 'C:/ws', () => {}, () => {}, async () => true);
+        return h;
+    };
+
+    it('writes none when the controller is a sub-agent', async () => {
+        expect(metricsWrites(await runAsSubagent(recoveryRun()))).toHaveLength(0);
+    });
+
+    it('still LEARNS from a sub-agent run — only the row is withheld', async () => {
+        // What the child found is real knowledge; it is the measurement UNIT that
+        // was wrong, not the learning.
+        const h = await runAsSubagent(recoveryRun());
+        expect(h.invokeCalls.some(c => c.cmd === 'write_file' && c.args?.path === CARDS)).toBe(true);
+    });
+});

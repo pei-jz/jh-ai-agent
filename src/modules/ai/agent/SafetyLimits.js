@@ -14,7 +14,22 @@ export const SAFETY_DEFAULTS = {
     historyCompressRatio: 0.5,   // compress old tool results only above this window fraction (keeps prefix cacheable below it)
     agentTemperature: 0.2,       // low temp → fewer transcription typos
     planMode: 'auto',            // 'off' | 'auto' (plan-gate complex tasks) | 'always'
-    subagentReview: 'off',       // 'off' | 'on' — pre-finish independent sub-agent review of file changes
+    // 'off' | 'on' — pre-finish independent sub-agent review of file changes.
+    //
+    // ON, changed from off. The reported symptom was that the agent fixes what it
+    // was pointed at and nothing else, and the reviewer is the one part of the
+    // loop positioned to notice: it reads the diff with a CLEAN context, so it is
+    // not carrying the thirty steps of history that made the narrow fix look
+    // complete to the agent that wrote it. That asymmetry — not extra
+    // intelligence — is what a second opinion is for.
+    //
+    // It was already built, guarded and tested, and simply never switched on.
+    // The guards are why turning it on is defensible: read-only tools by
+    // construction, its own step cap, once per run, skipped for report-only
+    // changes and for models in JSON-tool mode, and STYLE findings can never
+    // block a finish. The cost is real — roughly 10-20% more tokens on tasks
+    // that change files — and is stated in the Settings hint.
+    subagentReview: 'on',
     // 'on' | 'off' | 'auto' — whether learned cards are RECALLED into the run.
     // Learning continues either way, so a run without recall is a control
     // session, not a wasted one (docs/design/agent-memory-layers.md §6).

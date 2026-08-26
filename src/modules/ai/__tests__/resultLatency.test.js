@@ -19,6 +19,11 @@ const REPORT = '# 調査結果\n\n' + 'この行は成果物の本文です。'.
 /** A run that modifies one file and finishes with a real deliverable. */
 function editRun(extra = {}) {
     return makeHarness({
+        // These tests are about the DESCRIPTION call's latency. The pre-finish
+        // reviewer is a second LLM call on the same finish path, so the gate that
+        // holds the description call would hold the review call instead and the
+        // run would deadlock before reaching the thing under test.
+        config: { subagent_review: 'off' },
         script: [
             toolStep('write_file', { path: 'src/a.js', content: 'x' }),
             finishStep(REPORT),

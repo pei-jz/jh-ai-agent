@@ -1492,21 +1492,31 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
                     });
                 }
 
-                // One measurement row per run. Written for BOTH arms — a
+                // One measurement row per RUN. Written for BOTH arms — a
                 // recall-off session is the control, not a wasted session.
-                await appendSessionMetrics({
-                    workspacePath: wsPath, invoke,
-                    row: sessionMetrics({
-                        events: this._trace.events,
-                        shownLog: this._cardsShownLog,
-                        failures,
-                        iterations: iteration,
-                        recall: this._recallOn ? 'on' : 'off',
-                        injectionVariant: INJECTION_VARIANT,
-                        memoryChars: this._memoryChars,
-                        sessionId,
-                    }),
-                });
+                //
+                // A sub-agent is not a run. It is one phase of its parent, and it
+                // was writing a row of its own: short (its step cap is 8), often
+                // read-only, and — worst — drawing its OWN arm, so a parent in the
+                // recall arm could spawn a child in the control arm inside the same
+                // task. That breaks the unit the comparison averages over and makes
+                // the two arms non-independent. Its work still reaches the numbers
+                // through the parent's trace, where it belongs.
+                if (!this._isSubagent) {
+                    await appendSessionMetrics({
+                        workspacePath: wsPath, invoke,
+                        row: sessionMetrics({
+                            events: this._trace.events,
+                            shownLog: this._cardsShownLog,
+                            failures,
+                            iterations: iteration,
+                            recall: this._recallOn ? 'on' : 'off',
+                            injectionVariant: INJECTION_VARIANT,
+                            memoryChars: this._memoryChars,
+                            sessionId,
+                        }),
+                    });
+                }
             }
         } catch (e) {
             console.warn('AgentController: card learning failed:', e);
@@ -1537,8 +1547,17 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
         // the caller only emits `complete` once run() returns. Memory is
         // bookkeeping, so it settles in the background; ConversationMemory
         // serialises its own writes, so overlapping runs cannot interleave.
-        conversationMemory.addEntry(prompt, finalResponse, sessionId, wsPath, onLog, this._auxModel())
-            .catch(e => console.warn('AgentController: LTM addEntry failed:', e));
+        //
+        // Not for a sub-agent, for the same reason it writes no metrics row: its
+        // "session" is one phase of its parent's. Recording "I reviewed three
+        // files" as an episode in the project's durable memory is noise, the
+        // journal gets a line for something the user never asked for, and each
+        // one costs an extra LLM summarisation call. The parent records the
+        // session, and the child's work is inside it.
+        if (!this._isSubagent) {
+            conversationMemory.addEntry(prompt, finalResponse, sessionId, wsPath, onLog, this._auxModel())
+                .catch(e => console.warn('AgentController: LTM addEntry failed:', e));
+        }
 
         this.toolExecutor.endSession();
 
@@ -2649,7 +2668,12 @@ ${String(finalResponse || '').slice(0, 2000)}`;
      * default one.
      */
     async _recallPlaybook(prompt, workspacePath) {
-        if (!this._playbookOn || !this._recallOn) return '';
+        // Not for a sub-agent. A playbook says "this is how work on .rs files
+        // goes here", and a reviewer is not doing that work — it is reading a
+        // diff. Its brief lists the files that changed, so the extension match
+        // fired on paths that were evidence rather than intent, and the child
+        // got a procedure for a job it was not doing.
+        if (this._isSubagent || !this._playbookOn || !this._recallOn) return '';
         const ext = (String(prompt || '').match(/\.[a-z0-9]{1,6}\b/gi) || [])
             .map(s => s.toLowerCase())
             .find(s => s.length >= 3);
