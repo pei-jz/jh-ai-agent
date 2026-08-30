@@ -1,59 +1,95 @@
 /* ============================================================
-   J.H AI Agent Dashboard — Premium Dark Theme
+   J.H AI Agent Dashboard — design tokens and layout
    ============================================================
-   Design tokens, glassmorphism, micro-animations, and layout
+   Five themes share these tokens. There is no glassmorphism here any more:
+   translucency and blur depend on what is BEHIND a surface, and that is a
+   different colour in each theme — so their contrast could never be guaranteed,
+   only re-checked five times. Structure is carried by lines and one step of
+   lightness instead. See docs/design/visual-language.md.
    ============================================================ */
 
-/* ── CSS Custom Properties (Theme Tokens) ─────────────────── */
+/* ── CSS Custom Properties (Theme Tokens) ───────────────────
+   Named by ROLE, not by appearance. `--bg-primary` meant "the darkest surface
+   in the dark theme" — in paper it is the desk and in light it is nearly white,
+   so the name carried no instruction for anyone setting a value in a new theme.
+   The rename (docs/design/visual-language.md §3) is the LAST step of the visual
+   pass on purpose: it changes the most text and not one pixel, so it is easier
+   to read once the pixels have stopped moving.
+
+     --bg-primary   → --surface-app      the window's ground
+     --bg-secondary → --surface-panel    panels, cards, lists
+     --bg-tertiary  → --surface-sunken   headers, inset strips
+     --bg-card      → --surface-raised   the one layer allowed a shadow
+     --text-*       → --ink / --ink-soft / --ink-faint
+     --text-inverse → --on-accent        text ON the accent, not "inverted"
+     --border*      → --line / --line-soft / --line-focus
+     --*-bg         → --*-surface        so semantic colours match the surfaces
+*/
 :root {
   /* Background palette */
-  --bg-primary:   hsl(220, 20%, 8%);
-  --bg-secondary: hsl(220, 18%, 12%);
-  --bg-tertiary:  hsl(220, 16%, 16%);
-  --bg-card:      hsla(220, 18%, 14%, 0.6);
-  --bg-card-solid:hsl(220, 18%, 14%);
-  --bg-input:     hsl(220, 18%, 10%);
-  --bg-hover:     hsla(220, 18%, 20%, 0.5);
+  --surface-app:   hsl(220, 20%, 8%);
+  --surface-panel: hsl(220, 18%, 12%);
+  --surface-sunken:  hsl(220, 16%, 16%);
+  /* OPAQUE, and --bg-card-solid is gone with the pair.
+     A translucent card shows whatever is behind it, and what is behind it is a
+     different colour in each of five themes — so its contrast could not be
+     guaranteed anywhere, only checked everywhere. That is the combinatorial
+     cost visual-language.md §1 is about, and it is why the blur went too. */
+  --surface-raised:      hsl(220, 18%, 14%);
+  --surface-input:     hsl(220, 18%, 10%);
+  --surface-hover:     hsla(220, 18%, 20%, 0.5);
 
   /* Text palette */
-  --text-primary:   hsl(220, 20%, 90%);
-  --text-secondary: hsl(220, 15%, 60%);
-  --text-tertiary:  hsl(220, 12%, 40%);
-  --text-inverse:   hsl(220, 20%, 8%);
+  --ink:   hsl(220, 20%, 90%);
+  --ink-soft: hsl(220, 15%, 60%);
+  --ink-faint:  hsl(220, 12%, 40%);
+  --on-accent:   hsl(220, 20%, 8%);
 
   /* Accent */
   --accent:        hsl(185, 100%, 55%);
   --accent-hover:  hsl(185, 100%, 65%);
   --accent-dim:    hsl(185, 60%, 35%);
-  --accent-glow:   hsla(185, 100%, 55%, 0.3);
-  --accent-glow-lg:hsla(185, 100%, 55%, 0.12);
+  /* A wash used as a SURFACE (chip grounds, the active nav item), not a glow.
+     --accent-glow / --accent-glow-lg were the same colours doing both jobs;
+     the emitted-light half is gone (visual-language.md §3). */
+  --accent-surface:hsla(185, 100%, 55%, 0.14);
 
   /* Borders */
-  --border:       hsla(220, 20%, 30%, 0.5);
-  --border-light: hsla(220, 20%, 35%, 0.3);
-  --border-focus: hsla(185, 100%, 55%, 0.5);
+  --line:       hsla(220, 20%, 30%, 0.5);
+  --line-soft: hsla(220, 20%, 35%, 0.3);
+  --line-focus: hsla(185, 100%, 55%, 0.5);
 
   /* Status colors */
   --success:     hsl(145, 70%, 50%);
-  --success-bg:  hsla(145, 70%, 50%, 0.12);
+  --success-surface:  hsla(145, 70%, 50%, 0.12);
   --warning:     hsl(40, 90%, 55%);
-  --warning-bg:  hsla(40, 90%, 55%, 0.12);
+  --warning-surface:  hsla(40, 90%, 55%, 0.12);
   --error:       hsl(0, 75%, 55%);
-  --error-bg:    hsla(0, 75%, 55%, 0.12);
+  --error-surface:    hsla(0, 75%, 55%, 0.12);
   --info:        hsl(210, 90%, 60%);
-  --info-bg:     hsla(210, 90%, 60%, 0.12);
+  --info-surface:     hsla(210, 90%, 60%, 0.12);
 
-  /* Shadows */
-  --shadow-sm:  0 1px 3px  rgba(0,0,0,0.3);
-  --shadow-md:  0 4px 12px rgba(0,0,0,0.4);
-  --shadow-lg:  0 8px 32px rgba(0,0,0,0.5);
-  --shadow-glow:0 0 20px var(--accent-glow);
+  /* Shadows — TWO, and only for things that are genuinely floating.
+     A shadow means "this is above the page". 44 of them meant nothing was.
+     Everything else separates with a line (--line) and a step of lightness.
+     These are THEME tokens, not constants: a dark theme needs a heavier shadow
+     than paper does, and the old rgba(0,0,0,…) literals were written for dark
+     and then inherited by four themes that are not.
+     docs/design/visual-language.md §3. */
+  --shadow-pop:  0 8px 24px -12px rgba(0,0,0,0.45);   /* modals, popovers */
+  --shadow-drag: 0 12px 32px -14px rgba(0,0,0,0.55);  /* the thing under the cursor */
 
-  /* Radii */
-  --radius-sm: 6px;
-  --radius-md: 10px;
-  --radius-lg: 16px;
-  --radius-xl: 24px;
+  /* Radii — four steps, by ROLE.
+     The four that used to be here (6/10/16/24) were defined and then barely
+     used: the stylesheets had grown TWELVE literal values (1,2,3,4,5,6,7,8,9,
+     12,100,999), with 4px in 28 places, 6px in 21 and 3px in 14. That is the
+     same "tuned each spot by eye" signature the type scale above already
+     records, left unfixed for corners.
+     docs/design/visual-language.md §2. */
+  --r-1:    3px;    /* chips, badges, dots, small buttons */
+  --r-2:    5px;    /* inputs, cards, panels, rows — the default */
+  --r-3:    8px;    /* modals, popovers */
+  --r-pill: 999px;  /* status dots and bar ends only */
 
   /* Transitions */
   --transition-fast:   0.15s ease;
@@ -61,13 +97,37 @@
   --transition-slow:   0.4s  ease;
 
   /* Layout */
-  --sidebar-width:          64px;
-  --sidebar-width-expanded: 200px;
+  /* 68, not 64: the rail carries a WORD under each glyph now, not a tooltip.
+     "Schedule" sets the width. See components/Sidebar.js on why the icon-only
+     rail went (it was unreachable by keyboard and unnamed to a screen reader). */
+  --sidebar-width:          68px;
   --titlebar-height:        38px;
 
   /* Typography */
   --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+  /* A theme's display face. Defaults to the UI face, so a theme that has no
+     opinion writes nothing. Used ONLY on the title bar, view headings and empty
+     states — never on the dense tabular data, where a script face costs more
+     legibility than it buys character.
+     This replaces --font-hand, which each theme applied by naming .titlebar-title
+     itself. docs/design/visual-language.md §5. */
+  --font-accent: var(--font-sans);
+
+  /* ── The texture contract ────────────────────────────────────────────────
+     A theme supplies the IMAGE; the app decides where it goes, once, below.
+     Before this, `:root[data-theme="paper"] #result-panel { background-image: … }`
+     meant every new theme had to name the app's own element ids — so adding one
+     was a CSS-writing job rather than a token-writing job. Defaults are `none`,
+     so a theme with no texture omits them entirely. */
+  --texture-app:  none;   /* the window's ground */
+  --texture-read: none;   /* the one surface that is actually prose */
+  /* The title bar. Defaults to the ground, so a theme that wants one pattern
+     everywhere still writes a single token.
+     It is separable because a texture strong enough to say what a theme IS can
+     be too strong to read task titles through: 竹簡's slats are the case —
+     they belong on the binding at the top, not under the list. */
+  --texture-chrome: var(--texture-app);
 
   /* Type scale.
      The stylesheets had grown 21 distinct px sizes, five of them at half-pixel
@@ -102,19 +162,18 @@
    cascades app-wide. Code/diff blocks intentionally stay dark. */
 :root[data-theme="light"] {
   /* Background palette */
-  --bg-primary:   hsl(220, 30%, 97%);
-  --bg-secondary: hsl(0, 0%, 100%);
-  --bg-tertiary:  hsl(220, 25%, 93%);
-  --bg-card:      hsla(0, 0%, 100%, 0.75);
-  --bg-card-solid:hsl(0, 0%, 100%);
-  --bg-input:     hsl(220, 25%, 96%);
-  --bg-hover:     hsla(220, 25%, 85%, 0.5);
+  --surface-app:   hsl(220, 30%, 97%);
+  --surface-panel: hsl(0, 0%, 100%);
+  --surface-sunken:  hsl(220, 25%, 93%);
+  --surface-raised:      hsl(0, 0%, 100%);
+  --surface-input:     hsl(220, 25%, 96%);
+  --surface-hover:     hsla(220, 25%, 85%, 0.5);
 
   /* Text palette */
-  --text-primary:   hsl(220, 30%, 14%);
-  --text-secondary: hsl(220, 15%, 38%);
-  --text-tertiary:  hsl(220, 10%, 55%);
-  --text-inverse:   hsl(0, 0%, 100%);
+  --ink:   hsl(220, 30%, 14%);
+  --ink-soft: hsl(220, 15%, 38%);
+  --ink-faint:  hsl(220, 10%, 55%);
+  --on-accent:   hsl(0, 0%, 100%);
 
   /* Accent — violet. Deliberately NOT blue/teal (didn't sit well on white) and
      NOT orange (would collide with the warning color, blurring "accent" vs
@@ -124,29 +183,28 @@
   --accent:        hsl(262, 72%, 50%);
   --accent-hover:  hsl(262, 72%, 42%);
   --accent-dim:    hsl(262, 45%, 65%);
-  --accent-glow:   hsla(262, 72%, 50%, 0.20);
-  --accent-glow-lg:hsla(262, 72%, 50%, 0.08);
+  --accent-surface:   hsla(262, 72%, 50%, 0.20);
 
   /* Borders */
-  --border:       hsla(220, 25%, 30%, 0.25);
-  --border-light: hsla(220, 25%, 30%, 0.14);
-  --border-focus: hsla(262, 72%, 50%, 0.5);
+  --line:       hsla(220, 25%, 30%, 0.25);
+  --line-soft: hsla(220, 25%, 30%, 0.14);
+  --line-focus: hsla(262, 72%, 50%, 0.5);
 
   /* Status colors (slightly darkened for white backgrounds) */
   --success:     hsl(145, 65%, 34%);
-  --success-bg:  hsla(145, 65%, 34%, 0.10);
+  --success-surface:  hsla(145, 65%, 34%, 0.10);
   --warning:     hsl(35, 95%, 40%);
-  --warning-bg:  hsla(35, 95%, 40%, 0.10);
+  --warning-surface:  hsla(35, 95%, 40%, 0.10);
   --error:       hsl(0, 72%, 45%);
-  --error-bg:    hsla(0, 72%, 45%, 0.10);
+  --error-surface:    hsla(0, 72%, 45%, 0.10);
   --info:        hsl(210, 90%, 42%);
-  --info-bg:     hsla(210, 90%, 42%, 0.10);
+  --info-surface:     hsla(210, 90%, 42%, 0.10);
 
   /* Shadows — much softer on light surfaces */
-  --shadow-sm:  0 1px 3px  rgba(30, 40, 60, 0.08);
-  --shadow-md:  0 4px 12px rgba(30, 40, 60, 0.10);
-  --shadow-lg:  0 8px 32px rgba(30, 40, 60, 0.14);
-  --shadow-glow:0 0 20px var(--accent-glow);
+  /* Floating layers only. Tuned to THIS theme's ground — see
+     visual-language.md §3 on why a shadow is a theme token. */
+  --shadow-pop: 0 4px 12px rgba(30, 40, 60, 0.10);
+  --shadow-drag:0 8px 32px rgba(30, 40, 60, 0.14);
 }
 
 
@@ -161,54 +219,67 @@
    defined below and used only on the title bar, which is decoration. */
 :root[data-theme="paper"] {
   /* Background palette — the desk, and the sheet you write on */
-  --bg-primary:   #e7dab9;
-  --bg-secondary: #f3e9d0;
-  --bg-tertiary:  #ecdfbf;
-  --bg-card:      rgba(243, 233, 208, 0.82);
-  --bg-card-solid:#f3e9d0;
-  --bg-input:     #efe4c8;
-  --bg-hover:     rgba(213, 196, 152, 0.45);
+  --surface-app:   #e7dab9;
+  --surface-panel: #f3e9d0;
+  --surface-sunken:  #ecdfbf;
+  --surface-raised:      #f3e9d0;
+  --surface-input:     #efe4c8;
+  --surface-hover:     rgba(213, 196, 152, 0.45);
 
   /* Text — ink, pencil, faded pencil */
-  --text-primary:   #243049;
-  --text-secondary: #6d6350;
-  --text-tertiary:  #9a8f77;
-  --text-inverse:   #f6efdc;
+  --ink:   #243049;
+  --ink-soft: #6d6350;
+  --ink-faint:  #9a8f77;
+  --on-accent:   #f6efdc;
 
   /* Accent — the red pen */
   --accent:        #b23a48;
   --accent-hover:  #93313c;
   --accent-dim:    #cf9199;
-  --accent-glow:   rgba(178, 58, 72, 0.22);
-  --accent-glow-lg:rgba(178, 58, 72, 0.08);
+  --accent-surface:   rgba(178, 58, 72, 0.22);
 
   /* Borders */
-  --border:       #cbb98d;
-  --border-light: rgba(203, 185, 141, 0.55);
-  --border-focus: rgba(178, 58, 72, 0.5);
+  --line:       #cbb98d;
+  --line-soft: rgba(203, 185, 141, 0.55);
+  --line-focus: rgba(178, 58, 72, 0.5);
 
   /* Status — inks. `error` is pulled away from the accent's crimson so a failure
      never reads as "the app is emphasising this". */
   --success:     #4f6b41;
-  --success-bg:  rgba(79, 107, 65, 0.12);
+  --success-surface:  rgba(79, 107, 65, 0.12);
   --warning:     #b5761f;
-  --warning-bg:  rgba(181, 118, 31, 0.14);
+  --warning-surface:  rgba(181, 118, 31, 0.14);
   --error:       #8f2233;
-  --error-bg:    rgba(143, 34, 51, 0.12);
+  --error-surface:    rgba(143, 34, 51, 0.12);
   --info:        #35507a;
-  --info-bg:     rgba(53, 80, 122, 0.12);
+  --info-surface:     rgba(53, 80, 122, 0.12);
 
   /* Shadows — warm and shallow, like paper on a desk */
-  --shadow-sm:  0 1px 2px  rgba(90, 65, 25, 0.14);
-  --shadow-md:  0 3px 10px rgba(90, 65, 25, 0.16);
-  --shadow-lg:  0 8px 26px rgba(90, 65, 25, 0.20);
-  --shadow-glow:0 0 16px var(--accent-glow);
+  /* Floating layers only. Tuned to THIS theme's ground — see
+     visual-language.md §3 on why a shadow is a theme token. */
+  --shadow-pop: 0 3px 10px rgba(90, 65, 25, 0.16);
+  --shadow-drag:0 8px 26px rgba(90, 65, 25, 0.20);
 
   /* Ruled paper, used by the story panel below. */
   --paper-rule-color:   rgba(90, 120, 170, 0.14);
   --paper-rule-size:    27px;
   --paper-margin-color: rgba(178, 58, 72, 0.40);
-  --font-hand: "Segoe Print", "Bradley Hand", "Comic Sans MS", "Chalkboard SE", cursive;
+  --font-accent: "Segoe Print", "Bradley Hand", "Comic Sans MS", "Chalkboard SE", cursive;
+  /* The SHEET, not just its rules: an aged page is uneven and faintly
+     foxed, and the ruling is one part of that. --texture-app carries the
+     ageing across the whole window; --texture-read adds the rules where
+     there is prose to line up. */
+  --texture-app:
+    radial-gradient(circle at 12% 18%, rgba(146, 112, 58, .085) 0 2.5px, transparent 3.5px),
+    radial-gradient(circle at 63% 41%, rgba(146, 112, 58, .07) 0 2px, transparent 3px),
+    radial-gradient(circle at 34% 77%, rgba(146, 112, 58, .075) 0 1.5px, transparent 2.5px),
+    radial-gradient(circle at 86% 66%, rgba(146, 112, 58, .065) 0 2px, transparent 3px),
+    radial-gradient(circle at 47% 8%,  rgba(146, 112, 58, .055) 0 1.5px, transparent 2.5px),
+    radial-gradient(circle at 78% 93%, rgba(146, 112, 58, .06) 0 2px, transparent 3px),
+    /* the fibre itself — a fine horizontal laid line, as in laid paper */
+    repeating-linear-gradient(0deg, rgba(146, 112, 58, .035) 0 1px, transparent 1px 3px);
+  --texture-read: repeating-linear-gradient(to bottom, transparent 0, transparent calc(var(--paper-rule-size) - 1px), var(--paper-rule-color) calc(var(--paper-rule-size) - 1px), var(--paper-rule-color) var(--paper-rule-size));
+
 }
 
 /* ── Paper (Subtle) — "和紙と墨" (Washi & Ink) ────────────────
@@ -219,59 +290,62 @@
    terracotta. It inherits nothing — CSS custom properties do not cascade between
    sibling selectors — so the block is complete on its own. */
 :root[data-theme="paper-subtle"] {
-  /* Background palette — unbleached washi */
-  --bg-primary:   #e8e2d3;
-  --bg-secondary: #f2ecdc;
-  --bg-tertiary:  #dcd4c0;
-  --bg-card:      rgba(242, 236, 220, 0.92);
-  --bg-card-solid:#f2ecdc;
-  --bg-input:     #ece5d2;
-  --bg-hover:     rgba(214, 204, 180, 0.35);
+  /* Background palette — WHITE paper.
+     This used to be unbleached cream one step lighter than 古紙, which is
+     why the two read as the same theme: only the accent differed, and an
+     accent cannot carry a theme on its own. White ground keeps the moss
+     and makes this the other LIGHT theme rather than a paler 古紙. */
+  --surface-app:   #f4f3ef;
+  --surface-panel: #fbfaf7;
+  --surface-sunken:  #ecebe5;
+  --surface-raised:      #ffffff;
+  --surface-input:     #f7f6f2;
+  --surface-hover:     rgba(120, 130, 118, 0.10);
 
   /* Text — ink, ink-wash grey, faded ink */
-  --text-primary:   #2f2b24;
-  --text-secondary: #6d6759;
-  --text-tertiary:  #98917f;
-  --text-inverse:   #f6f1e3;
+  --ink:   #23262a;
+  --ink-soft: #5c6268;
+  --ink-faint:  #949aa0;
+  --on-accent:   #ffffff;
 
   /* Accent — 緑青 (mossy verdigris): ink-friendly, quieter than terracotta */
-  --accent:        #6d8f6f;
-  --accent-hover:  #567457;
-  --accent-dim:    #a3b9a4;
-  --accent-glow:   rgba(109, 143, 111, 0.22);
-  --accent-glow-lg:rgba(109, 143, 111, 0.08);
+  --accent:        #5f8f6a;
+  --accent-hover:  #4b7455;
+  --accent-dim:    #a6c2ac;
+  --accent-surface:   rgba(95, 143, 106, 0.14);
 
-  /* Borders — 籐 (rattan) */
-  --border:       #cfc5a9;
-  --border-light: rgba(207, 197, 169, 0.55);
-  --border-focus: rgba(109, 143, 111, 0.55);
+  /* Borders — a cool grey, so the ground reads as paper rather than card. */
+  --line:       #dcdbd5;
+  --line-soft: rgba(220, 219, 213, 0.7);
+  --line-focus: rgba(95, 143, 106, 0.55);
 
   /* Status — inks. `error` stays in the red family, pulled away from the moss
      accent so a failure never reads as "the app is emphasising this". */
   --success:     #5a7d52;
-  --success-bg:  rgba(90, 125, 82, 0.14);
+  --success-surface:  rgba(90, 125, 82, 0.14);
   --warning:     #b07a2e;
-  --warning-bg:  rgba(176, 122, 46, 0.14);
+  --warning-surface:  rgba(176, 122, 46, 0.14);
   --error:       #93403a;
-  --error-bg:    rgba(147, 64, 58, 0.13);
+  --error-surface:    rgba(147, 64, 58, 0.13);
   --info:        #5b6e8c;
-  --info-bg:     rgba(91, 110, 140, 0.13);
+  --info-surface:     rgba(91, 110, 140, 0.13);
 
   /* Shadows — warm and shallow, a touch deeper than before so cards sit on the desk */
-  --shadow-sm:  0 1px 2px  rgba(70, 60, 40, 0.14);
-  --shadow-md:  0 3px 10px rgba(70, 60, 40, 0.16);
-  --shadow-lg:  0 8px 26px rgba(70, 60, 40, 0.20);
-  --shadow-glow:0 0 16px var(--accent-glow);
+  /* Floating layers only. Tuned to THIS theme's ground — see
+     visual-language.md §3 on why a shadow is a theme token. */
+  --shadow-pop: 0 3px 10px rgba(40, 45, 50, 0.10);
+  --shadow-drag:0 8px 26px rgba(40, 45, 50, 0.14);
 
-  /* Decorations off — that is what makes this variant "subtle". */
+  /* No texture. 古紙 is the one with a surface; this is the plain sheet. */
   --paper-rule-color:   transparent;
   --paper-rule-size:    27px;
   --paper-margin-color: transparent;
   /* A textbook serif rather than handwriting; still chrome-only. */
-  --font-hand: "Yu Mincho", "YuMincho", "Hiragino Mincho ProN", "Noto Serif JP", "Noto Serif", Georgia, "Times New Roman", serif;
+  --font-accent: "Yu Mincho", "YuMincho", "Hiragino Mincho ProN", "Noto Serif JP", "Noto Serif", Georgia, "Times New Roman", serif;
 
   /* Washi fibre grain (faint fractal noise; layered via body/.card/#result-panel) */
   --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='w'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3CfeComponentTransfer%3E%3CfeFuncA type='linear' slope='0.035'/%3E%3C/feComponentTransfer%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23w)'/%3E%3C/svg%3E");
+
 }
 
 /* ── Bamboo Slip — "簡牘古文" (bamboo-ancient, proposal #3) ────────
@@ -283,94 +357,158 @@
    (slat/cord texture). Self-contained: no new dependency. */
 :root[data-theme="bamboo-ancient"] {
   /* Background palette — charred bamboo slips */
-  --bg-primary:   #3a2e1e;
-  --bg-secondary: #463a26;
-  --bg-tertiary:  #2f2518;
-  --bg-card:      rgba(70, 58, 38, 0.92);
-  --bg-card-solid:#463a26;
-  --bg-input:     #3a2e1e;
-  --bg-hover:     rgba(92, 76, 50, 0.45);
+  --surface-app:   #3a2e1e;
+  --surface-panel: #463a26;
+  --surface-sunken:  #2f2518;
+  --surface-raised:      #463a26;
+  --surface-input:     #3a2e1e;
+  --surface-hover:     rgba(92, 76, 50, 0.45);
 
   /* Text — faint ivory ink on darkened slips */
-  --text-primary:   #e8e0cc;
-  --text-secondary: #c2b89f;
-  --text-tertiary:  #8f8570;
-  --text-inverse:   #201708;
+  --ink:   #e8e0cc;
+  --ink-soft: #c2b89f;
+  --ink-faint:  #8f8570;
+  --on-accent:   #201708;
 
   /* Accent — 銅青 (bronze verdigris), the patina of unearthed bronzes */
   --accent:        #7fc4b8;
   --accent-hover:  #96d6cb;
   --accent-dim:    #58958c;
-  --accent-glow:   rgba(127, 196, 184, 0.30);
-  --accent-glow-lg:rgba(127, 196, 184, 0.13);
+  --accent-surface:   rgba(127, 196, 184, 0.30);
 
   /* Borders — old bamboo, darkened */
-  --border:       #6b5a3c;
-  --border-light: rgba(107, 90, 60, 0.55);
-  --border-focus: rgba(127, 196, 184, 0.60);
+  --line:       #6b5a3c;
+  --line-soft: rgba(107, 90, 60, 0.55);
+  --line-focus: rgba(127, 196, 184, 0.60);
 
   /* Status — kept distinct from the verdigris accent so a failure never
      reads as "the app is emphasising this". */
   --success:     #86c68a;
-  --success-bg:  rgba(134, 198, 138, 0.16);
+  --success-surface:  rgba(134, 198, 138, 0.16);
   --warning:     #d9a44a;
-  --warning-bg:  rgba(217, 164, 74, 0.16);
+  --warning-surface:  rgba(217, 164, 74, 0.16);
   --error:       #e06a52;
-  --error-bg:    rgba(224, 106, 82, 0.16);
+  --error-surface:    rgba(224, 106, 82, 0.16);
   --info:        #7fa8cc;
-  --info-bg:     rgba(127, 168, 204, 0.16);
+  --info-surface:     rgba(127, 168, 204, 0.16);
 
   /* Shadows — deep, like a bundle resting on a dark shelf */
-  --shadow-sm:  0 1px 2px  rgba(0, 0, 0, 0.40);
-  --shadow-md:  0 3px 10px rgba(0, 0, 0, 0.45);
-  --shadow-lg:  0 8px 26px rgba(0, 0, 0, 0.55);
-  --shadow-glow:0 0 16px var(--accent-glow);
+  /* Floating layers only. Tuned to THIS theme's ground — see
+     visual-language.md §3 on why a shadow is a theme token. */
+  --shadow-pop: 0 3px 10px rgba(0, 0, 0, 0.45);
+  --shadow-drag:0 8px 26px rgba(0, 0, 0, 0.55);
 
   /* Decorations off — the ruled-paper treatment belongs to the paper themes. */
   --paper-rule-color:   transparent;
   --paper-rule-size:    27px;
   --paper-margin-color: transparent;
   /* A classical serif rather than handwriting; still chrome-only. */
-  --font-hand: "Yu Mincho", "YuMincho", "Hiragino Mincho ProN", "Noto Serif JP", "Noto Serif", Georgia, "Times New Roman", serif;
+  --font-accent: "Yu Mincho", "YuMincho", "Hiragino Mincho ProN", "Noto Serif JP", "Noto Serif", Georgia, "Times New Roman", serif;
 
   /* Bamboo fibre grain (faint fractal noise; layered via body/.card/#result-panel) */
   --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='a'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.4 0.06' numOctaves='4' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3CfeComponentTransfer%3E%3CfeFuncA type='linear' slope='0.09'/%3E%3C/feComponentTransfer%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23a)'/%3E%3C/svg%3E");
   /* A bundle of vertically bound slats + two binding cords. */
   --slip: linear-gradient(180deg,transparent 0%,transparent 17%,rgba(0,0,0,0.55) 17%,rgba(0,0,0,0.55) calc(17% + 3px),rgba(220,205,160,0.08) calc(17% + 4px),transparent calc(17% + 6px),transparent 82%,rgba(0,0,0,0.55) 82%,rgba(0,0,0,0.55) calc(82% + 3px),rgba(220,205,160,0.08) calc(82% + 4px),transparent calc(82% + 6px),transparent 100%),repeating-linear-gradient(90deg,transparent 0px,transparent 42px,rgba(0,0,0,0.65) 42px,rgba(0,0,0,0.65) 46px),repeating-linear-gradient(90deg,rgba(0,0,0,0.35) 0px,rgba(0,0,0,0) 5px,rgba(220,205,160,0.10) 14px,rgba(255,255,255,0) 24px,rgba(0,0,0,0.15) 38px,rgba(0,0,0,0.35) 46px),radial-gradient(130% 95% at 50% 42%,rgba(225,205,165,0.04) 0%,rgba(0,0,0,0) 42%,rgba(0,0,0,0.6) 100%);
+  /* Slats on the window's ground AND on the reading surface — but never on
+     cards, where they would fight the dense data. */
+  /* The slats are the theme, and they are also 40px of high-contrast vertical
+     banding — which is fine behind a title and hard to read a task list or a
+     result through. So they stay on the binding at the top and come off the
+     working area. The palette still says 竹簡 everywhere; the pattern says it
+     where there is nothing to read. */
+  --texture-chrome: var(--grain), var(--slip);
+  --texture-app:  none;
+  --texture-read: none;
+
 }
 
-/* The reading surface gets the ruled sheet — the one place in the app that is
-   actually prose, and the only place the texture helps rather than distracts.
-   Subtle sets the rule colour to transparent, so the same rule is a no-op there. */
-:root[data-theme="paper"] #result-panel,
-:root[data-theme="paper-subtle"] #result-panel {
-  background-image: repeating-linear-gradient(
-    to bottom,
-    transparent 0,
-    transparent calc(var(--paper-rule-size) - 1px),
-    var(--paper-rule-color) calc(var(--paper-rule-size) - 1px),
-    var(--paper-rule-color) var(--paper-rule-size)
-  );
-}
-/* Washi grain on the reading surface — paper-subtle only. Its ruled sheet is
-   transparent there, so the grain replaces it instead of stacking. */
-:root[data-theme="paper-subtle"] #result-panel {
-  background-image: var(--grain);
-}
-:root[data-theme="paper"] .titlebar-title,
-:root[data-theme="paper-subtle"] .titlebar-title { font-family: var(--font-hand); letter-spacing: 0; }
+/* ── 掛け軸 (hanging scroll) ─────────────────────────────────────────────────
+   Ported from JHEditor. A mounted scroll: silk 緞子 for the mount, a paler
+   本紙 (the paper the work is actually on) for the panels, 藍 for the accent
+   and 墨 for the ink.
 
-/* Bamboo slip texture lives on the app canvas and the reading surface, not on
-   cards — the slats would fight the dense data there. The cursor is left at the
-   OS default for legibility and pointing precision. */
-:root[data-theme="bamboo-ancient"] body {
-  background-image: var(--grain), var(--slip);
+   Written as tokens ONLY — no selector names an element of this app. That is
+   the contract that made this theme a block to paste rather than a job:
+   docs/design/visual-language.md §5 and §9. */
+:root[data-theme="kakejiku"] {
+  /* Background palette — the mount, and the paper on it */
+  --surface-app:   #ddd2ba;   /* 緞子 — the silk border */
+  --surface-panel: #ece4d2;   /* 本紙 — the work's own paper */
+  --surface-sunken:#e0d7c2;
+  --surface-raised:#f2ecdd;
+  --surface-input: #e7dfcb;
+  --surface-hover: rgba(120, 100, 70, 0.10);
+
+  /* Text — 墨 (sumi), thinned twice */
+  --ink:        #23262d;
+  --ink-soft:   #55575e;
+  --ink-faint:  #8d8b86;
+  --on-accent:  #f5f1e6;
+
+  /* Accent — 藍 (indigo). The colour of the seal script and the mount's cord. */
+  --accent:         #2f4f7a;
+  --accent-hover:   #24405f;
+  --accent-dim:     #8ea3bd;
+  --accent-surface: rgba(47, 79, 122, 0.13);
+
+  /* Borders — the 風帯 (the strips at the top of a scroll) */
+  --line:       #c6b799;
+  --line-soft:  rgba(198, 183, 153, 0.6);
+  --line-focus: rgba(47, 79, 122, 0.5);
+
+  /* Status — mineral pigments, kept away from the indigo accent. */
+  --success:         #4a6f52;
+  --success-surface: rgba(74, 111, 82, 0.14);
+  --warning:         #9c6b1c;
+  --warning-surface: rgba(156, 107, 28, 0.14);
+  --error:           #8f3a34;
+  --error-surface:   rgba(143, 58, 52, 0.13);
+  --info:            #3f5f86;
+  --info-surface:    rgba(63, 95, 134, 0.13);
+
+  --shadow-pop:  0 3px 10px rgba(60, 50, 30, 0.16);
+  --shadow-drag: 0 8px 26px rgba(60, 50, 30, 0.20);
+
+  --font-accent: "Yu Mincho", "YuMincho", "Hiragino Mincho ProN", "Noto Serif JP", "Noto Serif", Georgia, serif;
+
+  /* The weave. Two crossed threads at a shallow angle, plus the seam where the
+     mount meets the 本紙 — a horizontal band rather than a repeating rule,
+     because a scroll has two of them and not fifty. */
+  --texture-app:
+    repeating-linear-gradient(45deg,  rgba(108, 86, 52, .10) 0 1px, transparent 1px 5px),
+    repeating-linear-gradient(-45deg, rgba(108, 86, 52, .075) 0 1px, transparent 1px 5px);
+  --texture-read:
+    linear-gradient(180deg, rgba(108, 86, 52, .22) 0 2px, transparent 2px),
+    repeating-linear-gradient(45deg, rgba(108, 86, 52, .055) 0 1px, transparent 1px 6px);
 }
-:root[data-theme="bamboo-ancient"] #result-panel {
-  background-image: var(--grain), var(--slip);
-}
-:root[data-theme="bamboo-ancient"] .titlebar-title {
-  font-family: var(--font-hand);
+
+/* ── The texture contract, applied ──────────────────────────────────────────
+   Written ONCE, for every theme that exists and every theme that will. A theme
+   supplies --texture-app / --texture-read (and --font-accent); nothing about the
+   app's own structure appears in a theme block any more.
+
+   What this replaces: four rules that each named `#result-panel` or
+   `.titlebar-title` from inside a `[data-theme=…]` selector. Porting a theme
+   from JHEditor meant writing those rules again, with this file's element ids
+   in them. docs/design/visual-language.md §5. */
+/* The one surface in the app that is actually prose, and so the only one where
+   a texture helps rather than competes with dense data.
+
+   `#result-panel` was the old Monitor's result pane and no longer exists —
+   which meant --texture-read had NO target: the paper themes' ruled sheet was
+   being supplied and applied to nothing. The reading surfaces now are the
+   deliverable card, the ask conversation and the welcome screen. */
+.read-surface,
+.mtl-doc,
+.mtl-ask,
+.mwelcome { background-image: var(--texture-read); }
+
+/* A theme's display face, on the three places it belongs. Everything else —
+   tables, tool lines, token counts, file paths — stays on the UI face. */
+.titlebar-title,
+.view-title,
+.dash-empty h3 {
+  font-family: var(--font-accent);
   letter-spacing: 0;
 }
 
@@ -391,9 +529,20 @@ html {
 
 body {
   font-family: var(--font-sans);
-  background: var(--bg-primary);
-  background-image: var(--grain, none);
-  color: var(--text-primary);
+  background: var(--surface-app);
+  /* The theme's texture, applied HERE rather than in a second rule further
+     down: this declaration used to say `var(--grain, none)` and, being later in
+     the file, it silently replaced the contract's `var(--texture-app)` with a
+     token most themes do not define — so every texture resolved to `none` and
+     no theme had a pattern at all. One place, one declaration. */
+  background-image: var(--texture-app);
+  /* The textures are gradients, which fill the element by default — so a
+     radial "speck" would be ONE speck stretched across the window. A tile
+     makes them a pattern. Themes with no texture are unaffected (none does not
+     tile). */
+  background-size: 180px 180px;
+  background-repeat: repeat;
+  color: var(--ink);
   line-height: 1.6;
   overflow: hidden;
   min-height: 100vh;
@@ -410,7 +559,7 @@ body {
 }
 ::-webkit-scrollbar-thumb {
   background: hsla(220, 15%, 30%, 0.6);
-  border-radius: 3px;
+  border-radius: var(--r-1);
 }
 ::-webkit-scrollbar-thumb:hover {
   background: hsla(220, 15%, 40%, 0.8);
@@ -424,8 +573,21 @@ body {
   align-items: center;
   justify-content: space-between;
   padding: 0 8px 0 14px;
-  background: var(--bg-secondary);
-  border-bottom: 1px solid var(--border);
+  background: var(--surface-panel);
+  /* The title bar wears the theme's pattern: one that stops at the edge of the
+     content looks like a wallpaper hung inside a plain frame, and on 掛け軸 the
+     mount IS the theme.
+
+     `--texture-chrome`, not `--texture-app`, so a theme can keep its pattern
+     here and drop it from the working area — see the token's note.
+
+     Declared INSIDE this rule, deliberately. It was a separate
+     `#titlebar, .sidebar { background-image: ... }` earlier in the file, and the
+     `background:` SHORTHAND on this line reset it to none — the same way a
+     second declaration on `body` silently disabled every texture before. A
+     shorthand always wins over an earlier longhand. */
+  background-image: var(--texture-chrome);
+  border-bottom: 1px solid var(--line);
   position: fixed;
   top: 0; left: 0; right: 0;
   z-index: 9999;
@@ -448,7 +610,7 @@ body {
 .titlebar-title {
   font-size: var(--fs-sm);
   font-weight: 600;
-  color: var(--text-secondary);
+  color: var(--ink-soft);
   letter-spacing: 0.3px;
 }
 
@@ -464,15 +626,15 @@ body {
   justify-content: center;
   border: none;
   background: transparent;
-  color: var(--text-secondary);
+  color: var(--ink-soft);
   font-size: var(--fs-sm);
   cursor: pointer;
-  border-radius: var(--radius-sm);
+  border-radius: var(--r-2);
   transition: background var(--transition-fast), color var(--transition-fast);
 }
 .titlebar-btn:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
+  background: var(--surface-hover);
+  color: var(--ink);
 }
 .titlebar-btn-close:hover {
   background: var(--error);
@@ -493,8 +655,19 @@ body {
   width: var(--sidebar-width);
   min-width: var(--sidebar-width);
   height: 100%;
-  background: var(--bg-secondary);
-  border-right: 1px solid var(--border);
+  background: var(--surface-panel);
+  /* The rail follows the GROUND, not the title bar: it carries labels, so a
+     theme that pulls its pattern off the working area (竹簡) should pull it off
+     here as well. A theme that wants one pattern everywhere gets that for free,
+     since --texture-chrome defaults to --texture-app.
+
+     Declared INSIDE this rule, deliberately: it was a separate
+     `#titlebar, .sidebar { background-image: ... }` earlier in the file, and the
+     `background:` SHORTHAND on this line reset it to none — the same way a
+     second declaration on `body` silently disabled every texture before. A
+     shorthand always wins over an earlier longhand. */
+  background-image: var(--texture-app);
+  border-right: 1px solid var(--line);
   display: flex;
   flex-direction: column;
   overflow: visible;   /* must NOT be hidden — tooltip ::after escapes sidebar bounds */
@@ -519,12 +692,16 @@ body {
 
 .sidebar-item {
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 0;
-  height: 44px;
+  gap: 3px;
+  width: 100%;
+  padding: 0 2px;
+  height: 50px;
+  font-family: var(--font-mono);
   cursor: pointer;
-  color: var(--text-secondary);
+  color: var(--ink-soft);
   text-decoration: none;
   position: relative;
   transition: color var(--transition-fast), background var(--transition-fast);
@@ -535,11 +712,15 @@ body {
   width: 100%;
 }
 .sidebar-item:hover {
-  color: var(--text-primary);
-  background: var(--bg-hover);
+  color: var(--ink);
+  background: var(--surface-hover);
 }
 .sidebar-item.active {
   color: var(--accent);
+}
+.sidebar-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 .sidebar-item.active::before {
   content: '';
@@ -550,7 +731,7 @@ body {
   width: 3px;
   background: var(--accent);
   border-radius: 0 3px 3px 0;
-  box-shadow: 0 0 8px var(--accent-glow);
+  box-shadow: 0 0 8px var(--accent-surface);
 }
 
 .sidebar-item-icon {
@@ -572,18 +753,18 @@ body {
   left: calc(var(--sidebar-width) + 10px);
   top: 50%;
   transform: translateY(-50%) translateX(-4px);
-  background: var(--bg-tertiary);
-  color: var(--text-primary);
+  background: var(--surface-sunken);
+  color: var(--ink);
   padding: 5px 11px;
-  border-radius: var(--radius-sm);
+  border-radius: var(--r-2);
   font-size: var(--fs-sm);
   font-weight: 500;
   white-space: nowrap;
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.15s ease, transform 0.15s ease;
-  border: 1px solid var(--border);
-  box-shadow: var(--shadow-md);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow-pop);
   z-index: 1000;
 }
 .sidebar-item:hover::after {
@@ -596,7 +777,7 @@ body {
    because it is still a route; only its GROUPING changed. */
 .sidebar-footer {
   padding: 6px 0 10px;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--line);
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
@@ -605,7 +786,7 @@ body {
 }
 .sidebar-version {
   font-size: var(--fs-2xs);
-  color: var(--text-tertiary);
+  color: var(--ink-faint);
 }
 
 
@@ -647,7 +828,7 @@ body {
 .page-title {
   font-size: var(--fs-2xl);
   font-weight: 700;
-  color: var(--text-primary);
+  color: var(--ink);
   margin-bottom: 4px;
   display: flex;
   align-items: center;
@@ -658,29 +839,40 @@ body {
 }
 .page-subtitle {
   font-size: var(--fs-md);
-  color: var(--text-secondary);
+  color: var(--ink-soft);
   font-weight: 400;
 }
 
 
 /* ── Glassmorphism Card ────────────────────────────────────── */
+/* ── Regions, not cards ─────────────────────────────────────────────────────
+   The app used to draw every grouping as a card: a fill, a 1px border and a
+   radius, sitting on the ground. Five of those on one screen read as five
+   objects stacked on a surface — which is what "flat" is not, and it is worst
+   under the textured themes, where the card hides the paper it is lying on.
+
+   The rule, from docs/design/visual-language.md §3:
+
+     • a CONTAINER (a region of the page) separates with a RULE and, when it has
+       to differ, one step of lightness. No border box, no radius, no fill it
+       does not need.
+     • a CONTROL (a button, an input, a chip — something you press or type into)
+       KEEPS its border and radius. That is what says it is operable, and taking
+       it away would make the page flat in the wrong sense.
+     • a FLOATING layer (modal, popover) keeps its shadow, because it really is
+       above the page.
+
+   `.card` is the first of those, so it stops being a card.                    */
 .card {
-  background: var(--bg-card);
-  background-image: var(--grain, none);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  padding: 24px;
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  transition: transform var(--transition-normal),
-              box-shadow var(--transition-normal),
-              border-color var(--transition-normal);
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  padding: 20px 0;
 }
-.card:hover {
-  transform: translateY(-2px);
-  box-shadow: var(--shadow-lg);
-  border-color: var(--border-focus);
-}
+/* The last section in a column has nothing below it to be separated from. */
+.card:last-child { border-bottom: none; }
+
 .card-flat {
   composes: card;
 }
@@ -697,7 +889,7 @@ body {
 .card-title {
   font-size: var(--fs-base);
   font-weight: 600;
-  color: var(--text-primary);
+  color: var(--ink);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -707,7 +899,7 @@ body {
 }
 .card-description {
   font-size: var(--fs-sm);
-  color: var(--text-secondary);
+  color: var(--ink-soft);
   margin-top: 2px;
 }
 
@@ -752,20 +944,16 @@ body {
 
 
 /* ── Stat Cards ────────────────────────────────────────────── */
+/* A figure and its label. Side by side these are columns of one strip, so the
+   rule goes BETWEEN them rather than around each. */
 .stat-card {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  padding: 20px;
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  transition: transform var(--transition-normal),
-              box-shadow var(--transition-normal);
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 16px 20px;
 }
-.stat-card:hover {
-  transform: translateY(-2px);
-  box-shadow: var(--shadow-md);
-}
+.stat-card + .stat-card { border-left: 1px solid var(--line); }
+
 .stat-icon {
   font-size: var(--fs-2xl);
   margin-bottom: 8px;
@@ -773,12 +961,12 @@ body {
 .stat-value {
   font-size: var(--fs-2xl);
   font-weight: 700;
-  color: var(--text-primary);
+  color: var(--ink);
   line-height: 1.2;
 }
 .stat-label {
   font-size: var(--fs-sm);
-  color: var(--text-secondary);
+  color: var(--ink-soft);
   margin-top: 4px;
   font-weight: 500;
   text-transform: uppercase;
@@ -792,16 +980,16 @@ body {
   align-items: center;
   gap: 5px;
   padding: 3px 10px;
-  border-radius: 100px;
+  border-radius: var(--r-pill);
   font-size: var(--fs-xs);
   font-weight: 600;
   letter-spacing: 0.3px;
   text-transform: uppercase;
 }
 .badge-active {
-  background: var(--accent-glow);
+  background: var(--accent-surface);
   color: var(--accent);
-  border: 1px solid var(--accent-glow);
+  border: 1px solid var(--accent-surface);
 }
 .badge-active::before {
   content: '';
@@ -811,22 +999,22 @@ body {
   animation: pulse 2s infinite;
 }
 .badge-success {
-  background: var(--success-bg);
+  background: var(--success-surface);
   color: var(--success);
   border: 1px solid hsla(145, 70%, 50%, 0.3);
 }
 .badge-warning {
-  background: var(--warning-bg);
+  background: var(--warning-surface);
   color: var(--warning);
   border: 1px solid hsla(40, 90%, 55%, 0.3);
 }
 .badge-error {
-  background: var(--error-bg);
+  background: var(--error-surface);
   color: var(--error);
   border: 1px solid hsla(0, 75%, 55%, 0.3);
 }
 .badge-info {
-  background: var(--info-bg);
+  background: var(--info-surface);
   color: var(--info);
   border: 1px solid hsla(210, 90%, 60%, 0.3);
 }
@@ -839,7 +1027,7 @@ body {
   justify-content: center;
   gap: 8px;
   padding: 10px 20px;
-  border-radius: var(--radius-md);
+  border-radius: var(--r-3);
   font-family: var(--font-sans);
   font-size: var(--fs-md);
   font-weight: 600;
@@ -856,32 +1044,31 @@ body {
 
 .btn-primary {
   background: var(--accent);
-  color: var(--text-inverse);
+  color: var(--on-accent);
   border-color: var(--accent);
 }
 .btn-primary:hover {
   background: var(--accent-hover);
-  box-shadow: var(--shadow-glow);
 }
 
 .btn-secondary {
-  background: var(--bg-tertiary);
-  color: var(--text-primary);
-  border-color: var(--border);
+  background: var(--surface-sunken);
+  color: var(--ink);
+  border-color: var(--line);
 }
 .btn-secondary:hover {
-  background: var(--bg-hover);
-  border-color: var(--text-secondary);
+  background: var(--surface-hover);
+  border-color: var(--ink-soft);
 }
 
 .btn-ghost {
   background: transparent;
-  color: var(--text-secondary);
+  color: var(--ink-soft);
   border-color: transparent;
 }
 .btn-ghost:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
+  background: var(--surface-hover);
+  color: var(--ink);
 }
 
 .btn-danger {
@@ -897,7 +1084,7 @@ body {
 .btn-sm {
   padding: 6px 14px;
   font-size: var(--fs-sm);
-  border-radius: var(--radius-sm);
+  border-radius: var(--r-2);
 }
 .btn-lg {
   padding: 14px 28px;
@@ -908,7 +1095,7 @@ body {
   width: 36px;
   height: 36px;
   padding: 0;
-  border-radius: var(--radius-sm);
+  border-radius: var(--r-2);
 }
 
 
@@ -918,10 +1105,10 @@ body {
 .select {
   width: 100%;
   padding: 10px 14px;
-  background: var(--bg-input);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  color: var(--text-primary);
+  background: var(--surface-input);
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
+  color: var(--ink);
   font-family: var(--font-sans);
   font-size: var(--fs-md);
   outline: none;
@@ -932,11 +1119,11 @@ body {
 .textarea:focus,
 .select:focus {
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-glow);
+  box-shadow: 0 0 0 3px var(--accent-surface);
 }
 .input::placeholder,
 .textarea::placeholder {
-  color: var(--text-tertiary);
+  color: var(--ink-faint);
 }
 
 .textarea {
@@ -964,13 +1151,13 @@ body {
 .input-label {
   font-size: var(--fs-sm);
   font-weight: 600;
-  color: var(--text-secondary);
+  color: var(--ink-soft);
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
 .input-hint {
   font-size: var(--fs-xs);
-  color: var(--text-tertiary);
+  color: var(--ink-faint);
 }
 
 /* Password input with toggle */
@@ -987,16 +1174,16 @@ body {
   transform: translateY(-50%);
   background: none;
   border: none;
-  color: var(--text-tertiary);
+  color: var(--ink-faint);
   cursor: pointer;
   padding: 6px;
   font-size: var(--fs-base);
   transition: color var(--transition-fast);
-  border-radius: var(--radius-sm);
+  border-radius: var(--r-2);
 }
 .input-password-toggle:hover {
-  color: var(--text-primary);
-  background: var(--bg-hover);
+  color: var(--ink);
+  background: var(--surface-hover);
 }
 
 
@@ -1010,9 +1197,9 @@ body {
 .toggle {
   width: 40px;
   height: 22px;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
-  border-radius: 100px;
+  background: var(--surface-sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
   position: relative;
   transition: background var(--transition-fast), border-color var(--transition-fast);
   cursor: pointer;
@@ -1025,7 +1212,7 @@ body {
   left: 2px;
   width: 16px;
   height: 16px;
-  background: var(--text-secondary);
+  background: var(--ink-soft);
   border-radius: 50%;
   transition: transform var(--transition-fast), background var(--transition-fast);
 }
@@ -1039,7 +1226,7 @@ body {
 }
 .toggle-label {
   font-size: var(--fs-md);
-  color: var(--text-primary);
+  color: var(--ink);
   user-select: none;
 }
 
@@ -1066,8 +1253,8 @@ input[type="range"] {
   -webkit-appearance: none;
   width: 100%;
   height: 4px;
-  background: var(--bg-tertiary);
-  border-radius: 2px;
+  background: var(--surface-sunken);
+  border-radius: var(--r-1);
   outline: none;
 }
 input[type="range"]::-webkit-slider-thumb {
@@ -1077,8 +1264,8 @@ input[type="range"]::-webkit-slider-thumb {
   background: var(--accent);
   border-radius: 50%;
   cursor: pointer;
-  border: 2px solid var(--bg-primary);
-  box-shadow: 0 0 8px var(--accent-glow);
+  border: 2px solid var(--surface-app);
+  box-shadow: 0 0 8px var(--accent-surface);
   transition: transform var(--transition-fast);
 }
 input[type="range"]::-webkit-slider-thumb:hover {
@@ -1089,8 +1276,8 @@ input[type="range"]::-webkit-slider-thumb:hover {
 /* ── Tables ────────────────────────────────────────────────── */
 .table-wrap {
   overflow-x: auto;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border);
+  border-radius: var(--r-3);
+  border: 1px solid var(--line);
 }
 table {
   width: 100%;
@@ -1098,28 +1285,28 @@ table {
   font-size: var(--fs-md);
 }
 thead {
-  background: var(--bg-tertiary);
+  background: var(--surface-sunken);
 }
 th {
   padding: 12px 16px;
   text-align: left;
   font-weight: 600;
-  color: var(--text-secondary);
+  color: var(--ink-soft);
   font-size: var(--fs-xs);
   text-transform: uppercase;
   letter-spacing: 0.5px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--line);
 }
 td {
   padding: 12px 16px;
-  border-bottom: 1px solid var(--border-light);
-  color: var(--text-primary);
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--ink);
 }
 tr:last-child td {
   border-bottom: none;
 }
 tr:hover td {
-  background: var(--bg-hover);
+  background: var(--surface-hover);
 }
 
 
@@ -1128,7 +1315,6 @@ tr:hover td {
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.6);
-  backdrop-filter: blur(4px);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1136,15 +1322,15 @@ tr:hover td {
   animation: fadeIn 0.2s ease;
 }
 .modal {
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
+  background: var(--surface-panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
   padding: 28px;
   min-width: 400px;
   max-width: 600px;
   max-height: 80vh;
   overflow-y: auto;
-  box-shadow: var(--shadow-lg);
+  box-shadow: var(--shadow-pop);
   animation: scaleIn 0.25s ease;
 }
 .modal-title {
@@ -1166,18 +1352,18 @@ tr:hover td {
   align-items: center;
   gap: 4px;
   padding: 2px 8px;
-  border-radius: 100px;
+  border-radius: var(--r-pill);
   font-size: var(--fs-xs);
   font-weight: 600;
   font-family: var(--font-mono);
-  background: var(--bg-tertiary);
-  color: var(--text-secondary);
-  border: 1px solid var(--border-light);
+  background: var(--surface-sunken);
+  color: var(--ink-soft);
+  border: 1px solid var(--line-soft);
 }
 .token-badge-accent {
-  background: var(--accent-glow);
+  background: var(--accent-surface);
   color: var(--accent);
-  border-color: var(--accent-glow);
+  border-color: var(--accent-surface);
 }
 
 
@@ -1196,12 +1382,12 @@ tr:hover td {
   top: 0;
   bottom: 0;
   width: 2px;
-  background: var(--border);
+  background: var(--line);
 }
 .timeline-item {
   position: relative;
   padding: 12px 0 12px 24px;
-  border-bottom: 1px solid var(--border-light);
+  border-bottom: 1px solid var(--line-soft);
 }
 .timeline-item:last-child {
   border-bottom: none;
@@ -1213,13 +1399,13 @@ tr:hover td {
   width: 12px;
   height: 12px;
   border-radius: 50%;
-  background: var(--bg-tertiary);
-  border: 2px solid var(--text-tertiary);
+  background: var(--surface-sunken);
+  border: 2px solid var(--ink-faint);
 }
 .timeline-dot.active {
   background: var(--accent);
   border-color: var(--accent);
-  box-shadow: 0 0 8px var(--accent-glow);
+  box-shadow: 0 0 8px var(--accent-surface);
 }
 .timeline-dot.success {
   background: var(--success);
@@ -1232,21 +1418,21 @@ tr:hover td {
 .timeline-title {
   font-size: var(--fs-md);
   font-weight: 600;
-  color: var(--text-primary);
+  color: var(--ink);
 }
 .timeline-meta {
   font-size: var(--fs-xs);
-  color: var(--text-tertiary);
+  color: var(--ink-faint);
   margin-top: 2px;
 }
 .timeline-content {
   font-size: var(--fs-sm);
-  color: var(--text-secondary);
+  color: var(--ink-soft);
   margin-top: 6px;
   font-family: var(--font-mono);
-  background: var(--bg-input);
+  background: var(--surface-input);
   padding: 8px 12px;
-  border-radius: var(--radius-sm);
+  border-radius: var(--r-2);
   overflow-x: auto;
   white-space: pre-wrap;
   word-break: break-all;
@@ -1255,16 +1441,16 @@ tr:hover td {
 
 /* ── Log Stream ────────────────────────────────────────────── */
 .log-stream {
-  background: var(--bg-input);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  background: var(--surface-input);
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
   padding: 16px;
   font-family: var(--font-mono);
   font-size: var(--fs-sm);
   line-height: 1.6;
   overflow-y: auto;
   max-height: 500px;
-  color: var(--text-secondary);
+  color: var(--ink-soft);
 }
 .log-line {
   padding: 2px 0;
@@ -1283,15 +1469,15 @@ tr:hover td {
 }
 .search-bar .input {
   padding-left: 40px;
-  background: var(--bg-card);
-  border-color: var(--border);
+  background: var(--surface-raised);
+  border-color: var(--line);
 }
 .search-bar-icon {
   position: absolute;
   left: 14px;
   top: 50%;
   transform: translateY(-50%);
-  color: var(--text-tertiary);
+  color: var(--ink-faint);
   font-size: var(--fs-base);
   pointer-events: none;
 }
@@ -1315,12 +1501,12 @@ tr:hover td {
 .empty-state-title {
   font-size: var(--fs-xl);
   font-weight: 600;
-  color: var(--text-primary);
+  color: var(--ink);
   margin-bottom: 8px;
 }
 .empty-state-description {
   font-size: var(--fs-md);
-  color: var(--text-secondary);
+  color: var(--ink-soft);
   max-width: 320px;
 }
 
@@ -1350,20 +1536,20 @@ tr:hover td {
 
 /* ── Task List Item ────────────────────────────────────────── */
 .task-item {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
   padding: 14px 16px;
   cursor: pointer;
   transition: all var(--transition-fast);
 }
 .task-item:hover {
   border-color: var(--accent-dim);
-  background: var(--bg-hover);
+  background: var(--surface-hover);
 }
 .task-item.selected {
   border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent-glow);
+  box-shadow: 0 0 0 1px var(--accent-surface);
 }
 .task-item-header {
   display: flex;
@@ -1374,7 +1560,7 @@ tr:hover td {
 .task-item-prompt {
   font-size: var(--fs-md);
   font-weight: 500;
-  color: var(--text-primary);
+  color: var(--ink);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1385,15 +1571,15 @@ tr:hover td {
   display: flex;
   gap: 12px;
   font-size: var(--fs-xs);
-  color: var(--text-tertiary);
+  color: var(--ink-faint);
 }
 
 
 /* ── History Item ──────────────────────────────────────────── */
 .history-item {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
   padding: 16px 20px;
   cursor: pointer;
   transition: all var(--transition-fast);
@@ -1414,13 +1600,13 @@ tr:hover td {
 }
 .history-item-date {
   font-size: var(--fs-xs);
-  color: var(--text-tertiary);
+  color: var(--ink-faint);
   font-weight: 500;
 }
 .history-item-prompt {
   font-size: var(--fs-md);
   font-weight: 500;
-  color: var(--text-primary);
+  color: var(--ink);
   margin-bottom: 8px;
   line-height: 1.4;
 }
@@ -1428,14 +1614,14 @@ tr:hover td {
   display: flex;
   gap: 16px;
   font-size: var(--fs-xs);
-  color: var(--text-secondary);
+  color: var(--ink-soft);
 }
 .history-item-details {
   margin-top: 12px;
   padding-top: 12px;
-  border-top: 1px solid var(--border-light);
+  border-top: 1px solid var(--line-soft);
   font-size: var(--fs-sm);
-  color: var(--text-secondary);
+  color: var(--ink-soft);
   display: none;
 }
 .history-item.expanded .history-item-details {
@@ -1445,12 +1631,10 @@ tr:hover td {
 
 /* ── Provider Card (Config) ────────────────────────────────── */
 .provider-card {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
+  background: var(--surface-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
   padding: 20px;
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
   transition: all var(--transition-normal);
 }
 .provider-card:hover {
@@ -1468,7 +1652,7 @@ tr:hover td {
 .provider-card-name {
   font-size: var(--fs-base);
   font-weight: 600;
-  color: var(--text-primary);
+  color: var(--ink);
 }
 .provider-card-fields {
   display: flex;
@@ -1489,7 +1673,7 @@ tr:hover td {
 .section-title {
   font-size: var(--fs-lg);
   font-weight: 700;
-  color: var(--text-primary);
+  color: var(--ink);
   margin-bottom: 16px;
   display: flex;
   align-items: center;
@@ -1502,9 +1686,9 @@ tr:hover td {
 
 /* ── Chart Placeholder ─────────────────────────────────────── */
 .chart-placeholder {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
+  background: var(--surface-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
   padding: 40px;
   display: flex;
   align-items: center;
@@ -1522,7 +1706,7 @@ tr:hover td {
 .chart-bar {
   width: 24px;
   background: linear-gradient(to top, var(--accent-dim), var(--accent));
-  border-radius: 4px 4px 0 0;
+  border-radius: var(--r-2) 4px 0 0;
   animation: barGrow 1s ease forwards;
   opacity: 0.7;
   transition: opacity var(--transition-fast);
@@ -1538,14 +1722,14 @@ tr:hover td {
 /* ── Progress Bar ──────────────────────────────────────────── */
 .progress-bar {
   height: 4px;
-  background: var(--bg-tertiary);
-  border-radius: 2px;
+  background: var(--surface-sunken);
+  border-radius: var(--r-1);
   overflow: hidden;
 }
 .progress-bar-fill {
   height: 100%;
   background: linear-gradient(90deg, var(--accent-dim), var(--accent));
-  border-radius: 2px;
+  border-radius: var(--r-1);
   transition: width var(--transition-normal);
 }
 
@@ -1555,16 +1739,16 @@ tr:hover td {
   position: fixed;
   bottom: 24px;
   right: 24px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  background: var(--surface-panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
   padding: 14px 20px;
   display: flex;
   align-items: center;
   gap: 10px;
   font-size: var(--fs-md);
-  color: var(--text-primary);
-  box-shadow: var(--shadow-lg);
+  color: var(--ink);
+  box-shadow: var(--shadow-pop);
   z-index: 8000;
   animation: slideInRight 0.3s ease;
 }
@@ -1659,13 +1843,13 @@ tr:hover td {
 /* ── Skeleton Loader ───────────────────────────────────────── */
 .skeleton {
   background: linear-gradient(90deg,
-    var(--bg-tertiary) 25%,
-    var(--bg-hover) 50%,
-    var(--bg-tertiary) 75%
+    var(--surface-sunken) 25%,
+    var(--surface-hover) 50%,
+    var(--surface-sunken) 75%
   );
   background-size: 200% 100%;
   animation: shimmer 1.5s infinite;
-  border-radius: var(--radius-sm);
+  border-radius: var(--r-2);
 }
 @keyframes shimmer {
   0% { background-position: 200% 0; }
@@ -1683,21 +1867,21 @@ tr:hover td {
   justify-content: space-between;
   margin-bottom: 20px;
   padding-bottom: 12px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--line);
 }
 .config-section-title {
   font-size: var(--fs-lg);
   font-weight: 700;
-  color: var(--text-primary);
+  color: var(--ink);
   display: flex;
   align-items: center;
   gap: 8px;
 }
 
 .mcp-server-item {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
   padding: 14px 18px;
   margin-bottom: 10px;
   display: flex;
@@ -1707,7 +1891,7 @@ tr:hover td {
 .mcp-server-name {
   font-size: var(--fs-md);
   font-weight: 600;
-  color: var(--text-primary);
+  color: var(--ink);
   font-family: var(--font-mono);
 }
 .mcp-server-status {
@@ -1740,7 +1924,7 @@ tr:hover td {
 .p-24  { padding: 24px; }
 .text-sm { font-size: var(--fs-sm); }
 .text-xs { font-size: var(--fs-xs); }
-.text-secondary { color: var(--text-secondary); }
+.text-secondary { color: var(--ink-soft); }
 .text-accent { color: var(--accent); }
 .font-mono { font-family: var(--font-mono); }
 .font-bold { font-weight: 700; }
@@ -1754,12 +1938,12 @@ tr:hover td {
 
 /* ── Confirmation Box Styles ──────────────────────────────── */
 .confirm-box {
-  background: var(--bg-tertiary);
+  background: var(--surface-sunken);
   border: 1px solid var(--warning);
-  border-radius: var(--radius-md);
+  border-radius: var(--r-3);
   padding: 16px;
   margin: 12px 0;
-  box-shadow: var(--shadow-md);
+  box-shadow: var(--shadow-pop);
 }
 
 .confirm-box h4 {
@@ -1769,15 +1953,15 @@ tr:hover td {
 }
 
 .confirm-box p {
-  color: var(--text-primary);
+  color: var(--ink);
   margin-bottom: 12px;
 }
 
 .confirm-box pre {
-  background: var(--bg-primary);
-  border: 1px solid var(--border);
+  background: var(--surface-app);
+  border: 1px solid var(--line);
   padding: 8px 12px;
-  border-radius: var(--radius-sm);
+  border-radius: var(--r-2);
   color: var(--accent);
   overflow-x: auto;
   font-family: var(--font-mono);
@@ -1798,19 +1982,19 @@ tr:hover td {
 /* ── Collapsible Steps (Monitor View) ─────────────────────── */
 .monitor-step-container {
   margin-bottom: 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--bg-card);
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
+  background: var(--surface-raised);
   overflow: hidden;
   transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
 }
 .monitor-step-container.active {
   border-color: var(--accent);
-  box-shadow: 0 0 12px var(--accent-glow-lg);
+  box-shadow: 0 0 12px var(--accent-surface);
 }
 .monitor-step-header {
   padding: 12px 16px;
-  background: var(--bg-secondary);
+  background: var(--surface-panel);
   cursor: pointer;
   user-select: none;
   display: flex;
@@ -1818,7 +2002,7 @@ tr:hover td {
   gap: 4px;
 }
 .monitor-step-header:hover {
-  background: var(--bg-hover);
+  background: var(--surface-hover);
 }
 .monitor-step-header-top {
   display: flex;
@@ -1828,7 +2012,7 @@ tr:hover td {
 .monitor-step-title {
   font-weight: 600;
   font-size: var(--fs-md);
-  color: var(--text-primary);
+  color: var(--ink);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1843,7 +2027,7 @@ tr:hover td {
 }
 .monitor-step-thought-summary {
   font-size: var(--fs-sm);
-  color: var(--text-secondary);
+  color: var(--ink-soft);
   padding-left: 16px;
   line-height: 1.4;
   white-space: nowrap;
@@ -1852,7 +2036,7 @@ tr:hover td {
 }
 .monitor-step-toggle {
   font-size: var(--fs-2xs);
-  color: var(--text-tertiary);
+  color: var(--ink-faint);
   transition: transform var(--transition-fast);
 }
 .monitor-step-header.expanded .monitor-step-toggle {
@@ -1861,7 +2045,7 @@ tr:hover td {
 .monitor-step-body {
   display: none;
   padding: 16px;
-  border-top: 1px solid var(--border-light);
+  border-top: 1px solid var(--line-soft);
   background: hsla(220, 20%, 6%, 0.4);
   flex-direction: column;
   gap: 12px;
@@ -1877,8 +2061,8 @@ tr:hover td {
   gap: 6px;
   padding: 10px;
   background: rgba(255, 255, 255, 0.02);
-  border: 1px solid var(--border-light);
-  border-radius: var(--radius-sm);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-2);
 }
 .monitor-status-row {
   display: flex;
@@ -1895,16 +2079,16 @@ tr:hover td {
 
 /* ── Telemetry logs (Monitor View) ────────────────────────── */
 .telemetry-log {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--bg-card);
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
+  background: var(--surface-raised);
   overflow: hidden;
   margin-top: 6px;
   text-align: left;
 }
 .telemetry-header {
   padding: 8px 12px;
-  background: var(--bg-secondary);
+  background: var(--surface-panel);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1912,7 +2096,7 @@ tr:hover td {
   font-size: var(--fs-xs);
 }
 .telemetry-header:hover {
-  background: var(--bg-hover);
+  background: var(--surface-hover);
 }
 .telemetry-header-left {
   display: flex;
@@ -1925,38 +2109,38 @@ tr:hover td {
 }
 .telemetry-status {
   padding: 1px 4px;
-  border-radius: var(--radius-sm);
+  border-radius: var(--r-2);
   font-weight: bold;
 }
 .telemetry-status.success {
   color: var(--success);
-  background: var(--success-bg);
+  background: var(--success-surface);
 }
 .telemetry-status.error {
   color: var(--error);
-  background: var(--error-bg);
+  background: var(--error-surface);
 }
 .telemetry-duration {
-  color: var(--text-secondary);
+  color: var(--ink-soft);
 }
 .telemetry-toggle {
   font-size: var(--fs-2xs);
-  color: var(--text-tertiary);
+  color: var(--ink-faint);
 }
 .telemetry-usage {
   display: flex;
   gap: 12px;
   font-family: var(--font-mono);
-  color: var(--text-secondary);
+  color: var(--ink-soft);
 }
 .telemetry-details {
-  border-top: 1px solid var(--border-light);
+  border-top: 1px solid var(--line-soft);
   display: none;
 }
 .telemetry-tabs {
   display: flex;
-  background: var(--bg-primary);
-  border-bottom: 1px solid var(--border-light);
+  background: var(--surface-app);
+  border-bottom: 1px solid var(--line-soft);
 }
 .telemetry-tab {
   padding: 6px 12px;
@@ -1964,17 +2148,17 @@ tr:hover td {
   cursor: pointer;
   background: transparent;
   border: none;
-  color: var(--text-secondary);
+  color: var(--ink-soft);
   transition: all var(--transition-fast);
 }
 .telemetry-tab.active {
   color: var(--accent);
-  background: var(--bg-secondary);
+  background: var(--surface-panel);
   border-bottom: 2px solid var(--accent);
 }
 .telemetry-tab-content {
   padding: 12px;
-  background: var(--bg-input);
+  background: var(--surface-input);
   max-height: 300px;
   overflow-y: auto;
 }
@@ -1982,7 +2166,7 @@ tr:hover td {
   margin: 0;
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
-  color: var(--text-primary);
+  color: var(--ink);
   white-space: pre-wrap;
   word-break: break-all;
 }
@@ -1990,24 +2174,23 @@ tr:hover td {
 /* ── Monitor View Filter Controls ────────────────────────── */
 .monitor-console-filter .filter-btn {
   background: transparent;
-  color: var(--text-secondary);
+  color: var(--ink-soft);
   border: none;
   cursor: pointer;
-  border-radius: var(--radius-sm);
+  border-radius: var(--r-2);
   font-size: var(--fs-sm);
   font-weight: 600;
   transition: all var(--transition-fast);
 }
 
 .monitor-console-filter .filter-btn:hover {
-  color: var(--text-primary);
-  background: var(--bg-hover);
+  color: var(--ink);
+  background: var(--surface-hover);
 }
 
 .monitor-console-filter .filter-btn.active {
-  background: var(--bg-tertiary) !important;
+  background: var(--surface-sunken) !important;
   color: var(--accent) !important;
-  box-shadow: var(--shadow-sm);
 }
 
 /* ── Steer Console Input Area ────────────────────────────── */
@@ -2015,18 +2198,18 @@ tr:hover td {
   display: flex;
   gap: 12px;
   margin: 16px;
-  background: var(--bg-secondary);
+  background: var(--surface-panel);
   padding: 12px;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border);
+  border-radius: var(--r-3);
+  border: 1px solid var(--line);
 }
 
 .console-input {
   flex: 1;
-  background: var(--bg-input);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  color: var(--text-primary);
+  background: var(--surface-input);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  color: var(--ink);
   font-family: var(--font-sans);
   font-size: var(--fs-md);
   padding: 10px 14px;
@@ -2038,7 +2221,7 @@ tr:hover td {
 
 .console-input:focus {
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-glow);
+  box-shadow: 0 0 0 3px var(--accent-surface);
 }
 
 .console-input:disabled {
@@ -2054,9 +2237,9 @@ tr:hover td {
 
 /* ── Monitor Task Item & Badges ──────────────────────────── */
 .monitor-task-item {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
   padding: 12px;
   cursor: pointer;
   transition: all var(--transition-fast);
@@ -2064,23 +2247,23 @@ tr:hover td {
 }
 
 .monitor-task-item:hover {
-  background: var(--bg-hover);
+  background: var(--surface-hover);
   border-color: var(--accent-dim);
 }
 
 .monitor-task-item.active {
   border-color: var(--accent) !important;
   background: rgba(185, 100%, 55%, 0.05) !important;
-  box-shadow: 0 0 8px var(--accent-glow-lg);
+  box-shadow: 0 0 8px var(--accent-surface);
 }
 
 .task-caller-badge {
   font-size: var(--fs-2xs);
   font-weight: 700;
   color: var(--accent);
-  background: var(--accent-glow);
+  background: var(--accent-surface);
   padding: 2px 6px;
-  border-radius: 4px;
+  border-radius: var(--r-2);
   text-transform: uppercase;
 }
 
@@ -2088,35 +2271,35 @@ tr:hover td {
   font-size: var(--fs-2xs);
   font-weight: 700;
   padding: 2px 6px;
-  border-radius: 4px;
+  border-radius: var(--r-2);
   text-transform: uppercase;
 }
 
 .task-badge.badge-running {
-  background: var(--accent-glow);
+  background: var(--accent-surface);
   color: var(--accent);
 }
 
 .task-badge.badge-completed {
-  background: var(--success-bg);
+  background: var(--success-surface);
   color: var(--success);
 }
 
 .task-badge.badge-failed {
-  background: var(--error-bg);
+  background: var(--error-surface);
   color: var(--error);
 }
 
 .task-badge.badge-aborted {
-  background: var(--warning-bg);
+  background: var(--warning-surface);
   color: var(--warning);
 }
 
 /* ── Structured Thought Styling ──────────────────────────── */
 .structured-thought {
   background: rgba(255, 255, 255, 0.02);
-  border: 1px solid var(--border-light);
-  border-radius: var(--radius-md);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-3);
   padding: 12px;
   text-align: left;
 }
@@ -2128,7 +2311,7 @@ tr:hover td {
   display: flex;
   align-items: center;
   gap: 6px;
-  border-bottom: 1px solid var(--border-light);
+  border-bottom: 1px solid var(--line-soft);
   padding-bottom: 6px;
 }
 
@@ -2154,7 +2337,7 @@ tr:hover td {
 
 .thought-section-content {
   font-size: var(--fs-sm);
-  color: var(--text-secondary);
+  color: var(--ink-soft);
   line-height: 1.5;
   white-space: pre-wrap;
   margin-top: 2px;
@@ -2164,5 +2347,109 @@ tr:hover td {
 .active-task-card:hover {
   transform: translateY(-4px) !important;
   border-color: var(--accent) !important;
-  box-shadow: 0 8px 24px var(--accent-glow-lg) !important;
+  box-shadow: 0 8px 24px var(--accent-surface) !important;
 }
+
+
+/* ── Theme picker ───────────────────────────────────────────────────────────
+   Replaces a one-button cycle. Five themes meant up to four presses (and four
+   repaints) to reach the one you wanted, and the button could only name the
+   NEXT theme, never the current one. See dashboard/utils/theme.js. */
+.titlebar-theme-name {
+  font-size: 11px;
+  letter-spacing: .02em;
+  margin-left: 5px;
+}
+#titlebar-theme {
+  display: inline-flex;
+  align-items: center;
+  width: auto;
+  padding: 0 8px;
+}
+.theme-menu {
+  position: fixed;
+  z-index: 200;
+  width: 210px;
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+  background: var(--surface-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
+  /* A popover is one of the two layers that really is above the page. */
+  box-shadow: var(--shadow-pop);
+}
+.theme-menu[hidden] { display: none; }
+.theme-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: var(--r-2);
+  padding: 7px 9px;
+  cursor: pointer;
+  color: var(--ink-soft);
+}
+.theme-menu-item:hover { background: var(--surface-hover); color: var(--ink); }
+.theme-menu-item[aria-checked="true"] { color: var(--accent); }
+.theme-menu-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* A swatch, so the list can be read by colour as well as by name. Each one is
+   painted below with that theme's own ground and accent. */
+.theme-menu-sw {
+  flex: 0 0 auto;
+  width: 22px; height: 22px;
+  border-radius: var(--r-1);
+  border: 1px solid var(--line);
+  position: relative;
+  overflow: hidden;
+}
+.theme-menu-sw::after {
+  content: '';
+  position: absolute; right: 3px; bottom: 3px;
+  width: 8px; height: 8px; border-radius: 50%;
+}
+.theme-menu-text { display: flex; flex-direction: column; min-width: 0; }
+.theme-menu-name { font-size: 12.5px; font-weight: 600; }
+.theme-menu-hint { font-size: 10.5px; color: var(--ink-faint); }
+.theme-menu-item[aria-checked="true"] .theme-menu-hint { color: var(--accent); opacity: .75; }
+
+[data-theme-sw="light"]          { background: #f5f7fb; }
+[data-theme-sw="light"]::after   { background: #6b25db; }
+[data-theme-sw="dark"]           { background: #191d26; }
+[data-theme-sw="dark"]::after    { background: #1ae2ff; }
+[data-theme-sw="paper"]          { background: #f3e9d0; }
+[data-theme-sw="paper"]::after   { background: #b23a48; }
+[data-theme-sw="paper-subtle"]        { background: #fbfaf7; }
+[data-theme-sw="paper-subtle"]::after { background: #5f8f6a; }
+[data-theme-sw="bamboo-ancient"]        { background: #463a26; }
+[data-theme-sw="bamboo-ancient"]::after { background: #7fc4b8; }
+[data-theme-sw="kakejiku"]        { background: #ece4d2; }
+[data-theme-sw="kakejiku"]::after { background: #2f4f7a; }
+
+/* The last thing some users see. Themed, because an unstyled red block reads as
+   a crash inside a crash — and this renders when startup has already failed. */
+.fatal {
+  max-width: 560px;
+  margin: 12vh auto 0;
+  padding: 0 24px;
+  text-align: center;
+  color: var(--ink);
+}
+.fatal-title { font-family: var(--font-accent); font-size: var(--fs-2xl); margin: 0 0 12px; }
+.fatal-body { color: var(--ink-soft); margin: 0 0 16px; }
+.fatal-detail {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  text-align: left;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--error);
+  background: var(--error-surface);
+  border-radius: var(--r-2);
+  padding: 12px 14px;
+  margin: 0 0 14px;
+}
+.fatal-hint { color: var(--ink-faint); font-size: var(--fs-sm); margin: 0; }

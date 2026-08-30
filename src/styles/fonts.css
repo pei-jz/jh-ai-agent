@@ -1,0 +1,67 @@
+/* Inter, bundled — no network at startup.
+   ===========================================================================
+   This replaces a <link> to fonts.googleapis.com in src/index.html. Three
+   things were wrong with fetching it:
+
+     • it was render-BLOCKING, so on a machine with no route to Google the
+       window sat empty until the request timed out — and this app is used
+       offline on purpose;
+     • it was a request to a third party on every single launch, which is an IP
+       and a timestamp handed over for a typeface;
+     • the README claimed the app does not depend on external services.
+
+   The @fontsource/inter package ships the same files under SIL OFL 1.1; the
+   licence is recorded in THIRD-PARTY-NOTICES.md. Vite fingerprints and copies
+   the woff2 into dist/, so this is a build-time dependency, not a runtime one.
+
+   LATIN ONLY, and only the six weights dashboard.css actually asks for. The
+   full family with every subset is ~1.4MB; this is ~145KB. Japanese text is
+   rendered by the platform face in --font-sans's fallback chain, which is what
+   was happening anyway — Inter has no kana or kanji.
+
+   `font-display: swap` keeps the first paint immediate: text appears in the
+   fallback and re-renders when the file is decoded, which for a local file is
+   the same frame in practice. */
+
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 300;
+  font-display: swap;
+  src: url('@fontsource/inter/files/inter-latin-300-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('@fontsource/inter/files/inter-latin-400-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('@fontsource/inter/files/inter-latin-500-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('@fontsource/inter/files/inter-latin-600-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('@fontsource/inter/files/inter-latin-700-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 800;
+  font-display: swap;
+  src: url('@fontsource/inter/files/inter-latin-800-normal.woff2') format('woff2');
+}

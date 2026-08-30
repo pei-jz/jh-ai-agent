@@ -7,6 +7,7 @@
   AND by a matching branch in the save handler, two places to keep in step.
 -->
 <script>
+    import { t } from '../../../i18n/index.js';
     import { untrack } from 'svelte';
     import { icon } from '../../utils/icons.js';
     import { skillRefusal } from '../../views/config/lists.js';
@@ -92,21 +93,18 @@
                     <!-- No name field while editing: the name is the file. -->
                     {#if !isEdit}
                         <div class="input-group">
-                            <label class="input-label" for="skill-name">
-                                Skill name <span class="cfg-req">*</span></label>
+                            <label class="input-label" for="skill-name">{t('skill.name')}<span class="cfg-req">*</span></label>
                             <input id="skill-name" class="input" type="text" bind:value={form.name}
                                 placeholder="e.g. backlog-register (letters, numbers, hyphens, underscores)">
-                            <p class="input-hint">Invoke by typing <code>/skill-name</code> in chat</p>
+                            <p class="input-hint">{t('tmpl.invoke')}<code>/skill-name</code> in chat</p>
                         </div>
                     {/if}
                     <div class="input-group">
-                        <label class="input-label" for="skill-content">
-                            Content (Markdown) <span class="cfg-req">*</span></label>
+                        <label class="input-label" for="skill-content">{t('skill.content')}<span class="cfg-req">*</span></label>
                         <textarea id="skill-content" class="textarea cfg-mono-area" rows="12"
                             bind:value={form.content}
                             placeholder="# Skill title"></textarea>
-                        <p class="input-hint">
-                            Start with a <code>---</code> header so the agent knows when this
+                        <p class="input-hint">{t('tmpl.startWith')}<code>---</code> header so the agent knows when this
                             skill applies — the <code>description</code> is the only part it
                             sees until it loads the skill:
                         </p>
@@ -123,7 +121,7 @@ allowed-tools: read_office, write_xlsx
                 </div>
                 {#if error}<div class="cfg-modal-errors" role="alert">{error}</div>{/if}
                 <div class="cfg-form-actions">
-                    <button class="btn btn-secondary" id="btn-skill-cancel" onclick={() => onCancel?.()}>Cancel</button>
+                    <button class="btn btn-secondary" id="btn-skill-cancel" onclick={() => onCancel?.()}>{t('common.cancel')}</button>
                     <button class="btn btn-primary" id="btn-skill-save" onclick={submit}>
                         {@html icon('save', 13)} Save</button>
                 </div>
@@ -133,17 +131,17 @@ allowed-tools: read_office, write_xlsx
         {#if !skills.length}
             <div class="cfg-empty">
                 <span class="cfg-empty-ic">⚡</span>
-                <p>No skills yet.<br>Create one with the "Create new" button.</p>
+                <p>{t('skill.none')}<br>Create one with the "Create new" button.</p>
             </div>
         {:else}
             <div class="table-wrap">
                 <table>
                     <thead>
                         <tr>
-                            <th>Command</th>
-                            <th>Description</th>
-                            <th>Files</th>
-                            <th class="cfg-col-acts">Actions</th>
+                            <th>{t('common.command')}</th>
+                            <th>{t('common.description')}</th>
+                            <th>{t('common.files')}</th>
+                            <th class="cfg-col-acts">{t('common.actions')}</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -192,20 +190,20 @@ allowed-tools: read_office, write_xlsx
 
 <style>
     .cfg-skill-desc {
-        font-size: 11.5px; color: var(--text-secondary);
+        font-size: 11.5px; color: var(--ink-soft);
         margin-top: 2px; line-height: 1.45;
         display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
     }
-    .cfg-skill-desc.is-missing { color: var(--text-tertiary); font-style: italic; }
-    .cfg-skill-files { font-size: 11.5px; color: var(--text-secondary); white-space: nowrap; }
+    .cfg-skill-desc.is-missing { color: var(--ink-faint); font-style: italic; }
+    .cfg-skill-files { font-size: 11.5px; color: var(--ink-soft); white-space: nowrap; }
     .cfg-fm-example {
         margin: 4px 0 6px;
         padding: 8px 10px;
-        background: var(--bg-tertiary);
-        border: 1px solid var(--border-light);
-        border-radius: var(--radius-sm);
+        background: var(--surface-sunken);
+        border: 1px solid var(--line-soft);
+        border-radius: var(--r-2);
         font-family: var(--font-mono); font-size: 11px; line-height: 1.5;
-        color: var(--text-secondary);
+        color: var(--ink-soft);
         white-space: pre; overflow-x: auto;
     }
 </style>

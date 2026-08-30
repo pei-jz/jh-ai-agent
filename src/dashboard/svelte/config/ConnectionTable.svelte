@@ -11,6 +11,7 @@
   table has to agree or the marker sits on no row at all.
 -->
 <script>
+    import { t } from '../../../i18n/index.js';
     import { icon } from '../../utils/icons.js';
     import { providerInfo, effectiveActiveId } from '../../views/config/providers.js';
 
@@ -30,19 +31,19 @@
     <table>
         <thead>
             <tr>
-                <th class="cfg-col-default">Default</th>
-                <th>Provider</th>
-                <th>Connection Name</th>
-                <th>Model</th>
-                <th>Base URL</th>
-                <th class="cfg-col-actions">Actions</th>
+                <th class="cfg-col-default">{t('conn.default')}</th>
+                <th>{t('common.provider')}</th>
+                <th>{t('conn.name')}</th>
+                <th>{t('common.model')}</th>
+                <th>{t('conn.baseUrl')}</th>
+                <th class="cfg-col-actions">{t('common.actions')}</th>
             </tr>
         </thead>
         <tbody>
             {#if !list.length}
                 <tr>
                     <td colspan="6" class="cfg-table-empty">
-                        No LLM connections registered. Click "Add Connection" to register one.
+                        {t('conn.none')}
                     </td>
                 </tr>
             {:else}
@@ -55,7 +56,7 @@
                                 type="radio" name="active-llm-instance"
                                 class="active-llm-radio" data-id={inst.id}
                                 checked={isActive}
-                                title="Use this connection by default for the agent and Direct Chat"
+                                title={t('conn.default.title')}
                                 onchange={() => onSetActive?.(inst.id)}
                             >
                         </td>

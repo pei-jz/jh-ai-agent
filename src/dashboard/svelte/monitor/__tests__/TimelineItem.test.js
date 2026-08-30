@@ -14,6 +14,7 @@ import { render, cleanup } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import TimelineItem from '../TimelineItem.svelte';
 import Timeline from '../Timeline.svelte';
+import { t } from '../../../../i18n/index.js';
 
 afterEach(() => cleanup());
 
@@ -41,7 +42,7 @@ describe('TimelineItem — request', () => {
 
     it('labels it and shows the text', () => {
         const el = mountItem(req);
-        expect(el.textContent).toContain('Your request');
+        expect(el.textContent).toContain(t('task.yourRequest'));
         expect(el.textContent).toContain('update the README');
     });
 
@@ -83,7 +84,7 @@ describe('TimelineItem — request', () => {
     it('minimises the request to one line and restores it', async () => {
         const el = mountItem(req);
         const row = el.querySelector('.tl-chapter');
-        const btn = el.querySelector('.tl-request-min');
+        const btn = el.querySelectorAll('.tl-request-act')[1];
         btn.click();
         await tick();
         expect(row.classList.contains('is-min')).toBe(true);
@@ -97,7 +98,7 @@ describe('TimelineItem — request', () => {
     it('the minimise toggle does NOT flip the open/closed state', async () => {
         const el = mountItem(req);
         const row = el.querySelector('.tl-chapter');
-        el.querySelector('.tl-request-min').click();
+        el.querySelectorAll('.tl-request-act')[1].click();
         await tick();
         expect(row.classList.contains('is-open')).toBe(false);
     });
@@ -105,7 +106,7 @@ describe('TimelineItem — request', () => {
     it('clicking a minimised card restores and opens it', async () => {
         const el = mountItem(req);
         const row = el.querySelector('.tl-chapter');
-        el.querySelector('.tl-request-min').click();
+        el.querySelectorAll('.tl-request-act')[1].click();
         await tick();
         expect(row.classList.contains('is-min')).toBe(true);
         el.querySelector('.tl-card-request').click();
@@ -409,7 +410,7 @@ describe('TimelineItem — folded exchanges', () => {
         const bar = el.querySelector('.tl-fold-bar');
         expect(bar.textContent).toContain('12 steps');
         expect(bar.textContent).toContain('3m 20s');
-        expect(bar.textContent).toContain('Show working');
+        expect(bar.textContent).toContain(t('task.showWorking'));
     });
 
     it('a folded RESULT renders its header ALONE, not a hidden body', () => {
@@ -484,7 +485,7 @@ describe('TimelineItem — the rest', () => {
 
     it('renders a narration as the agent note', () => {
         const el = mountItem({ id: 'i10', kind: 'narration', text: 'thinking aloud' });
-        expect(el.textContent).toContain("The agent's note");
+        expect(el.textContent).toContain(t('task.note'));
         expect(el.querySelector('.rv-summary').innerHTML).toContain('thinking aloud');
     });
 

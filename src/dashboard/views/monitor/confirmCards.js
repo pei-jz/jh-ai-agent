@@ -48,7 +48,7 @@ export function setWsAutoApprove(ws, on) {
 export function renderSimpleDiff(oldText, newText) {
     const ol = (oldText || '').split('\n');
     const nl = (newText || '').split('\n');
-    let html = '<div style="font-family:monospace;font-size:10.5px;background:#0f1419;padding:8px;border-radius:4px;overflow-x:auto;max-height:200px;border:1px solid var(--border);">';
+    let html = '<div style="font-family:monospace;font-size:10.5px;background:#0f1419;padding:8px;border-radius:var(--r-2);overflow-x:auto;max-height:200px;border:1px solid var(--line);">';
     let i = 0, j = 0;
     while (i < ol.length || j < nl.length) {
         if (i < ol.length && j < nl.length) {

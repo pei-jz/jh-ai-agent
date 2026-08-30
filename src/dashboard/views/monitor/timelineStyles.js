@@ -13,7 +13,7 @@ export const TIMELINE_STYLES = `
     .mtl { position: relative; padding-left: 30px; }
     .mtl::before {
         content: ''; position: absolute; left: 9px; top: 8px; bottom: 8px; width: 2px;
-        background: linear-gradient(180deg, var(--border), var(--accent-glow) 40%, var(--border));
+        background: linear-gradient(180deg, var(--line), var(--accent-surface) 40%, var(--line));
     }
     /* Steps are the most repeated element, so they get the tightest rhythm;
        the chapters that mark a change of phase keep their breathing room. */
@@ -30,10 +30,10 @@ export const TIMELINE_STYLES = `
     .tl-chapter::before {
         content: ''; position: absolute; left: -25px; top: 4px;
         width: 10px; height: 10px; border-radius: 50%;
-        background: var(--bg-secondary); border: 2px solid var(--border);
+        background: var(--surface-panel); border: 2px solid var(--line);
         transition: background var(--transition-fast), border-color var(--transition-fast);
     }
-    .tl-chapter.is-live::before { box-shadow: 0 0 8px var(--accent-glow); }
+    .tl-chapter.is-live::before { box-shadow: 0 0 8px var(--accent-surface); }
     .tl-step.is-live::before,
     .tl-note.is-live::before { background: var(--accent); border-color: var(--accent); }
     /* The request's marker is a REAL button, so it can be clicked; the shared
@@ -43,33 +43,33 @@ export const TIMELINE_STYLES = `
         position: absolute; left: -27px; top: 3px; z-index: 3;
         width: 14px; height: 14px; padding: 0;
         border-radius: 50%; cursor: pointer;
-        background: var(--text-tertiary); border: 2px solid var(--text-tertiary);
+        background: var(--ink-faint); border: 2px solid var(--ink-faint);
         transition: background var(--transition-fast), border-color var(--transition-fast);
     }
     .tl-story-toggle:hover { background: var(--accent); border-color: var(--accent); }
     /* Hollow = this exchange's working is folded. */
-    .tl-story-toggle.is-folded { background: var(--bg-secondary); }
+    .tl-story-toggle.is-folded { background: var(--surface-panel); }
 
     /* ── A folded exchange, standing in for its steps ────────────────────── */
     .tl-fold-bar {
         display: flex; align-items: center; gap: var(--space-2); width: 100%;
         padding: var(--space-2) var(--space-3);
-        font-size: var(--fs-xs); color: var(--text-tertiary);
+        font-size: var(--fs-xs); color: var(--ink-faint);
         text-align: left; cursor: pointer;
-        background: var(--bg-secondary); border: 1px dashed var(--border);
-        border-radius: var(--radius-md);
+        background: var(--surface-panel); border: 1px dashed var(--line);
+        border-radius: var(--r-3);
     }
-    .tl-fold-bar:hover { border-color: var(--accent); color: var(--text-secondary); }
-    .tl-fold-n { font-weight: 600; color: var(--text-secondary); }
+    .tl-fold-bar:hover { border-color: var(--accent); color: var(--ink-soft); }
+    .tl-fold-n { font-weight: 600; color: var(--ink-soft); }
     .tl-fold-dur { font-family: var(--font-mono); }
     .tl-fold-hint { margin-left: auto; opacity: .7; }
 
     /* Boundary between exchanges. */
     .tl-turn { display: flex; align-items: center; gap: var(--space-3); margin: var(--space-5) 0 var(--space-4); }
-    .tl-turn::before, .tl-turn::after { content: ''; flex: 1 1 auto; height: 1px; background: var(--border); }
+    .tl-turn::before, .tl-turn::after { content: ''; flex: 1 1 auto; height: 1px; background: var(--line); }
     .tl-turn-label {
         flex-shrink: 0; font-size: var(--fs-2xs); font-weight: 700;
-        letter-spacing: .08em; text-transform: uppercase; color: var(--text-tertiary);
+        letter-spacing: .08em; text-transform: uppercase; color: var(--ink-faint);
     }
     .tl-turn.tl-chapter::before { position: static; width: auto; height: 1px; border: 0; border-radius: 0; }
     .tl-deliverable::before,
@@ -80,25 +80,34 @@ export const TIMELINE_STYLES = `
     .tl-progress::before { background: var(--accent); border-color: var(--accent); }
 
     .tl-when { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-2); }
-    .tl-clock { font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--text-tertiary); }
+    .tl-clock { font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--ink-faint); }
     .tl-tag {
         font-size: var(--fs-2xs); font-weight: 700; letter-spacing: .08em;
-        text-transform: uppercase; padding: 2px 8px; border-radius: 10px;
-        background: var(--bg-tertiary); color: var(--text-secondary);
+        text-transform: uppercase; padding: 2px 8px; border-radius: var(--r-3);
+        background: var(--surface-sunken); color: var(--ink-soft);
     }
-    .tl-tag-step { background: var(--accent-glow-lg); color: var(--accent); }
-    .tl-tag-note { background: var(--bg-tertiary); color: var(--text-tertiary); }
-    .tl-tag-progress { background: var(--accent-glow-lg); color: var(--accent); }
-    .tl-tag-question, .tl-tag-approval { background: var(--warning-bg); color: var(--warning); }
-    .tl-tag-deliverable, .tl-tag-final { background: var(--success-bg); color: var(--success); }
-    .tl-tag-error { background: var(--error-bg); color: var(--error); }
+    .tl-tag-step { background: var(--accent-surface); color: var(--accent); }
+    .tl-tag-note { background: var(--surface-sunken); color: var(--ink-faint); }
+    .tl-tag-progress { background: var(--accent-surface); color: var(--accent); }
+    .tl-tag-question, .tl-tag-approval { background: var(--warning-surface); color: var(--warning); }
+    .tl-tag-deliverable, .tl-tag-final { background: var(--success-surface); color: var(--success); }
+    .tl-tag-error { background: var(--error-surface); color: var(--error); }
 
     /* ── Cards ──────────────────────────────────────────────────────────── */
     .tl-card {
-        background: var(--bg-card-solid); border: 1px solid var(--border);
-        border-radius: var(--radius-md); padding: var(--space-3) var(--space-4);
+        background: var(--surface-raised); border: 1px solid var(--line);
+        border-radius: var(--r-3); padding: var(--space-3) var(--space-4);
     }
-    .tl-card-request { background: var(--accent-glow-lg); border-color: var(--accent-glow); }
+    /* The request is a BAND at the top of the reading column, not a card on it:
+       a box drawn inside a box is what "枠の中に枠" looks like, and this one sits
+       directly under the header's own edge. Tinted, ruled underneath, no frame.
+       See the "Regions, not cards" note in styles/dashboard.css. */
+    .tl-card-request {
+        background: var(--accent-surface);
+        border: none;
+        border-bottom: 1px solid var(--line);
+        border-radius: 0;
+    }
     .tl-q-label {
         font-size: var(--fs-2xs); font-weight: 700; color: var(--accent);
         text-transform: uppercase; letter-spacing: .08em; margin-bottom: 1px;
@@ -114,22 +123,30 @@ export const TIMELINE_STYLES = `
        pinned is always the exchange you are inside. */
     .tl-request {
         position: sticky; top: 0; z-index: 2;
-        background: var(--bg-primary);
+        background: var(--surface-app);
         padding-bottom: var(--space-1);
     }
+    /* UNPINNED: it scrolls away with everything else. Minimising only ever made
+       it a shorter piece of fixed furniture; reading a long result on a short
+       window is the case that wants the whole column. */
+    .tl-request.is-unpinned { position: static; }
     .tl-request .tl-card-request { padding: var(--space-2) var(--space-3); cursor: pointer; }
     /* The minimise toggle rides on the label row: the sticky request is tall
        fixed furniture, and on a narrow window one click should shrink it to a
        sliver so the story gets the room. Real <button>, styled as text. */
     .tl-q-label { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
-    .tl-request-min {
+    .tl-request-acts { display: inline-flex; align-items: center; gap: 2px; }
+    /* Visible, not hover-only. A control you cannot see is not a control — the
+       minimise toggle sat at opacity 0 and was found by accident or not at all. */
+    .tl-request-act {
         display: inline-flex; align-items: center; justify-content: center;
-        width: 16px; height: 16px; padding: 0; border: none; border-radius: 4px;
-        background: transparent; color: var(--text-tertiary); cursor: pointer;
-        opacity: 0; transition: opacity var(--transition-fast), background var(--transition-fast), color var(--transition-fast);
+        width: 18px; height: 18px; padding: 0; border: none; border-radius: var(--r-1);
+        background: transparent; color: var(--ink-faint); cursor: pointer;
+        opacity: .55; transition: opacity var(--transition-fast), background var(--transition-fast), color var(--transition-fast);
     }
-    .tl-card-request:hover .tl-request-min { opacity: 1; }
-    .tl-request-min:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+    .tl-card-request:hover .tl-request-act { opacity: 1; }
+    .tl-request-act:hover { background: var(--surface-sunken); color: var(--ink); }
+    .tl-request-act[aria-pressed="false"] { color: var(--accent); opacity: 1; }
     /* MINIMISED: one line, no fade — a bare sliver of the request. The label
        stays (it is what the toggle sits on), the text clamps to a single line.
        is-min beats is-open (both can be true if the user minimises while
@@ -150,7 +167,7 @@ export const TIMELINE_STYLES = `
     }
     .tl-request.is-open .tl-card-request { max-height: 40vh; overflow-y: auto; }
     .tl-card-note { background: transparent; border-style: dashed; }
-    .tl-note-label { font-size: var(--fs-2xs); color: var(--text-tertiary); margin-bottom: var(--space-1); }
+    .tl-note-label { font-size: var(--fs-2xs); color: var(--ink-faint); margin-bottom: var(--space-1); }
     .tl-card-deliverable { border-color: var(--success); border-left-width: 3px; }
     /* The task_progress checklist card — a plan the reader can watch fill in. */
     .tl-card-progress { border-color: var(--accent); border-left-width: 3px; }
@@ -158,22 +175,22 @@ export const TIMELINE_STYLES = `
         display: flex; align-items: baseline; gap: var(--space-2);
         padding: 2px 0; font-size: var(--fs-sm); line-height: 1.4;
     }
-    .tl-progress-row.is-done .tl-progress-title { color: var(--text-tertiary); text-decoration: line-through; }
-    .tl-progress-ic { flex-shrink: 0; color: var(--text-tertiary); }
+    .tl-progress-row.is-done .tl-progress-title { color: var(--ink-faint); text-decoration: line-through; }
+    .tl-progress-ic { flex-shrink: 0; color: var(--ink-faint); }
     .tl-progress-row.is-done .tl-progress-ic { color: var(--success); }
-    .tl-progress-id { font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--text-tertiary); flex-shrink: 0; }
-    .tl-progress-note { color: var(--text-tertiary); font-size: var(--fs-2xs); }
+    .tl-progress-id { font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--ink-faint); flex-shrink: 0; }
+    .tl-progress-note { color: var(--ink-faint); font-size: var(--fs-2xs); }
     .tl-card-h {
         display: flex; align-items: center; gap: var(--space-2);
         font-size: var(--fs-md); font-weight: 600; color: var(--success);
         padding-bottom: var(--space-2); margin-bottom: var(--space-3);
-        border-bottom: 1px solid var(--border-light);
+        border-bottom: 1px solid var(--line-soft);
     }
     .tl-card-final { border-left: 3px solid var(--success); }
     /* A foldable card header. */
     .tl-fold-h { cursor: pointer; user-select: none; }
     .tl-fold-h:hover { color: var(--accent); }
-    .tl-card-chev { margin-left: auto; font-size: var(--fs-2xs); color: var(--text-tertiary); }
+    .tl-card-chev { margin-left: auto; font-size: var(--fs-2xs); color: var(--ink-faint); }
     .tl-chapter.collapsed .tl-card-body { display: none; }
     .tl-chapter.collapsed .tl-card-h { margin-bottom: 0; padding-bottom: 0; border-bottom: 0; }
     .tl-chapter.collapsed .tl-card-chev { transform: rotate(-90deg); }
@@ -185,43 +202,43 @@ export const TIMELINE_STYLES = `
         display: flex; align-items: center; gap: var(--space-2);
         padding: var(--space-2) var(--space-3); cursor: pointer; user-select: none;
     }
-    .tl-step-title:hover { background: var(--bg-hover); }
+    .tl-step-title:hover { background: var(--surface-hover); }
     .tl-step-num {
         font-family: var(--font-mono); font-size: var(--fs-2xs); font-weight: 600;
-        color: var(--text-tertiary); border: 1px solid var(--border);
-        padding: 1px 7px; border-radius: var(--radius-sm); flex-shrink: 0;
+        color: var(--ink-faint); border: 1px solid var(--line);
+        padding: 1px 7px; border-radius: var(--r-2); flex-shrink: 0;
     }
-    .tl-step-num.is-live { color: var(--accent); border-color: var(--accent); background: var(--accent-glow-lg); }
+    .tl-step-num.is-live { color: var(--accent); border-color: var(--accent); background: var(--accent-surface); }
     .tl-step-sum {
-        flex: 1 1 auto; min-width: 0; font-size: var(--fs-sm); color: var(--text-secondary);
+        flex: 1 1 auto; min-width: 0; font-size: var(--fs-sm); color: var(--ink-soft);
         white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
     .tl-step-count {
         flex-shrink: 0; font-family: var(--font-mono);
-        font-size: var(--fs-2xs); color: var(--text-tertiary);
+        font-size: var(--fs-2xs); color: var(--ink-faint);
         min-width: 14px; text-align: right;
     }
-    .tl-step-at { flex-shrink: 0; font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--text-tertiary); }
-    .tl-step-chev { flex-shrink: 0; font-size: var(--fs-2xs); color: var(--text-tertiary); }
+    .tl-step-at { flex-shrink: 0; font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--ink-faint); }
+    .tl-step-chev { flex-shrink: 0; font-size: var(--fs-2xs); color: var(--ink-faint); }
 
     /* What the step did, readable while it is folded. */
     .tl-step-tools { display: inline-flex; gap: var(--space-1); flex-shrink: 0; }
     .tl-tchip {
         display: inline-flex; align-items: center; gap: 3px;
-        padding: 1px 6px; border-radius: var(--radius-sm);
-        background: var(--bg-tertiary); border: 1px solid var(--border-light);
+        padding: 1px 6px; border-radius: var(--r-2);
+        background: var(--surface-sunken); border: 1px solid var(--line-soft);
         font-family: var(--font-mono); font-size: var(--fs-2xs);
-        color: var(--text-secondary); white-space: nowrap;
+        color: var(--ink-soft); white-space: nowrap;
     }
-    .tl-tchip.is-write { color: var(--warning); border-color: var(--warning-bg); }
-    .tl-tchip.is-more { color: var(--text-tertiary); }
+    .tl-tchip.is-write { color: var(--warning); border-color: var(--warning-surface); }
+    .tl-tchip.is-more { color: var(--ink-faint); }
 
     /* A line that arrived before the run's first reasoning: part of the flow,
        not a chapter of its own. */
     .tl-bare { margin-bottom: var(--space-2); }
     .tl-bare::before { width: 6px; height: 6px; left: -23px; top: 7px; }
     .tl-bare-line {
-        border-left: 1px solid var(--border-light);
+        border-left: 1px solid var(--line-soft);
         padding: 2px 0 2px var(--space-3);
     }
     .tl-step-body { padding: 0 var(--space-3) var(--space-2) 34px; }
@@ -237,14 +254,14 @@ export const TIMELINE_STYLES = `
     .mstep-file {
         display: inline-flex; align-items: center; gap: var(--space-1);
         margin-left: auto; padding: 0 var(--space-2);
-        border: 1px solid var(--border-light); border-radius: var(--radius-sm);
+        border: 1px solid var(--line-soft); border-radius: var(--r-2);
         font-family: var(--font-mono); font-size: var(--fs-2xs);
-        color: var(--text-secondary); cursor: pointer;
+        color: var(--ink-soft); cursor: pointer;
         max-width: 260px; overflow: hidden; text-overflow: ellipsis;
         white-space: nowrap; flex-shrink: 0;
     }
-    .mstep-file:hover { color: var(--accent); border-color: var(--border-focus); }
-    .mstep-file.is-write { color: var(--warning); border-color: var(--warning-bg); }
+    .mstep-file:hover { color: var(--accent); border-color: var(--line-focus); }
+    .mstep-file.is-write { color: var(--warning); border-color: var(--warning-surface); }
 
     /* ── Inspector ──────────────────────────────────────────────────────── */
     /* A sibling of the story panel with its OWN scroll: a reference column that
@@ -253,8 +270,9 @@ export const TIMELINE_STYLES = `
         flex: 0 0 var(--mpane-insp-w, 264px); width: var(--mpane-insp-w, 264px);
         display: flex; flex-direction: column;
         overflow-y: auto; overscroll-behavior: contain;
-        background: var(--bg-secondary);
-        border: 1px solid var(--border); border-radius: var(--radius-lg);
+        /* A rule on the reading side, nothing else — see .mpanel-left. */
+        background: transparent;
+        border: none; border-left: 1px solid var(--line); border-radius: 0;
         padding: var(--space-3);
         font-size: var(--fs-xs);
     }
@@ -263,33 +281,33 @@ export const TIMELINE_STYLES = `
        wrapped rather than ellipsised — in a reference column you want to READ it. */
     .insp-ws {
         display: flex; align-items: flex-start; gap: var(--space-2);
-        color: var(--text-secondary); font-size: var(--fs-2xs);
+        color: var(--ink-soft); font-size: var(--fs-2xs);
     }
     .insp-ws-path { font-family: var(--font-mono); word-break: break-all; line-height: 1.5; }
     .insp-h {
         font-size: var(--fs-2xs); font-weight: 700; letter-spacing: .06em;
-        text-transform: uppercase; color: var(--text-tertiary); margin-bottom: var(--space-2);
+        text-transform: uppercase; color: var(--ink-faint); margin-bottom: var(--space-2);
     }
-    .insp-n { color: var(--text-tertiary); font-weight: 400; }
+    .insp-n { color: var(--ink-faint); font-weight: 400; }
     .insp-row { display: flex; justify-content: space-between; gap: var(--space-2); padding: 2px 0; }
-    .insp-k { color: var(--text-tertiary); }
-    .insp-v { color: var(--text-primary); font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+    .insp-k { color: var(--ink-faint); }
+    .insp-v { color: var(--ink); font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
     /* Cost sits between the label and the token count: money is the secondary
        reading of the same row, so it gets the quieter colour and pushes right
        against the figure it prices. */
     .insp-cost {
-        margin-left: auto; color: var(--text-tertiary); font-family: var(--font-mono);
+        margin-left: auto; color: var(--ink-faint); font-family: var(--font-mono);
         font-size: var(--fs-2xs); font-variant-numeric: tabular-nums;
     }
     .insp-row:last-child .insp-cost { color: var(--warning); }
     /* Footnote under the totals: how the figure was arrived at. */
     .insp-note {
-        margin-top: 2px; color: var(--text-tertiary); font-size: var(--fs-2xs);
+        margin-top: 2px; color: var(--ink-faint); font-size: var(--fs-2xs);
         text-align: right;
     }
     /* Per-model usage when a run touched more than one model. The rows reuse the
        .insp-row rhythm but sit in their own group so the totals read as their sum. */
-    .insp-models { margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--border-light); }
+    .insp-models { margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--line-soft); }
     .insp-models .insp-row { padding: 1px 0; }
     .insp-models .insp-k { max-width: 55%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .insp-models .insp-cost { font-size: var(--fs-2xs); }
@@ -297,13 +315,13 @@ export const TIMELINE_STYLES = `
     .insp-file, .insp-act, .insp-chap {
         display: flex; align-items: center; gap: var(--space-2);
         width: 100%; text-align: left; padding: 3px var(--space-1);
-        background: none; border: 0; border-radius: var(--radius-sm);
-        color: var(--text-secondary); font-size: var(--fs-xs); cursor: pointer;
+        background: none; border: 0; border-radius: var(--r-2);
+        color: var(--ink-soft); font-size: var(--fs-xs); cursor: pointer;
     }
-    .insp-act { border: 1px solid var(--border); padding: 6px var(--space-2); margin-bottom: var(--space-1); }
-    .insp-file:hover, .insp-act:hover, .insp-chap:hover { background: var(--bg-hover); color: var(--accent); }
+    .insp-act { border: 1px solid var(--line); padding: 6px var(--space-2); margin-bottom: var(--space-1); }
+    .insp-file:hover, .insp-act:hover, .insp-chap:hover { background: var(--surface-hover); color: var(--accent); }
     .insp-file-n { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .insp-file-a { margin-left: auto; font-size: var(--fs-2xs); color: var(--text-tertiary); }
+    .insp-file-a { margin-left: auto; font-size: var(--fs-2xs); color: var(--ink-faint); }
 
     /* Changed files as a TREE. The flat list of basenames it replaced could not
        answer "which part of the project did this touch?" — twelve rows all reading
@@ -316,11 +334,11 @@ export const TIMELINE_STYLES = `
         width: 100%; text-align: left;
         padding: 2px var(--space-1);
         background: none; border: 0; cursor: pointer;
-        color: var(--text-tertiary); font-size: var(--fs-2xs);
+        color: var(--ink-faint); font-size: var(--fs-2xs);
         font-weight: 600; letter-spacing: .01em;
         white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
-    .insp-tree-dir:hover { background: var(--bg-hover); color: var(--accent); }
+    .insp-tree-dir:hover { background: var(--surface-hover); color: var(--accent); }
     .insp-tree-chev { flex-shrink: 0; width: 8px; opacity: 0.7; }
     .insp-tree-n { overflow: hidden; text-overflow: ellipsis; }
     /* The file count is what keeps a FOLDED directory informative. */
@@ -332,9 +350,9 @@ export const TIMELINE_STYLES = `
        column instead of stepping with the folder glyphs. */
     .insp-tree-file { padding-top: 2px; padding-bottom: 2px; }
     .insp-tree-more {
-        padding: var(--space-1); color: var(--text-tertiary); font-size: var(--fs-2xs);
+        padding: var(--space-1); color: var(--ink-faint); font-size: var(--fs-2xs);
     }
-    .insp-chap-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--border); flex-shrink: 0; }
+    .insp-chap-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--line); flex-shrink: 0; }
     .insp-chap.is-active { color: var(--accent); }
     .insp-chap.is-active .insp-chap-dot { background: var(--accent); }
     .insp-chap-question .insp-chap-dot { background: var(--warning); }
@@ -345,7 +363,7 @@ export const TIMELINE_STYLES = `
     /* Each bar is stacked out / cache / in from the top, so the colour tells you
        WHY a step was expensive, not just that it was. */
     .insp-bar {
-        flex: 1 1 0; min-width: 3px; border-radius: 2px 2px 0 0; overflow: hidden;
+        flex: 1 1 0; min-width: 3px; border-radius: var(--r-1) 2px 0 0; overflow: hidden;
         display: flex; flex-direction: column;
     }
     .insp-bar.is-last { outline: 1px solid var(--accent); outline-offset: 1px; }
@@ -358,7 +376,7 @@ export const TIMELINE_STYLES = `
     .insp-lg.is-out { color: var(--warning); }
     .insp-spark-legend {
         display: flex; justify-content: space-between; gap: var(--space-2);
-        font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--text-tertiary);
+        font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--ink-faint);
     }
 
     /* ── Detail header ──────────────────────────────────────────────────── */
@@ -375,7 +393,7 @@ export const TIMELINE_STYLES = `
     .mdetail-header {
         display: flex; align-items: flex-start; gap: var(--space-2);
         padding: 3px 12px 2px;
-        background: var(--bg-tertiary);
+        background: var(--surface-sunken);
         border-bottom: none;
         flex-shrink: 0; min-width: 0;
     }
@@ -384,15 +402,15 @@ export const TIMELINE_STYLES = `
     .mdh-act { height: 26px; padding: 0 10px; font-size: var(--fs-xs); flex-shrink: 0; }
     .mdh-act-del { color: var(--error); border-color: var(--error); }
     .mdh-icon {
-        flex-shrink: 0; width: 26px; height: 26px; border-radius: var(--radius-sm);
+        flex-shrink: 0; width: 26px; height: 26px; border-radius: var(--r-2);
         display: flex; align-items: center; justify-content: center;
-        background: var(--accent-glow-lg); color: var(--accent);
+        background: var(--accent-surface); color: var(--accent);
     }
     .mdh-main { flex: 1 1 auto; min-width: 0; }
     /* ONE line. A two-line title pushed the whole story down on every task with
        a long prompt, which is most of them. */
     .mdh-title {
-        font-size: var(--fs-base); font-weight: 700; color: var(--text-primary);
+        font-size: var(--fs-base); font-weight: 700; color: var(--ink);
         line-height: 1.3;
         white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
@@ -402,26 +420,26 @@ export const TIMELINE_STYLES = `
     .mdh-meta {
         display: flex; align-items: center; gap: var(--space-2);
         margin-top: 2px; flex-wrap: wrap;
-        font-size: var(--fs-xs); color: var(--text-tertiary);
+        font-size: var(--fs-xs); color: var(--ink-faint);
     }
-    .mdh-chip b { color: var(--text-primary); font-family: var(--font-mono); font-weight: 600; }
-    .mdh-tokens-bd { font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--text-tertiary); }
+    .mdh-chip b { color: var(--ink); font-family: var(--font-mono); font-weight: 600; }
+    .mdh-tokens-bd { font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--ink-faint); }
     .mdh-ctx {
         display: flex; align-items: center; gap: var(--space-2);
         margin: 0; padding: 0 12px 5px;
-        background: var(--bg-tertiary);
-        border-bottom: 1px solid var(--border);
+        background: var(--surface-sunken);
+        border-bottom: 1px solid var(--line);
         flex-shrink: 0;
     }
-    .mdh-ctx-label { font-size: var(--fs-2xs); color: var(--text-tertiary); flex-shrink: 0; }
+    .mdh-ctx-label { font-size: var(--fs-2xs); color: var(--ink-faint); flex-shrink: 0; }
     /* Both are <span>s, and an inline element ignores width/height — which is why
        the fill never moved even though the percentage next to it did. */
     .mdh-ctx-track {
-        display: block; flex: 1 1 auto; height: 4px; border-radius: 2px;
-        background: var(--bg-tertiary); overflow: hidden;
+        display: block; flex: 1 1 auto; height: 4px; border-radius: var(--r-1);
+        background: var(--surface-sunken); overflow: hidden;
     }
     .mdh-ctx-fill {
-        display: block; height: 100%; width: 0; border-radius: 2px;
+        display: block; height: 100%; width: 0; border-radius: var(--r-1);
         background: linear-gradient(90deg, var(--success), var(--warning) 70%, var(--error));
         transition: width var(--transition-normal);
     }
@@ -434,10 +452,10 @@ export const TIMELINE_STYLES = `
        kinds of measurement. A 100% bar without a check still means "all checked
        off" — the gradient would scream danger at a state that is just fine. */
     .mdh-progress .mdh-ctx-fill { background: var(--accent); }
-    .mdh-progress .mdh-ctx-pct { color: var(--text-primary); }
+    .mdh-progress .mdh-ctx-pct { color: var(--ink); }
     .mdh-ctx-pct {
         flex-shrink: 0; font-family: var(--font-mono);
-        font-size: var(--fs-2xs); color: var(--text-secondary);
+        font-size: var(--fs-2xs); color: var(--ink-soft);
     }
 
     /* Tabs are furniture above a scrolling story — they get the tightest band
@@ -447,46 +465,46 @@ export const TIMELINE_STYLES = `
     /* ── Markdown inside a card ─────────────────────────────────────────── */
     /* A report is mostly headings, lists and code. Rendered at one weight and one
        size it reads as a wall; the hierarchy has to be visible before it is read. */
-    .tl-card .rv-summary { font-size: var(--fs-md); line-height: 1.7; color: var(--text-secondary); }
+    .tl-card .rv-summary { font-size: var(--fs-md); line-height: 1.7; color: var(--ink-soft); }
     .tl-card .rv-summary > *:first-child { margin-top: 0; }
     .tl-card .rv-summary > *:last-child { margin-bottom: 0; }
     .tl-card .rv-summary h1,
     .tl-card .rv-summary h2,
     .tl-card .rv-summary h3,
     .tl-card .rv-summary h4 {
-        color: var(--text-primary); font-weight: 700; line-height: 1.35;
+        color: var(--ink); font-weight: 700; line-height: 1.35;
         margin: var(--space-5) 0 var(--space-2);
     }
     .tl-card .rv-summary h1 {
         font-size: var(--fs-lg);
         padding-bottom: var(--space-2);
-        border-bottom: 1px solid var(--border);
+        border-bottom: 1px solid var(--line);
     }
     /* h2 is the workhorse in a report, so it gets the one strong signal: a rule
        above it. A coloured left bar on every h2 competed with the rail itself. */
     .tl-card .rv-summary h2 {
         font-size: var(--fs-base);
         padding-top: var(--space-3);
-        border-top: 1px solid var(--border-light);
+        border-top: 1px solid var(--line-soft);
     }
-    .tl-card .rv-summary h3 { font-size: var(--fs-md); color: var(--text-primary); }
-    .tl-card .rv-summary h4 { font-size: var(--fs-sm); color: var(--text-secondary); text-transform: uppercase; letter-spacing: .05em; }
+    .tl-card .rv-summary h3 { font-size: var(--fs-md); color: var(--ink); }
+    .tl-card .rv-summary h4 { font-size: var(--fs-sm); color: var(--ink-soft); text-transform: uppercase; letter-spacing: .05em; }
     .tl-card .rv-summary p { margin: var(--space-2) 0; }
     .tl-card .rv-summary ul,
     .tl-card .rv-summary ol { margin: var(--space-2) 0; padding-left: var(--space-5); }
     .tl-card .rv-summary li { margin: var(--space-1) 0; }
-    .tl-card .rv-summary li::marker { color: var(--text-tertiary); }
-    .tl-card .rv-summary strong { color: var(--text-primary); font-weight: 600; }
+    .tl-card .rv-summary li::marker { color: var(--ink-faint); }
+    .tl-card .rv-summary strong { color: var(--ink); font-weight: 600; }
     /* On a dark surface a bordered chip per inline code turns a paragraph into a
        dotted line of boxes — the report read as noise. Tint instead of outline,
        and let the accent carry the emphasis. */
     .tl-card .rv-summary code {
         font-family: var(--font-mono); font-size: var(--fs-sm);
-        background: var(--accent-glow-lg); border: 0;
-        border-radius: var(--radius-sm); padding: 1px 5px; color: var(--accent);
+        background: var(--accent-surface); border: 0;
+        border-radius: var(--r-2); padding: 1px 5px; color: var(--accent);
     }
     :root[data-theme="light"] .tl-card .rv-summary code {
-        background: var(--bg-tertiary); color: var(--text-primary);
+        background: var(--surface-sunken); color: var(--ink);
     }
     /* Paper keeps JHEditor's own code treatment: red-pen ink on a faint wash. */
     :root[data-theme="paper"] .tl-card .rv-summary code {
@@ -495,23 +513,23 @@ export const TIMELINE_STYLES = `
     }
     /* Emphasis is for emphasis. Bold + a background made every other phrase
        shout, which is the same as none of them shouting. */
-    .tl-card .rv-summary em { color: var(--text-tertiary); font-style: italic; }
+    .tl-card .rv-summary em { color: var(--ink-faint); font-style: italic; }
     .tl-card .rv-summary a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
     .tl-card .rv-summary pre {
-        background: var(--bg-input); border: 1px solid var(--border);
-        border-radius: var(--radius-sm); padding: var(--space-3);
+        background: var(--surface-input); border: 1px solid var(--line);
+        border-radius: var(--r-2); padding: var(--space-3);
         overflow-x: auto; margin: var(--space-3) 0;
     }
     .tl-card .rv-summary pre code { border: 0; background: none; padding: 0; font-size: var(--fs-xs); }
     .tl-card .rv-summary blockquote {
         margin: var(--space-3) 0; padding: var(--space-1) var(--space-3);
-        border-left: 3px solid var(--border); color: var(--text-tertiary);
+        border-left: 3px solid var(--line); color: var(--ink-faint);
     }
     .tl-card .rv-summary table { border-collapse: collapse; margin: var(--space-3) 0; font-size: var(--fs-sm); }
     .tl-card .rv-summary th,
-    .tl-card .rv-summary td { border: 1px solid var(--border); padding: var(--space-1) var(--space-2); }
-    .tl-card .rv-summary th { background: var(--bg-tertiary); color: var(--text-primary); font-weight: 600; }
-    .tl-card .rv-summary hr { border: 0; border-top: 1px solid var(--border); margin: var(--space-4) 0; }
+    .tl-card .rv-summary td { border: 1px solid var(--line); padding: var(--space-1) var(--space-2); }
+    .tl-card .rv-summary th { background: var(--surface-sunken); color: var(--ink); font-weight: 600; }
+    .tl-card .rv-summary hr { border: 0; border-top: 1px solid var(--line); margin: var(--space-4) 0; }
 
     /* ── An unanswered question, made impossible to miss ────────────────── */
     /* The STICKY element has to be the slot, not the banner inside it: a sticky
@@ -524,12 +542,12 @@ export const TIMELINE_STYLES = `
         display: flex; align-items: center; gap: var(--space-2);
         margin-bottom: var(--space-3);
         padding: var(--space-2) var(--space-3);
-        background: var(--warning-bg); border: 1px solid var(--warning);
-        border-radius: var(--radius-md);
+        background: var(--warning-surface); border: 1px solid var(--warning);
+        border-radius: var(--r-3);
         color: var(--warning); font-size: var(--fs-sm); font-weight: 600;
         cursor: pointer;
     }
-    .mask-pending:hover { background: var(--bg-hover); }
+    .mask-pending:hover { background: var(--surface-hover); }
     .mask-pending-go { margin-left: auto; font-size: var(--fs-xs); opacity: .8; }
 
     /* ── Panel collapse ─────────────────────────────────────────────────── */
@@ -537,23 +555,23 @@ export const TIMELINE_STYLES = `
        reads as a tool rather than a place. */
     .mfold-all {
         margin-left: var(--space-3);
-        background: none; border: 1px solid var(--border); border-radius: var(--radius-sm);
-        color: var(--text-tertiary); cursor: pointer;
+        background: none; border: 1px solid var(--line); border-radius: var(--r-2);
+        color: var(--ink-faint); cursor: pointer;
         padding: 2px 8px; font-size: var(--fs-2xs); line-height: 1.4;
     }
-    .mfold-all:hover { color: var(--accent); border-color: var(--border-focus); }
+    .mfold-all:hover { color: var(--accent); border-color: var(--line-focus); }
 
     .mpanel-toggle {
-        background: none; border: 1px solid var(--border); border-radius: var(--radius-sm);
-        color: var(--text-tertiary); cursor: pointer;
+        background: none; border: 1px solid var(--line); border-radius: var(--r-2);
+        color: var(--ink-faint); cursor: pointer;
         padding: 2px 7px; font-size: var(--fs-2xs); line-height: 1.4;
     }
-    .mpanel-toggle:hover { color: var(--accent); border-color: var(--border-focus); }
+    .mpanel-toggle:hover { color: var(--accent); border-color: var(--line-focus); }
     /* An open panel has to LOOK open: the toggle carried the active class but
        nothing styled it, so the button never showed the state. */
     .mpanel-toggle.active {
         color: var(--accent); border-color: var(--accent);
-        background: var(--accent-glow-lg);
+        background: var(--accent-surface);
     }
 
     @media (max-width: 1100px) {

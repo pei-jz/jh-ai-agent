@@ -138,9 +138,9 @@
         display: flex; align-items: center; justify-content: center;
     }
     .mchat-box {
-        background: var(--bg-secondary);
-        border: 1px solid var(--border);
-        border-radius: var(--radius-lg);
+        background: var(--surface-panel);
+        border: 1px solid var(--line);
+        border-radius: var(--r-3);
         width: min(92vw, 880px);
         max-height: 82vh;
         display: flex; flex-direction: column; overflow: hidden;
@@ -149,64 +149,64 @@
     .mchat-header {
         display: flex; align-items: center; justify-content: space-between;
         padding: 10px 16px; flex-shrink: 0;
-        background: var(--bg-tertiary);
-        border-bottom: 1px solid var(--border);
+        background: var(--surface-sunken);
+        border-bottom: 1px solid var(--line);
     }
     .mchat-title {
         font-size: 12.5px; font-weight: 600;
-        color: var(--text-primary); font-family: var(--font-mono);
+        color: var(--ink); font-family: var(--font-mono);
     }
     .mchat-close {
-        background: none; border: none; color: var(--text-tertiary);
+        background: none; border: none; color: var(--ink-faint);
         cursor: pointer; font-size: 16px; padding: 2px 6px;
-        border-radius: 4px; line-height: 1;
+        border-radius: var(--r-2); line-height: 1;
         transition: background 0.12s, color 0.12s;
     }
-    .mchat-close:hover { background: var(--bg-hover); color: var(--text-primary); }
+    .mchat-close:hover { background: var(--surface-hover); color: var(--ink); }
 
     .mchat-body { flex: 1; overflow-y: auto; padding: 0; }
-    .mchat-empty { padding: 24px 18px; font-size: 12px; color: var(--text-tertiary); }
+    .mchat-empty { padding: 24px 18px; font-size: 12px; color: var(--ink-faint); }
 
     .mchat-entry { padding: 14px 18px; }
-    .mchat-entry + .mchat-entry { border-top: 1px solid var(--border-light); }
+    .mchat-entry + .mchat-entry { border-top: 1px solid var(--line-soft); }
     .mchat-entry-meta {
         display: flex; align-items: center; gap: 10px;
         margin-bottom: 12px; padding-bottom: 10px;
-        border-bottom: 1px solid var(--border-light);
+        border-bottom: 1px solid var(--line-soft);
         font-family: var(--font-mono);
     }
-    .mchat-usage { margin-left: auto; font-size: 11px; color: var(--text-secondary); }
+    .mchat-usage { margin-left: auto; font-size: 11px; color: var(--ink-soft); }
     .mchat-steplabel { font-size: 10.5px; color: var(--accent); font-weight: 600; }
 
     .mchat-subtabs {
         display: flex; gap: 4px; flex-wrap: wrap;
         margin: 4px 0 8px; padding-bottom: 6px;
-        border-bottom: 1px solid var(--border-light);
+        border-bottom: 1px solid var(--line-soft);
     }
     .mchat-subtab {
         padding: 4px 10px;
-        border: 1px solid var(--border);
-        background: var(--bg-tertiary);
-        color: var(--text-secondary);
-        font-size: 11px; border-radius: var(--radius-sm);
+        border: 1px solid var(--line);
+        background: var(--surface-sunken);
+        color: var(--ink-soft);
+        font-size: 11px; border-radius: var(--r-2);
         cursor: pointer; white-space: nowrap;
     }
-    .mchat-subtab:hover { background: var(--bg-hover); color: var(--text-primary); }
-    .mchat-subtab.active { background: var(--bg-primary); color: var(--accent); border-color: var(--accent); }
+    .mchat-subtab:hover { background: var(--surface-hover); color: var(--ink); }
+    .mchat-subtab.active { background: var(--surface-app); color: var(--accent); border-color: var(--accent); }
     .mchat-copy {
         margin-left: auto;
-        background: var(--bg-tertiary); border: 1px solid var(--border);
-        color: var(--text-secondary); font-size: 11px;
-        padding: 2px 8px; border-radius: 5px; cursor: pointer;
+        background: var(--surface-sunken); border: 1px solid var(--line);
+        color: var(--ink-soft); font-size: 11px;
+        padding: 2px 8px; border-radius: var(--r-2); cursor: pointer;
     }
 
     .mchat-pre {
         margin: 0; padding: 10px 12px;
-        background: var(--bg-primary);
-        border: 1px solid var(--border-light);
-        border-radius: 5px;
+        background: var(--surface-app);
+        border: 1px solid var(--line-soft);
+        border-radius: var(--r-2);
         font-size: 10.5px; font-family: var(--font-mono);
-        color: var(--text-secondary);
+        color: var(--ink-soft);
         white-space: pre-wrap; word-break: break-word;
         max-height: 300px; overflow-y: auto; line-height: 1.5;
     }

@@ -100,30 +100,30 @@ export class ModeDropdown {
             .mode-dd { position: relative; }
             .mode-dd-btn {
                 display: flex; align-items: center; gap: 7px; width: 100%;
-                background: var(--bg-input); border: 1px solid var(--border);
-                border-radius: var(--radius-sm); color: var(--text-primary);
+                background: var(--surface-input); border: 1px solid var(--line);
+                border-radius: var(--r-2); color: var(--ink);
                 padding: 0 10px; height: 28px; font-size: 12px; cursor: pointer; outline: none;
             }
-            .mode-dd-btn:hover { border-color: var(--border-focus); }
+            .mode-dd-btn:hover { border-color: var(--line-focus); }
             .mode-dd-cur { flex: 1; text-align: left; white-space: nowrap; }
             .mode-dd-caret { opacity: 0.6; font-size: 10px; }
             .mode-dd-ico { display: inline-flex; color: var(--accent); }
             .mode-dd-list {
                 position: absolute; top: calc(100% + 4px); left: 0; right: 0; min-width: 260px;
-                background: var(--bg-secondary); border: 1px solid var(--border-focus);
-                border-radius: var(--radius-md); box-shadow: 0 8px 28px rgba(0,0,0,0.45);
+                background: var(--surface-panel); border: 1px solid var(--line-focus);
+                border-radius: var(--r-3); box-shadow: 0 8px 28px rgba(0,0,0,0.45);
                 z-index: 500; overflow: hidden; padding: 4px;
             }
             .mode-dd-opt {
                 display: flex; align-items: flex-start; gap: 9px; padding: 8px 10px;
-                border-radius: 6px; cursor: pointer;
+                border-radius: var(--r-2); cursor: pointer;
             }
-            .mode-dd-opt:hover { background: var(--bg-hover); }
-            .mode-dd-opt.sel { background: var(--accent-glow-lg); }
+            .mode-dd-opt:hover { background: var(--surface-hover); }
+            .mode-dd-opt.sel { background: var(--accent-surface); }
             .mode-dd-opt .mode-dd-ico { margin-top: 1px; }
             .mode-dd-texts { display: flex; flex-direction: column; gap: 2px; }
-            .mode-dd-name { font-size: 12.5px; font-weight: 600; color: var(--text-primary); }
-            .mode-dd-desc { font-size: 11px; color: var(--text-tertiary); line-height: 1.4; }
+            .mode-dd-name { font-size: 12.5px; font-weight: 600; color: var(--ink); }
+            .mode-dd-desc { font-size: 11px; color: var(--ink-faint); line-height: 1.4; }
         `;
         document.head.appendChild(style);
     }

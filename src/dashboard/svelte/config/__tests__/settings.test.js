@@ -39,8 +39,14 @@ const ALL_OPEN = {
     commands: true, logging: true, connection: true, updates: true, license: true,
 };
 
+// `showAdvanced: true` because the component hides the advanced sections by
+// default now (the simplified-first toggle) — and every test below is about a
+// field that lives in one of them. Without it they all read null and fail with
+// "cannot set properties of null", which names the symptom and not the cause.
+//
+// The tests that are ABOUT the default state pass it explicitly instead.
 const general = (props = {}) => render(SettingsGeneral, {
-    props: { config: cfg(), openSections: ALL_OPEN, ...props },
+    props: { config: cfg(), openSections: ALL_OPEN, showAdvanced: true, ...props },
 }).container;
 
 const type = (el, value) => {
@@ -252,14 +258,17 @@ describe('SettingsGeneral — phase routing', () => {
 
 describe('SettingsGeneral — sections', () => {
     it('opens Basic by default and leaves the rest closed', () => {
-        const el = render(SettingsGeneral, { props: { config: cfg(), openSections: {} } }).container;
+        const el = render(SettingsGeneral, { props: { config: cfg(), openSections: {}, showAdvanced: true } }).container;
         const open = [...el.querySelectorAll('.cfg-sec')].filter(d => d.open).map(d => d.dataset.sec);
         expect(open).toEqual(['basic']);
     });
 
     it('honours a persisted open set', () => {
+        // `safety` is one of the ADVANCED sections, so it is not rendered at all
+        // unless the advanced toggle is on — a persisted "open" for a section
+        // that is not on screen is not a contradiction, it is simply not shown.
         const el = render(SettingsGeneral, {
-            props: { config: cfg(), openSections: { basic: false, safety: true } },
+            props: { config: cfg(), openSections: { basic: false, safety: true }, showAdvanced: true },
         }).container;
         const open = [...el.querySelectorAll('.cfg-sec')].filter(d => d.open).map(d => d.dataset.sec);
         expect(open).toEqual(['safety']);

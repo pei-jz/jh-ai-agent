@@ -26,7 +26,6 @@ export const KEYS = {
     statsCut: 'jhai_dash_stats_cut',
     statsRange: 'jhai_dash_stats_range',
     statsStatus: 'jhai_dash_stats_status',
-    openNewTask: 'jh_open_new_task',
 };
 
 /** Read a persisted preference, falling back when storage is unavailable. */

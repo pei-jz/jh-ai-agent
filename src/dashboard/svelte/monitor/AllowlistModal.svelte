@@ -10,6 +10,7 @@
   not project configuration.
 -->
 <script>
+    import { t } from '../../../i18n/index.js';
     const PATTERN_KEY = 'jhai_approved_commands';
     const WORKSPACE_KEY = 'jhai_autoapprove_workspaces';
 
@@ -39,19 +40,19 @@
     onclick={(e) => { if (e.target === e.currentTarget) onClose?.(); }}
     onkeydown={(e) => { if (e.key === 'Escape') onClose?.(); }}
 >
-    <div class="acm-box" role="dialog" aria-label="Command approval allowlist">
+    <div class="acm-box" role="dialog" aria-label={t('allow.title')}>
         <div class="acm-head">
             <strong>🛡 Command approval allowlist</strong>
-            <button class="acm-close" type="button" aria-label="Close" onclick={() => onClose?.()}>✖</button>
+            <button class="acm-close" type="button" aria-label={t('common.close')} onclick={() => onClose?.()}>✖</button>
         </div>
         <div class="acm-body">
             <div>
-                <div class="acm-section">Always-allow patterns (<code>*</code> = prefix match)</div>
+                <div class="acm-section">{t('allow.patterns')}<code>*</code> = prefix match)</div>
                 <div class="acm-list">
                     {#each patterns as p (p)}
                         <div class="acm-row">
                             <code>{p}</code>
-                            <button class="acm-del" type="button" title="Remove"
+                            <button class="acm-del" type="button" title={t('common.remove')}
                                 onclick={() => remove(PATTERN_KEY, p)}>✕</button>
                         </div>
                     {:else}
@@ -60,12 +61,12 @@
                 </div>
             </div>
             <div>
-                <div class="acm-section">Auto-approved workspaces (dangerous commands are always confirmed)</div>
+                <div class="acm-section">{t('allow.autoWs')}</div>
                 <div class="acm-list">
                     {#each workspaces as w (w)}
                         <div class="acm-row">
                             <code>{w}</code>
-                            <button class="acm-del" type="button" title="Remove"
+                            <button class="acm-del" type="button" title={t('common.remove')}
                                 onclick={() => remove(WORKSPACE_KEY, w)}>✕</button>
                         </div>
                     {:else}
@@ -88,26 +89,26 @@
         display: flex; align-items: center; justify-content: center;
     }
     .acm-box {
-        background: var(--bg-secondary);
-        border: 1px solid var(--border);
-        border-radius: 12px;
+        background: var(--surface-panel);
+        border: 1px solid var(--line);
+        border-radius: var(--r-3);
         width: 560px; max-width: 94vw; max-height: 86vh;
         display: flex; flex-direction: column; overflow: hidden;
         box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
     }
     .acm-head {
         padding: 14px 18px;
-        border-bottom: 1px solid var(--border);
-        background: var(--bg-tertiary);
+        border-bottom: 1px solid var(--line);
+        background: var(--surface-sunken);
         display: flex; justify-content: space-between; align-items: center;
     }
     .acm-head strong { font-size: 14px; }
-    .acm-close { background: none; border: none; color: var(--text-primary); cursor: pointer; font-size: 18px; }
+    .acm-close { background: none; border: none; color: var(--ink); cursor: pointer; font-size: 18px; }
     .acm-body {
         padding: 16px 18px; overflow-y: auto;
         display: flex; flex-direction: column; gap: 16px;
     }
-    .acm-section { font-size: 12px; font-weight: 700; color: var(--text-secondary); margin-bottom: 6px; }
+    .acm-section { font-size: 12px; font-weight: 700; color: var(--ink-soft); margin-bottom: 6px; }
     .acm-list { display: flex; flex-direction: column; gap: 4px; }
-    .acm-note { font-size: 11px; color: var(--text-tertiary); }
+    .acm-note { font-size: 11px; color: var(--ink-faint); }
 </style>

@@ -7,6 +7,8 @@ pub mod fs;
 pub mod git;
 pub mod office;
 pub mod shell;
+// Installed copy or portable copy — decides whether updates may be offered.
+pub mod install;
 pub mod indexer;
 pub mod code_index;
 pub mod mcp;

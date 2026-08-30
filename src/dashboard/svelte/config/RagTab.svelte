@@ -10,6 +10,7 @@
   That cascade is `descendantsOf` here — pure, tested, and expressed as data.
 -->
 <script>
+    import { t } from '../../../i18n/index.js';
     import { icon } from '../../utils/icons.js';
     import { RAG_EXTENSIONS, dirDepth, dirBasename, descendantsOf } from '../../views/config/rag.js';
 
@@ -46,18 +47,18 @@
     </div>
     <div class="provider-card-fields">
         <div class="input-group">
-            <label class="input-label" for="rag-path-input">Workspace Path</label>
+            <label class="input-label" for="rag-path-input">{t('rag.workspacePath')}</label>
             <div class="cfg-row-inline">
                 <input id="rag-path-input" class="input cfg-grow" type="text" value={path}
                     placeholder={'C:\\path\\to\\workspace'}
                     oninput={(e) => onPathChange?.(e.currentTarget.value)}>
                 <button class="btn btn-secondary cfg-nowrap" id="btn-rag-load-dirs"
-                    onclick={() => onLoadDirs?.()}>Load Directories</button>
+                    onclick={() => onLoadDirs?.()}>{t('rag.load')}</button>
             </div>
         </div>
 
         <div class="input-group">
-            <span class="input-label">Directories to Include</span>
+            <span class="input-label">{t('rag.dirs')}</span>
             <div id="rag-dir-list" class="cfg-rag-dirs">
                 {#if !dirs.length}
                     <div class="cfg-rag-hint">Enter a workspace path and click "Load Directories".</div>
@@ -77,7 +78,7 @@
         </div>
 
         <div class="input-group">
-            <span class="input-label">File Extensions</span>
+            <span class="input-label">{t('rag.exts')}</span>
             <div class="cfg-rag-exts">
                 {#each RAG_EXTENSIONS as ext (ext)}
                     <label class="cfg-rag-ext">

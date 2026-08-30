@@ -6,6 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, fireEvent, waitFor } from '@testing-library/svelte';
+import { t } from '../../../../i18n/index.js';
 
 const invoke = vi.fn(async () => null);
 
@@ -46,8 +47,8 @@ function mountBox(props = {}) {
 }
 
 const box = (c) => c.querySelector('#input-steering');
-const sendBtn = (c) => [...c.querySelectorAll('button')].find(b => b.textContent.trim() === 'Send');
-const stopBtn = (c) => [...c.querySelectorAll('button')].find(b => /Stop/.test(b.textContent));
+const sendBtn = (c) => [...c.querySelectorAll('button')].find(b => b.textContent.trim() === t('common.send'));
+const stopBtn = (c) => [...c.querySelectorAll('button')].find(b => b.textContent.includes(t('task.stop')) || /Stop/.test(b.textContent));
 const type = (el, value) => fireEvent.input(el, { target: { value } });
 
 describe('when it is usable', () => {

@@ -18,7 +18,11 @@ export const CONFIG_TABS = [
     { id: 'skills', icon: 'bolt', label: 'Skills' },
     // API Logs moved to the Monitor view (per-task raw payloads).
     { id: 'rag', icon: 'search', label: 'RAG Indexing' },
-    { id: 'memory', icon: 'memory', label: 'Memory' },
+    // Memory and Usage are both DESTINATIONS now, not tabs
+    // (docs/design/information-architecture.md §7 step 4 and its §11 correction).
+    // Reviewing what the agent believes is not a setting, and neither is looking
+    // at what the month cost — Settings is where you change how the app behaves
+    // and then leave.
 ];
 
 export const APPROVED_COMMANDS_KEY = 'jhai_approved_commands';

@@ -10,6 +10,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, cleanup, fireEvent, waitFor } from '@testing-library/svelte';
 import RawLog from '../RawLog.svelte';
+import { t } from '../../../../i18n/index.js';
 
 afterEach(() => cleanup());
 
@@ -45,7 +46,7 @@ const summaryOf = (el) => el.querySelector('.mstep-summary').textContent.trim();
 describe('an empty log', () => {
     it('says it is waiting rather than showing nothing', () => {
         const h = mountLog();
-        expect(h.container.textContent).toMatch(/Waiting for execution logs/);
+        expect(h.container.textContent).toContain(t('task.waitingLogs'));
         expect(steps(h.container)).toHaveLength(0);
     });
 });

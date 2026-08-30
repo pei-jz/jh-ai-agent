@@ -7,6 +7,7 @@
   remember to remove inside its own close handler.
 -->
 <script>
+    import { t } from '../../../i18n/index.js';
     let { src = '', alt = 'Full size image', onClose = null } = $props();
 </script>
 
@@ -16,7 +17,7 @@
     class="iz-overlay"
     role="button"
     tabindex="-1"
-    aria-label="Close full-size image"
+    aria-label={t('common.closeImage')}
     onclick={() => onClose?.()}
     onkeydown={(e) => { if (e.key === 'Enter') onClose?.(); }}
 >
@@ -32,7 +33,7 @@
     }
     .iz-overlay img {
         max-width: 96vw; max-height: 92vh;
-        border-radius: 8px;
+        border-radius: var(--r-3);
         box-shadow: 0 8px 40px rgba(0, 0, 0, 0.6);
     }
 </style>

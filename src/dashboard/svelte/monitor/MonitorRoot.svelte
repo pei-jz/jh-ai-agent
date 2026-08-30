@@ -17,9 +17,14 @@
   emits, so there is no shared-ownership seam left inside the Monitor.
 -->
 <script>
+    import { t } from '../../../i18n/index.js';
     import { icon } from '../../utils/icons.js';
     import { LEFT_VAR, INSP_VAR, dragWidth, isAtBottom } from '../../views/monitor/paneLayout.js';
+    import { thinkLabel } from '../../views/monitor/askView.js';
+    import AskConversation from '../work/AskConversation.svelte';
 
+    import Composer from './Composer.svelte';
+    import Welcome from './Welcome.svelte';
     import TaskList from './TaskList.svelte';
     import TaskHeader from './TaskHeader.svelte';
     import Timeline from './Timeline.svelte';
@@ -31,6 +36,10 @@
     let {
         /** Everything the left column needs (TaskList's own props). */
         taskList = null,
+        /** The composer above the list — null hides it (Composer's own props). */
+        composer = null,
+        /** What the right column shows with nothing selected (Welcome's props). */
+        welcome = null,
         taskCount = 0,
         /** null until a task is selected — the right column shows a placeholder. */
         header = null,
@@ -54,6 +63,14 @@
         earlier = null,
         /** { text, collapsed } while a run is streaming, else null. */
         working = null,
+        /**
+         * `ask` presentation (docs/design/information-architecture.md §4).
+         * null on a build run and whenever the Raw Log filter is on — that is
+         * the escape hatch, and it works by this simply not being set.
+         *   think : { since:number, status:string|null } — the ONE progress line
+         *   tools : { count, lines } | null — what was withheld, folded
+         */
+        ask = null,
 
         onNewTask = null,
         onFilter = null,
@@ -70,11 +87,41 @@
     } = $props();
 
     let panelEl = $state(null);
+
+    // ── The ask progress line ──────────────────────────────────────────────
+    // A local 100ms tick rather than a prop the view pushes: the seconds are
+    // presentation, and driving them from outside would mean a props push (and
+    // a full re-render) ten times a second for a counter.
+    //
+    // The interval exists ONLY while the line is on screen, so a finished run
+    // leaves no timer — and the line itself is removed rather than frozen,
+    // which is §4-2's "終わったら消える".
+    let tick = $state(0);
+    $effect(() => {
+        if (!ask?.think) return;
+        const id = setInterval(() => { tick = Date.now(); }, 100);
+        return () => clearInterval(id);
+    });
+    const thinkText = $derived(
+        ask?.think ? thinkLabel((tick || Date.now()) - ask.think.since, ask.think.status) : ''
+    );
     /** The reader left the bottom, so new content must stop pulling the view. */
     let scrolledUp = $state(false);
 
     const hasTask = $derived(!!header);
-    const pendingAsk = $derived((timeline?.items || []).find(i => i.kind === 'ask' && !i.answered) || null);
+    /**
+     * An unanswered question, for the banner that says the run is waiting.
+     *
+     * NOT on an `ask` run. There, the agent asking something back is just the
+     * other half of a conversation — it arrives as a normal reply and you type
+     * into the box below it, the way you would answer anyone. A banner saying
+     * "Waiting for your answer" with a "go to the question" jump is scaffolding
+     * for a long task you had walked away from; on a two-turn exchange it
+     * announces the thing you are already looking at.
+     */
+    const pendingAsk = $derived(
+        ask ? null : ((timeline?.items || []).find(i => i.kind === 'ask' && !i.answered) || null)
+    );
 
     function scrollToBottom() {
         if (!panelEl) return;
@@ -142,27 +189,49 @@
 <!-- The panes size themselves from these custom properties (MonitorView.styles.js
      and monitor/timelineStyles.js), so the widths are written there rather than as
      an inline `width` — which looks right until the next render and then snaps back. -->
-<div class="monitor-layout" style={`${LEFT_VAR}:${leftWidth}px;${INSP_VAR}:${inspWidth}px`}>
+<div class="monitor-layout" class:is-ask={!!ask} style={`${LEFT_VAR}:${leftWidth}px;${INSP_VAR}:${inspWidth}px`}>
     <div class="mpanel-left" class:pane-hidden={listCollapsed}>
         <div class="mpanel-left-header">
-            <span>Executions <span class="mpl-count">{taskCount}</span></span>
-            <button class="btn btn-primary mpl-new" type="button" title="Create a new task"
+            <span>{t('list.title')}<span class="mpl-count">{taskCount}</span></span>
+            <button class="btn btn-primary mpl-new" type="button" title={t('list.newDetailed')}
                 onclick={() => onNewTask?.()}>{@html icon('plus', 12)} New</button>
         </div>
+        <!--
+          The composer sits ABOVE the list rather than behind the "New" button:
+          starting something and watching it are the same activity, and the
+          Dashboard's separate launcher is what this replaces (see
+          docs/design/information-architecture.md §7 step 1). "New" stays as the
+          way to reach the full modal directly.
+
+          It is mounted HERE only while a task is open. With nothing selected the
+          whole middle of the screen is empty and this column is 240px wide, so
+          the box moves to the middle instead (below). ONE box, two places —
+          never two boxes: that would raise the question of which is the real
+          one, and the draft would have to be kept in step between them.
+        -->
+        {#if composer && hasTask}<Composer {...composer} place="rail" />{/if}
         {#if taskList}<TaskList {...taskList} />{/if}
     </div>
 
     <!-- The 12px flex gap is the hit area; the divider itself is invisible. -->
-    <div class="mpane-divider" title="Drag to resize the task list"
+    <div class="mpane-divider" title={t('list.resize')}
         role="separator" aria-orientation="vertical"
         onpointerdown={startDrag('left')}></div>
 
     <div class="mpanel-right">
         {#if !hasTask}
-            <div class="mdetail-empty">
-                <span class="mdetail-empty-icon">📊</span>
-                <h3>Select a task</h3>
-                <p>Choose an agent task from the left panel.</p>
+            <!-- "Select a task" described the furniture. The reason you are here
+                 with nothing selected is almost always that you have not started
+                 anything yet. -->
+            <div class="mwelcome">
+                <!-- The composer goes INSIDE Welcome, between the lede and the
+                     templates: you type first and reach for a saved request only
+                     if nothing comes to mind. Rendering it as a sibling put the
+                     templates above the box, which offers the shortcut before
+                     the thing it is a shortcut for. -->
+                <Welcome {...(welcome || {})}>
+                    {#if composer}<Composer {...composer} place="hero" />{/if}
+                </Welcome>
             </div>
         {:else}
             <TaskHeader {...header} />
@@ -187,10 +256,10 @@
                         onclick={() => onFoldAll?.()}>{foldAll.label}</button>
                 {/if}
                 <button class="mpanel-toggle mfilter-spacer" class:active={!listCollapsed}
-                    type="button" title="Show or hide the task list"
+                    type="button" title={t('list.toggle')}
                     onclick={() => onToggleList?.()}>◧</button>
                 <button class="mpanel-toggle" class:active={inspectorOpen} type="button"
-                    title="Task details, token flow and chapter jumps"
+                    title={t('insp.toggle')}
                     onclick={() => onToggleInspector?.()}>◨</button>
             </div>
 
@@ -228,7 +297,7 @@
                     <div class="mresult-earlier">
                         {#if earlier.canLoadMore}
                             <button class="btn btn-sm" type="button"
-                                onclick={() => onLoadEarlier?.()}>↑ Load earlier</button>
+                                onclick={() => onLoadEarlier?.()}>↑ {t('task.loadEarlier')}</button>
                         {/if}
                         <div class="mresult-earlier-note">{earlier.note || ''}</div>
                     </div>
@@ -238,20 +307,54 @@
                     <div class="mask-pending" role="button" tabindex="0"
                         onclick={jumpToAsk}
                         onkeydown={(e) => { if (e.key === 'Enter') jumpToAsk(); }}>
-                        {@html icon('question', 14)}<span>Waiting for your answer</span>
+                        {@html icon('question', 14)}<span>{t('task.waiting')}</span>
                         <span class="mask-pending-go">Go to the question ↓</span>
                     </div>
                 {/if}
 
-                {#if timeline}<div class="mtl"><Timeline {...timeline} /></div>{/if}
-
-                {#if loading}
-                    <div class="mload"><span class="mload-spin"></span>Loading results…</div>
+                {#if ask}
+                    <!-- An `ask` run is a conversation, so it uses the conversation
+                         surface (svelte/work/AskConversation.svelte) rather than the
+                         step timeline. Same run, same log, same bill — a different
+                         reading of the same items. See views/monitor/askConversation.js
+                         and information-architecture.md §4. -->
+                    <div class="mtl mtl-ask">
+                        <AskConversation messages={ask.messages}
+                            renderMarkdown={timeline?.renderMarkdown}
+                            renderUserMarkdown={timeline?.renderMarkdown} />
+                    </div>
+                {:else if timeline}
+                    <div class="mtl"><Timeline {...timeline} /></div>
                 {/if}
 
-                {#if working}
+                {#if loading}
+                    <div class="mload"><span class="mload-spin"></span>{t('task.loadingResults')}</div>
+                {/if}
+
+                <!-- An `ask` run folds every tool call into one row. It hides
+                     itself when there is nothing withheld rather than saying
+                     "0 tools", which is noise on a question answered from what
+                     the agent already knew. -->
+                {#if ask?.tools}
+                    <details class="mask-tools">
+                        <summary>使ったツール {ask.tools.count}</summary>
+                        <div class="mask-tools-body">
+                            {#each ask.tools.lines as line}<div class="mask-tool-line">{line}</div>{/each}
+                        </div>
+                    </details>
+                {/if}
+
+                {#if ask?.think}
+                    <!-- ONE line, overwritten rather than appended to, and removed
+                         when the turn ends. NOT a toggle: making it expand a log
+                         is what turns a conversation back into a task view. -->
+                    <div class="mask-think">
+                        <span class="mask-dots"><i></i><i></i><i></i></span>
+                        <span class="mask-think-text">{thinkText}</span>
+                    </div>
+                {:else if working && !ask}
                     <div class="mresult-live-label" class:is-folded={working.collapsed}
-                        role="button" tabindex="0" title="Toggle the activity log"
+                        role="button" tabindex="0" title={t('task.toggleLog')}
                         onclick={() => onToggleWorking?.()}
                         onkeydown={(e) => { if (e.key === 'Enter') onToggleWorking?.(); }}>
                         <span class="mll-dot"></span>
@@ -264,7 +367,7 @@
             <!-- Shown whenever the reader has scrolled up, not only when new
                  activity arrives. -->
             {#if scrolledUp && filter === 'result'}
-                <button class="mresult-jump" type="button" onclick={scrollToBottom}>↓ Jump to latest</button>
+                <button class="mresult-jump" type="button" onclick={scrollToBottom}>↓ {t('task.jumpLatest')}</button>
             {/if}
 
             {#if steer}<SteeringInput {...steer} />{/if}
@@ -273,7 +376,7 @@
 
     <!-- Hidden while the inspector is closed. -->
     {#if inspectorOpen}
-        <div class="mpane-divider" title="Drag to resize the inspector"
+        <div class="mpane-divider" title={t('insp.resize')}
             role="separator" aria-orientation="vertical"
             onpointerdown={startDrag('right')}></div>
         <!-- The inspector is its OWN column, a sibling of the story rather than a

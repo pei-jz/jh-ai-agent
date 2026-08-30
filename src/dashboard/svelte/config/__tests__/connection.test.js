@@ -13,6 +13,7 @@ import { render, cleanup } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import ConnectionTable from '../ConnectionTable.svelte';
 import ConnectionModal from '../ConnectionModal.svelte';
+import { t } from '../../../../i18n/index.js';
 
 afterEach(() => cleanup());
 
@@ -27,7 +28,7 @@ const field = (el, id) => el.querySelector(`#${id}`);
 
 describe('ConnectionTable', () => {
     it('says what to do when there are no connections', () => {
-        expect(table().textContent).toContain('No LLM connections registered');
+        expect(table().textContent).toContain(t('conn.none'));
     });
 
     it('renders a row per connection with its provider label, model and URL', () => {

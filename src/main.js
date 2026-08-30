@@ -3,8 +3,8 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { listen, emit } from '@tauri-apps/api/event';
 
 import { Sidebar } from './dashboard/components/Sidebar.js';
-import { OverviewView } from './dashboard/views/OverviewView.js';
-import { ChatView } from './dashboard/views/ChatView.js';
+import { MemoryView } from './dashboard/views/MemoryView.js';
+import { UsageView } from './dashboard/views/UsageView.js';
 import { MonitorView } from './dashboard/views/MonitorView.js';
 import { ConfigView } from './dashboard/views/ConfigView.js';
 import { ScheduleView } from './dashboard/views/ScheduleView.js';
@@ -12,6 +12,10 @@ import { ScheduleView } from './dashboard/views/ScheduleView.js';
 import { taskBridge } from './modules/bridge/TaskBridge.js';
 import { scheduleManager } from './modules/ai/ScheduleManager.js';
 import { mcpManager } from './modules/ai/McpManager.js';
+import { install as installErrorReporter, recentErrors } from './dashboard/utils/errorReporter.js';
+import { showNotification } from './dashboard/utils/notifications.js';
+import { DEFAULT_MODE_ID } from './modules/ai/AgentModes.js';
+import { ASK } from './modules/ai/agent/InteractionMode.js';
 import llmService from './modules/ai/LLMService.js';
 import { ToolExecutor } from './modules/ai/ToolExecutor.js';
 import { isExternalCaller } from './modules/ai/agent/taskCaller.js';
@@ -23,7 +27,7 @@ import { extractToolCall } from './dashboard/views/chat/chatRenderer.js';
 import { STORAGE_KEY as CHAT_SESSIONS_KEY, parseSessions, pruneSessions } from './dashboard/views/chat/chatSessions.js';
 import { icon } from './dashboard/utils/icons.js';
 import { initLocale } from './i18n/index.js';
-import { normalizeTheme, nextTheme, themeIcon, themeLabel, themeAttr } from './dashboard/utils/theme.js';
+import { normalizeTheme, themeList, themeLabel, themeAttr } from './dashboard/utils/theme.js';
 
 // API Client Helper
 class ApiClient {
@@ -118,9 +122,66 @@ function applyTheme(theme) {
     else document.documentElement.dataset.theme = attr;
     const btn = document.getElementById('titlebar-theme');
     if (btn) {
-        btn.innerHTML = icon(themeIcon(theme), 14);
-        btn.title = themeLabel(theme);
+        // The button names where you ARE, not where the next press would take
+        // you — it opens a list now rather than advancing a cycle.
+        btn.innerHTML = `${icon('palette', 13)}<span class="titlebar-theme-name">${escapeHtml(themeLabel(theme))}</span>`;
+        btn.title = 'テーマを選ぶ';
     }
+    const menu = document.getElementById('theme-menu');
+    if (menu) {
+        menu.querySelectorAll('[data-theme-id]').forEach(el => {
+            el.setAttribute('aria-checked', String(el.getAttribute('data-theme-id') === theme));
+        });
+    }
+}
+
+/** Open/close the theme list. One list, built once, re-marked on each apply. */
+function initThemeMenu() {
+    const btn = document.getElementById('titlebar-theme');
+    if (!btn) return;
+
+    const menu = document.createElement('div');
+    menu.id = 'theme-menu';
+    menu.className = 'theme-menu';
+    menu.setAttribute('role', 'menu');
+    menu.hidden = true;
+    menu.innerHTML = themeList().map(t => `
+        <button type="button" class="theme-menu-item" role="menuitemradio"
+                data-theme-id="${t.id}" aria-checked="false">
+            <span class="theme-menu-sw" data-theme-sw="${t.id}"></span>
+            <span class="theme-menu-text">
+                <span class="theme-menu-name">${escapeHtml(t.label)}</span>
+                <span class="theme-menu-hint">${escapeHtml(t.hint)}</span>
+            </span>
+        </button>`).join('');
+    document.body.appendChild(menu);
+
+    const close = () => { menu.hidden = true; btn.setAttribute('aria-expanded', 'false'); };
+    const open = () => {
+        const r = btn.getBoundingClientRect();
+        menu.style.top = `${Math.round(r.bottom + 4)}px`;
+        // Right-aligned to the button, clamped so it cannot leave the window.
+        menu.style.left = `${Math.max(8, Math.round(r.right - 210))}px`;
+        menu.hidden = false;
+        btn.setAttribute('aria-expanded', 'true');
+    };
+
+    btn.setAttribute('aria-haspopup', 'menu');
+    btn.setAttribute('aria-expanded', 'false');
+    btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (menu.hidden) open(); else close();
+    });
+    menu.addEventListener('click', (e) => {
+        const item = e.target.closest('[data-theme-id]');
+        if (!item) return;
+        const next = item.getAttribute('data-theme-id');
+        try { localStorage.setItem('jhai_theme', next); } catch (_) { /* private mode */ }
+        applyTheme(next);
+        close();
+    });
+    document.addEventListener('click', close);
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
 }
 function currentTheme() {
     try { return normalizeTheme(localStorage.getItem('jhai_theme')); }
@@ -142,13 +203,9 @@ window.addEventListener('storage', (e) => {
 function initTitlebar() {
     const appWindow = getCurrentWindow();
 
-    // Theme toggle (icon shows the mode you'd switch TO)
-    applyTheme(currentTheme());   // sync the button icon now that the DOM exists
-    document.getElementById('titlebar-theme')?.addEventListener('click', () => {
-        const next = nextTheme(currentTheme());
-        try { localStorage.setItem('jhai_theme', next); } catch (_) {}
-        applyTheme(next);
-    });
+    // Theme picker. The button names the CURRENT theme and opens the list.
+    initThemeMenu();
+    applyTheme(currentTheme());   // sync the button now that the DOM exists
 
     document.getElementById('titlebar-minimize')?.addEventListener('click', () => {
         appWindow.minimize();
@@ -190,17 +247,22 @@ async function handleRoute() {
     // Resolve Views
     let viewInstance;
     switch (route) {
-        case 'overview':
-            viewInstance = new OverviewView();
+        case 'memory':
+            viewInstance = new MemoryView(params.get('tab') || 'digest');
             break;
-        case 'chat':
-            viewInstance = new ChatView();
+        case 'usage':
+            viewInstance = new UsageView();
             break;
         case 'monitor':
             viewInstance = new MonitorView();
             break;
-        // 'history' route removed — its search/filter folded into Monitor.
-        // Legacy #history links fall through to the default (Overview).
+        // 'chat' route removed (docs/design/information-architecture.md §7 step 3):
+        // a short conversation is a Work run with interaction:'ask', not a second
+        // engine. Legacy #chat links fall through to the default, like #history.
+        //
+        // The stored sessions (chat_sessions.json) are deliberately NOT deleted.
+        // Nothing reads them any more, but destroying a user's history as a side
+        // effect of a navigation change is not a decision a refactor gets to make.
         case 'schedule':
             viewInstance = new ScheduleView();
             break;
@@ -208,7 +270,12 @@ async function handleRoute() {
             viewInstance = new ConfigView(params.get('tab') || 'llm');
             break;
         default:
-            viewInstance = new OverviewView();
+            // Work is where you land. The three commonest reasons to open this
+            // app — start something, watch something, look at what finished —
+            // are all one screen (information-architecture.md §1), so there is
+            // nothing a separate landing page would add. #overview and #chat
+            // both fall through to here.
+            viewInstance = new MonitorView();
             break;
     }
 
@@ -259,17 +326,15 @@ function injectSearchOverlayStyles() {
             position: absolute;
             inset: 0;
             background: rgba(0, 0, 0, 0.45);
-            backdrop-filter: blur(4px);
-            -webkit-backdrop-filter: blur(4px);
         }
 
         .search-container {
             position: relative;
             z-index: 1;
             width: min(620px, calc(100vw - 80px));
-            background: var(--bg-secondary);
-            border: 1px solid var(--border);
-            border-radius: 14px;
+            background: var(--surface-panel);
+            border: 1px solid var(--line);
+            border-radius: var(--r-3);
             box-shadow: 0 24px 64px rgba(0,0,0,0.35), 0 0 0 1px rgba(0,0,0,0.04);
             overflow: hidden;
             animation: searchSlideIn 0.15s ease;
@@ -284,7 +349,7 @@ function injectSearchOverlayStyles() {
             align-items: center;
             gap: 12px;
             padding: 16px 18px;
-            border-bottom: 1px solid var(--border);
+            border-bottom: 1px solid var(--line);
         }
         .search-input-icon { font-size: 16px; opacity: 0.6; flex-shrink: 0; align-self: flex-start; margin-top: 2px; }
         #search-input {
@@ -292,7 +357,7 @@ function injectSearchOverlayStyles() {
             background: none;
             border: none;
             outline: none;
-            color: var(--text-primary);
+            color: var(--ink);
             font-size: 16px;
             font-family: inherit;
             caret-color: var(--accent);
@@ -304,7 +369,7 @@ function injectSearchOverlayStyles() {
             padding: 0;
             display: block;
         }
-        #search-input::placeholder { color: var(--text-tertiary); }
+        #search-input::placeholder { color: var(--ink-faint); }
         .search-input-row { align-items: flex-start; }
 
         .search-expand-btn {
@@ -314,7 +379,7 @@ function injectSearchOverlayStyles() {
             padding: 5px 11px;
             background: color-mix(in srgb, var(--accent) 12%, transparent);
             border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
-            border-radius: 8px;
+            border-radius: var(--r-3);
             color: var(--accent);
             font-size: 12px;
             font-family: inherit;
@@ -327,9 +392,9 @@ function injectSearchOverlayStyles() {
 
         .search-footer {
             padding: 8px 18px;
-            border-top: 1px solid var(--border-light);
+            border-top: 1px solid var(--line-soft);
             font-size: 11px;
-            color: var(--text-tertiary);
+            color: var(--ink-faint);
             display: flex;
             align-items: center;
             gap: 14px;
@@ -337,9 +402,9 @@ function injectSearchOverlayStyles() {
         .search-footer kbd {
             display: inline-block;
             padding: 1px 5px;
-            background: var(--bg-tertiary);
-            border: 1px solid var(--border);
-            border-radius: 4px;
+            background: var(--surface-sunken);
+            border: 1px solid var(--line);
+            border-radius: var(--r-2);
             font-size: 10px;
             font-family: monospace;
         }
@@ -349,9 +414,9 @@ function injectSearchOverlayStyles() {
             max-height: 420px;
             overflow-y: auto;
             padding: 14px 18px;
-            border-top: 1px solid var(--border-light);
+            border-top: 1px solid var(--line-soft);
             font-size: 13px;
-            color: var(--text-primary);
+            color: var(--ink);
             line-height: 1.6;
         }
         .search-ai-q {
@@ -363,12 +428,12 @@ function injectSearchOverlayStyles() {
             gap: 6px;
             align-items: flex-start;
         }
-        .search-ai-thinking { color: var(--text-tertiary); }
+        .search-ai-thinking { color: var(--ink-faint); }
         .search-ai-stream { white-space: pre-wrap; word-break: break-word; }
         #search-ai-answer .rv-summary { font-size: 13px; }
         .search-ai-toolnote {
             font-size: 12px;
-            color: var(--text-tertiary);
+            color: var(--ink-faint);
             margin: 6px 0;
             display: flex;
             gap: 6px;
@@ -394,7 +459,6 @@ function injectSearchOverlayStyles() {
             width: 100vw;
             height: 100vh;
             border-radius: 0;
-            box-shadow: none;
             border: none;
             animation: none;
             display: flex;
@@ -415,9 +479,9 @@ function injectSearchOverlayStyles() {
             top: 100%;
             left: 18px;
             right: 18px;
-            background: var(--bg-secondary);
-            border: 1px solid var(--border);
-            border-radius: 8px;
+            background: var(--surface-panel);
+            border: 1px solid var(--line);
+            border-radius: var(--r-3);
             box-shadow: 0 4px 20px rgba(0,0,0,0.25);
             overflow: hidden;
             z-index: 200;
@@ -431,12 +495,12 @@ function injectSearchOverlayStyles() {
         .slash-popup-item {
             display: flex; align-items: center; gap: 10px;
             padding: 8px 12px; cursor: pointer; font-size: 13px;
-            color: var(--text-secondary);
+            color: var(--ink-soft);
         }
-        .slash-popup-item.selected, .slash-popup-item:hover { background: var(--bg-tertiary); }
+        .slash-popup-item.selected, .slash-popup-item:hover { background: var(--surface-sunken); }
         .slash-popup-key { font-family: monospace; color: var(--accent); min-width: 60px; font-weight: 600; }
         .slash-popup-label { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .slash-popup-type { font-size: 10px; color: var(--text-tertiary); background: var(--bg-tertiary); padding: 2px 6px; border-radius: 4px; }
+        .slash-popup-type { font-size: 10px; color: var(--ink-faint); background: var(--surface-sunken); padding: 2px 6px; border-radius: var(--r-2); }
 
         .chat-input-skills {
             display: flex; flex-wrap: wrap; gap: 6px; padding: 12px 18px 0 18px;
@@ -445,22 +509,22 @@ function injectSearchOverlayStyles() {
             display: inline-flex; align-items: center; gap: 5px;
             background: color-mix(in srgb, var(--accent) 12%, transparent);
             border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
-            color: var(--text-primary);
-            border-radius: 999px; padding: 3px 8px; font-size: 11.5px;
+            color: var(--ink);
+            border-radius: var(--r-pill); padding: 3px 8px; font-size: 11.5px;
         }
-        .skill-chip-remove { background: none; border: none; color: var(--text-tertiary); cursor: pointer; padding: 0 0 0 2px; }
+        .skill-chip-remove { background: none; border: none; color: var(--ink-faint); cursor: pointer; padding: 0 0 0 2px; }
         .skill-chip-remove:hover { color: var(--error); }
 
         .search-mcp-row {
             padding: 8px 18px;
-            border-top: 1px solid var(--border-light);
+            border-top: 1px solid var(--line-soft);
             font-size: 11.5px;
-            color: var(--text-secondary);
+            color: var(--ink-soft);
             display: flex;
             align-items: center;
             gap: 12px;
             flex-wrap: wrap;
-            background: var(--bg-tertiary);
+            background: var(--surface-sunken);
         }
         .search-mcp-row label {
             display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none;
@@ -642,7 +706,7 @@ async function renderMcpCheckboxes() {
             <label>
                 <input type="checkbox" class="spotlight-mcp-checkbox" data-name="${escapeHtml(name)}" checked>
                 ${escapeHtml(name)}
-                <span style="font-size: 9px; background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); border-radius: 4px; padding: 1px 4px;">${toolCount}t</span>
+                <span style="font-size: 9px; background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); border-radius: var(--r-2); padding: 1px 4px;">${toolCount}t</span>
             </label>
         `;
     }).join('');
@@ -663,13 +727,70 @@ function hideSearch() {
 }
 
 /** "Open App" button: bring the main window forward (and hide spotlight). */
+/**
+ * "Expand" — promote the exchange on screen into a Work run.
+ *
+ * This is the line between the two surfaces (docs/design/information-architecture.md
+ * §5): Spotlight is the layer you use WITHOUT switching windows and that keeps
+ * nothing; Work is where things are kept. Expanding is how something crosses.
+ *
+ * It used to just show the main window, leaving the answer behind in a window
+ * that then hid itself — so the only way to keep a Spotlight answer was to
+ * retype the question somewhere else.
+ *
+ * The run is created as `interaction: 'ask'`: it was a question, and creating it
+ * as work would put a plan-first gate in front of something already answered.
+ * A failure here must NOT swallow the expand — the user asked to open the app.
+ */
 async function onExpandApp() {
-    if (document.body.classList.contains('spotlight-mode')) {
+    const inSpotlight = document.body.classList.contains('spotlight-mode');
+    const hash = await promoteSpotlightRun();
+
+    if (inSpotlight) {
         clearAiAnswer();
-        try { await invoke('open_main_window'); } catch (e) { console.error(e); }
+        try {
+            if (hash) await invoke('spotlight_navigate', { hash });
+            else await invoke('open_main_window');
+        } catch (e) { console.error(e); }
         return;
     }
+    if (hash) window.location.hash = hash;
     hideSearch();
+}
+
+/**
+ * Create the Work run for the question Spotlight just answered.
+ * @returns {Promise<string|null>} the hash to open, or null if there is nothing
+ *   to promote (no exchange yet, no workspace, or the create failed).
+ */
+async function promoteSpotlightRun() {
+    const question = (_lastSpotlightQuery || '').trim();
+    if (!question || !window.apiClient) return null;
+    try {
+        const { createTask } = await import('./dashboard/views/monitor/createTask.js');
+        const cfg = await invoke('get_ai_config');
+        // The same default the composer uses. Without a workspace the server
+        // accepts the task and its first tool call fails, so promoting into
+        // nothing is worse than not promoting.
+        let ws = '';
+        try { ws = localStorage.getItem('jhai_last_ws') || ''; } catch (_) { /* private mode */ }
+        ws = ws || (Array.isArray(cfg?.approved_projects) ? cfg.approved_projects[0] : '') || '';
+        if (!ws) return null;
+
+        const id = await createTask({
+            prompt: question,
+            workspace: ws,
+            modeId: DEFAULT_MODE_ID,
+            selectedMcp: [],
+            interaction: ASK,
+            caller: 'Spotlight',
+            client: window.apiClient,
+        });
+        return `#monitor?id=${id}`;
+    } catch (e) {
+        console.warn('Could not promote the Spotlight exchange:', e);
+        return null;
+    }
 }
 
 /** Auto-grow the multiline search textarea up to its CSS max-height. */
@@ -955,7 +1076,7 @@ Your final responses and messages to the user MUST be in ${outputLanguage}.
                     // Update only if not already showing — avoids a per-chunk rewrite.
                     if (!curEl.dataset.toolNote) {
                         curEl.dataset.toolNote = '1';
-                        curEl.innerHTML = `<span style="font-size:13px;color:var(--text-secondary);">🤔 Thinking or using tools…</span>`;
+                        curEl.innerHTML = `<span style="font-size:13px;color:var(--ink-soft);">🤔 Thinking or using tools…</span>`;
                     }
                 } else {
                     delete curEl.dataset.toolNote;
@@ -1253,7 +1374,53 @@ async function initSpotlightWindow() {
     showSearch();
 }
 
+/**
+ * The error log's path, and the writer that appends to it.
+ *
+ * One file, truncated when it passes ~256KB. Rotation by size rather than by
+ * date because the question this answers is "what happened just before the
+ * thing I am reporting", and that is always the tail.
+ */
+const ERROR_LOG_MAX = 256 * 1024;
+let _errorLogPath = null;
+
+async function errorLogPath() {
+    if (_errorLogPath) return _errorLogPath;
+    const dir = await invoke('get_app_config_dir');
+    _errorLogPath = `${dir}/errors.log`;
+    return _errorLogPath;
+}
+
+async function appendErrorLog(entry) {
+    try {
+        const path = await errorLogPath();
+        let prev = '';
+        try { prev = (await invoke('read_file', { path })) || ''; } catch (_) { /* first write */ }
+        if (prev.length > ERROR_LOG_MAX) prev = prev.slice(-Math.floor(ERROR_LOG_MAX / 2));
+        const line = `${entry.at} [${entry.source}] ${entry.text}` + String.fromCharCode(10);
+        await invoke('write_file', { path, content: prev + line });
+    } catch (e) {
+        // The log is a convenience. If writing it fails, the console entry the
+        // reporter already made is what remains — and saying so here would be a
+        // second failure notice for the same event.
+        console.warn('Could not append to the error log:', e);
+    }
+}
+
+/** Everything captured this session, for a bug report. Exposed for the console. */
+window.jhaiDiagnostics = () => recentErrors()
+    .map(e => `${e.at} [${e.source}] ${e.text}`)
+    .join(String.fromCharCode(10, 10));
+
 window.addEventListener('DOMContentLoaded', async () => {
+    // FIRST, before anything that can fail. An app with no error channel is one
+    // where a rejected promise inside an effect leaves a blank panel and no
+    // explanation — the failure mode Report_20260829.md §1 proposal 8 describes.
+    installErrorReporter({
+        toast: (line) => showNotification(`エラー: ${line}`),
+        write: (entry) => { appendErrorLog(entry); },
+    });
+
     // The spotlight window loads this same bundle. Detect it by label and run a
     // minimal bootstrap that renders ONLY the quick-search/ask-AI overlay — no
     // dashboard, router, TaskBridge, or scheduler.
@@ -1367,11 +1534,21 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     } catch (e) {
         console.error("Critical: Failed to connect backend API:", e);
+        // escapeHtml, like every other interpolation in this file. This was the
+        // one that P2-11's pass missed, and it is the one path whose content is
+        // least under our control: the text comes from a backend error, an MCP
+        // server's message or a thrown Response. Report_20260829.md B3.
+        //
+        // Themed rather than a hard-coded red on nothing: this is the LAST thing
+        // some users will see, and an unstyled block reads as a crash inside a
+        // crash. The log path is named because the reporter has already written
+        // there by the time this renders.
         document.getElementById('app').innerHTML = `
-            <div style="padding: 40px; color: #ff5555; text-align: center;">
-                <h2>Critical Error</h2>
-                <p>Failed to initialize Tauri and connect to the local server API.</p>
-                <pre>${e.message || e}</pre>
+            <div class="fatal">
+                <h2 class="fatal-title">起動できませんでした</h2>
+                <p class="fatal-body">ローカルサーバー API に接続できませんでした。アプリを再起動してください。</p>
+                <pre class="fatal-detail">${escapeHtml(String(e?.message || e))}</pre>
+                <p class="fatal-hint">詳細は設定ディレクトリの <code>errors.log</code> に記録されています。</p>
             </div>
         `;
     }

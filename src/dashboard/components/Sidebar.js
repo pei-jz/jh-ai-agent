@@ -25,22 +25,16 @@
 // uneven enough to see at 20px. Six teeth, not eight — at this size fewer and
 // larger survives rasterization.
 
-const ICONS = {
-    // Dashboard — a bento of panels, asymmetric so it is not "the apps grid".
-    overview: `
-        <g class="ic-fill">
-            <rect x="2.5" y="2.5" width="6.4" height="15" rx="1.8"/>
-            <rect x="11.1" y="2.5" width="6.4" height="6" rx="1.8"/>
-            <rect x="11.1" y="11.5" width="6.4" height="6" rx="1.8"/>
-        </g>`,
+import { getAppVersion } from '../../modules/ai/appVersion.js';
 
-    // Chat — a bubble with two text lines. The old three dots read as "typing…",
-    // which is a state, not a place you navigate to.
-    chat: `
+const ICONS = {
+    // Memory — a head in profile with a filled core: what is retained, not a
+    // database and not a lightbulb. Three elements, like every other glyph.
+    memory: `
         <g class="ic-fill">
-            <path d="M17.5 9.6c0 3.65-3.36 6.6-7.5 6.6-.93 0-1.82-.15-2.64-.42L3 17.5l1.62-3.7A6.24 6.24 0 012.5 9.6C2.5 5.95 5.86 3 10 3s7.5 2.95 7.5 6.6z"/>
+            <path d="M10 2.6c-2.4 0-4 1.45-4 3.3 0 .58-.32.9-.85 1.22C4.05 7.78 3.4 8.78 3.4 10s.65 2.2 1.7 2.8c.5.3.8.62.8 1.2 0 1.78 1.55 3.2 4.1 3.2s4.1-1.42 4.1-3.2c0-.58.3-.9.8-1.2 1.05-.6 1.7-1.58 1.7-2.8s-.65-2.22-1.75-2.88c-.53-.32-.85-.64-.85-1.22 0-1.85-1.6-3.3-4-3.3z"/>
         </g>
-        <path d="M6.9 8.3h6.2M6.9 11.1h3.8"/>`,
+        <path d="M10 2.8v14.4"/>`,
 
     // Monitor — a screen with a live pulse. The bare sparkline it replaces was
     // both too small and too close to a chart, which is Analytics' job.
@@ -56,6 +50,12 @@ const ICONS = {
         <path d="M6.6 2.4v3.4M13.4 2.4v3.4"/>
         <circle cx="10" cy="12.8" r="1.5" fill="currentColor" stroke="none"/>`,
 
+    // Usage — a sheet with two bars. Not a pie (unreadable at 20px) and not a
+    // coin (this is a breakdown, not a balance).
+    report: `
+        <g class="ic-fill"><rect x="3.4" y="2.5" width="13.2" height="15" rx="2.2"/></g>
+        <path d="M7 13.4V9.6M10 13.4V6.9M13 13.4v-2.6"/>`,
+
     // Settings — a real 6-tooth gear (generated), with a hub.
     config: `
         <g class="ic-fill">
@@ -69,9 +69,16 @@ const ICONS = {
 // thing on screen that could not be mistaken for part of the nav.
 // The rail's PRIMARY destinations — the places you move between while working.
 export const NAV_ITEMS = [
-    { id: 'overview', label: 'Overview', icon: 'overview' },
-    { id: 'chat',     label: 'Chat',     icon: 'chat' },
-    { id: 'monitor',  label: 'Monitor',  icon: 'monitor' },
+    // "Work", not "Monitor": you START things here as well as watch them — the
+    // composer moved into it and Chat folded into it as a mode.
+    // docs/design/information-architecture.md §2.
+    { id: 'monitor',  label: 'Work',     icon: 'monitor' },
+    // What the agent has learned. Its own destination since step 4 — it used to
+    // be a tab in a pane that swapped away whenever a run started.
+    { id: 'memory',   label: 'Memory',   icon: 'memory' },
+    // Consulted rather than worked in, but consulting it should not mean
+    // opening the settings drawer. See views/UsageView.js.
+    { id: 'usage',    label: 'Usage',    icon: 'report' },
     { id: 'schedule', label: 'Schedule', icon: 'schedule' },
 ];
 
@@ -93,21 +100,43 @@ export class Sidebar {
         const svg = (body) => `<svg viewBox="0 0 20 20" fill="none" stroke="currentColor"
             stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${body}</svg>`;
 
-        const itemHtml = (item) => `
-            <div class="sidebar-item ${this.activeRoute === item.id ? 'active' : ''}"
+        // A <button> with a real accessible name and a VISIBLE label.
+        //
+        // Two problems, one fix. The rail was a set of <div>s with click
+        // handlers: no tabindex, no role, no aria-label — so the app's primary
+        // navigation could not be reached by keyboard at all and a screen reader
+        // announced nothing (Report_20260829.md B9). And with the destination
+        // count where it is, an icon-only rail asks the user to learn a glyph
+        // set to move around a five-screen app; the tooltip was the only label,
+        // and a tooltip is not a label, it is a reminder.
+        //
+        // `aria-current="page"` rather than a class alone: the active state has
+        // to be perceivable without colour, which is a weak cue on a narrow rail
+        // and weaker still under the paper themes.
+        const itemHtml = (item, index) => `
+            <button type="button"
+                 class="sidebar-item ${this.activeRoute === item.id ? 'active' : ''}"
                  data-route="${item.id}"
-                 data-tooltip="${item.label}">
+                 ${this.activeRoute === item.id ? 'aria-current="page"' : ''}
+                 title="${item.label}${index != null ? ` (Ctrl+${index + 1})` : ''}">
                 <span class="sidebar-item-icon">${svg(ICONS[item.icon])}</span>
-            </div>
+                <span class="sidebar-item-label">${item.label}</span>
+            </button>
         `;
-        const navHtml = NAV_ITEMS.map(itemHtml).join('');
-        const footerHtml = FOOTER_ITEMS.map(itemHtml).join('');
+        const navHtml = NAV_ITEMS.map((it, i) => itemHtml(it, i)).join('');
+        const footerHtml = FOOTER_ITEMS.map(it => itemHtml(it, null)).join('');
 
         return `
             <style>
+                .sidebar-item-label {
+                    font-size: 9.5px;
+                    letter-spacing: 0.04em;
+                    line-height: 1;
+                    color: inherit;
+                }
                 .sidebar-item-icon svg {
-                    width: 21px;
-                    height: 21px;
+                    width: 20px;
+                    height: 20px;
                     display: block;
                     /* The tint is applied to .ic-fill only; a stroke-only glyph
                        filled wholesale turns into a blob. */
@@ -118,8 +147,8 @@ export class Sidebar {
                 .sidebar-item.active .sidebar-item-icon svg { stroke: var(--accent); }
                 /* A wash, not a solid: the glyph must still read as line art, and
                    the stroke has to stay legible on top of its own fill. */
-                .sidebar-item.active .sidebar-item-icon .ic-fill { fill: var(--accent-glow-lg, var(--accent-glow)); }
-                .sidebar-item:hover:not(.active) .sidebar-item-icon svg { stroke: var(--text-primary); }
+                .sidebar-item.active .sidebar-item-icon .ic-fill { fill: var(--accent-surface); }
+                .sidebar-item:hover:not(.active) .sidebar-item-icon svg { stroke: var(--ink); }
             </style>
             <div class="sidebar">
                 <nav class="sidebar-nav">
@@ -127,7 +156,7 @@ export class Sidebar {
                 </nav>
                 <div class="sidebar-footer">
                     ${footerHtml}
-                    <span class="sidebar-version">v0.1</span>
+                    <span class="sidebar-version"></span>
                 </div>
             </div>
         `;
@@ -142,5 +171,27 @@ export class Sidebar {
                 }
             });
         });
+
+        // Ctrl/⌘ + 1..N for the primary destinations. Held on the instance so a
+        // re-render (every route change builds a new Sidebar) releases the old
+        // one instead of stacking a listener per navigation.
+        if (this._keyHandler) document.removeEventListener('keydown', this._keyHandler);
+        this._keyHandler = (e) => {
+            if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
+            const n = Number(e.key);
+            if (!Number.isInteger(n) || n < 1 || n > NAV_ITEMS.length) return;
+            // Ctrl+N is the new-task shortcut inside Work; digits are free.
+            e.preventDefault();
+            this.onNavigate?.(NAV_ITEMS[n - 1].id);
+        };
+        document.addEventListener('keydown', this._keyHandler);
+
+        // The version is resolved from the runtime (Cargo.toml) rather than
+        // hard-coded — see modules/ai/appVersion.js. Render an empty span first
+        // and fill it once resolved, so the footer never shows a stale literal.
+        getAppVersion().then(v => {
+            const el = document.querySelector('.sidebar-version');
+            if (el) el.textContent = `v${v}`;
+        }).catch(() => {});
     }
 }

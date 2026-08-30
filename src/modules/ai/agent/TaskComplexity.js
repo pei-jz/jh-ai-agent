@@ -18,8 +18,12 @@ const READ_ONLY_PATTERNS = [
     // Japanese: investigate / explain / summarize / evaluate / report / check
     /調べ|調査|教えて|説明して|要約|まとめて(?!ください.*実装)|分析|評価|レビュー|確認して|洗い出/,
     /レポート|報告|一覧(?:化)?して|比較して|提案して/,
-    // A question, not an instruction
-    /(?:ですか|でしょうか|かな)[?？]?\s*$/,
+    // A question, not an instruction. `ますか` is in because Japanese asks
+    // "…できますか / …ありますか" as often as "…ですか", frequently with no
+    // question mark — and without it "java LSP はどこでダウンロードできますか"
+    // read as an instruction. The explicit-edit guard in looksReadOnly runs
+    // FIRST, so "実装してもらえますか" is still a change request.
+    /(?:ですか|ますか|でしょうか|かな)[?？]?\s*$/,
     /[?？]\s*$/,
     // English
     /\b(?:investigate|analy[sz]e|explain|summari[sz]e|review|report|compare|research|audit|assess)\b/i,

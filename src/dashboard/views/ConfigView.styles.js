@@ -2,12 +2,17 @@
 // <style> blocks (section list + modal). Kept as template strings.
 
 export const CONFIG_SECTION_STYLES = `
+                    /* A collapsible section is a REGION, so it is divided by a
+                       rule rather than boxed. See the "Regions, not cards" note
+                       in styles/dashboard.css. */
                     .cfg-sec {
-                        border: 1px solid var(--border);
-                        border-radius: var(--radius-md);
-                        background: var(--bg-secondary);
-                        margin-bottom: 10px;
+                        border: none;
+                        border-bottom: 1px solid var(--line);
+                        border-radius: 0;
+                        background: transparent;
+                        margin-bottom: 0;
                     }
+                    .cfg-sec:last-of-type { border-bottom: none; }
                     .cfg-sec > summary {
                         list-style: none;
                         cursor: pointer; user-select: none;
@@ -18,28 +23,28 @@ export const CONFIG_SECTION_STYLES = `
                         text-transform: uppercase; letter-spacing: 0.06em;
                     }
                     .cfg-sec > summary::-webkit-details-marker { display: none; }
-                    .cfg-sec > summary:hover { background: var(--bg-tertiary); border-radius: var(--radius-md); }
-                    .cfg-sec-chev { margin-left: auto; color: var(--text-tertiary); transition: transform 0.15s; }
+                    .cfg-sec > summary:hover { background: var(--surface-sunken); border-radius: var(--r-3); }
+                    .cfg-sec-chev { margin-left: auto; color: var(--ink-faint); transition: transform 0.15s; }
                     .cfg-sec:not([open]) .cfg-sec-chev { transform: rotate(-90deg); }
                     .cfg-sec-body { padding: 4px 16px 14px; }
-                    .cfg-sec-hint { font-size: var(--fs-xs); color: var(--text-tertiary); margin: 0 0 14px 0; line-height: 1.5; }
+                    .cfg-sec-hint { font-size: var(--fs-xs); color: var(--ink-faint); margin: 0 0 14px 0; line-height: 1.5; }
                     .cfg-cmd-row {
                         display: flex; align-items: center; gap: 8px;
                         padding: 4px 10px; margin-bottom: 4px;
-                        border: 1px solid var(--border-light); border-radius: 5px;
-                        font-size: var(--fs-sm); background: var(--bg-primary);
+                        border: 1px solid var(--line-soft); border-radius: var(--r-2);
+                        font-size: var(--fs-sm); background: var(--surface-app);
                     }
                     .cfg-cmd-row code {
                         flex: 1; font-family: var(--font-mono, monospace);
                         white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-                        color: var(--text-primary);
+                        color: var(--ink);
                     }
                     .cfg-cmd-del {
                         background: none; border: none; cursor: pointer;
-                        color: var(--text-tertiary); font-size: var(--fs-md); padding: 2px 4px;
+                        color: var(--ink-faint); font-size: var(--fs-md); padding: 2px 4px;
                     }
                     .cfg-cmd-del:hover { color: var(--error); }
-                    .cfg-cmd-empty { color: var(--text-tertiary); font-size: var(--fs-sm); padding: 2px 0 8px; }
+                    .cfg-cmd-empty { color: var(--ink-faint); font-size: var(--fs-sm); padding: 2px 0 8px; }
                     .cfg-cmd-add { display: flex; gap: 8px; margin-top: 6px; }
 
                     /* ── General tab (migrated to Svelte) ─────────────────────
@@ -51,7 +56,7 @@ export const CONFIG_SECTION_STYLES = `
                     .cfg-mono-input { flex: 1; font-size: var(--fs-xs); }
                     .cfg-mono-area { font-size: var(--fs-sm); }
                     .cfg-path-area { font-size: var(--fs-xs); resize: vertical; }
-                    .cfg-token { background: var(--bg-primary); cursor: default; }
+                    .cfg-token { background: var(--surface-app); cursor: default; }
                     .cfg-group-gap { margin-bottom: 12px; }
                     .cfg-group-top { margin-top: 14px; }
                     .cfg-group-top-sm { margin-top: 8px; }
@@ -60,16 +65,16 @@ export const CONFIG_SECTION_STYLES = `
                     /* Licence status line. Tone comes from licenseState.describeLicense. */
                     .cfg-lic-title {
                         margin: 0 0 2px; font-size: var(--fs-sm); font-weight: 600;
-                        color: var(--text-primary);
+                        color: var(--ink);
                     }
                     .cfg-lic-title.is-warn { color: var(--warning, #f59e0b); }
                     .cfg-lic-title.is-error { color: var(--error, #ef4444); }
                     .cfg-lic-clear {
                         margin-top: 8px; background: none; border: 0; padding: 0;
                         cursor: pointer; text-decoration: underline;
-                        color: var(--text-tertiary); font-size: var(--fs-2xs);
+                        color: var(--ink-faint); font-size: var(--fs-2xs);
                     }
-                    .cfg-lic-clear:hover { color: var(--text-secondary); }
+                    .cfg-lic-clear:hover { color: var(--ink-soft); }
                     .cfg-link { color: var(--accent); }
                     .cfg-row-inline { display: flex; gap: 8px; }
                     .cfg-grow { flex: 1; }
@@ -77,28 +82,28 @@ export const CONFIG_SECTION_STYLES = `
                     .cfg-btn-pick {
                         padding: 0 12px; height: 36px;
                         display: flex; align-items: center; justify-content: center;
-                        border: 1px solid var(--border);
+                        border: 1px solid var(--line);
                     }
                     .cfg-btn-row { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
                     .cfg-btn-sm { font-size: var(--fs-xs); }
                     .cfg-btn-danger { color: var(--error); border-color: var(--error); }
                     .cfg-storage {
-                        font-size: var(--fs-xs); color: var(--text-secondary);
-                        background: var(--bg-secondary); border: 1px solid var(--border);
-                        border-radius: var(--radius-sm); padding: 12px; line-height: 1.7;
+                        font-size: var(--fs-xs); color: var(--ink-soft);
+                        background: var(--surface-panel); border: none;
+                        border-radius: var(--r-2); padding: 12px; line-height: 1.7;
                     }
-                    .cfg-muted { color: var(--text-tertiary); }
+                    .cfg-muted { color: var(--ink-faint); }
                     .cfg-ok { color: var(--success); }
                     .cfg-err { color: var(--error); }
                     .cfg-export-box {
                         margin-top: 14px; padding: 12px;
-                        background: var(--bg-secondary); border: 1px solid var(--border);
-                        border-radius: var(--radius-sm);
+                        background: var(--surface-panel); border: none;
+                        border-radius: var(--r-2);
                     }
                     .cfg-export-head {
                         display: flex; justify-content: space-between; align-items: center; gap: 12px;
                     }
-                    .cfg-export-title { font-size: var(--fs-sm); color: var(--text-primary); }
+                    .cfg-export-title { font-size: var(--fs-sm); color: var(--ink); }
                     .cfg-export-status { margin-top: 8px; font-size: var(--fs-xs); }
 
                     /* ── Phase routing: the tier map + savings estimate ──────
@@ -106,15 +111,15 @@ export const CONFIG_SECTION_STYLES = `
                        the two tier selects above it, not as another field. */
                     .cfg-phase-box {
                         margin-top: 10px; padding: 10px 12px;
-                        background: var(--accent-glow); border: 1px solid var(--accent-dim);
-                        border-radius: var(--radius-sm);
+                        background: var(--accent-surface); border: 1px solid var(--accent-dim);
+                        border-radius: var(--r-2);
                     }
                     .cfg-phase-map {
-                        margin: 0; font-size: var(--fs-xs); color: var(--text-secondary);
+                        margin: 0; font-size: var(--fs-xs); color: var(--ink-soft);
                         line-height: 1.6;
                     }
                     .cfg-phase-save {
-                        margin: 6px 0 0; font-size: var(--fs-xs); color: var(--text-primary);
+                        margin: 6px 0 0; font-size: var(--fs-xs); color: var(--ink);
                         line-height: 1.6;
                     }
                     .cfg-phase-warn { color: var(--warning, #f59e0b); margin-top: 6px; }
@@ -129,12 +134,12 @@ export const CONFIG_SECTION_STYLES = `
                     .cfg-tab-body { flex: 1; overflow-y: auto; }
                     .cfg-gap-12 { gap: 12px; }
                     .cfg-req { color: var(--error); }
-                    .cfg-readonly { background: var(--bg-primary); cursor: not-allowed; }
+                    .cfg-readonly { background: var(--surface-app); cursor: not-allowed; }
                     .cfg-icon-input { width: 80px; }
                     /* The inline add/edit form both list tabs open above their table. */
                     .cfg-inline-form {
-                        background: var(--bg-tertiary); border: 1px solid var(--border-focus);
-                        border-radius: var(--radius-md); padding: 16px; margin-bottom: 16px;
+                        background: var(--surface-sunken); border: 1px solid var(--line-focus);
+                        border-radius: var(--r-2); padding: 16px; margin-bottom: 16px;
                     }
                     .cfg-inline-form-h {
                         margin: 0 0 14px 0; font-size: var(--fs-sm); color: var(--accent);
@@ -142,14 +147,14 @@ export const CONFIG_SECTION_STYLES = `
                     .cfg-form-actions {
                         display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px;
                     }
-                    .cfg-empty { padding: 32px; text-align: center; color: var(--text-secondary); }
+                    .cfg-empty { padding: 32px; text-align: center; color: var(--ink-soft); }
                     .cfg-empty-ic { font-size: var(--fs-display); display: block; margin-bottom: 12px; }
                     .cfg-col-icon { width: 40px; text-align: center; }
                     .cfg-col-acts { width: 160px; text-align: right; }
                     .cfg-emoji { font-size: var(--fs-lg); }
                     .cfg-cmd { font-family: var(--font-mono); color: var(--accent); }
                     .cfg-prompt-preview {
-                        color: var(--text-secondary); max-width: 280px;
+                        color: var(--ink-soft); max-width: 280px;
                         overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
                     }
                     .cfg-btn-tiny { padding: 2px 8px; font-size: var(--fs-xs); }
@@ -158,8 +163,8 @@ export const CONFIG_SECTION_STYLES = `
                        opacity written by a DOM walk; it is a class now. */
                     .cfg-rag-dirs {
                         max-height: 200px; overflow-y: auto;
-                        background: var(--bg-secondary); padding: 10px;
-                        border: 1px solid var(--border); border-radius: 6px;
+                        background: var(--surface-panel); padding: 10px;
+                        border: none; border-radius: var(--r-2);
                         display: flex; flex-direction: column;
                     }
                     .cfg-rag-dir {
@@ -167,21 +172,21 @@ export const CONFIG_SECTION_STYLES = `
                         font-size: var(--fs-sm); cursor: pointer; margin-bottom: 4px;
                     }
                     .cfg-rag-dir.is-excluded { opacity: 0.5; }
-                    .cfg-rag-hint { font-size: var(--fs-sm); color: var(--text-secondary); }
+                    .cfg-rag-hint { font-size: var(--fs-sm); color: var(--ink-soft); }
                     .cfg-rag-exts {
                         display: flex; flex-wrap: wrap; gap: 8px;
-                        background: var(--bg-secondary); padding: 10px;
-                        border: 1px solid var(--border); border-radius: 6px;
+                        background: var(--surface-panel); padding: 10px;
+                        border: none; border-radius: var(--r-2);
                     }
                     .cfg-rag-ext {
                         display: flex; align-items: center; gap: 6px;
                         font-size: var(--fs-sm); cursor: pointer;
-                        background: var(--bg-primary); padding: 4px 8px;
-                        border: 1px solid var(--border); border-radius: 4px;
+                        background: var(--surface-app); padding: 4px 8px;
+                        border: 1px solid var(--line); border-radius: var(--r-2);
                     }
                     .cfg-rag-bar {
-                        margin-top: 8px; height: 6px; background: var(--bg-tertiary);
-                        border-radius: 4px; overflow: hidden;
+                        margin-top: 8px; height: 6px; background: var(--surface-sunken);
+                        border-radius: var(--r-2); overflow: hidden;
                     }
                     .cfg-rag-bar > div {
                         height: 100%; background: var(--accent); transition: width 0.3s;
@@ -189,7 +194,7 @@ export const CONFIG_SECTION_STYLES = `
                     .cfg-rag-start { display: flex; align-items: center; gap: 12px; margin-top: 8px; }
 
                     /* Memory tab. */
-                    .cfg-mem-hint { color: var(--text-tertiary); font-size: var(--fs-sm); padding: 14px 0; }
+                    .cfg-mem-hint { color: var(--ink-faint); font-size: var(--fs-sm); padding: 14px 0; }
                     /* The study control sits under the workspace row: it acts ON
                        that workspace, so it belongs with it rather than in the
                        lists it fills. */
@@ -203,7 +208,7 @@ export const CONFIG_SECTION_STYLES = `
                        it is the one memory written for a person. */
                     .cfg-mem-ov-text {
                         margin: 0; white-space: pre-wrap; font-family: inherit;
-                        font-size: var(--fs-xs); line-height: 1.7; color: var(--text-secondary);
+                        font-size: var(--fs-xs); line-height: 1.7; color: var(--ink-soft);
                     }
                     .cfg-mem-ov-edit {
                         width: 100%; font-family: var(--font-mono); font-size: var(--fs-xs);
@@ -211,17 +216,17 @@ export const CONFIG_SECTION_STYLES = `
                     }
                     .cfg-mem-cov { margin-top: 10px; }
                     .cfg-mem-cov-h {
-                        font-size: var(--fs-xs); color: var(--text-secondary); margin-bottom: 6px;
+                        font-size: var(--fs-xs); color: var(--ink-soft); margin-bottom: 6px;
                         font-family: var(--font-mono);
                     }
                     .cfg-mem-cov-row {
                         display: flex; align-items: center; gap: 8px;
-                        font-size: var(--fs-2xs); color: var(--text-tertiary); padding: 1px 0;
+                        font-size: var(--fs-2xs); color: var(--ink-faint); padding: 1px 0;
                     }
                     .cfg-mem-cov-row .d { width: 230px; flex-shrink: 0; overflow: hidden;
                         text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); }
-                    .cfg-mem-cov-row .b { flex: 1; height: 5px; background: var(--bg-tertiary);
-                        border-radius: 3px; overflow: hidden; }
+                    .cfg-mem-cov-row .b { flex: 1; height: 5px; background: var(--surface-sunken);
+                        border-radius: var(--r-1); overflow: hidden; }
                     .cfg-mem-cov-row .b > i { display: block; height: 100%; background: var(--accent); }
                     .cfg-mem-cov-row .n { width: 40px; text-align: right;
                         font-variant-numeric: tabular-nums; font-family: var(--font-mono); }
@@ -231,15 +236,15 @@ export const CONFIG_SECTION_STYLES = `
                     .cfg-mem-ab-grid {
                         display: grid; grid-template-columns: 1fr auto 56px;
                         gap: 2px 10px; margin: 6px 0 4px;
-                        font-size: var(--fs-2xs); color: var(--text-tertiary);
+                        font-size: var(--fs-2xs); color: var(--ink-faint);
                         font-family: var(--font-mono); font-variant-numeric: tabular-nums;
                     }
                     .cfg-mem-ab-grid > span:nth-child(3n) { text-align: right; }
                     .cfg-mem-ab-grid > span.good { color: var(--success, #16a34a); font-weight: 600; }
                     .cfg-mem-box {
                         margin-top: 8px; padding: 14px 16px;
-                        border: 1px solid var(--border); border-radius: var(--radius-md);
-                        background: var(--bg-secondary);
+                        border: 1px solid var(--line); border-radius: var(--r-3);
+                        background: var(--surface-panel);
                     }
                     .cfg-mem-head {
                         display: flex; justify-content: space-between; align-items: center;
@@ -253,50 +258,67 @@ export const CONFIG_SECTION_STYLES = `
                        to skim when the tables can be folded away. The whole header
                        row is the hit target; the clear button stops propagation. */
                     .cfg-mem-collapsible { cursor: pointer; user-select: none; }
-                    .cfg-mem-collapsible:hover { color: var(--text-primary); }
+                    .cfg-mem-collapsible:hover { color: var(--ink); }
                     .cfg-mem-collapsible .cfg-mem-title { display: inline-flex; align-items: center; gap: 6px; }
                     .cfg-mem-chevron {
                         display: inline-block; width: 12px; text-align: center;
-                        color: var(--text-tertiary); font-size: 10px;
+                        color: var(--ink-faint); font-size: 10px;
                     }
-                    .cfg-mem-empty { color: var(--text-tertiary); font-size: var(--fs-xs); }
+                    .cfg-mem-empty { color: var(--ink-faint); font-size: var(--fs-xs); }
                     .cfg-mem-scroll { max-height: 320px; overflow: auto; }
                     /* The cell borders/padding used to be inherited from .rv-table,
                        whose stylesheet is injected lazily by the Chat/Monitor views —
                        so the table was unstyled until one of those had rendered. */
                     .cfg-mem-table { width: 100%; border-collapse: collapse; font-size: var(--fs-xs); }
                     .cfg-mem-table th, .cfg-mem-table td {
-                        border: 1px solid var(--border); padding: 6px 8px;
+                        border: 1px solid var(--line); padding: 6px 8px;
                         text-align: left; vertical-align: top;
                     }
                     .cfg-mem-table th {
-                        background: var(--bg-tertiary); color: var(--text-secondary); font-weight: 600;
+                        background: var(--surface-sunken); color: var(--ink-soft); font-weight: 600;
                     }
                     .cfg-mem-th { text-align: left; padding: 4px 8px; }
                     .cfg-mem-fact {
                         font-size: var(--fs-xs); line-height: 1.5;
                         overflow-wrap: anywhere; word-break: break-word;
                     }
+                    /* The three right-hand columns are FIXED and never wrap: a
+                       date broken over two lines and two action buttons stacked
+                       on top of each other doubled every row's height, and the
+                       column that actually needs the room is the text one. The
+                       widths are width on a percentage-less table, i.e. minimums
+                       the browser honours before giving the slack to the fact. */
                     .cfg-mem-meta {
-                        white-space: nowrap; font-size: var(--fs-2xs); color: var(--text-tertiary);
+                        white-space: nowrap; font-size: var(--fs-2xs); color: var(--ink-faint);
+                        width: 1%; font-variant-numeric: tabular-nums;
                     }
-                    .cfg-mem-hits { text-align: center; font-size: var(--fs-2xs); }
-                    .cfg-mem-acts { white-space: nowrap; text-align: right; }
+                    .cfg-mem-hits {
+                        text-align: center; font-size: var(--fs-2xs);
+                        white-space: nowrap; width: 1%; font-variant-numeric: tabular-nums;
+                    }
+                    .cfg-mem-acts {
+                        white-space: nowrap; text-align: right; width: 1%;
+                    }
+                    /* Side by side, not stacked. The buttons are inline-flex
+                       children of a nowrap cell, so this is what keeps them on
+                       one line when the cell is at its minimum width. */
+                    .cfg-mem-acts .btn { display: inline-flex; vertical-align: middle; }
+                    .cfg-mem-acts .btn + .btn { margin-left: 4px; }
                     .cfg-mem-summary {
-                        color: var(--text-secondary); font-size: var(--fs-2xs); margin-top: 2px;
+                        color: var(--ink-soft); font-size: var(--fs-2xs); margin-top: 2px;
                     }
                     .cfg-mem-edit { font-size: var(--fs-xs); }
                     /* Experience cards: which layer / polarity a row is. */
                     .cfg-mem-badge {
                         display: inline-block; margin-right: 6px; padding: 0 6px;
-                        border-radius: 999px; font-size: var(--fs-2xs); font-weight: 600;
-                        border: 1px solid var(--border); color: var(--text-secondary);
+                        border-radius: var(--r-pill); font-size: var(--fs-2xs); font-weight: 600;
+                        border: 1px solid var(--line); color: var(--ink-soft);
                         text-transform: uppercase; letter-spacing: 0.04em;
                     }
                     .cfg-mem-badge.is-lesson { color: var(--warning, #f59e0b); border-color: currentColor; }
                     .cfg-mem-badge.is-insight,
                     .cfg-mem-badge.is-where { color: var(--success, #22c55e); border-color: currentColor; }
-                    .cfg-mem-badge.is-episodic { color: var(--text-tertiary); }
+                    .cfg-mem-badge.is-episodic { color: var(--ink-faint); }
                     .cfg-mem-badge.is-semantic { color: var(--accent); border-color: currentColor; }
                     /* A switched-off card is kept (it may be re-enabled) but reads as inert. */
                     tr.is-off { opacity: 0.45; }
@@ -305,12 +327,12 @@ export const CONFIG_SECTION_STYLES = `
 
 export const CONFIG_MODAL_STYLES = `
                 .settings-tab-btn:hover {
-                    color: var(--text-primary) !important;
-                    background: var(--bg-hover) !important;
+                    color: var(--ink) !important;
+                    background: var(--surface-hover) !important;
                 }
                 .settings-tab-btn.active:hover {
                     color: var(--accent) !important;
-                    background: var(--bg-tertiary) !important;
+                    background: var(--surface-sunken) !important;
                 }
 
                 /* ── LLM connection table + modal (migrated to Svelte) ────────
@@ -322,7 +344,7 @@ export const CONFIG_MODAL_STYLES = `
                 .cfg-col-default { width: 70px; text-align: center; }
                 .cfg-col-actions { width: 180px; text-align: right; }
                 .cfg-table-empty {
-                    text-align: center; padding: 32px; color: var(--text-secondary);
+                    text-align: center; padding: 32px; color: var(--ink-soft);
                 }
                 /* The row the agent will actually use. */
                 tr.is-active { background: rgba(0, 200, 255, 0.04); }
@@ -332,7 +354,7 @@ export const CONFIG_MODAL_STYLES = `
                 /* Checkbox + label on one line, both clickable. */
                 .cfg-check {
                     display: flex; align-items: center; gap: 8px;
-                    cursor: pointer; font-size: var(--fs-sm); color: var(--text-primary);
+                    cursor: pointer; font-size: var(--fs-sm); color: var(--ink);
                 }
                 .cfg-inst-name { font-weight: 600; }
                 .cfg-active-tag {
@@ -340,10 +362,10 @@ export const CONFIG_MODAL_STYLES = `
                 }
                 .cfg-model {
                     font-family: var(--font-mono); font-size: 11px;
-                    background: var(--bg-tertiary); padding: 2px 6px; border-radius: 4px;
+                    background: var(--surface-sunken); padding: 2px 6px; border-radius: var(--r-2);
                 }
                 .cfg-base-url {
-                    color: var(--text-secondary); max-width: 220px;
+                    color: var(--ink-soft); max-width: 220px;
                     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
                 }
                 .cfg-row-actions {
@@ -354,20 +376,20 @@ export const CONFIG_MODAL_STYLES = `
                 .cfg-modal { width: 500px; max-width: 90%; }
                 .cfg-modal .modal-title { margin-bottom: 20px; }
                 .cfg-hint {
-                    color: var(--text-secondary); font-size: 11px; margin-top: 4px; display: block;
+                    color: var(--ink-soft); font-size: 11px; margin-top: 4px; display: block;
                 }
                 .cfg-price-row { display: flex; gap: 8px; }
                 /* Every validation problem at once. Refusing to save while saying
                    nothing about which field was wrong was the old behaviour. */
                 .cfg-modal-errors {
-                    margin-top: 12px; padding: 8px 12px; border-radius: var(--radius-sm);
+                    margin-top: 12px; padding: 8px 12px; border-radius: var(--r-2);
                     background: rgba(244, 67, 54, 0.1); color: var(--error);
                     font-size: 12px; font-weight: 500; line-height: 1.6;
                 }
                 .cfg-test-status {
                     margin-top: 12px; font-size: 12px; padding: 8px 12px;
-                    border-radius: var(--radius-sm); font-weight: 500;
-                    background: var(--bg-tertiary); color: var(--text-secondary);
+                    border-radius: var(--r-2); font-weight: 500;
+                    background: var(--surface-sunken); color: var(--ink-soft);
                 }
                 .cfg-test-status.is-ok { background: rgba(76, 175, 80, 0.1); color: var(--success); }
                 .cfg-test-status.is-fail { background: rgba(244, 67, 54, 0.1); color: var(--error); }
@@ -376,8 +398,8 @@ export const CONFIG_MODAL_STYLES = `
                 }
                 .cfg-modal-confirm { display: flex; gap: 8px; }
                 .cfg-btn-test {
-                    background: transparent; border: 1px solid var(--border);
-                    color: var(--text-secondary); width: auto;
+                    background: transparent; border: 1px solid var(--line);
+                    color: var(--ink-soft); width: auto;
                 }
             `;
 

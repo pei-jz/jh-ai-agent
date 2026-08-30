@@ -1,79 +1,93 @@
+// 竹簡 (bamboo-ancient) — the adopted "簡牘古文" palette.
+//
+// The design tokens are static CSS, so the values are pinned here: a later theme
+// tweak cannot silently drift away from the agreed palette.
+//
+// Rewritten after the visual pass (docs/design/visual-language.md): the token
+// names are role-based now, the card is opaque, and the slip texture reaches the
+// app through `--texture-app` rather than through a rule that names this app's
+// element ids.
+
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
-// The adopted Bamboo Slip redesign — "簡牘古文" (Bamboo-ancient),
-// proposal #3 (docs/design/bamboo-slip-proposals/03-bamboo-ancient.html).
-// The design tokens are static CSS; the tests pin the values so a future
-// theme tweak cannot silently drift away from the agreed palette.
-
 const here = dirname(fileURLToPath(import.meta.url));
-const cssPath = join(here, '../dashboard.css');
-const css = readFileSync(cssPath, 'utf8');
+const css = readFileSync(join(here, '../dashboard.css'), 'utf8');
 
-// Extract the custom-property block of one theme.
 function themeBlock(theme) {
-    const start = css.indexOf(`:root[data-theme="${theme}"]`);
-    expect(start).toBeGreaterThan(-1); // theme must exist in the stylesheet
+    // The DECLARATION, not the first mention: the stylesheet's comments quote
+    // selectors, and a bare indexOf found those first.
+    const start = css.indexOf(`:root[data-theme="${theme}"] {`);
+    expect(start).toBeGreaterThan(-1);
     const open = css.indexOf('{', start);
-    const close = css.indexOf('}', open);
-    return css.slice(open + 1, close);
+    return css.slice(open + 1, css.indexOf('}', open));
 }
 
-describe('bamboo-ancient theme — adopted "簡牘古文" palette', () => {
+describe('竹簡 — charred bamboo slips', () => {
     const block = themeBlock('bamboo-ancient');
 
     it('defines every token the components rely on', () => {
-        const tokens = ['--bg-primary', '--bg-secondary', '--bg-tertiary', '--bg-card',
-            '--bg-card-solid', '--bg-input', '--bg-hover',
-            '--text-primary', '--text-secondary', '--text-tertiary', '--text-inverse',
-            '--accent', '--accent-hover', '--accent-dim', '--accent-glow', '--accent-glow-lg',
-            '--border', '--border-light', '--border-focus',
-            '--success', '--success-bg', '--warning', '--warning-bg',
-            '--error', '--error-bg', '--info', '--info-bg',
-            '--shadow-sm', '--shadow-md', '--shadow-lg', '--shadow-glow',
-            '--paper-rule-color', '--paper-rule-size', '--paper-margin-color', '--font-hand'];
-        for (const t of tokens) expect(block).toContain(`${t}:`);
+        const tokens = [
+            '--surface-app', '--surface-panel', '--surface-sunken', '--surface-raised',
+            '--surface-input', '--surface-hover',
+            '--ink', '--ink-soft', '--ink-faint', '--on-accent',
+            '--accent', '--accent-hover', '--accent-dim', '--accent-surface',
+            '--shadow-pop', '--shadow-drag',
+            '--line', '--line-soft', '--line-focus',
+            '--success', '--warning', '--error', '--info',
+            '--font-accent',
+        ];
+        for (const t of tokens) expect(block, `${t} missing`).toContain(`${t}:`);
     });
 
     it('moves the background onto charred near-black bamboo slips', () => {
-        expect(block).toContain('--bg-primary:   #3a2e1e;');
-        expect(block).toContain('--bg-secondary: #463a26;');
-        expect(block).toContain('--bg-tertiary:  #2f2518;');
-        expect(block).toContain('--bg-card-solid:#463a26;');
+        expect(block).toContain('--surface-app:   #3a2e1e;');
+        expect(block).toContain('--surface-panel: #463a26;');
+        expect(block).toContain('--surface-sunken:  #2f2518;');
     });
 
-    it('keeps the card translucent so the slip texture shows through', () => {
-        expect(block).toContain('--bg-card:      rgba(70, 58, 38, 0.92);');
+    // Opaque, since the visual pass: a translucent card's contrast depends on
+    // what is behind it, and that differs in every theme (visual-language.md §1).
+    it('keeps the card opaque', () => {
+        expect(block).toMatch(/--surface-raised:\s*#463a26;/);
+        expect(block).not.toMatch(/--surface-raised:\s*rgba/);
     });
 
-    it('uses faint ivory ink instead of grey-green', () => {
-        expect(block).toContain('--text-primary:   #e8e0cc;');
-        expect(block).toContain('--text-secondary: #c2b89f;');
-        expect(block).toContain('--text-tertiary:  #8f8570;');
+    it('writes in faint ivory ink', () => {
+        expect(block).toContain('--ink:   #e8e0cc;');
+        expect(block).toContain('--ink-soft: #c2b89f;');
+        expect(block).toContain('--ink-faint:  #8f8570;');
     });
 
-    it('uses bronze-verdigris (銅青) as the accent', () => {
+    it('accents with 銅青 (bronze verdigris)', () => {
         expect(block).toContain('--accent:        #7fc4b8;');
-        expect(block).toContain('--accent-hover:  #96d6cb;');
-        expect(block).toContain('--border-focus: rgba(127, 196, 184, 0.60);');
     });
 
-    it('uses old darkened bamboo for the borders', () => {
-        expect(block).toContain('--border:       #6b5a3c;');
+    it('borders in aged cord', () => {
+        expect(block).toContain('--line:       #6b5a3c;');
     });
 
-    it('adds a bamboo slip texture for the app canvas and the result panel', () => {
+    // The theme supplies the IMAGE; the app decides where it goes, once. A theme
+    // block that names an element id is what made porting a theme a CSS-writing
+    // job — visual-language.md §5.
+    it('supplies its texture as tokens, not as rules', () => {
         expect(block).toContain('--grain: url("data:image/svg+xml,');
         expect(block).toContain('--slip: linear-gradient(180deg,');
-        expect(css).toMatch(/:root\[data-theme="bamboo-ancient"\] body \{/);
-        expect(css).toMatch(/:root\[data-theme="bamboo-ancient"\] #result-panel \{/);
+        // On the CHROME only. The slats are 40px of high-contrast vertical
+        // banding — fine behind a title, hard to read a task list or a result
+        // through — so the pattern stays on the binding at the top and the
+        // palette carries the theme everywhere else.
+        expect(block).toContain('--texture-chrome: var(--grain), var(--slip);');
+        expect(block).toMatch(/--texture-app:\s*none;/);
+        expect(block).toMatch(/--texture-read:\s*none;/);
+        expect(css).not.toMatch(/:root\[data-theme="bamboo-ancient"\]\s+[.#]/);
     });
 
-    it('keeps the paper-subtle theme untouched', () => {
+    it('leaves the other themes alone', () => {
         const paperSubtle = themeBlock('paper-subtle');
-        expect(paperSubtle).toContain('--bg-primary:   #e8e2d3;');
-        expect(paperSubtle).toContain('--accent:        #6d8f6f;');
+        expect(paperSubtle).toContain('--surface-app:   #f4f3ef;');
+        expect(paperSubtle).toMatch(/--accent:\s*#5f8f6a;/);
     });
 });

@@ -11,6 +11,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, cleanup } from '@testing-library/svelte';
 import TaskHeader from '../TaskHeader.svelte';
+import { t } from '../../../../i18n/index.js';
 
 afterEach(() => cleanup());
 
@@ -86,17 +87,17 @@ describe('TaskHeader — the vital signs', () => {
 
 describe('TaskHeader — Abort vs Delete', () => {
     it('offers Abort ONLY while running', () => {
-        expect(mount({ status: 'running' }).textContent).toContain('Abort');
+        expect(mount({ status: 'running' }).textContent).toContain(t('task.abort'));
         cleanup();
-        expect(mount({ status: 'running' }).textContent).not.toContain('Delete');
+        expect(mount({ status: 'running' }).textContent).not.toContain(t('common.delete'));
     });
 
     it('offers Delete once the run has ended', () => {
         // This used to require removing #btn-abort-task from the DOM by hand on
         // completion; the button is derived from status now.
         const el = mount({ status: 'completed' });
-        expect(el.textContent).toContain('Delete');
-        expect(el.textContent).not.toContain('Abort');
+        expect(el.textContent).toContain(t('common.delete'));
+        expect(el.textContent).not.toContain(t('task.abort'));
     });
 
     it('calls back on Abort', () => {

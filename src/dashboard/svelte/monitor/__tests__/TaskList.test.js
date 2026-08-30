@@ -14,6 +14,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, cleanup } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import TaskList from '../TaskList.svelte';
+import { t } from '../../../../i18n/index.js';
 
 afterEach(() => cleanup());
 
@@ -32,13 +33,13 @@ const headers = (el) => [...el.querySelectorAll('.mtask-group-header')];
 
 describe('TaskList — empty states', () => {
     it('says there are no tasks yet', () => {
-        expect(mount().textContent).toContain('No tasks yet');
+        expect(mount().textContent).toContain(t('list.empty'));
     });
 
     it('distinguishes "nothing yet" from "nothing MATCHES"', () => {
         const el = mount({ tasks: [task('a')], search: 'zzzz-no-match' });
-        expect(el.textContent).toContain('No tasks match');
-        expect(el.textContent).not.toContain('No tasks yet');
+        expect(el.textContent).toContain(t('list.noMatch'));
+        expect(el.textContent).not.toContain(t('list.empty'));
     });
 });
 
@@ -164,64 +165,31 @@ describe('TaskList — grouping', () => {
     });
 });
 
-describe('TaskList — filters', () => {
-    const tasks = [task('a1', { prompt: 'evaluate' }), task('b1', { prompt: 'fix', status: 'running' })];
-
-    it('reflects the current search text', () => {
-        expect(mount({ tasks, search: 'evaluate' }).querySelector('.mtask-search').value).toBe('evaluate');
+describe('TaskList — the chrome that was removed', () => {
+    // The search box and the five status buttons were dropped as unused
+    // (2026-08-30). What is asserted now is their ABSENCE: they occupied the top
+    // of the column, where the composer and the running task are, and re-adding
+    // them would be a regression rather than a feature.
+    it('has no search box', () => {
+        expect(mount().querySelector('.mtask-search')).toBeNull();
     });
 
-    it('reports what was typed', () => {
-        const onSearch = vi.fn();
-        const el = mount({ tasks, onSearch });
-        const input = el.querySelector('.mtask-search');
-        input.value = 'fix';
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-        expect(onSearch).toHaveBeenCalledWith('fix');
+    it('has no status filter buttons', () => {
+        expect(mount().querySelectorAll('.mtask-status-btn')).toHaveLength(0);
     });
 
-    it('applies the search to the rendered rows', () => {
-        expect(rows(mount({ tasks, search: 'evaluate' }))).toEqual(['a1']);
+    // The RULES stay: only the chrome went, so a command palette can drive the
+    // same filtering later without this component growing a UI again.
+    it('still applies a search term supplied as a prop', () => {
+        const el = mount({ tasks: [task('a', { prompt: 'alpha' }), task('b', { prompt: 'beta' })], search: 'alpha' });
+        expect([...el.querySelectorAll('.mtask-prompt')].map(e => e.textContent)).toEqual(['alpha']);
     });
 
-    it('offers every status as a button, and reports a toggle', () => {
-        const onStatusFilter = vi.fn();
-        const el = mount({ tasks, onStatusFilter });
-        const btns = [...el.querySelectorAll('.mtask-status-btn')];
-        expect(btns.map(b => b.textContent.trim()))
-            .toEqual(['running', 'paused', 'completed', 'failed', 'aborted']);
-        // First click on 'running' ADDS it to the (empty) selection.
-        const run = btns.find(b => b.textContent.trim() === 'running');
-        run.click();
-        expect(onStatusFilter).toHaveBeenCalledWith(['running']);
-    });
-
-    it('marks the selected statuses and reports multi-select', async () => {
-        const onStatusFilter = vi.fn();
-        // Real flow: MonitorView re-mounts TaskList with the new statusFilter prop
-        // after every onStatusFilter call, so emulate that with rerender.
-        const { container, rerender } = render(TaskList, {
-            props: { tasks, statusFilter: ['completed'], seenKeys: new Set(), collapsedKeys: new Set(), onStatusFilter },
+    it('still applies a status filter supplied as a prop', () => {
+        const el = mount({
+            tasks: [task('a', { status: 'running' }), task('b', { status: 'completed' })],
+            statusFilter: ['running'],
         });
-        const btns = () => [...container.querySelectorAll('.mtask-status-btn')];
-        expect(btns().find(b => b.textContent.trim() === 'completed').classList.contains('active')).toBe(true);
-        expect(btns().find(b => b.textContent.trim() === 'running').classList.contains('active')).toBe(false);
-        // Click a SECOND status — it joins, not replaces.
-        btns().find(b => b.textContent.trim() === 'running').click();
-        expect(onStatusFilter).toHaveBeenCalledWith(['completed', 'running']);
-        // Parent re-mounts with the joined selection; clicking the first one drops it.
-        await rerender({ tasks, statusFilter: ['completed', 'running'], seenKeys: new Set(), collapsedKeys: new Set(), onStatusFilter });
-        btns().find(b => b.textContent.trim() === 'completed').click();
-        expect(onStatusFilter).toHaveBeenCalledWith(['running']);
-    });
-
-    it('marks the active grouping and reports a switch', () => {
-        const onGroupBy = vi.fn();
-        const el = mount({ tasks, groupBy: 'workspace', onGroupBy });
-        const [wsBtn, dateBtn] = el.querySelectorAll('.mgroup-btn');
-        expect(wsBtn.classList.contains('active')).toBe(true);
-        expect(dateBtn.classList.contains('active')).toBe(false);
-        dateBtn.click();
-        expect(onGroupBy).toHaveBeenCalledWith('date');
+        expect(el.querySelectorAll('.mtask-item')).toHaveLength(1);
     });
 });

@@ -19,6 +19,7 @@
   cannot influence it.
 -->
 <script>
+    import { t } from '../../../i18n/index.js';
     import { buildLogSteps, chatButtonLabel, requestDividerHtml } from '../../views/monitor/logs.js';
     import { extractThoughtSummary, isChatLog } from '../../views/monitorLogFormat.js';
 
@@ -161,7 +162,7 @@
 
 <div class="mconsole" bind:this={rootEl} data-current-filter={filter}>
     {#if !logs.length}
-        <div class="mconsole-placeholder">Waiting for execution logs...</div>
+        <div class="mconsole-placeholder">{t('task.waitingLogs')}</div>
     {:else}
         {#if model.init.length}
             <!-- Events before the first step: project scan, workspace setup. -->
@@ -171,8 +172,8 @@
                     onclick={() => toggle('init', model.steps.length - 1)}
                     onkeydown={(e) => { if (e.key === 'Enter') toggle('init', model.steps.length - 1); }}>
                     <span class="mstep-toggle">{isOpen('init', -2) ? '▼' : '▶'}</span>
-                    <span class="mstep-num">Init</span>
-                    <span class="mstep-summary">Initialization</span>
+                    <span class="mstep-num">{t('task.raw.init')}</span>
+                    <span class="mstep-summary">{t('task.raw.initFull')}</span>
                 </div>
                 <div class="mstep-body" class:open={isOpen('init', -2)}>
                     {#each model.init as line, i (i)}{@html line}{/each}

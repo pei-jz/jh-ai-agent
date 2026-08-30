@@ -28,9 +28,9 @@ beforeEach(() => {
 });
 
 describe('CONFIG_TABS', () => {
-    it('lists the seven reachable tabs, in order', () => {
+    it('lists the six reachable tabs, in order (memory and usage are destinations)', () => {
         expect(CONFIG_TABS.map(t => t.id))
-            .toEqual(['llm', 'mcp', 'general', 'templates', 'skills', 'rag', 'memory']);
+            .toEqual(['llm', 'mcp', 'general', 'templates', 'skills', 'rag']);
     });
 
     // API logs moved to Monitor (per-task raw payloads); the tab button was

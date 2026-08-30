@@ -16,6 +16,7 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { tick } from 'svelte';
+import { t } from '../../../i18n/index.js';
 
 const invoke = vi.fn(async () => null);
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a) => invoke(...a) }));
@@ -404,7 +405,7 @@ describe('project-instructions button', () => {
         expect(written.path).toBe('C:/cusor_workspace/Task/.agent/instructions.md');
         expect(written.path).not.toContain('\\');
         // Template seeded with the workspace's own name.
-        expect(written.content).toContain('Task');
+        expect(written.content).toContain(t('common.task'));
     });
 
     it('opens an EXISTING file without rewriting it', async () => {
@@ -741,7 +742,7 @@ describe('pending question banner', () => {
         v._showAskCard({ message: 'どのシートですか' });
         await tick();
         expect(slot()).toBeTruthy();
-        expect(slot().textContent).toContain('Waiting for your answer');
+        expect(slot().textContent).toContain(t('task.waiting'));
     });
 
     it('disappears once the question is answered', async () => {

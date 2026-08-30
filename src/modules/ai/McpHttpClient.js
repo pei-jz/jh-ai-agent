@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { getAppVersion } from './appVersion.js';
 
 /**
  * McpHttpClient — MCP client for the outbound "Streamable HTTP" transport
@@ -58,7 +59,7 @@ export class McpHttpClient {
             const initResult = await this.request('initialize', {
                 protocolVersion: '2025-03-26',
                 capabilities: {},
-                clientInfo: { name: 'JHAiAgent', version: '0.1.0' }
+                clientInfo: { name: 'JHAiAgent', version: await getAppVersion() }
             });
             this.capabilities = initResult.capabilities;
             await this.notification('notifications/initialized', {});

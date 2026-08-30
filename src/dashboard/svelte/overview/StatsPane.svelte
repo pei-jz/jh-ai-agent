@@ -45,7 +45,7 @@
 </script>
 
 {#if !tasks.length}
-    <div class="dash-empty"><p>No tasks yet — run something and the usage breakdown will appear here.</p></div>
+    <div class="dash-empty"><p>{t('stats.empty')}</p></div>
 {:else if !shown.length}
     <div class="dash-empty">
         <p>{status !== 'all' && range !== 'all'
@@ -55,13 +55,13 @@
 {:else}
     <div class="dm">
         <div class="dm-layers dm-layers-4">
-            <div><span class="k">TASKS</span><span class="v">{kpi.count}</span>
+            <div><span class="k">{t('stats.tasks')}</span><span class="v">{kpi.count}</span>
                 <span class="s">{status === 'all' ? 'all statuses' : status}</span></div>
-            <div><span class="k">SUCCESS</span><span class="v">{kpi.successRate === null ? '—' : kpi.successRate + '%'}</span>
+            <div><span class="k">{t('stats.success')}</span><span class="v">{kpi.successRate === null ? '—' : kpi.successRate + '%'}</span>
                 <span class="s">{kpi.done} done / {kpi.failed} failed</span></div>
-            <div><span class="k">COST</span><span class="v">{money(kpi.totalCost)}</span>
+            <div><span class="k">{t('stats.cost')}</span><span class="v">{money(kpi.totalCost)}</span>
                 <span class="s">≈ {money(kpi.avgCost)} / task</span></div>
-            <div><span class="k">TOKENS</span><span class="v">{short(kpi.tokens)}</span>
+            <div><span class="k">{t('stats.tokens')}</span><span class="v">{short(kpi.tokens)}</span>
                 <span class="s">≈ {short(kpi.avgTokens)} / task</span></div>
         </div>
 

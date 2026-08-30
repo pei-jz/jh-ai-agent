@@ -13,7 +13,7 @@
 
     let { metrics, range = '7d', onRange = null } = $props();
 
-    const SHADES = ['var(--accent)', 'var(--accent-dim)', 'var(--text-tertiary)'];
+    const SHADES = ['var(--accent)', 'var(--accent-dim)', 'var(--ink-faint)'];
     const RANGES = [['1d', 'Today'], ['7d', '7d'], ['30d', '30d']];
 
     const s = $derived(metrics.spend);
@@ -43,7 +43,7 @@
     <div class="ds">
         <div class="ds-top">
             <span class="ds-v">{money(s.total)}</span>
-            <span class="ds-range" role="group" aria-label="Spend window">
+            <span class="ds-range" role="group" aria-label={t('stats.spendRange')}>
                 {#each RANGES as [key, label]}
                     <button type="button" class="ds-range-btn" class:is-on={range === key}
                         onclick={() => onRange?.(key)}>{label}</button>
@@ -104,7 +104,7 @@
     <div class="ds">
         <div class="ds-top">
             <span class="ds-v">{money(0)}</span>
-            <span class="ds-range" role="group" aria-label="Spend window">
+            <span class="ds-range" role="group" aria-label={t('stats.spendRange')}>
                 {#each RANGES as [key, label]}
                     <button type="button" class="ds-range-btn" class:is-on={range === key}
                         onclick={() => onRange?.(key)}>{label}</button>

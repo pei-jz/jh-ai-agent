@@ -8,6 +8,7 @@
 // Exit: 0 = consistent, 1 = something would silently produce an unusable release.
 
 import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { checkRelease } from './releaseChecks.js';
@@ -17,7 +18,16 @@ const read = (rel) => JSON.parse(readFileSync(join(root, rel), 'utf8'));
 
 const pkg = read('package.json');
 const conf = read('src-tauri/tauri.conf.json');
-const { ok, problems, notes, signed } = checkRelease({ pkg, conf });
+// The remote is read here rather than in the rules, which stay pure. A machine
+// without git, or a checkout with no origin, simply skips that check.
+let remote = '';
+try {
+    remote = execFileSync('git', ['remote', 'get-url', 'origin'], {
+        cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+} catch (_) { /* not a git checkout, or no origin */ }
+
+const { ok, problems, notes, signed } = checkRelease({ pkg, conf, remote });
 
 for (const n of notes) console.log(`note: ${n}\n`);
 

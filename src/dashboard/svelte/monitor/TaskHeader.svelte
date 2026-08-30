@@ -20,6 +20,7 @@
       run, so a permanent row for it was pure cost.
 -->
 <script>
+    import { t } from '../../../i18n/index.js';
     import { icon } from '../../utils/icons.js';
     import {
         contextGauge, elapsedText, compactTokens,
@@ -78,13 +79,13 @@
                      the numbers that change while you watch. What stays: the
                      wall-clock elapsed and the token totals. -->
                 <span class="mdh-chip"><b>{elapsed}</b> elapsed</span>
-                <span class="mdh-chip" title="Input ↑ · cache ⚡ · output ↓">
+                <span class="mdh-chip" title={t('task.tokens.title')}>
                     <b>{compactTokens(usage.total_tokens)}</b> tokens
                 </span>
                 <span class="mdh-tokens-bd">(<span
-                    title="Input (excl. cached, full-price)">↑{n(usage.prompt_tokens)}</span> · <span
-                    title="Cache reads (~10% price = savings)">⚡{n(usage.cache_read_input_tokens)}</span> · <span
-                    title="Output">↓{n(usage.completion_tokens)}</span>)</span>
+                    title={t('task.tokens.in')}>↑{n(usage.prompt_tokens)}</span> · <span
+                    title={t('task.tokens.cached')}>⚡{n(usage.cache_read_input_tokens)}</span> · <span
+                    title={t('task.tokens.out')}>↓{n(usage.completion_tokens)}</span>)</span>
             </div>
             <!-- The id / caller line is gone: the Inspector on the right already
                  shows both, and a header line that only repeats what is visible
@@ -93,11 +94,11 @@
         <!-- Abort exists only while there is something to abort; it used to be
              REMOVED from the DOM by hand on completion. -->
         {#if running}
-            <button class="btn btn-error mdh-act" onclick={() => onAbort?.()}>⏹ Abort</button>
+            <button class="btn btn-error mdh-act" onclick={() => onAbort?.()}>⏹ {t('task.abort')}</button>
         {:else}
             <button class="btn btn-secondary mdh-act mdh-act-del"
-                title="Delete this task from history"
-                onclick={() => onDelete?.()}>{@html icon('trash', 13)} Delete</button>
+                title={t('task.delete')}
+                onclick={() => onDelete?.()}>{@html icon('trash', 13)} {t('common.delete')}</button>
         {/if}
     </div>
     <!-- One bar, its % on the right. An earlier version put the label and the
@@ -105,7 +106,7 @@
          the bar's own value. -->
     {#if plan}
         <div class="mdh-ctx mdh-progress" title="Subtask checklist: {plan.done}/{plan.total} complete">
-            <span class="mdh-ctx-label">Progress</span>
+            <span class="mdh-ctx-label">{t('common.progress')}</span>
             <span class="mdh-ctx-track">
                 <span class="mdh-ctx-fill mdh-progress-fill" class:is-danger={!plan.allDone && plan.pct === 100}
                     style={`width:${plan.pct}%`}></span>
@@ -114,7 +115,7 @@
         </div>
     {/if}
     <div class="mdh-ctx" title="How full the model's context window is (last LLM call's input vs the window)">
-        <span class="mdh-ctx-label">Context</span>
+        <span class="mdh-ctx-label">{t('common.context')}</span>
         <span class="mdh-ctx-track">
             <span class="mdh-ctx-fill" class:is-danger={gauge.danger} style={`width:${gauge.pct}%`}></span>
         </span>

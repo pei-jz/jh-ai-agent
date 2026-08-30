@@ -1,24 +1,32 @@
-// theme — which themes exist, and what the toggle does next.
+// theme — which themes exist, and how they are chosen.
 //
-// Extracted from main.js so the cycle has a testable contract. main.js keeps the
-// parts that touch the world (localStorage, the <html> attribute, the button).
+// It used to be a CYCLE: one titlebar button that advanced to the next theme.
+// With five that meant up to four clicks (and four full repaints) to reach the
+// one you wanted, and the button could not say where you were — only where the
+// next press would take you. A list you pick from does both, and it stops the
+// cost of a new theme being "one more press for everyone else".
+//
+// Extracted from main.js so the set has a testable contract. main.js keeps the
+// parts that touch the world (localStorage, the <html> attribute, the menu).
 //
 // Dark is the token DEFAULT in dashboard.css, so it is the one theme expressed
 // by the ABSENCE of `data-theme` — see themeAttr().
 
-/** In cycle order. The paper variants are ported from JHEditor / the Task app;
-    bamboo-ancient is the adopted bamboo-slip proposal (#3). */
-export const THEMES = ['light', 'dark', 'paper', 'paper-subtle', 'bamboo-ancient'];
+/**
+ * Every theme, in the order the picker lists them: the two plain ones first,
+ * then the textured family (ported from JHEditor / the Task app) grouped
+ * together, because that is how someone browsing them thinks about the set.
+ */
+export const THEMES = ['light', 'dark', 'paper', 'paper-subtle', 'bamboo-ancient', 'kakejiku'];
 
-const NEXT = { light: 'dark', dark: 'paper', paper: 'paper-subtle', 'paper-subtle': 'bamboo-ancient', 'bamboo-ancient': 'light' };
-// The button shows the theme you would switch TO, not the one you are in.
-const ICON = { light: 'moon', dark: 'paper', paper: 'template', 'paper-subtle': 'bamboo', 'bamboo-ancient': 'sun' };
-const LABEL = {
-    light: 'ダークモードへ / Switch to dark',
-    dark: 'ペーパーへ / Switch to paper',
-    paper: 'ペーパー(Subtle)へ / Switch to paper (subtle)',
-    'paper-subtle': '竹簡(古文)へ / Switch to bamboo (ancient)',
-    'bamboo-ancient': 'ライトモードへ / Switch to light',
+/** Display name and one line of what it is, for the picker. */
+const META = {
+    light:            { label: 'ライト',       hint: '既定。白地に violet' },
+    dark:             { label: 'ダーク',       hint: '暗所向け。cyan' },
+    paper:            { label: '古紙',         hint: '罫のある紙。臙脂' },
+    'paper-subtle':   { label: '白紙',         hint: '白い紙に苔緑' },
+    'bamboo-ancient': { label: '竹簡',         hint: '焦げ竹の簡。銅青' },
+    kakejiku:         { label: '掛け軸',       hint: '絹本の軸装。藍' },
 };
 
 /** Anything unrecognised (or absent) falls back to the shipped default. */
@@ -26,16 +34,13 @@ export function normalizeTheme(theme) {
     return THEMES.includes(theme) ? theme : 'light';
 }
 
-export function nextTheme(theme) {
-    return NEXT[normalizeTheme(theme)];
-}
-
-export function themeIcon(theme) {
-    return ICON[normalizeTheme(theme)];
+/** [{ id, label, hint }] in picker order. */
+export function themeList() {
+    return THEMES.map(id => ({ id, ...META[id] }));
 }
 
 export function themeLabel(theme) {
-    return LABEL[normalizeTheme(theme)];
+    return META[normalizeTheme(theme)].label;
 }
 
 /**

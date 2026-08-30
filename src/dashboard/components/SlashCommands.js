@@ -165,28 +165,28 @@ export class SlashCommands {
         const s = document.createElement('style');
         s.id = 'slashcmd-styles';
         s.textContent = `
-            .slash-popup { position:absolute; top:auto; bottom: calc(100% + 6px); left:0; right:0; background:var(--bg-secondary);
-                border:1px solid var(--border-focus); border-radius:var(--radius-md); box-shadow:0 -4px 20px rgba(0,0,0,0.35);
+            .slash-popup { position:absolute; top:auto; bottom: calc(100% + 6px); left:0; right:0; background:var(--surface-panel);
+                border:1px solid var(--line-focus); border-radius:var(--r-3); box-shadow:0 -4px 20px rgba(0,0,0,0.35);
                 overflow:hidden; z-index:600; max-height:260px; display:flex; flex-direction:column; }
-            .slash-popup-header { padding:6px 12px; font-size:11px; font-weight:600; color:var(--text-tertiary);
-                text-transform:uppercase; letter-spacing:0.05em; background:var(--bg-tertiary); border-bottom:1px solid var(--border-light); }
+            .slash-popup-header { padding:6px 12px; font-size:11px; font-weight:600; color:var(--ink-faint);
+                text-transform:uppercase; letter-spacing:0.05em; background:var(--surface-sunken); border-bottom:1px solid var(--line-soft); }
             .slash-popup-list { overflow-y:auto; flex:1; }
             .slash-popup-item { display:flex; align-items:center; gap:10px; padding:8px 12px; cursor:pointer; font-size:13px; }
-            .slash-popup-item:hover, .slash-popup-item.selected { background:var(--bg-hover); }
+            .slash-popup-item:hover, .slash-popup-item.selected { background:var(--surface-hover); }
             .slash-popup-icon { font-size:16px; flex-shrink:0; }
             .slash-popup-key { font-family:var(--font-mono); font-size:12px; color:var(--accent); font-weight:600; min-width:80px; }
-            .slash-popup-label { color:var(--text-secondary); flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-            .slash-popup-hint { color:var(--text-tertiary); font-size:11px; margin-left:6px; }
-            .slash-popup-type { font-size:10px; color:var(--text-tertiary); background:var(--bg-tertiary); border:1px solid var(--border-light);
-                border-radius:3px; padding:1px 5px; flex-shrink:0; }
-            .slash-popup-empty { padding:12px; text-align:center; font-size:12px; color:var(--text-tertiary); }
+            .slash-popup-label { color:var(--ink-soft); flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+            .slash-popup-hint { color:var(--ink-faint); font-size:11px; margin-left:6px; }
+            .slash-popup-type { font-size:10px; color:var(--ink-faint); background:var(--surface-sunken); border:1px solid var(--line-soft);
+                border-radius:var(--r-1); padding:1px 5px; flex-shrink:0; }
+            .slash-popup-empty { padding:12px; text-align:center; font-size:12px; color:var(--ink-faint); }
             .sc-chips { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:8px; }
             .sc-chip { display:inline-flex; align-items:center; gap:5px; background:hsla(265,90%,65%,0.12);
-                border:1px solid hsla(265,90%,65%,0.45); color:var(--text-primary); border-radius:999px;
+                border:1px solid hsla(265,90%,65%,0.45); color:var(--ink); border-radius:var(--r-pill);
                 padding:3px 8px; font-size:11.5px; font-weight:500; line-height:1.4; }
             .sc-chip-ico { font-size:11px; }
             .sc-chip-label { max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-            .sc-chip-x { background:none; border:none; color:var(--text-tertiary); cursor:pointer; padding:0 0 0 2px; font-size:11px; line-height:1; }
+            .sc-chip-x { background:none; border:none; color:var(--ink-faint); cursor:pointer; padding:0 0 0 2px; font-size:11px; line-height:1; }
             .sc-chip-x:hover { color:var(--error); }
         `;
         document.head.appendChild(s);
