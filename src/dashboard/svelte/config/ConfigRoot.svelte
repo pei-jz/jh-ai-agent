@@ -52,7 +52,6 @@
     import TemplatesTab from './TemplatesTab.svelte';
     import SkillsTab from './SkillsTab.svelte';
     import RagTab from './RagTab.svelte';
-    import MemoryTab from './MemoryTab.svelte';
 
     let {
         /** Injectable seams — default to the real client / Tauri bridge. */
@@ -119,15 +118,6 @@
     let ragProgress = $state(0);
 
     // Memory — null means "not loaded yet", which the tab shows as a hint.
-    let memoryWorkspace = $state('');
-    let memoryFacts = $state(null);
-    let memoryEpisodes = $state(null);
-    let memoryCards = $state(null);
-    let memoryOverview = $state(null);
-    let indexStats = $state(null);
-    let abStats = $state(null);
-    let studying = $state(false);
-    let studyStatus = $state('');
 
     const projects = $derived(Array.isArray(config.approved_projects) ? config.approved_projects : []);
     const connection = $derived({
@@ -281,158 +271,6 @@
         }
     }
 
-    // ── Memory tab ────────────────────────────────────────────────────────
-
-    async function loadMemoryData() {
-        if (!memoryWorkspace) return;
-        const { facts, episodes, cards } = await readWorkspaceMemory(memoryWorkspace, invoke);
-        memoryFacts = facts;
-        memoryEpisodes = episodes;
-        memoryCards = cards;
-        // A separate file that readWorkspaceMemory deliberately does not read.
-        // Skipping it left the note written but never read back, so the tab's
-        // `overview?.text` gate hid it. readOverview never throws.
-        memoryOverview = await readOverview(memoryWorkspace, invoke);
-        if (memoryOverview?.generatedAt) memoryOverview.head = await headCommit();
-    }
-
-    async function headCommit() {
-        try {
-            const out = await invoke('run_command', { command: 'git rev-parse HEAD', cwd: memoryWorkspace });
-            return String(out || '').trim().slice(0, 12);
-        } catch (_) { return ''; }
-    }
-
-    /** Mutate one store optimistically, reloading from disk if the write fails. */
-    async function mutateStore(kind, fn) {
-        const target = { facts: memoryFacts, cards: memoryCards, episodes: memoryEpisodes }[kind];
-        if (!Array.isArray(target)) return;
-        const copy = [...target];
-        fn(copy);
-        if (kind === 'facts') memoryFacts = copy;
-        else if (kind === 'cards') memoryCards = copy;
-        else memoryEpisodes = copy;
-        const writer = { facts: writeFacts, cards: writeCards, episodes: writeEpisodes }[kind];
-        const file = { facts: 'facts.json', cards: 'cards.jsonl', episodes: 'memory.json' }[kind];
-        try {
-            await writer(memoryWorkspace, copy, invoke);
-        } catch (e) {
-            notify(`Failed to save ${file}: ` + e);
-            await loadMemoryData();
-        }
-    }
-
-    async function loadIndexStats() {
-        try {
-            const { CodeIndexClient, coverage } = await import('../../../modules/ai/memory/CodeIndex.js');
-            const idx = new CodeIndexClient({ workspacePath: memoryWorkspace, invoke });
-            const stats = await idx.stats();
-            const paths = (await idx.knownHashes()).map(([p]) => p);
-            indexStats = { ...stats, coverage: coverage(paths, { root: memoryWorkspace }) };
-        } catch (_) { indexStats = null; }
-    }
-
-    async function loadAbStats() {
-        try {
-            const { compareArms, parseMetrics, runsNeeded } =
-                await import('../../../modules/ai/memory/SessionMetrics.js');
-            const { INJECTION_VARIANT } = await import('../../../modules/ai/memory/CardStore.js');
-            const text = await invoke('read_file', { path: `${memoryWorkspace}/.agent/trace/metrics.jsonl` });
-            const rows = parseMetrics(text);
-            // Only the CURRENT wording generation. Rows measured under earlier
-            // phrasing describe a different injection, and averaging them in
-            // would report the mean of two experiments as the result of one.
-            const cmp = compareArms(rows, { variant: INJECTION_VARIANT });
-            const live = rows.filter(r => (r.injectionVariant || 'v1') === INJECTION_VARIANT);
-            abStats = rows.length
-                ? { ...cmp, rows: live.length, needed: runsNeeded(live) || runsNeeded(rows) }
-                : null;
-        } catch (_) { abStats = null; }   // no runs recorded yet
-    }
-
-    async function runStudy() {
-        if (studying) return;
-        if (!memoryWorkspace) { notify('Please enter a workspace path.'); return; }
-        studying = true;
-        studyStatus = '';
-        try {
-            const { runStudyPass, dropStudyCards } = await import('../../../modules/ai/memory/StudyPass.js');
-            // The index is written inside `.agent/memory`, so the guard has to know
-            // about the directory before the pass starts, not after.
-            await allowMemoryDir(memoryWorkspace, invoke);
-
-            const res = await runStudyPass({
-                workspacePath: memoryWorkspace, invoke,
-                onProgress: ({ read, total }) => { studyStatus = `${read} / ${total}`; },
-            });
-            if (res.error) { studyStatus = t('memory.study.failed', { error: res.error }); return; }
-
-            studyStatus = t('memory.study.indexed', { files: res.files, symbols: res.symbols, edges: res.edges })
-                + (res.skipped ? t('memory.study.skipped', { count: res.skipped }) : '')
-                + (res.pruned ? t('memory.study.dropped', { count: res.pruned }) : '')
-                + (res.truncated || res.omitted
-                    ? ' ' + t('memory.study.capped', { total: res.total || res.files + (res.omitted || 0), omitted: res.omitted || 0 })
-                    : '');
-
-            // One-time migration: the first version of this pass wrote a card per
-            // symbol. They live in the index now, so the rows left in cards.jsonl
-            // are residue in a panel whose whole purpose is being reviewable.
-            const { kept, dropped } = dropStudyCards(memoryCards || []);
-            if (dropped) {
-                memoryCards = kept;
-                await writeCards(memoryWorkspace, kept, invoke);
-                studyStatus += ' · ' + t('memory.study.migrated', { count: dropped });
-            }
-            await loadIndexStats();
-            await writeProjectOverview(res.areas);
-        } catch (e) {
-            studyStatus = t('memory.study.failed', { error: String(e?.message || e) });
-        } finally {
-            studying = false;
-        }
-    }
-
-    /** Best-effort: a failure here leaves the index — the expensive part — intact. */
-    async function writeProjectOverview(areas) {
-        try {
-            const { structureDigest, detectConventionsFull, buildOverviewPrompt, normalizeOverview, isOverviewStale } =
-                await import('../../../modules/ai/memory/ProjectOverview.js');
-            const llmService = (await import('../../../modules/ai/LLMService.js')).default;
-
-            const digest = structureDigest(areas, { root: memoryWorkspace });
-            if (!digest.length) return;
-            const measured = detectConventionsFull(areas, { root: memoryWorkspace });
-            const head = await headCommit();
-            const prev = await readOverview(memoryWorkspace, invoke);
-
-            let text = prev?.text || '';
-            if (isOverviewStale(prev, { head })) {
-                const prompt = buildOverviewPrompt(digest, measured.rules);
-                const res = await llmService.generate([{ role: 'user', content: prompt }]);
-                text = normalizeOverview(res?.content || '');
-            }
-            await writeOverview(memoryWorkspace, text, invoke, {
-                generatedAt: new Date().toISOString(), head, conventions: measured.rules,
-            });
-            memoryOverview = await readOverview(memoryWorkspace, invoke);
-            if (memoryOverview) memoryOverview.head = head;
-        } catch (e) {
-            console.warn('Overview generation failed:', e);
-        }
-    }
-
-    async function saveOverview(text) {
-        try {
-            await writeOverview(memoryWorkspace, text, invoke, {
-                generatedAt: memoryOverview?.generatedAt, head: memoryOverview?.head,
-                conventions: memoryOverview?.conventions,
-            });
-            memoryOverview = await readOverview(memoryWorkspace, invoke);
-        } catch (e) {
-            notify('Failed to save overview.md: ' + (e.message || e));
-        }
-    }
-
     // ── Lifecycle ─────────────────────────────────────────────────────────
 
     $effect(() => {
@@ -485,8 +323,8 @@
 <div class="view-container">
     <div class="view-header">
         <div>
-            <h1>Settings</h1>
-            <p class="subtitle">Configure AI connection instances, API keys, and MCP servers</p>
+            <h1>{t('nav.settings')}</h1>
+            <p class="subtitle">{t('cfg.sub.llm')}</p>
         </div>
     </div>
 
@@ -506,7 +344,7 @@
                     <div class="card-header cfg-card-head">
                         <div>
                             <h3>{@html icon('llm', 15)} LLM Connections</h3>
-                            <p class="subtitle">Manage connection instances and credentials</p>
+                            <p class="subtitle">{t('conn.subtitle')}</p>
                         </div>
                         <div class="cfg-head-actions">
                             <button class="btn btn-secondary" onclick={save}>{@html icon('save', 13)} Save Settings</button>
@@ -526,7 +364,7 @@
                     <div class="card-header cfg-card-head">
                         <div>
                             <h3>{@html icon('mcp', 15)} Model Context Protocol (MCP) Servers</h3>
-                            <p class="subtitle">Configure local or remote MCP servers in JSON format</p>
+                            <p class="subtitle">{t('cfg.sub.mcp')}</p>
                         </div>
                         <button class="btn btn-primary" onclick={save}>{@html icon('save', 13)} Save Settings</button>
                     </div>
@@ -538,7 +376,7 @@
                     <div class="card-header cfg-card-head">
                         <div>
                             <h3>{@html icon('gear', 15)} General Settings</h3>
-                            <p class="subtitle">Configure proxy, logging, and other general preferences</p>
+                            <p class="subtitle">{t('cfg.sub.general')}</p>
                         </div>
                         <button class="btn btn-primary" onclick={save}>{@html icon('save', 13)} Save Settings</button>
                     </div>
@@ -674,35 +512,6 @@
                         ragExtensions = [...set];
                     }}
                 />
-            {:else if activeTab === 'memory'}
-                <MemoryTab
-                    workspace={memoryWorkspace || projects[0] || ''}
-                    {projects}
-                    facts={memoryFacts} episodes={memoryEpisodes} cards={memoryCards}
-                    {indexStats} {abStats} overview={memoryOverview}
-                    {studying} {studyStatus}
-                    onWorkspaceChange={(v) => (memoryWorkspace = v.trim())}
-                    onBrowse={async () => {
-                        try { const sel = await pickFolder(); if (sel) memoryWorkspace = sel; }
-                        catch (_) { /* dialog cancelled */ }
-                    }}
-                    onLoad={async () => {
-                        if (!memoryWorkspace) { notify('Please enter a workspace path.'); return; }
-                        await loadMemoryData();
-                        await loadIndexStats();
-                        await loadAbStats();
-                    }}
-                    onSaveOverview={saveOverview}
-                    onStudy={runStudy}
-                    onEditFact={(i, text) => mutateStore('facts', (l) => { l[i] = { ...l[i], fact: capFactText(text) }; })}
-                    onDeleteFact={(i) => { if (confirmAction('Delete this fact?')) mutateStore('facts', (l) => l.splice(i, 1)); }}
-                    onClearFacts={() => { if (confirmAction('Delete ALL durable facts?')) mutateStore('facts', (l) => (l.length = 0)); }}
-                    onDeleteEpisode={(i) => { if (confirmAction('Delete this episode?')) mutateStore('episodes', (l) => l.splice(i, 1)); }}
-                    onClearEpisodes={() => { if (confirmAction('Delete ALL session history?')) mutateStore('episodes', (l) => (l.length = 0)); }}
-                    onToggleCard={(i, disabled) => mutateStore('cards', (l) => { l[i] = { ...l[i], disabled }; })}
-                    onDeleteCard={(i) => { if (confirmAction('Delete this learned card?')) mutateStore('cards', (l) => l.splice(i, 1)); }}
-                    onClearCards={() => { if (confirmAction('Delete ALL learned cards?')) mutateStore('cards', (l) => (l.length = 0)); }}
-                />
             {/if}
         </div>
     </div>
@@ -726,7 +535,7 @@
     }
     .cfg-tabs {
         width: 220px; display: flex; flex-direction: column; gap: 4px;
-        border-right: 1px solid var(--border); padding-right: 16px; flex-shrink: 0;
+        border-right: 1px solid var(--line); padding-right: 16px; flex-shrink: 0;
     }
     .settings-content-wrapper { flex: 1; min-width: 0; }
     .cfg-full { height: 100%; }
@@ -739,8 +548,8 @@
         background: transparent;
         border: none;
         border-left: 3px solid transparent;
-        border-radius: var(--radius-md);
-        color: var(--text-secondary);
+        border-radius: var(--r-3);
+        color: var(--ink-soft);
         font-family: inherit;
         font-size: 13px;
         font-weight: 500;
@@ -753,11 +562,11 @@
         width: 100%;
         outline: none;
     }
-    .settings-tab-btn:hover { color: var(--text-primary); }
+    .settings-tab-btn:hover { color: var(--ink); }
     .settings-tab-btn.active {
-        background: var(--bg-tertiary);
+        background: var(--surface-sunken);
         border-left-color: var(--accent);
-        border-radius: 0 var(--radius-md) var(--radius-md) 0;
+        border-radius: 0 var(--r-3) var(--r-3) 0;
         color: var(--accent);
         font-weight: 600;
     }

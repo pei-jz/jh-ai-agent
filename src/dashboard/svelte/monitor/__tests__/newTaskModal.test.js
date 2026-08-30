@@ -195,7 +195,10 @@ describe('validation', () => {
     it('refuses to send without a workspace, and says why', async () => {
         const h = mountModal();
         await waitFor(() => expect(h.container.querySelector('#nt-ws')).toBeTruthy());
-        await type(h.container.querySelector('#nt-ws'), '');
+        // The workspace is a <select> now, not a text field (the autocomplete
+        // datalist went). Clearing it means choosing the empty option, which is
+        // why that option is always rendered.
+        await fireEvent.change(h.container.querySelector('#nt-ws'), { target: { value: '' } });
         await type(h.container.querySelector('#nt-prompt'), 'something');
         await fireEvent.click(sendBtn(h.container));
         await waitFor(() => expect(h.notify).toHaveBeenCalledWith(expect.stringMatching(/workspace/i)));

@@ -2,7 +2,7 @@
 // role presets (persona + tool allowlist + budget defaults), brief/prompt
 // composition, and reviewer-verdict parsing. No I/O — unit-testable.
 //
-// Design (docs/design/subagent-architecture.md): the ENGINE is generic
+// Design: the ENGINE is generic
 // (one run_subtask tool); roles are thin PRESETS of defaults on top. The
 // guarantees that matter (reviewer can't write, budgets, no recursion) are
 // enforced in code via the tool allowlist — not by the persona text.

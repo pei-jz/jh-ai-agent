@@ -17,6 +17,7 @@
   $effect: it owns its own popup, and it is shared with the New Task modal.
 -->
 <script>
+    import { t } from '../../../i18n/index.js';
     import { invoke } from '@tauri-apps/api/core';
     import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
     import { SlashCommands } from '../../components/SlashCommands.js';
@@ -185,7 +186,7 @@
                         {:else}
                             <span>📄</span><span class="nt-prev-name">{a.name}</span>
                         {/if}
-                        <button class="nt-prev-x" type="button" title="Remove"
+                        <button class="nt-prev-x" type="button" title={t('common.remove')}
                             onclick={() => (attachments = attachments.filter(x => x.id !== a.id))}>✕</button>
                     </div>
                 {/each}
@@ -194,7 +195,7 @@
     </div>
 
     <div class="msteering-input-row">
-        <button type="button" class="steer-btn-icon steer-attach-btn" title="Attach file or image"
+        <button type="button" class="steer-btn-icon steer-attach-btn" title={t('common.attach')}
             disabled={!enabled} onclick={() => fileInputEl?.click()}>📎</button>
         <input type="file" class="steer-file-input" multiple bind:this={fileInputEl}
             onchange={(e) => { for (const f of e.currentTarget.files || []) attach(f); e.currentTarget.value = ''; }}>
@@ -209,9 +210,9 @@
             onkeydown={onKeydown}
             onpaste={(e) => { for (const it of e.clipboardData?.items || []) if (it.type.includes('image')) attach(it.getAsFile()); }}
         ></textarea>
-        <button class="btn btn-primary btn-sm" type="button" disabled={!canSend} onclick={send}>Send</button>
+        <button class="btn btn-primary btn-sm" type="button" disabled={!canSend} onclick={send}>{t('common.send')}</button>
         {#if showStop}
-            <button class="btn btn-error btn-sm" type="button" title="Stop the running task"
+            <button class="btn btn-error btn-sm" type="button" title={t('task.stop')}
                 disabled={stopping} onclick={stop}>{stopping ? 'Stopping…' : '⏹ Stop'}</button>
         {/if}
     </div>
@@ -237,13 +238,13 @@
 
     .nt-prev {
         position: relative; padding: 4px;
-        border: 1px solid var(--border); border-radius: 6px; background: var(--bg-tertiary);
+        border: 1px solid var(--line); border-radius: var(--r-2); background: var(--surface-sunken);
     }
-    .nt-prev img { width: 40px; height: 40px; object-fit: cover; border-radius: 4px; display: block; cursor: zoom-in; }
+    .nt-prev img { width: 40px; height: 40px; object-fit: cover; border-radius: var(--r-2); display: block; cursor: zoom-in; }
     .nt-prev-file {
         display: flex; align-items: center; gap: 6px;
         padding: 4px 20px 4px 8px; font-size: 11px;
-        color: var(--text-secondary); max-width: 180px;
+        color: var(--ink-soft); max-width: 180px;
     }
     .nt-prev-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .nt-prev-x {

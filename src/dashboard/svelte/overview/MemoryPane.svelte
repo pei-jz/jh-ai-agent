@@ -39,34 +39,34 @@
 </script>
 
 {#if !memory}
-    <div class="dash-empty"><p>Loading memory…</p></div>
+    <div class="dash-empty"><p>{t('mem.loading')}</p></div>
 {:else if !workspace}
     <div class="dash-empty">
         <div class="dash-empty-ico">{@html icon('memory', 28)}</div>
-        <h3>No workspace yet</h3>
-        <p>Memory is stored per workspace, under <code>.agent/</code>. Run a task in one and
+        <h3>{t('mem.noWorkspace')}</h3>
+        <p>{t('mem.storedUnder')}<code>.agent/</code>. Run a task in one and
            what it learns will show up here.</p>
     </div>
 {:else if error}
     <div class="dash-empty">
-        <h3>Could not read memory</h3>
+        <h3>{t('mem.readFailed')}</h3>
         <p>{error}</p>
     </div>
 {:else if empty}
     <div class="dash-empty">
         <div class="dash-empty-ico">{@html icon('memory', 28)}</div>
-        <h3>Nothing learned yet</h3>
+        <h3>{t('mem.empty')}</h3>
         <p>Cards appear after runs that hit a problem, or that found something worth
            reusing. Facts appear when a run states a rule about this project.</p>
     </div>
 {:else}
     <div class="dm">
         <div class="dm-layers">
-            <div><span class="k">DURABLE</span><span class="v">{layers.durable}</span><span class="s">facts</span></div>
-            <div><span class="k">EPISODIC</span><span class="v">{layers.episodic}</span><span class="s">on probation</span></div>
-            <div><span class="k">LESSONS</span><span class="v">{layers.lessons}</span><span class="s">what failed</span></div>
-            <div><span class="k">INSIGHTS</span><span class="v">{layers.insights}</span><span class="s">what worked</span></div>
-            <div><span class="k">EPISODES</span><span class="v">{layers.episodes}</span><span class="s">sessions kept</span></div>
+            <div><span class="k">{t('mem.layer.durable')}</span><span class="v">{layers.durable}</span><span class="s">facts</span></div>
+            <div><span class="k">{t('mem.layer.episodic')}</span><span class="v">{layers.episodic}</span><span class="s">on probation</span></div>
+            <div><span class="k">{t('mem.layer.lessons')}</span><span class="v">{layers.lessons}</span><span class="s">what failed</span></div>
+            <div><span class="k">{t('mem.layer.insights')}</span><span class="v">{layers.insights}</span><span class="s">what worked</span></div>
+            <div><span class="k">{t('mem.layer.episodes')}</span><span class="v">{layers.episodes}</span><span class="s">sessions kept</span></div>
         </div>
 
         <!--
@@ -99,13 +99,13 @@
                     </div>
                     {#if health.failingCards.length}
                         <div class="dm-fail">
-                            <div class="dm-fail-t">Not earning their place</div>
+                            <div class="dm-fail-t">{t('mem.notEarning')}</div>
                             {#each health.failingCards as f}
                                 <div class="dm-frow">
                                     <span class="drow-dot dot-failed"></span>
                                     <span class="grow" title={f.detail}>{f.headline}</span>
                                     <span class="dm-rate">{f.rate.toFixed(2)}</span>
-                                    <label class="dm-toggle" title="Switch this card off">
+                                    <label class="dm-toggle" title={t('mem.cardOff')}>
                                         <input type="checkbox" checked
                                             onchange={(e) => onToggleCard?.(f.card.id, !e.currentTarget.checked)}>
                                         <i></i>

@@ -5,6 +5,7 @@
 // after a check that never completed, or offering an update with no version.
 
 import { describe as suite, it, expect } from 'vitest';
+import { describe as describe_ } from '../updateState.js';
 import {
     PUBKEY_PLACEHOLDER, initialUpdateState, isRealUpdate, describe,
     progressPercent, shouldCheckOnLaunch,
@@ -131,5 +132,43 @@ suite('shouldCheckOnLaunch', () => {
     it('defaults to not checking when asked with nothing', () => {
         expect(shouldCheckOnLaunch()).toBe(false);
         expect(shouldCheckOnLaunch({})).toBe(false);
+    });
+
+    // The portable build is unzipped wherever the user likes. The updater runs
+    // the downloaded installer with /UPDATE and no /D, so it writes to the
+    // REGISTERED install directory: the download succeeds, the signature
+    // verifies, the new version lands somewhere else, and this copy relaunches
+    // unchanged. There is no way to notice that afterwards, so it is never
+    // started.
+    it('does not check from a portable copy, however well signed', () => {
+        expect(shouldCheckOnLaunch({ pubkey: KEY, optedOut: false, installed: false })).toBe(false);
+    });
+
+    it('checks from the installed copy', () => {
+        expect(shouldCheckOnLaunch({ pubkey: KEY, optedOut: false, installed: true })).toBe(true);
+    });
+
+    // The gate exists to suppress an impossible update, not to suppress updates
+    // whenever the question cannot be answered — an older build, or a harness
+    // with no Tauri command, must not silently stop receiving them.
+    it('assumes installed when nobody says otherwise', () => {
+        expect(shouldCheckOnLaunch({ pubkey: KEY })).toBe(true);
+        expect(shouldCheckOnLaunch({ pubkey: KEY, installed: undefined })).toBe(true);
+    });
+});
+
+describe('what a portable copy is told', () => {
+    it('says updates do not reach it, and where to get the new version', () => {
+        const d = describe_({ phase: 'portable' });
+        expect(d.title).toBeTruthy();
+        expect(d.detail).toBeTruthy();
+        expect(d.busy).toBe(false);
+    });
+
+    it('is not reported as a failure', () => {
+        // "Failed" would send the user looking for a network problem that does
+        // not exist.
+        expect(describe_({ phase: 'portable' }).title)
+            .not.toBe(describe_({ phase: 'failed' }).title);
     });
 });

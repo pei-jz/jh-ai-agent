@@ -12,6 +12,7 @@
   once — the old flow refused to save with no explanation of which field was wrong.
 -->
 <script>
+    import { t } from '../../../i18n/index.js';
     import { untrack } from 'svelte';
     import { icon } from '../../utils/icons.js';
     import {
@@ -127,7 +128,7 @@
 
         <div class="provider-card-fields">
             <div class="input-group">
-                <label class="input-label" for="modal-provider-type">Provider Type</label>
+                <label class="input-label" for="modal-provider-type">{t('conn.providerType')}</label>
                 <!-- Locked while editing: the provider decides the whole shape of
                      the credentials, so changing it is a new connection. -->
                 <select id="modal-provider-type" class="select" disabled={isEdit}
@@ -141,12 +142,12 @@
 
             <div class="grid-2">
                 <div class="input-group">
-                    <label class="input-label" for="modal-inst-name">Connection Name</label>
+                    <label class="input-label" for="modal-inst-name">{t('conn.name')}</label>
                     <input id="modal-inst-name" class="input" type="text"
                         bind:value={form.name} placeholder="e.g. My Connection">
                 </div>
                 <div class="input-group">
-                    <label class="input-label" for="modal-inst-model">Model Name</label>
+                    <label class="input-label" for="modal-inst-model">{t('conn.model')}</label>
                     <input id="modal-inst-model" class="input" type="text"
                         bind:value={form.model} placeholder="e.g. gpt-4o, claude-3-5-sonnet">
                 </div>
@@ -155,7 +156,7 @@
             <!-- A local runtime needs no key, so the field says so instead of
                  looking like a required blank. -->
             <div class="input-group" id="modal-key-group">
-                <label class="input-label" for="modal-inst-key">API Key</label>
+                <label class="input-label" for="modal-inst-key">{t('conn.apiKey')}</label>
                 <div class="input-password-wrap">
                     <input id="modal-inst-key" class="input"
                         type={showKey ? 'text' : 'password'}
@@ -179,14 +180,14 @@
                  from a change handler. -->
             {#if form.provider === 'azure'}
                 <div class="input-group" id="modal-version-group">
-                    <label class="input-label" for="modal-inst-version">API Version</label>
+                    <label class="input-label" for="modal-inst-version">{t('conn.apiVersion')}</label>
                     <input id="modal-inst-version" class="input" type="text"
                         bind:value={form.api_version} placeholder="e.g. 2024-08-01-preview">
                 </div>
             {/if}
 
             <div class="input-group">
-                <label class="input-label" for="modal-inst-context">Context Window (tokens, optional)</label>
+                <label class="input-label" for="modal-inst-context">{t('conn.contextWindow')}</label>
                 <input id="modal-inst-context" class="input" type="number" min="0" step="1024"
                     bind:value={form.context_window}
                     placeholder="Auto-detect (leave blank). e.g. 65536 for DeepSeek, 131072 for Qwen">
@@ -195,10 +196,10 @@
             </div>
 
             <div class="input-group">
-                <label class="input-label" for="modal-inst-maxout">Max Output Tokens (optional)</label>
+                <label class="input-label" for="modal-inst-maxout">{t('conn.maxOutput')}</label>
                 <input id="modal-inst-maxout" class="input" type="number" min="0" step="256"
                     bind:value={form.max_output_tokens}
-                    placeholder="Provider default (blank). Anthropic uses 8192 if blank.">
+                    placeholder={t('conn.maxOutput.placeholder')}>
                 <small class="cfg-hint">Caps the model's reply length. Leave blank for the provider default.</small>
             </div>
 
@@ -209,7 +210,7 @@
             <div class="input-group">
                 <label class="cfg-check" for="modal-inst-vision">
                     <input id="modal-inst-vision" type="checkbox" bind:checked={form.supports_vision}>
-                    <span>This model accepts images (vision)</span>
+                    <span>{t('conn.vision')}</span>
                 </label>
                 <small class="cfg-hint">
                     {#if inferredVision === form.supports_vision}
@@ -235,11 +236,11 @@
                 <span class="input-label">Pricing — USD per 1M tokens (optional)</span>
                 <div class="cfg-price-row">
                     <input id="modal-inst-cost-in" class="input" type="number" min="0" step="0.01"
-                        bind:value={form.cost_per_1m_input} placeholder="Input ↑">
+                        bind:value={form.cost_per_1m_input} placeholder={t('conn.rate.in')}>
                     <input id="modal-inst-cost-cache" class="input" type="number" min="0" step="0.01"
-                        bind:value={form.cost_per_1m_cache_read} placeholder="Cache ⚡">
+                        bind:value={form.cost_per_1m_cache_read} placeholder={t('conn.rate.cache')}>
                     <input id="modal-inst-cost-out" class="input" type="number" min="0" step="0.01"
-                        bind:value={form.cost_per_1m_output} placeholder="Output ↓">
+                        bind:value={form.cost_per_1m_output} placeholder={t('conn.rate.out')}>
                 </div>
                 <small class="cfg-hint">Used for the dashboard cost estimate when THIS model is
                     active. e.g. GPT-4o ≈ 2.5 / — / 10; Claude Sonnet ≈ 3 / 0.3 / 15.
@@ -267,9 +268,9 @@
                 onclick={() => onTest?.(collect())}>⚡ Test Connection</button>
             <div class="cfg-modal-confirm">
                 <button class="btn btn-secondary" id="btn-modal-cancel"
-                    onclick={() => onCancel?.()}>Cancel</button>
+                    onclick={() => onCancel?.()}>{t('common.cancel')}</button>
                 <button class="btn btn-primary" id="btn-modal-save"
-                    onclick={submit}>Save Connection</button>
+                    onclick={submit}>{t('conn.save')}</button>
             </div>
         </div>
     </div>

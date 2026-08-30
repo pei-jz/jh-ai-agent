@@ -134,6 +134,29 @@ fn open_main_window<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
     }
 }
 
+/// Bring the main window forward AND tell it where to go.
+///
+/// The frontend has listened for `spotlight-navigate` since the spotlight window
+/// existed, but nothing ever emitted it — so "expand" could only ever open the
+/// app on whatever route it was last showing, and the exchange the user was
+/// looking at stayed behind in a window that had just hidden itself.
+///
+/// This is what makes promoting a Spotlight question into a Work run possible
+/// (docs/design/information-architecture.md §5): the spotlight window creates the
+/// task through the same local API, then hands the main window the hash.
+#[tauri::command]
+fn spotlight_navigate<R: tauri::Runtime>(app: tauri::AppHandle<R>, hash: String) {
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.show();
+        let _ = main.unminimize();
+        let _ = main.set_focus();
+        let _ = main.emit("spotlight-navigate", serde_json::json!({ "hash": hash }));
+    }
+    if let Some(sp) = app.get_webview_window("spotlight") {
+        let _ = sp.hide();
+    }
+}
+
 /// Register additional directory roots the backend may write to / delete within
 /// / use as a shell working dir. Idempotent and additive — the frontend calls
 /// this at boot (approved projects, log dir) and per agent session (workspace),
@@ -1124,6 +1147,7 @@ pub fn run() {
             get_api_token,
             get_server_port,
             open_main_window,
+            spotlight_navigate,
             get_storage_usage,
             clear_comm_log,
             // Path guard (defense-in-depth write/exec allowlist)
@@ -1152,6 +1176,7 @@ pub fn run() {
             commands::fs::parse_excel_to_html,
             // Search & FS-mutation operations
             commands::updater::updater_pubkey,
+            commands::install::is_installed,
             commands::license::verify_license,
             commands::license::license_configured,
             commands::search::grep_search,
@@ -1226,6 +1251,7 @@ mod task_log_sidecar_tests {
             completed_at: None,
             workspace_path: None,
             caller: None,
+            interaction: None,
             mcp_servers: None,
             result_summary: None,
             modified_files: vec![],
@@ -1464,6 +1490,7 @@ mod history_persistence_tests {
             completed_at: if status == "completed" { Some("2026-01-01T00:01:00Z".to_string()) } else { None },
             workspace_path: Some("C:/ws".to_string()),
             caller: Some("NewTask".to_string()),
+            interaction: None,
             mcp_servers: None,
             result_summary: None,
             modified_files: vec![],

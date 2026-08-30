@@ -12,6 +12,7 @@
   The grouping/filtering RULES live in views/monitor/taskList.js as pure functions.
 -->
 <script>
+    import { t } from '../../../i18n/index.js';
     import { icon } from '../../utils/icons.js';
     import {
         filterTasks, groupTasks, applyDefaultCollapse, shortTaskId, rowStatus,
@@ -34,19 +35,10 @@
         onGroupBy = null,
     } = $props();
 
-    const STATUSES = ['running', 'paused', 'completed', 'failed', 'aborted'];
-
     /** Normalize a single status (legacy 'all' string) to an array. */
     const toArray = (v) => (Array.isArray(v) ? v : (!v || v === 'all' ? [] : [v]));
 
     const filtered = $derived(filterTasks(tasks, { search, status: statusFilter }));
-
-    const toggleStatus = (s) => {
-        const cur = new Set(toArray(statusFilter));
-        if (cur.has(s)) cur.delete(s);
-        else cur.add(s);
-        onStatusFilter?.([...cur]);
-    };
 
     // `collapsedKeys` (the caller's Set) stays the single source of truth — that is
     // what lets a manual toggle survive both a re-render and a re-route. A plain
@@ -69,7 +61,7 @@
         toggles += 1;
     };
 
-    const pct = (t) => Math.round((t.progress || 0) * 100);
+    const pct = (task) => Math.round((task.progress || 0) * 100);
     const clock = (iso) => {
         if (!iso) return '';
         try { return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }); }
@@ -77,22 +69,18 @@
     };
 </script>
 
-<div class="mtask-filter">
-    <input
-        type="text" class="mtask-search"
-        placeholder="🔍 Search prompt, ID, caller…"
-        value={search}
-        oninput={(e) => onSearch?.(e.currentTarget.value)}
-    >
-    <div class="mtask-status-bar">
-        {#each STATUSES as s (s)}
-            <button type="button" class="mtask-status-btn"
-                class:active={toArray(statusFilter).includes(s)}
-                onclick={() => toggleStatus(s)}>{s}</button>
-        {/each}
-    </div>
-</div>
+<!--
+  No search box, no status buttons.
 
+  Both were removed as unused after the owner reported never reaching for either
+  (2026-08-30). They cost two rows at the very top of the column — the place the
+  eye lands first and where the composer and the running task now are — to offer
+  filters for a list that is already grouped and already sorted by recency.
+
+  The FUNCTIONS stay: `filterTasks` still takes both, and the props are still
+  accepted, so a command-palette or a keyboard filter can drive them later
+  without reinstating chrome nobody used.
+-->
 <div class="mgroup-toggle">
     <button class="mgroup-btn" class:active={groupBy === 'workspace'}
         onclick={() => onGroupBy?.('workspace')}>{@html icon('folder', 13)} WS</button>
@@ -102,9 +90,9 @@
 
 <div class="mpanel-left-list">
     {#if !tasks.length}
-        <div class="mtask-empty">No tasks yet</div>
+        <div class="mtask-empty">{t('list.empty')}</div>
     {:else if !filtered.length}
-        <div class="mtask-empty">No tasks match the filter</div>
+        <div class="mtask-empty">{t('list.noMatch')}</div>
     {:else}
         {#each groups as g (g.key)}
             {@const isCollapsed = g.collapsed}
@@ -120,39 +108,39 @@
                      workspace — the group's real full path, not the basename key. -->
                 {#if groupBy === 'workspace'}
                     <button class="mgroup-add" data-ws-add={g.workspace}
-                        title="New task in this workspace"
+                        title={t('list.newHere')}
                         onclick={(e) => { e.stopPropagation(); onNewTask?.(g.workspace || null); }}
                     >{@html icon('plus', 12)}</button>
                 {/if}
             </div>
             {#if !isCollapsed}
                 <div class="mtask-group-items" data-group-items={g.key}>
-                    {#each g.tasks as t (t.id)}
-                        {@const st = rowStatus(t.status)}
+                    {#each g.tasks as task (task.id)}
+                        {@const st = rowStatus(task.status)}
                         <div class="mtask-item mtask-{st}"
-                            class:selected={t.id === selectedId}
-                            data-task-id={t.id}
+                            class:selected={task.id === selectedId}
+                            data-task-id={task.id}
                             role="button" tabindex="0"
-                            onclick={() => onSelect?.(t.id)}
-                            onkeydown={(e) => { if (e.key === 'Enter') onSelect?.(t.id); }}>
+                            onclick={() => onSelect?.(task.id)}
+                            onkeydown={(e) => { if (e.key === 'Enter') onSelect?.(task.id); }}>
                             <div class="mtask-top">
                                 <span class="mtask-dot dot-{st}"></span>
-                                <span class="mtask-id">{shortTaskId(t.id)}</span>
-                                {#if t.caller}<span class="mtask-caller">{t.caller}</span>{/if}
-                                <span class="mtask-time">{clock(t.started_at)}</span>
+                                <span class="mtask-id">{shortTaskId(task.id)}</span>
+                                {#if task.caller}<span class="mtask-caller">{task.caller}</span>{/if}
+                                <span class="mtask-time">{clock(task.started_at)}</span>
                                 <!-- Delete straight from the list, without opening
                                      the task first. stopPropagation so it does not
                                      also navigate into it. -->
                                 {#if st !== 'running'}
-                                    <button class="mtask-del" data-del-id={t.id}
-                                        title="Delete this task from history"
-                                        onclick={(e) => { e.stopPropagation(); onDelete?.(t.id); }}
+                                    <button class="mtask-del" data-del-id={task.id}
+                                        title={t('task.delete')}
+                                        onclick={(e) => { e.stopPropagation(); onDelete?.(task.id); }}
                                     >{@html icon('trash', 13)}</button>
                                 {/if}
                             </div>
-                            <div class="mtask-prompt">{t.prompt}</div>
+                            <div class="mtask-prompt">{task.prompt}</div>
                             {#if st === 'running'}
-                                <div class="mtask-progbar"><div style={`width:${pct(t)}%`}></div></div>
+                                <div class="mtask-progbar"><div style={`width:${pct(task)}%`}></div></div>
                             {/if}
                         </div>
                     {/each}

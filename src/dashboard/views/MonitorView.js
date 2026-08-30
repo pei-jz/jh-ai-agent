@@ -23,6 +23,13 @@ import MonitorRoot from '../svelte/monitor/MonitorRoot.svelte';
 import { mountComponent, destroyComponent } from '../svelte/mount.svelte.js';
 import { contextReading } from './monitor/headerStats.js';
 import { rowStatus } from './monitor/taskList.js';
+import { askStream } from './monitor/askView.js';
+import { askMessages } from './monitor/askConversation.js';
+import { rankRecipes, readUseCounts, recordUse } from './overview/recipes.js';
+import { promptTemplateManager } from '../../modules/ai/PromptTemplateManager.js';
+import { ASK_STYLES } from './ask.styles.js';
+import { interactionOf, ASK } from '../../modules/ai/agent/InteractionMode.js';
+import { takePendingLaunch } from './monitor/pendingLaunch.js';
 import { toolTarget, toolLineText } from './monitor/toolLine.js';
 import { MONITOR_STYLES } from './MonitorView.styles.js';
 import { extractThoughtSummary, fmtThought, formatThoughtDetail, fmtTool, fmtFile, fmtStatus, isChatLog, fmtEfficiency, fmtReview, fmtTelemetry } from './monitorLogFormat.js';
@@ -340,6 +347,118 @@ export class MonitorView {
     }
 
 
+    /**
+     * The composer above the list.
+     *
+     * Mode and workspace are carried from the last create rather than
+     * re-defaulted, because the common case is a run of tasks in one project
+     * with one mode — see docs/design/information-architecture.md §7 step 1.
+     * Projects and MCP config are the composer's own read: the view has no other
+     * use for them, and NewTaskModal reads them the same way.
+     *
+     * `presetPrompt` is read ONCE per view and then cleared: a handoff that has
+     * been consumed must not refill the box when the user navigates back.
+     */
+    _composerProps() {
+        const preset = this._pendingLaunch;
+        return {
+            workspace: this._lastNewTaskWs || preset?.ws || '',
+            presetPrompt: this._composerPreset || preset?.prompt || '',
+            // Bumped on every pick so choosing the SAME template twice refills
+            // the box; without it the effect sees an unchanged string.
+            presetSeq: this._composerPresetSeq || 0,
+            modeId: this._lastNewTaskMode || '',
+            // The draft lives here, not in the component: the box moves between
+            // the list column and the middle of an empty screen, and a
+            // component-local draft would be lost on the way.
+            text: this._composerText || '',
+            onText: (v) => {
+                // No _sync(): the component already shows what was typed, and a
+                // props push per keystroke would re-render the whole layout.
+                this._composerText = v;
+            },
+            busy: (this.tasks || []).some(t => rowStatus(t.status) === 'running'),
+            onCreated: (taskId, { workspace, modeId }) => {
+                this._lastNewTaskWs = workspace;
+                this._lastNewTaskMode = modeId;
+                this._pendingLaunch = null;
+                this._composerPreset = '';
+                this._composerText = '';
+                invalidateTasksCache();
+                this.selectedTaskId = taskId;
+                window.location.hash = `#monitor?id=${taskId}`;
+            },
+            // "Details" hands what is typed to the modal rather than discarding
+            // it — the modal is a superset of this box, not a different one.
+            onDetails: ({ prompt, ws, interaction }) => this._openNewTaskModal(ws || null, prompt || '', interaction || null),
+        };
+    }
+
+    /**
+     * Was the selected task started as a question rather than a job?
+     *
+     * Read off the task's own `interaction` field, NOT its behavior block: the
+     * list response carries metadata only (see router.rs `task_meta`), so a run
+     * would have rendered as a timeline until its logs happened to be loaded —
+     * which is to say, always.
+     */
+    _isAskRun() {
+        const t = (this.tasks || []).find(x => x.id === this.selectedTaskId);
+        return interactionOf(t) === ASK;
+    }
+
+    /**
+     * The `ask` presentation bag (information-architecture.md §4), or null.
+     *
+     * Null on a build run AND whenever the Raw Log filter is on. That second
+     * condition IS the escape hatch: "全ログ" gives back the ordinary timeline
+     * by turning this off, rather than by a second rendering path.
+     */
+    _askProps() {
+        if (!this._isAskRun() || this._filter === 'all') return null;
+        const items = this._inspectorItems || [];
+        const { tools } = askStream(items);
+        return {
+            // The conversation itself. The tool rows are inside the messages
+            // (one closed line per run of calls), so `tools` is not drawn for an
+            // ask run any more — it stays for the fold-count the header shows.
+            messages: askMessages(items),
+            tools: null,
+            _withheld: tools,
+            // The line exists only while the turn is in flight. `since` is when
+            // it started, so the component can tick without a props push per
+            // frame; `status` overwrites the seconds while a tool runs.
+            think: this._working
+                ? { since: this._workingSince || Date.now(), status: this._workingText || null }
+                : null,
+        };
+    }
+
+    /**
+     * The empty state's props.
+     *
+     * The presets are the user's OWN templates, ranked by how often each has
+     * been used (overview/recipes.js — the ranking the Dashboard's recipe chips
+     * used, kept when that screen was dissolved). Invented examples would look
+     * better and teach the wrong thing: a starting point that cannot be run.
+     */
+    _welcomeProps() {
+        let templates = [];
+        try { templates = promptTemplateManager.getAll() || []; } catch (_) { /* not loaded yet */ }
+        return {
+            presets: rankRecipes(templates, readUseCounts()),
+            onPick: (preset) => {
+                recordUse(preset.key);
+                // Through the composer, not straight to createTask: picking a
+                // template is choosing a STARTING POINT, and the user still has
+                // to be able to edit it before it runs.
+                this._composerPreset = preset.prompt || '';
+                this._composerPresetSeq = (this._composerPresetSeq || 0) + 1;
+                this._sync();
+            },
+        };
+    }
+
     /** Delete a task straight from the list, without opening it first. */
     async _deleteTaskFromList(id) {
         if (!id) return;
@@ -363,17 +482,31 @@ export class MonitorView {
         const urlParams = getHashParams();
         if (urlParams.id && this.tasks.some(t => t.id === urlParams.id)) {
             this.selectedTaskId = urlParams.id;
-        } else if (this.tasks.length > 0 && !this.selectedTaskId) {
-            // Default to the MOST RECENT task. list_tasks returns HashMap order
-            // (unsorted), so tasks[0] is arbitrary — pick the newest by start time.
-            this.selectedTaskId = this._newestTaskId();
+        } else if (!this.selectedTaskId) {
+            // Opening Work used to select the newest task, which meant the
+            // welcome screen could never appear: yesterday's finished run was
+            // always sitting there instead.
+            //
+            // A RUNNING task still wins, because that is the one case where
+            // something is happening that you would want to see without asking.
+            // Anything finished is history, and history is what the list is for.
+            const running = (this.tasks || []).filter(t => rowStatus(t.status) === 'running');
+            if (running.length) {
+                this.selectedTaskId = running
+                    .slice()
+                    .sort((a, b) => String(b.started_at || '').localeCompare(String(a.started_at || '')))[0].id;
+            }
         }
 
         // MIGRATED: svelte/monitor/MonitorRoot.svelte. This used to be two template
         // strings (this method and _renderDetail, 160 lines) whose every live field
         // was then written by id from elsewhere in this file, and re-bound after
         // every re-render.
-        return `<style>${MONITOR_STYLES}</style><div id="${ROOT_HOST}"></div>`;
+        // ASK_STYLES is the conversation surface (the old Chat look). Emitted
+        // alongside rather than merged: the two are different renderings of the
+        // same run, and keeping their rules apart is what lets either change
+        // without touching the other.
+        return `<style>${MONITOR_STYLES}${ASK_STYLES}</style><div id="${ROOT_HOST}"></div>`;
     }
 
 
@@ -1337,6 +1470,10 @@ export class MonitorView {
     }
 
     _setWorkingLabel(on) {
+        // Stamped on the RISING edge only: the ask progress line counts from the
+        // start of the turn, and re-stamping on every sync would reset it to 0.0s
+        // ten times a second.
+        if (on && !this._working) this._workingSince = Date.now();
         this._working = !!on;
         this._sync();
     }
@@ -1431,8 +1568,11 @@ export class MonitorView {
             const latest = progs[progs.length - 1];
             if (latest && !latest.userFolded) latest.collapsed = false;
         }
-        const items = pinLiveProgress(folded, running);
+        let items = pinLiveProgress(folded, running);
+        // The inspector keeps the FULL list even on an ask run: its job is "what
+        // did this touch", and that question survives the presentation choice.
         this._inspectorItems = items;
+        if (this._isAskRun() && this._filter !== 'all') items = askStream(items).items;
         return {
             items,
             collapsed: collapsedIds(this._timeline.items),
@@ -1960,6 +2100,8 @@ export class MonitorView {
         if (!host) return;
         mountComponent(MonitorRoot, host, {
             taskList: this._taskListProps(),
+            composer: this._composerProps(),
+            welcome: this._welcomeProps(),
             taskCount: (this.tasks || []).length,
             header: this._headerProps(),
             timeline: this._timelineProps(),
@@ -1969,7 +2111,10 @@ export class MonitorView {
             steer: this._steerProps(),
 
             listCollapsed: this._listCollapsed,
-            inspectorOpen: this._inspectorOpen,
+            // Closed on an ask run: "which files did this touch" is a question
+            // about work, and a conversation has not done any. The user can
+            // still open it — this is a default, not a lock.
+            inspectorOpen: this._inspectorOpen && !this._askProps(),
             leftWidth: this._leftPaneWidth,
             inspWidth: this._inspPaneWidth,
 
@@ -1980,6 +2125,7 @@ export class MonitorView {
             working: this._working
                 ? { text: this._workingText || '⏳ Working…', collapsed: !!this._feedCollapsed }
                 : null,
+            ask: this._askProps(),
 
             onNewTask: () => this._openNewTaskModal(),
             onFilter: (f) => {
@@ -2303,6 +2449,17 @@ export class MonitorView {
     // ─── init() ─────────────────────────────────────────────────────────────
 
     init() {
+        // A launch queued by the Dashboard's launcher fills the COMPOSER rather
+        // than opening the modal: the box it was typed into and the box it
+        // arrives in are now the same control, so the modal would be a detour.
+        // The old channel was localStorage['jh_open_new_task'] — see
+        // monitor/pendingLaunch.js for why that key is gone.
+        //
+        // Read BEFORE the first _sync(), so it reaches the composer's initial
+        // props rather than arriving as a later update it would ignore (the
+        // prefill is deliberately seeded once — see Composer.svelte).
+        this._pendingLaunch = takePendingLaunch();
+
         // Everything visible is MonitorRoot's; this pushes it once and then only
         // when something changes. (The API-call, allowlist, image-zoom and
         // new-task overlays are mounted on demand by _openOverlay.)
@@ -2320,23 +2477,6 @@ export class MonitorView {
         };
         document.addEventListener('keydown', this._newTaskKeyHandler);
 
-        // Auto-open the modal when arriving from the Dashboard's launcher.
-        //
-        // The handoff used to be a bare '1' flag. It now carries what the user
-        // already typed there — {prompt, ws} — so the modal opens filled in
-        // rather than making them retype it. The old '1' is still honoured: it is
-        // what a stale flag written by a previous build looks like.
-        try {
-            const raw = localStorage.getItem('jh_open_new_task');
-            if (raw) {
-                localStorage.removeItem('jh_open_new_task');
-                let preset = null;
-                if (raw !== '1') {
-                    try { preset = JSON.parse(raw); } catch (_) { /* treat as bare flag */ }
-                }
-                this._openNewTaskModal(preset?.ws || null, preset?.prompt || '');
-            }
-        } catch (_) {}
 
         this._bindDetailEvents();
         this._autoConnect();
@@ -2489,7 +2629,7 @@ export class MonitorView {
      *        validation, the mode picker, MCP selection, "/" templates and
      *        attachments, so it stays the single task-creation path.
      */
-    _openNewTaskModal(presetWs = null, presetPrompt = '') {
+    _openNewTaskModal(presetWs = null, presetPrompt = '', presetInteraction = null) {
         // MIGRATED: svelte/monitor/NewTaskModal.svelte. This was 315 lines that
         // injected a <style> into document.head on first open, built the dialog
         // as one innerHTML string with every rule inline, appended it to
@@ -2498,6 +2638,7 @@ export class MonitorView {
         this._openOverlay('mnt-new-task-host', NewTaskModal, (close) => ({
             presetWs,
             presetPrompt,
+            presetInteraction,
             lastWs: this._lastNewTaskWs || '',
             lastMode: this._lastNewTaskMode || '',
             onClose: close,

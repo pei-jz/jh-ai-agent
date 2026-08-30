@@ -76,6 +76,22 @@ async function configuredPubkey() {
 }
 
 /**
+ * Is this the INSTALLED copy, or an unzipped portable one?
+ *
+ * Defaults to true when the command is unavailable (a browser test harness, an
+ * older build): the gate exists to suppress an impossible update, not to
+ * suppress updates whenever the question cannot be answered.
+ */
+async function isInstalledCopy() {
+    try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        return await invoke('is_installed') !== false;
+    } catch (_) {
+        return true;
+    }
+}
+
+/**
  * Can this build verify signed updates at all?
  *
  * Used by Settings to decide between offering a check and saying plainly that this
@@ -83,7 +99,8 @@ async function configuredPubkey() {
  */
 export async function isUpdaterConfigured() {
     const pubkey = await configuredPubkey();
-    return shouldCheckOnLaunch({ pubkey, optedOut: false });
+    const installed = await isInstalledCopy();
+    return shouldCheckOnLaunch({ pubkey, optedOut: false, installed });
 }
 
 /**
@@ -96,10 +113,15 @@ export async function checkForUpdate({ silent = false } = {}) {
     let optedOut = false;
     try { optedOut = localStorage.getItem(OPT_OUT_KEY) === '1'; } catch (_) {}
     const pubkey = await configuredPubkey();
+    const installed = await isInstalledCopy();
 
-    if (!shouldCheckOnLaunch({ pubkey, optedOut })) {
+    if (!shouldCheckOnLaunch({ pubkey, optedOut, installed })) {
         if (!silent) {
-            state = { ...initialUpdateState(), phase: optedOut ? 'idle' : 'unconfigured' };
+            // Which of the three reasons it is matters to the user: opting out
+            // is their own doing, an unconfigured build is ours, and a portable
+            // copy is a property of how it was obtained.
+            const phase = optedOut ? 'idle' : (installed ? 'unconfigured' : 'portable');
+            state = { ...initialUpdateState(), phase };
             if (state.phase !== 'idle') paint();
         }
         return state;

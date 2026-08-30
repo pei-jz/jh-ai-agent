@@ -5,6 +5,7 @@
   re-attached a click listener to every row after each innerHTML rewrite.
 -->
 <script>
+    import { t } from '../../../i18n/index.js';
     import {
         DAY_LABELS, nextRunText, scheduleTypeBadge,
     } from '../../views/schedule/scheduleModel.js';
@@ -31,7 +32,7 @@
     </div>
     <div class="sch-list-body">
         {#if visible.length === 0}
-            <div class="sch-empty">No schedules<br>Add one with "+ New"</div>
+            <div class="sch-empty">{t('sched.none')}<br>{t('sched.addHint')}</div>
         {:else}
             {#each visible as s (s.id)}
                 {@const isDraft = !!draft && draft.id === s.id}
@@ -71,25 +72,28 @@
 </div>
 
 <style>
+    /* A column of the screen, not a card on it — one rule where it meets the
+       detail pane. See "Regions, not cards" in styles/dashboard.css. */
     .sch-list-panel {
         width: 280px;
         min-width: 220px;
-        background: var(--bg-secondary);
-        border: 1px solid var(--border);
-        border-radius: var(--radius-lg);
+        background: transparent;
+        border: none;
+        border-right: 1px solid var(--line);
+        border-radius: 0;
         display: flex;
         flex-direction: column;
         overflow: hidden;
     }
     .sch-list-header {
         padding: 10px 14px;
-        background: var(--bg-tertiary);
-        border-bottom: 1px solid var(--border);
+        background: var(--surface-sunken);
+        border-bottom: 1px solid var(--line);
         font-size: 11px;
         font-weight: 700;
         text-transform: uppercase;
         letter-spacing: 0.06em;
-        color: var(--text-secondary);
+        color: var(--ink-soft);
         display: flex;
         align-items: center;
         justify-content: space-between;
@@ -105,32 +109,32 @@
     }
     .sch-item {
         padding: 9px 11px;
-        border-radius: 7px;
+        border-radius: var(--r-2);
         border: 1px solid transparent;
         cursor: pointer;
         transition: background 0.12s;
     }
-    .sch-item:hover { background: var(--bg-hover); }
-    .sch-item.selected { background: var(--accent-glow-lg); border-color: var(--accent); }
+    .sch-item:hover { background: var(--surface-hover); }
+    .sch-item.selected { background: var(--accent-surface); border-color: var(--accent); }
     .sch-item-top { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
     .sch-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
     .sch-dot.on { background: var(--success); }
-    .sch-dot.off { background: var(--text-tertiary); }
+    .sch-dot.off { background: var(--ink-faint); }
     .sch-time-badge { font-family: var(--font-mono); font-size: 11px; font-weight: 700; color: var(--accent); }
-    .sch-state { font-size: 10px; color: var(--text-tertiary); margin-left: auto; }
+    .sch-state { font-size: 10px; color: var(--ink-faint); margin-left: auto; }
     .sch-state.is-draft { color: var(--warning); }
     .sch-days-row { display: flex; gap: 2px; margin-bottom: 3px; }
-    .sch-day-chip { font-size: 10px; padding: 1px 5px; border-radius: 3px; font-weight: 600; }
-    .sch-day-chip.active { background: var(--accent-glow); color: var(--accent); }
-    .sch-day-chip.inactive { background: var(--bg-tertiary); color: var(--text-tertiary); }
+    .sch-day-chip { font-size: 10px; padding: 1px 5px; border-radius: var(--r-1); font-weight: 600; }
+    .sch-day-chip.active { background: var(--accent-surface); color: var(--accent); }
+    .sch-day-chip.inactive { background: var(--surface-sunken); color: var(--ink-faint); }
     .sch-once-at { font-size: 10px; color: var(--accent); }
     .sch-prompt-preview {
         font-size: 11.5px;
-        color: var(--text-secondary);
+        color: var(--ink-soft);
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
     }
-    .sch-next { font-size: 10px; color: var(--text-tertiary); margin-top: 2px; }
-    .sch-empty { padding: 24px; text-align: center; color: var(--text-tertiary); font-size: 12px; }
+    .sch-next { font-size: 10px; color: var(--ink-faint); margin-top: 2px; }
+    .sch-empty { padding: 24px; text-align: center; color: var(--ink-faint); font-size: 12px; }
 </style>

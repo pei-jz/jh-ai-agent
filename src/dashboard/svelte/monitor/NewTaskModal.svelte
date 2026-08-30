@@ -22,6 +22,8 @@
     import { invoke } from '@tauri-apps/api/core';
     import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
     import { AGENT_MODES, DEFAULT_MODE_ID } from '../../../modules/ai/AgentModes.js';
+    import { ASK, BUILD } from '../../../modules/ai/agent/InteractionMode.js';
+    import { looksReadOnly } from '../../../modules/ai/agent/TaskComplexity.js';
     import { mcpManager } from '../../../modules/ai/McpManager.js';
     import { promptTemplateManager } from '../../../modules/ai/PromptTemplateManager.js';
     import { skillManager } from '../../../modules/ai/SkillManager.js';
@@ -29,13 +31,16 @@
     import { icon } from '../../utils/icons.js';
     import { readAttachment } from '../../views/chat/chatAttachments.js';
     import {
-        attachmentBlocks, validateNewTask, taskPayload, modeName, MODE_ICON,
+        attachmentBlocks, validateNewTask, modeName, MODE_ICON,
     } from '../../views/monitor/newTaskRequest.js';
+    import { createTask } from '../../views/monitor/createTask.js';
 
     let {
         /** An explicit workspace — the "＋" on a workspace group header wins over the default. */
         presetWs = null,
         presetPrompt = '',
+        /** 'ask' | 'build' carried in from the composer's chip, or null. */
+        presetInteraction = null,
         /** Remembered from the last create, so the next one starts where you left off. */
         lastWs = '',
         lastMode = '',
@@ -60,6 +65,14 @@
     // drown out the ones that mean something.
     // (The dialog is mounted fresh on every open, so "once" is once per open.)
     let modeId = $state(untrack(() => lastMode || DEFAULT_MODE_ID));
+
+    // The interaction axis, same rules as the composer: inferred from the text
+    // with `looksReadOnly`, always overridable. It has to be HERE too, not only
+    // in the composer — "Details" is a superset of that box, and a run created
+    // through it would otherwise always be `build`, silently ignoring the chip
+    // the user had just set.
+    let pickedInteraction = $state(untrack(() => (presetInteraction || null)));
+    const interaction = $derived(pickedInteraction ?? (looksReadOnly(prompt) ? ASK : BUILD));
     let prompt = $state(untrack(() => presetPrompt || ''));
     let attachments = $state([]);
     let creating = $state(false);
@@ -157,7 +170,7 @@
         if (creating) return;
         const raw = prompt.trim();
         const hasContent = slash ? slash.hasContent(raw) : (!!raw || attachments.length > 0);
-        const check = validateNewTask({ hasContent: hasContent || attachments.length > 0, workspace });
+        const check = validateNewTask({ hasContent: hasContent || attachments.length > 0, workspace, interaction });
         if (!check.ok) {
             if (check.reason) notify(check.reason);
             (check.field === 'workspace' ? wsInputEl : textareaEl)?.focus();
@@ -170,21 +183,14 @@
 
         creating = true;
         try {
-            // Bring up any checked server that is not running yet. Best-effort:
-            // a server that refuses to start should not block the task.
-            for (const name of selectedMcp) {
-                if (!mcpManager.clients.has(name)) {
-                    try { await mcpManager.startClient(name, mcpServers[name]); }
-                    catch (e) { console.warn(`MCP start failed for ${name}:`, e); }
-                }
-            }
-            const res = await client().request('/tasks', {
-                method: 'POST',
-                body: JSON.stringify(taskPayload({
-                    prompt: body, workspace: workspace.trim(), modeId, selectedMcp, images,
-                })),
+            // Shared with the composer at the top of the list — see
+            // views/monitor/createTask.js. Two entries, one creation path.
+            const taskId = await createTask({
+                prompt: body, workspace, modeId, selectedMcp, mcpServers, images,
+                interaction,
+                client: client(),
             });
-            onCreated?.(res.task_id, { workspace: workspace.trim(), modeId });
+            onCreated?.(taskId, { workspace: workspace.trim(), modeId });
         } catch (e) {
             notify('Failed to create task: ' + (e.message || e));
             creating = false;
@@ -219,12 +225,47 @@
             <div>
                 <label class="input-label nt-label" for="nt-ws">Workspace (required for agent tasks)</label>
                 <div class="nt-ws-row">
-                    <input id="nt-ws" type="text" class="input nt-ws" bind:this={wsInputEl}
-                        bind:value={workspace} list="nt-ws-list" placeholder="C:\path\to\project">
-                    <datalist id="nt-ws-list">
-                        {#each projects as p (p)}<option value={p}></option>{/each}
-                    </datalist>
+                    <!--
+                      A real list, not an autocomplete.
+
+                      `<datalist>` looked like a dropdown but behaved like a
+                      suggestion popup: it filtered as you typed, hid itself when
+                      nothing matched, and gave no way to just SEE the approved
+                      projects — which is what anyone opening it actually wants.
+                      A <select> shows them, and the browse button covers the
+                      case a list cannot (a folder that is not approved yet).
+
+                      The current value is included as an option even when it is
+                      not an approved project, so the field can display a path
+                      the picker returned.
+                    -->
+                    <select id="nt-ws" class="input cfg-grow" bind:value={workspace}>
+                                                <!-- Always present, not only while empty: an option
+                             that appears and disappears cannot be selected, so
+                             there was no way to CLEAR a workspace once set. -->
+                        <option value="">(ワークスペースを選択)</option>
+                        {#if workspace && !projects.includes(workspace)}
+                            <option value={workspace}>{workspace}</option>
+                        {/if}
+                        {#each projects as p (p)}<option value={p}>{p}</option>{/each}
+                    </select>
                     <button class="btn btn-secondary nt-browse" type="button" onclick={browse}>{@html icon('folder')}</button>
+                </div>
+            </div>
+
+            <div>
+                <span class="input-label nt-label">この依頼の種類</span>
+                <div class="nt-mode-group">
+                    <button type="button" class="nt-int-btn" class:sel={interaction === ASK}
+                        title="読み取り専用・計画なし・すぐ答える。ワークスペースは任意"
+                        onclick={() => (pickedInteraction = ASK)}>
+                        <span class="nt-mode-name">聞く</span>
+                    </button>
+                    <button type="button" class="nt-int-btn" class:sel={interaction === BUILD}
+                        title="計画を先に・フルツール。ワークスペースが要る"
+                        onclick={() => (pickedInteraction = BUILD)}>
+                        <span class="nt-mode-name">頼む</span>
+                    </button>
                 </div>
             </div>
 
@@ -318,26 +359,26 @@
     }
     .nt-modal-box {
         position: relative;
-        background: var(--bg-secondary);
-        border: 1px solid var(--border);
-        border-radius: 12px;
+        background: var(--surface-panel);
+        border: 1px solid var(--line);
+        border-radius: var(--r-3);
         width: 720px; max-width: 94vw;
         height: 80vh; min-height: 420px; min-width: 520px;
         display: flex; flex-direction: column; overflow: hidden;
         box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
         resize: both;
     }
-    .nt-modal-box::-webkit-resizer { background: var(--text-tertiary); border-radius: 2px; }
+    .nt-modal-box::-webkit-resizer { background: var(--ink-faint); border-radius: var(--r-1); }
     .nt-drag { outline: 2px dashed var(--accent); outline-offset: -4px; }
 
     .nt-head {
         padding: 10px 16px; flex-shrink: 0;
-        border-bottom: 1px solid var(--border); background: var(--bg-tertiary);
+        border-bottom: 1px solid var(--line); background: var(--surface-sunken);
         display: flex; justify-content: space-between; align-items: center;
     }
     .nt-head strong { font-size: 14px; display: flex; align-items: center; gap: 7px; }
     .nt-head-ico { color: var(--accent); display: inline-flex; }
-    .nt-close { background: none; border: none; color: var(--text-primary); cursor: pointer; font-size: 18px; }
+    .nt-close { background: none; border: none; color: var(--ink); cursor: pointer; font-size: 18px; }
 
     .nt-body {
         padding: 10px 16px; flex: 1; min-height: 0; overflow-y: auto;
@@ -351,28 +392,31 @@
     .nt-browse { padding: 0 12px; display: flex; align-items: center; }
 
     .nt-mode-group { display: flex; flex-wrap: wrap; gap: 6px; }
+    .nt-int-btn,
     .nt-mode-btn {
         display: inline-flex; align-items: center; gap: 6px;
-        padding: 5px 12px; border-radius: 7px; cursor: pointer;
-        background: var(--bg-tertiary); border: 1px solid var(--border);
-        color: var(--text-secondary); font-size: 12px; user-select: none;
+        padding: 5px 12px; border-radius: var(--r-2); cursor: pointer;
+        background: var(--surface-sunken); border: 1px solid var(--line);
+        color: var(--ink-soft); font-size: 12px; user-select: none;
         transition: border-color .12s, background .12s, color .12s;
     }
-    .nt-mode-btn:hover { border-color: var(--border-focus); color: var(--text-primary); }
+    .nt-int-btn:hover,
+    .nt-mode-btn:hover { border-color: var(--line-focus); color: var(--ink); }
+    .nt-int-btn.sel,
     .nt-mode-btn.sel { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
     .nt-mode-ico { display: inline-flex; }
-    .nt-mode-desc { margin-top: 6px; font-size: 11.5px; color: var(--text-secondary); line-height: 1.5; }
+    .nt-mode-desc { margin-top: 6px; font-size: 11.5px; color: var(--ink-soft); line-height: 1.5; }
 
     .nt-mcp-box {
         display: flex; flex-wrap: wrap; gap: 10px;
-        padding: 6px 10px; border: 1px solid var(--border-light);
-        border-radius: 6px; background: var(--bg-tertiary);
+        padding: 6px 10px; border: 1px solid var(--line-soft);
+        border-radius: var(--r-2); background: var(--surface-sunken);
     }
     .nt-mcp-item {
         display: flex; align-items: center; gap: 6px;
         font-size: 12px; cursor: pointer; user-select: none;
     }
-    .nt-muted { font-size: 11.5px; color: var(--text-tertiary); }
+    .nt-muted { font-size: 11.5px; color: var(--ink-faint); }
 
     .nt-prompt-wrap { position: relative; display: flex; flex-direction: column; flex: 1; min-height: 0; }
     .nt-prompt-head { display: flex; justify-content: space-between; align-items: center; }
@@ -388,13 +432,13 @@
     .nt-previews { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
     .nt-prev {
         position: relative; padding: 4px;
-        border: 1px solid var(--border); border-radius: 6px; background: var(--bg-tertiary);
+        border: 1px solid var(--line); border-radius: var(--r-2); background: var(--surface-sunken);
     }
-    .nt-prev img { width: 40px; height: 40px; object-fit: cover; border-radius: 4px; display: block; cursor: zoom-in; }
+    .nt-prev img { width: 40px; height: 40px; object-fit: cover; border-radius: var(--r-2); display: block; cursor: zoom-in; }
     .nt-prev-file {
         display: flex; align-items: center; gap: 6px;
         padding: 4px 20px 4px 8px; font-size: 11px;
-        color: var(--text-secondary); max-width: 180px;
+        color: var(--ink-soft); max-width: 180px;
     }
     .nt-prev-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .nt-prev-x {
@@ -410,7 +454,7 @@
 
     .nt-foot {
         padding: 10px 16px; flex-shrink: 0;
-        border-top: 1px solid var(--border);
+        border-top: 1px solid var(--line);
         display: flex; justify-content: flex-end; gap: 8px;
     }
 </style>

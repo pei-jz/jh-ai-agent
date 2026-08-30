@@ -17,6 +17,9 @@ import { normalizeSafetyLimits, resolveRecallArm } from './agent/SafetyLimits.js
 // One definition of "is this multi-step change work" — see _looksComplex below
 // for why a second, laxer copy used to live in this file.
 import { looksComplex } from './agent/TaskComplexity.js';
+// "Am I being asked, or given a job?" — a SECOND axis, orthogonal to the agent
+// mode. See agent/InteractionMode.js and information-architecture.md §3.
+import { runShape } from './agent/InteractionMode.js';
 // The run's mutable counters, named so the phases below can take one argument
 // instead of closing over twenty free variables — see agent/RunState.js.
 import { RunState } from './agent/RunState.js';
@@ -92,6 +95,11 @@ const DELIVERABLE_MIN_CHARS = 400;
 
 export class AgentController {
     constructor() {
+        // The build shape until _prepareRun resolves the real one. A default
+        // here rather than `?.` at each use site: four separate places read it,
+        // and an undefined shape at any of them would silently take the wrong
+        // branch instead of failing.
+        this._shape = runShape({});
         this.baseMaxIterations = 100;
         this.maxIterations = this.baseMaxIterations;
         this.steeringQueue = [];
@@ -359,7 +367,7 @@ export class AgentController {
                         revisionNote + '\n' +
                         'The user\'s reply arrives as your next turn; after approval the edit/command tools are unblocked. Do NOT attempt any edit or command before then.'
                 });
-            } else if (iteration === 1 && this._looksComplex(prompt)) {
+            } else if (iteration === 1 && this._shape.includeTaskTools && this._looksComplex(prompt)) {
                 history.push({
                     role: 'user',
                     content: '[Planning Required] This task has multiple steps. Your VERY FIRST tool call MUST be `task_progress(action="set", items=[...])` — list every subtask before touching any file or running any command. After registering, proceed immediately with execution without waiting for confirmation.'
@@ -1619,6 +1627,10 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
     async _prepareRun({ prompt, workspacePath, onAgentStatus, chatContext, kisContext, images }) {
         chatContext = chatContext || [];
         images = images || [];
+        // Resolved FIRST: the plan-first gate, the tool allowlist, the phase
+        // router and the step-1 planning injection all read it, and a shape
+        // computed after any of them would leave that one on the build path.
+        this._shape = runShape(this.behaviorOverrides || {});
         // A previous run must not leak its images into this one.
         this._pendingToolImages = [];
         this.toolExecutor.drainImages();
@@ -1853,8 +1865,13 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
             lastUserMsg,
         });
         this._planRevisionText = gate.revisionText;
-        this._planFirstActive = gate.active;
-        this._planApproved = gate.approved;
+        // An `ask` run never plan-gates. A plan is the thing being asked a
+        // question is NOT, and the gate would put an approval step in front of a
+        // one-sentence answer. Applied AFTER the gate rather than inside it so
+        // SafetyGuards keeps one job (is this complex work a human is watching?)
+        // and the interaction axis keeps its own.
+        this._planFirstActive = gate.active && this._shape.planFirst;
+        this._planApproved = this._planFirstActive ? false : true;
         if (this._planFirstActive) {
             onAgentStatus?.({ event: 'status', status: 'running', message: t('agent.planFirst.on', null, '📋 計画優先モード — まず計画を提示し承認を得ます') });
         }
@@ -1891,6 +1908,10 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
         this._phaseRouting = safety.phaseRouting === 'on'
             && !userPicksModel
             && !this._isSubagent          // a sub-agent is ONE phase of the parent
+            // An `ask` run has no implementation phase to move onto the cheap
+            // model, and switching models mid-answer would change voice halfway
+            // through a reply the user is already reading.
+            && this._shape.routePhases
             && !!tierModels.fast && !!tierModels.deep;
         if (this._phaseRouting) {
             this._phase = initialPhase({
@@ -2050,7 +2071,13 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
         // NOTE: for interactive callers that picked MCP servers (Schedule/NewTask),
         // mcp_servers is NOT external — so the built-in toolset is preserved and
         // the selected servers' tools are surfaced through the normal MCP filter.
-        let enabledTools = this.behaviorOverrides?.enabled_tools;
+        // `enabledTools` for an `ask` run is the INTERSECTION of the agent
+        // mode's list with what a conversation may call — so `research + ask`
+        // does not gain a tool by being asked rather than told, and no `ask` run
+        // can reach an editing tool or a shell. See agent/InteractionMode.js.
+        let enabledTools = this._shape.isAsk
+            ? this._shape.enabledTools
+            : this.behaviorOverrides?.enabled_tools;
 
         if (isExternalCaller && (enabledTools === null || enabledTools === undefined)) {
             // External callers default to restricting native tools to only finish/meta tools,
@@ -2068,8 +2095,10 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
         if (Array.isArray(enabledTools)) {
             // Add task_progress only for complex tasks; single-shot app intents
             // stay minimal (finish_task + present_result) to avoid over-planning.
+            // An `ask` run never gets it, however complex the sentence looked:
+            // a checklist is work-shaped, and the user asked a question.
             this.toolExecutor.setToolAllowlist(enabledTools, {
-                includeTaskTools: this._looksComplex(prompt),
+                includeTaskTools: this._shape.includeTaskTools && this._looksComplex(prompt),
             });
         }
         // Write scope (Step 3): hard-restrict file-mutating tools to the given
@@ -2097,7 +2126,7 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
         // scoped by the intent (enabled_tools / mcp_servers).
         this.toolExecutor.setMcpRelevanceQuery(isExternalCaller ? null : prompt);
 
-        // ── run_subtask engine (docs/design/subagent-architecture.md) ──────
+        // ── run_subtask engine ──────
         // Inject the sub-agent runner so the generic run_subtask tool works.
         // Parent runs only: children must not recurse (their allowlists exclude
         // run_subtask AND no runner is attached, so the tool isn't even

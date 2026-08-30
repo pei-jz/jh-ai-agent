@@ -71,3 +71,24 @@ task_logs/
 # ─── OS junk ─────────────────────────────────────────────────
 Thumbs.db
 .DS_Store
+
+# ─── Signing keys ────────────────────────────────────────────
+# The updater's private key is what proves an update came from this project.
+# A copy in git is a copy in every clone, and the key cannot be rotated for
+# anyone who already installed — their app verifies with the public key baked
+# into the build they have. Kept as a pattern rather than one path so a key
+# written to the repo root by mistake is caught too. See docs/RELEASING.md §0.
+*.key
+*.pem
+.tauri/
+tauri-signing-*
+
+# ─── Working documents ───────────────────────────────────────
+# docs/ holds in-progress reports and design notes — snapshots of a decision
+# being made, not documentation of what shipped. They are kept on disk and
+# read while working, but they are not part of the distributed source.
+#
+# NOTE: README.md links to docs/RELEASING.md and docs/design/. Those links
+# 404 on GitHub while this rule stands. Either drop the links, or commit the
+# one file the release procedure needs:  git add -f docs/RELEASING.md
+docs/

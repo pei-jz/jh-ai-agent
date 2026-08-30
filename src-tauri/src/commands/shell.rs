@@ -408,8 +408,15 @@ pub fn open_path_default<R: Runtime>(app: AppHandle<R>, path: String) -> Result<
 /// registered in the registry by `register_notification_identity()` so Windows
 /// shows "J.H AI Agent" (name + icon) as the toast source instead of falling
 /// back to "Windows PowerShell".
+///
+/// This is the SAME string as `identifier` in tauri.conf.json, and it has to
+/// be: for an installed build the AppUserModelID Windows knows the app by IS
+/// the bundle identifier. A copy in two places drifts silently — the toast
+/// keeps working in dev (where this registers its own key) and loses its name
+/// and icon only once installed. `identifier_matches_bundle` below is the
+/// guard.
 #[cfg(windows)]
-pub const NOTIFY_APP_ID: &str = "com.jh-ai-agent.app";
+pub const NOTIFY_APP_ID: &str = "io.github.pei-jz.jhaiagent";
 
 /// Register our AppUserModelID → DisplayName mapping (HKCU, no elevation).
 /// Without this, an unpackaged exe (target\debug|release — the dev workflow)
@@ -442,4 +449,21 @@ pub fn os_notify(title: String, body: String) -> Result<(), String> {
         n.app_id(NOTIFY_APP_ID);
     }
     n.show().map(|_| ()).map_err(|e| e.to_string())
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::NOTIFY_APP_ID;
+
+    /// The toast identity and the bundle identity are one identity.
+    ///
+    /// Nothing at runtime compares them. An installed build with a mismatched
+    /// AppUserModelID still shows toasts — under whatever name Windows can
+    /// find, which is the fallback this constant exists to avoid.
+    #[test]
+    fn identifier_matches_bundle() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../../tauri.conf.json")).unwrap();
+        assert_eq!(conf["identifier"].as_str().unwrap(), NOTIFY_APP_ID);
+    }
 }

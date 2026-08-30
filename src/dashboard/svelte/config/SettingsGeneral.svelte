@@ -72,6 +72,13 @@
         /** UI language. Owned by the parent so the whole view re-renders on change. */
         uiLocale = 'ja',
         onChangeLocale = null,
+        /**
+         * Simplified-first toggle. Defaults to false (advanced sections hidden);
+         * the unit tests pass true so they can keep asserting the routing / safety
+         * / experimental controls without clicking the toggle first. Reassignable
+         * like any Svelte 5 prop, so the toggle just flips it.
+         */
+        showAdvanced = false,
     } = $props();
 
     const licenseView = $derived(describeLicense(license));
@@ -100,6 +107,14 @@
     let newCommand = $state('');
     let newWorkspace = $state('');
 
+    // Simplified-first: Safety Limits, model routing and the experimental knobs
+    // are hidden until the user opts into them. A non-engineer should only ever
+    // see language, network, plan mode and memory — everything else is an
+    // advanced concern that a wrong value can quietly cost real money or break a
+    // run. Session-scoped on purpose (not persisted): someone who wants the deep
+    // controls re-opens them in one click, and a shared machine does not inherit
+    // them. `showAdvanced` is the Svelte 5 prop above, reassigned by the toggle.
+
     const addCommand = () => {
         const v = newCommand.trim();
         if (!v) return;
@@ -123,6 +138,16 @@
 {/snippet}
 
 <div class="provider-card-fields">
+
+    <div class="cfg-advanced-toggle">
+        <div class="toggle-wrap" role="button" tabindex="0"
+            onclick={() => (showAdvanced = !showAdvanced)}
+            onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); showAdvanced = !showAdvanced; } }}>
+            <div class="toggle" class:active={showAdvanced}></div>
+            <span class="toggle-label">{t('settings.advanced.show')}</span>
+        </div>
+        <p class="input-hint">{t('settings.advanced.hint')}</p>
+    </div>
 
     {#snippet basicBody()}
         <div class="input-group">
@@ -191,15 +216,19 @@
             <p class="input-hint">{@html t('settings.planMode.hint')}</p>
         </div>
 
-        <div class="input-group cfg-group-gap">
-            <label class="input-label" for="cfg-subagent-review">{t('settings.subagentReview')}</label>
-            <select id="cfg-subagent-review" class="input" value={config.subagent_review ?? 'off'}
-                onchange={(e) => patch('subagent_review', e.currentTarget.value)}>
-                <option value="off">{t('settings.subagentReview.off')}</option>
-                <option value="on">{t('settings.subagentReview.on')}</option>
-            </select>
-            <p class="input-hint">{@html t('settings.subagentReview.hint')}</p>
-        </div>
+        <!-- Sub-agent review is an experimental quality gate, not a daily
+             control — hidden behind the advanced toggle. -->
+        {#if showAdvanced}
+            <div class="input-group cfg-group-gap">
+                <label class="input-label" for="cfg-subagent-review">{t('settings.subagentReview')}</label>
+                <select id="cfg-subagent-review" class="input" value={config.subagent_review ?? 'off'}
+                    onchange={(e) => patch('subagent_review', e.currentTarget.value)}>
+                    <option value="off">{t('settings.subagentReview.off')}</option>
+                    <option value="on">{t('settings.subagentReview.on')}</option>
+                </select>
+                <p class="input-hint">{@html t('settings.subagentReview.hint')}</p>
+            </div>
+        {/if}
 
         <div class="input-group cfg-group-gap">
             <label class="input-label" for="cfg-memory-recall">{t('settings.memoryRecall')}</label>
@@ -215,6 +244,7 @@
             <p class="input-hint">{@html t('settings.memoryRecall.hint')}</p>
         </div>
 
+        {#if showAdvanced}
         <!-- Playbook (Step 6). Directly under memory recall because it is the
              same mechanism at a larger grain, and because it is gated on that
              mechanism being shown to work. See modules/ai/memory/Playbook.js. -->
@@ -309,6 +339,7 @@
                 </div>
             {/if}
         </div>
+        {/if}
     {/snippet}
     {@render section('behavior', false, 'llm', t('settings.sec.behavior'), behaviorBody)}
 
@@ -342,7 +373,9 @@
             <p class="input-hint">{@html t('settings.safety.compressRatio.hint')}</p>
         </div>
     {/snippet}
-    {@render section('safety', false, 'shield', t('settings.sec.safety'), safetyBody)}
+    {#if showAdvanced}
+        {@render section('safety', false, 'shield', t('settings.sec.safety'), safetyBody)}
+    {/if}
 
     {#snippet pathsBody()}
         <p class="cfg-sec-hint">{@html t('settings.paths.hint')}</p>
@@ -554,12 +587,12 @@
     .cfg-secret-note {
         margin-bottom: 12px;
         padding: 8px 12px;
-        border: 1px solid var(--border-light);
+        border: 1px solid var(--line-soft);
         border-left: 3px solid var(--accent);
-        border-radius: var(--radius-sm);
-        background: var(--bg-tertiary);
+        border-radius: var(--r-2);
+        background: var(--surface-sunken);
         font-size: 11.5px; line-height: 1.55;
-        color: var(--text-secondary);
+        color: var(--ink-soft);
     }
     .cfg-secret-note.is-fallback { border-left-color: var(--error, #c0392b); }
     .cfg-secret-note code { font-family: var(--font-mono); font-size: 11px; }

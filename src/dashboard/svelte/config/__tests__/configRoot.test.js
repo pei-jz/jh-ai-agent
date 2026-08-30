@@ -74,12 +74,16 @@ function mountRoot(props = {}) {
 const callsTo = (cmd) => invoke.mock.calls.filter(c => c[0] === cmd);
 
 describe('the tab strip', () => {
-    it('offers the seven reachable tabs', async () => {
+    // Six now: Memory and Usage are DESTINATIONS, not tabs.
+    it('offers the six reachable tabs', async () => {
         const { container } = mountRoot();
-        await waitFor(() => expect(container.querySelectorAll('.settings-tab-btn').length).toBe(7));
+        await waitFor(() => expect(container.querySelectorAll('.settings-tab-btn').length).toBe(6));
         const labels = [...container.querySelectorAll('.settings-tab-btn')].map(b => b.textContent.trim());
         expect(labels.join(' ')).toMatch(/LLM Settings/);
-        expect(labels.join(' ')).toMatch(/Memory/);
+        expect(labels.join(' ')).toMatch(/RAG/);
+        // Both left for their own destinations.
+        expect(labels.join(' ')).not.toMatch(/Memory/);
+        expect(labels.join(' ')).not.toMatch(/Usage/);
     });
 
     // API logs moved to Monitor; the button was removed then but the branch,
@@ -96,18 +100,18 @@ describe('the tab strip', () => {
         await waitFor(() => expect(container.querySelector('.settings-tab-btn.active')).toBeTruthy());
         expect(container.querySelector('.settings-tab-btn.active').textContent).toMatch(/LLM/);
 
-        const memoryBtn = [...container.querySelectorAll('.settings-tab-btn')]
-            .find(b => /Memory/.test(b.textContent));
-        await fireEvent.click(memoryBtn);
-        expect(container.querySelector('.settings-tab-btn.active').textContent).toMatch(/Memory/);
+        const ragBtn = [...container.querySelectorAll('.settings-tab-btn')]
+            .find(b => /RAG/.test(b.textContent));
+        await fireEvent.click(ragBtn);
+        expect(container.querySelector('.settings-tab-btn.active').textContent).toMatch(/RAG/);
     });
 
     // The Dashboard links straight to `#config?tab=memory`; main.js used to throw
     // the query away, so those links landed on the default tab.
     it('honours the deep-linked initial tab', async () => {
-        const { container } = mountRoot({ initialTab: 'memory' });
+        const { container } = mountRoot({ initialTab: 'rag' });
         await waitFor(() => expect(container.querySelector('.settings-tab-btn.active')).toBeTruthy());
-        expect(container.querySelector('.settings-tab-btn.active').textContent).toMatch(/Memory/);
+        expect(container.querySelector('.settings-tab-btn.active').textContent).toMatch(/RAG/);
     });
 });
 
@@ -150,41 +154,6 @@ describe('connections', () => {
 
 // When the study pass hits the file cap it must say so, instead of silently
 // indexing a prefix of the tree and looking complete.
-describe('study pass status', () => {
-    async function runStudy(result) {
-        studyMock.runStudyPass.mockResolvedValue(result);
-        const h = mountRoot({ initialTab: 'memory' });
-        await waitFor(() => expect(h.container.querySelector('.settings-tab-btn.active')).toBeTruthy());
-        // Give the tab a workspace, then press Study.
-        const ws = h.container.querySelector('input[type=text]');
-        if (ws) await fireEvent.input(ws, { target: { value: 'C:/ws' } });
-        const study = [...h.container.querySelectorAll('button')].find(b => /Study|学習/.test(b.textContent));
-        if (study) await fireEvent.click(study);
-        return h;
-    }
-
-    it('warns when the pass was truncated or omitted files', async () => {
-        const h = await runStudy({
-            files: 800, symbols: 1200, edges: 300, sheets: 0,
-            pruned: 0, total: 5000, omitted: 200, truncated: true, paths: [], areas: [],
-        });
-        await waitFor(() => {
-            expect(h.container.textContent).toContain('上限');
-            expect(h.container.textContent).toContain('5000');
-            expect(h.container.textContent).toContain('200');
-        });
-    });
-
-    it('does not warn when the whole tree was indexed', async () => {
-        const h = await runStudy({
-            files: 300, symbols: 900, edges: 200, sheets: 0,
-            pruned: 0, total: 300, omitted: 0, truncated: false, paths: [], areas: [],
-        });
-        await waitFor(() => expect(h.container.textContent).toMatch(/300/));
-        expect(h.container.textContent).not.toContain('上限');
-    });
-});
-
 describe('storage usage is a prop, not a DOM write', () => {
     // `_renderStorageUsage()` used to write straight into `#cfg-storage-usage`,
     // an element inside SettingsGeneral's own subtree, while the `storageUsage`

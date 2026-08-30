@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { getAppVersion } from './appVersion.js';
 
 /**
  * McpWsClient — MCP client over an INBOUND WebSocket (Part A / T1).
@@ -68,7 +69,7 @@ export class McpWsClient {
             const initResult = await this.request('initialize', {
                 protocolVersion: '2024-11-05',
                 capabilities: {},
-                clientInfo: { name: 'JHAiAgent', version: '0.1.0' }
+                clientInfo: { name: 'JHAiAgent', version: await getAppVersion() }
             });
             this.capabilities = initResult.capabilities;
             await this.notification('notifications/initialized', {});

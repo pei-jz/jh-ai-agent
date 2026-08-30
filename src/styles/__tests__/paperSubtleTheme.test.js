@@ -1,78 +1,88 @@
+// 白紙 (paper-subtle) — the OTHER light theme.
+//
+// It began as "Washi & Ink": unbleached cream, one step lighter than 古紙. That
+// is why the two read as the same theme — only the accent differed, and an
+// accent cannot carry a theme on its own. The ground is white now and the moss
+// accent stayed, which makes this the second LIGHT theme rather than a paler
+// 古紙.
+//
+// The palette is asserted here so a later tweak cannot quietly walk it back
+// toward cream.
+
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
-// The adopted Paper (Subtle) redesign — "和紙と墨" (Washi & Ink),
-// proposal #2 (docs/design/paper-subtle-proposals/02-washi-ink.html).
-// The design tokens are static CSS; the tests pin the values so a future
-// theme tweak cannot silently drift away from the agreed palette.
-
 const here = dirname(fileURLToPath(import.meta.url));
-const cssPath = join(here, '../dashboard.css');
-const css = readFileSync(cssPath, 'utf8');
+const css = readFileSync(join(here, '../dashboard.css'), 'utf8');
 
-// Extract the custom-property block of one theme.
 function themeBlock(theme) {
-    const start = css.indexOf(`:root[data-theme="${theme}"]`);
-    expect(start).toBeGreaterThan(-1); // theme must exist in the stylesheet
+    // The DECLARATION, not the first mention: the stylesheet's comments quote
+    // selectors, and a bare indexOf found those first.
+    const start = css.indexOf(`:root[data-theme="${theme}"] {`);
+    expect(start).toBeGreaterThan(-1);
     const open = css.indexOf('{', start);
-    const close = css.indexOf('}', open);
-    return css.slice(open + 1, close);
+    return css.slice(open + 1, css.indexOf('}', open));
 }
 
-describe('paper-subtle theme — adopted "Washi & Ink" palette', () => {
+describe('白紙 — the other light theme', () => {
     const block = themeBlock('paper-subtle');
 
     it('defines every token the components rely on', () => {
-        const tokens = ['--bg-primary', '--bg-secondary', '--bg-tertiary', '--bg-card',
-            '--bg-card-solid', '--bg-input', '--bg-hover',
-            '--text-primary', '--text-secondary', '--text-tertiary', '--text-inverse',
-            '--accent', '--accent-hover', '--accent-dim', '--accent-glow', '--accent-glow-lg',
-            '--border', '--border-light', '--border-focus',
-            '--success', '--success-bg', '--warning', '--warning-bg',
-            '--error', '--error-bg', '--info', '--info-bg',
-            '--shadow-sm', '--shadow-md', '--shadow-lg', '--shadow-glow',
-            '--paper-rule-color', '--paper-rule-size', '--paper-margin-color', '--font-hand'];
-        for (const t of tokens) expect(block).toContain(`${t}:`);
+        const tokens = [
+            '--surface-app', '--surface-panel', '--surface-sunken', '--surface-raised',
+            '--surface-input', '--surface-hover',
+            '--ink', '--ink-soft', '--ink-faint', '--on-accent',
+            '--accent', '--accent-hover', '--accent-dim', '--accent-surface',
+            '--shadow-pop', '--shadow-drag',
+            '--line', '--line-soft', '--line-focus',
+            '--success', '--warning', '--error', '--info',
+            '--font-accent',
+        ];
+        for (const t of tokens) expect(block, `${t} missing`).toContain(`${t}:`);
     });
 
-    it('moves the background off the old "too white" cream onto unbleached washi', () => {
-        expect(block).toContain('--bg-primary:   #e8e2d3;');
-        expect(block).toContain('--bg-secondary: #f2ecdc;');
-        expect(block).toContain('--bg-tertiary:  #dcd4c0;');
-        expect(block).toContain('--bg-card-solid:#f2ecdc;');
+    // The whole point of the change.
+    it('sits on WHITE, not cream', () => {
+        expect(block).toContain('--surface-panel: #fbfaf7;');
+        expect(block).toMatch(/--surface-raised:\s*#ffffff;/);
+        // The old cream values must not come back.
+        expect(block).not.toContain('#f2ecdc');
+        expect(block).not.toContain('#e8e2d3');
     });
 
-    it('keeps the card translucent so the washi shows through', () => {
-        expect(block).toContain('--bg-card:      rgba(242, 236, 220, 0.92);');
+    it('keeps the moss accent — that is what it is FOR', () => {
+        expect(block).toMatch(/--accent:\s*#5f8f6a;/);
     });
 
-    it('uses ink-black text instead of grey-green', () => {
-        expect(block).toContain('--text-primary:   #2f2b24;');
-        expect(block).toContain('--text-secondary: #6d6759;');
-        expect(block).toContain('--text-tertiary:  #98917f;');
-    });
-
-    it('swaps the terracotta accent for mossy verdigris (緑青)', () => {
-        expect(block).toContain('--accent:        #6d8f6f;');
-        expect(block).toContain('--accent-hover:  #567457;');
-        expect(block).toContain('--border-focus: rgba(109, 143, 111, 0.55);');
-    });
-
-    it('sharpens the borders to rattan', () => {
-        expect(block).toContain('--border:       #cfc5a9;');
-    });
-
-    it('adds a faint washi fibre grain for body / cards / result panel', () => {
-        expect(block).toContain('--grain: url("data:image/svg+xml,');
-        expect(css).toMatch(/background-image:\s*var\(--grain,\s*none\);/);          // body + .card
-        expect(css).toMatch(/:root\[data-theme="paper-subtle"\] #result-panel \{/);  // reading surface
-    });
-
-    it('keeps the paper theme untouched (only paper-subtle changed)', () => {
+    it('is visibly a different theme from 古紙', () => {
         const paper = themeBlock('paper');
-        expect(paper).toContain('--bg-primary:   #e7dab9;');
+        const ground = (b) => b.match(/--surface-app:\s*(\S+);/)[1];
+        const accent = (b) => b.match(/--accent:\s*(\S+);/)[1];
+        expect(ground(block)).not.toBe(ground(paper));
+        expect(accent(block)).not.toBe(accent(paper));
+    });
+
+    it('keeps the card opaque', () => {
+        expect(block).toMatch(/--surface-raised:\s*#[0-9a-f]{6};/i);
+        expect(block).not.toMatch(/--surface-raised:\s*rgba/);
+    });
+
+    // 古紙 is the one with a surface; this is the plain sheet. A texture here is
+    // part of what made the two look alike.
+    it('has no texture at all', () => {
+        expect(block).not.toContain('--texture-app:');
+        expect(block).not.toContain('--texture-read:');
+    });
+
+    it('uses ink-black text', () => {
+        expect(block).toMatch(/--ink:\s*#23262a;/);
+    });
+
+    it('leaves 古紙 alone', () => {
+        const paper = themeBlock('paper');
+        expect(paper).toContain('--surface-app:   #e7dab9;');
         expect(paper).toContain('--accent:        #b23a48;');
     });
 });

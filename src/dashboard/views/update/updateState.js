@@ -17,7 +17,7 @@ import { t } from '../../../i18n/index.js';
 export const PUBKEY_PLACEHOLDER = 'REPLACE_WITH_YOUR_MINISIGN_PUBLIC_KEY';
 
 /**
- * @typedef {'idle'|'checking'|'available'|'current'|'downloading'|'ready'|'failed'|'unconfigured'} UpdatePhase
+ * @typedef {'idle'|'checking'|'available'|'current'|'downloading'|'ready'|'failed'|'unconfigured'|'portable'} UpdatePhase
  */
 
 /** The starting state. */
@@ -77,6 +77,15 @@ export function describe(state) {
                 detail: t('update.unconfigured.detail'),
                 busy: false,
             };
+        // Not a failure and not a lesser mode — the portable build simply
+        // cannot be updated in place, and saying so is better than a check
+        // that appears to succeed and changes nothing.
+        case 'portable':
+            return {
+                title: t('update.portable'),
+                detail: t('update.portable.detail'),
+                busy: false,
+            };
         default:
             return { title: '', detail: '', busy: false };
     }
@@ -97,8 +106,14 @@ export function progressPercent(downloaded, total) {
  * an install — the most a launch check does is tell the user something exists. An
  * unconfigured updater is not worth a request at all.
  */
-export function shouldCheckOnLaunch({ pubkey = '', optedOut = false } = {}) {
+export function shouldCheckOnLaunch({ pubkey = '', optedOut = false, installed = true } = {}) {
     if (optedOut) return false;
     if (!pubkey || pubkey === PUBKEY_PLACEHOLDER) return false;
+    // A portable copy cannot receive an update. The installer the updater
+    // downloads writes to the REGISTERED install directory, so the download
+    // would succeed, the signature would verify, the new version would land
+    // somewhere else entirely, and this copy would relaunch unchanged. There
+    // is no way to make that visible after the fact, so it is not started.
+    if (installed === false) return false;
     return true;
 }

@@ -7,11 +7,12 @@
   `readFormValues()` first as a precaution.
 -->
 <script>
+    import { t } from '../../../i18n/index.js';
     let { text = '{}', onChange = null } = $props();
 </script>
 
 <div class="input-group">
-    <label class="input-label" for="cfg-mcp-servers">Configuration JSON</label>
+    <label class="input-label" for="cfg-mcp-servers">{t('mcp.configJson')}</label>
     <textarea
         id="cfg-mcp-servers" class="textarea cfg-mono-area" rows="16"
         value={text}

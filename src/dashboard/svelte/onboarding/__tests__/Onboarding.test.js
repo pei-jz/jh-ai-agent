@@ -10,6 +10,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, cleanup } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import Onboarding from '../Onboarding.svelte';
+import { t } from '../../../../i18n/index.js';
 
 afterEach(() => cleanup());
 
@@ -156,7 +157,7 @@ describe('Onboarding — step 3, ready', () => {
 
     it('points at Develop mode for code work', () => {
         // The default is now general, so a developer needs to be told where to switch.
-        expect(mount({ step: 2 }).textContent).toContain('Develop');
+        expect(mount({ step: 2 }).textContent).toContain(t('mode.develop'));
     });
 
     it('finishes', () => {

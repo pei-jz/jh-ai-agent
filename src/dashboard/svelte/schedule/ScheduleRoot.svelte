@@ -14,6 +14,7 @@
   surface: forget one and the list and the editor disagreed about what was selected.
 -->
 <script>
+    import { t } from '../../../i18n/index.js';
     import { untrack } from 'svelte';
     import ScheduleList from './ScheduleList.svelte';
     import ScheduleDetail from './ScheduleDetail.svelte';
@@ -154,8 +155,8 @@
 <div class="view-container">
     <div class="view-header">
         <div>
-            <h1>Schedule</h1>
-            <p class="subtitle">Recurring tasks — run automatically on chosen days/times</p>
+            <h1>{t('sched.title')}</h1>
+            <p class="subtitle">{t('sched.subtitle')}</p>
         </div>
     </div>
     <div class="sch-layout">
@@ -185,7 +186,7 @@
 <style>
     .sch-layout {
         display: flex;
-        gap: 16px;
+        gap: 0;
         height: calc(100vh - var(--titlebar-height) - 60px);
     }
 </style>

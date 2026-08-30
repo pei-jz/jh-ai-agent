@@ -5,6 +5,7 @@ description = "J.H AI Agent — standalone Tauri-based AI agent server."
 authors = ["J.H AI Agent Contributors"]
 edition = "2021"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/pei-jz/jh-ai-agent"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

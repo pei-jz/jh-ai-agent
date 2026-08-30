@@ -100,6 +100,24 @@
         (which chooses between 3 lines and the full text); `is-min` wins. */
     let requestMin = $state(false);
 
+    /**
+     * Is the request PINNED to the top of the panel?
+     *
+     * Minimising made it a sliver; it still held the top of the column. Reading
+     * a long result on a short window is the case that wants it gone entirely,
+     * so this un-sticks it and lets it scroll away with everything else.
+     *
+     * Remembered, because it is a reading preference rather than a per-task one:
+     * someone who wants the full height wants it on the next task too.
+     */
+    let requestPinned = $state((() => {
+        try { return localStorage.getItem('jhai_request_pinned') !== '0'; } catch (_) { return true; }
+    })());
+    const setPinned = (on) => {
+        requestPinned = on;
+        try { localStorage.setItem('jhai_request_pinned', on ? '1' : '0'); } catch (_) { /* private mode */ }
+    };
+
     const toggleCollapsed = () => onToggleCollapse?.(item.id);
 
     /** Status icon for one task_progress row — drawn, not emoji, like every
@@ -127,6 +145,7 @@
     class:collapsed
     class:is-open={requestOpen}
     class:is-min={requestMin}
+    class:is-unpinned={!requestPinned}
     data-item-id={item.id}
 >
 
@@ -152,7 +171,7 @@
         onclick={() => onToggleStory?.(item._ex, 'outcome')}>
         {@html icon(d.icon)}<span class="tl-fold-n">{d.label}</span>
         {#if words}<span class="tl-fold-dur">{words} words</span>{/if}
-        <span class="tl-fold-hint">Show result</span>
+        <span class="tl-fold-hint">{t('task.showResult')}</span>
     </button>
 
 {:else if item.kind === 'request'}
@@ -160,7 +179,7 @@
          pseudo-element takes no clicks — so the "fold the story" affordance never
          fired at all. -->
     <button type="button" class="tl-story-toggle" class:is-folded={item._folded}
-        title="Fold or unfold this exchange's working"
+        title={t('task.foldExchange')}
         onclick={() => onToggleStory?.(item._ex, 'working')}></button>
     <div class="tl-card tl-card-request"
         class:is-min={requestMin}
@@ -168,15 +187,26 @@
         role="button" tabindex="0"
         onkeydown={(e) => { if (e.key === 'Enter') { if (requestMin) { requestMin = false; requestOpen = true; } else { requestOpen = !requestOpen; } } }}>
         <div class="tl-q-label">
-            <span>Your request</span>
+            <span>{t('task.yourRequest')}</span>
             <!-- Minimise / restore: the sticky request is tall fixed furniture;
                  this gives it a one-line sliver. stopPropagation so the toggle
                  does not also flip the open/closed state. -->
-            <button type="button" class="tl-request-min"
-                title={requestMin ? 'Expand the request' : 'Minimise the request'}
-                onclick={(e) => { e.stopPropagation(); requestMin = !requestMin; if (!requestMin) requestOpen = true; }}>
-                {@html icon(requestMin ? 'plus' : 'minus')}
-            </button>
+            <span class="tl-request-acts">
+                <!-- Unpin: let the request scroll away, so a long result gets the
+                     whole column. Minimising only ever made it a shorter piece of
+                     fixed furniture. -->
+                <button type="button" class="tl-request-act"
+                    title={requestPinned ? '固定を解除（スクロールで隠れる）' : '上部に固定する'}
+                    aria-pressed={requestPinned}
+                    onclick={(e) => { e.stopPropagation(); setPinned(!requestPinned); }}>
+                    {@html icon(requestPinned ? 'pin' : 'pin-off', 12)}
+                </button>
+                <button type="button" class="tl-request-act"
+                    title={requestMin ? 'Expand the request' : 'Minimise the request'}
+                    onclick={(e) => { e.stopPropagation(); requestMin = !requestMin; if (!requestMin) requestOpen = true; }}>
+                    {@html icon(requestMin ? 'plus' : 'minus', 12)}
+                </button>
+            </span>
         </div>
         <div class="tl-q-text">{item.text}</div>
         {#if item.images?.length}
@@ -196,7 +226,7 @@
         onclick={() => onToggleStory?.(item.ex, 'working')}>
         {@html icon('steps')}<span class="tl-fold-n">{item.steps || item.n} steps</span>
         {#if dur}<span class="tl-fold-dur">{dur}</span>{/if}
-        <span class="tl-fold-hint">Show working</span>
+        <span class="tl-fold-hint">{t('task.showWorking')}</span>
     </button>
 
 {:else if item.kind === 'turn'}
@@ -249,7 +279,7 @@
 
 {:else if item.kind === 'narration'}
     <div class="tl-card tl-card-note">
-        <div class="tl-note-label">The agent's note</div>
+        <div class="tl-note-label">{t('task.note')}</div>
         <div class="rv-summary chat-md">{@html renderMarkdown(item.text)}</div>
     </div>
 
@@ -259,7 +289,7 @@
          model's collapsed flag (onToggleCollapse), never the exchange's working.
          The header always shows the live tally so a folded card still says how
          far the plan got. -->
-    {@const done = (item.items || []).filter(t => t.status === 'completed').length}
+    {@const done = (item.items || []).filter(x => x.status === 'completed').length}
     {@const total = (item.items || []).length}
     <div class="tl-card tl-card-progress">
         <div class="tl-card-h tl-fold-h" role="button" tabindex="0"
@@ -269,12 +299,12 @@
             <span class="tl-card-chev">▼</span>
         </div>
         <div class="tl-card-body tl-progress-body">
-            {#each (item.items || []) as t (t.id)}
-                <div class="tl-progress-row" class:is-done={t.status === 'completed'}>
-                    <span class="tl-progress-ic">{@html icon(progressIcon(t.status))}</span>
-                    <span class="tl-progress-id">[{t.id}]</span>
-                    <span class="tl-progress-title">{t.title}</span>
-                    {#if t.note}<span class="tl-progress-note">({t.note})</span>{/if}
+            {#each (item.items || []) as step (step.id)}
+                <div class="tl-progress-row" class:is-done={step.status === 'completed'}>
+                    <span class="tl-progress-ic">{@html icon(progressIcon(step.status))}</span>
+                    <span class="tl-progress-id">[{step.id}]</span>
+                    <span class="tl-progress-title">{step.title}</span>
+                    {#if step.note}<span class="tl-progress-note">({step.note})</span>{/if}
                 </div>
             {/each}
         </div>
@@ -308,7 +338,7 @@
             onkeydown={(e) => { if (e.key === 'Enter') foldOutcome(); }}>
             {@html icon(d.icon)} {d.label}
             {#if item.kind === 'document'}
-                <button type="button" class="tl-doc-copy" title="Copy the body"
+                <button type="button" class="tl-doc-copy" title={t('task.copyBody')}
                     onclick={(e) => { e.stopPropagation(); onCopyDoc?.(item.text); }}
                 >{@html icon('clipboard')}</button>
             {/if}
@@ -373,7 +403,7 @@
                 <div class="mask-actions">
                     <button class="btn btn-primary btn-sm mask-submit"
                         onclick={() => { if (picked.length) onAnswer?.(picked.join(', ')); }}
-                    >Submit</button>
+                    >{t('common.submit')}</button>
                 </div>
             {/if}
             {#if revising}
@@ -388,7 +418,7 @@
                         bind:value={revisionText}></textarea>
                     <div class="mask-actions">
                         <button type="button" class="btn btn-sm mask-revise-cancel"
-                            onclick={() => { revising = false; revisionText = ''; }}>Cancel</button>
+                            onclick={() => { revising = false; revisionText = ''; }}>{t('common.cancel')}</button>
                         <button type="button" class="btn btn-primary btn-sm mask-revise-submit"
                             onclick={submitRevision}>{t('plan.revise.submit')}</button>
                     </div>

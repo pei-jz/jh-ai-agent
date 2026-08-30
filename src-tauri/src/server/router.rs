@@ -37,6 +37,15 @@ pub struct TaskInfo {
     pub completed_at: Option<String>,
     pub workspace_path: Option<String>,
     pub caller: Option<String>,
+    /// "ask" | "build", from behavior.interaction at creation.
+    ///
+    /// On the LIST response, not only the detail: the Monitor decides how to
+    /// DRAW a run — conversation or timeline — before it has fetched the logs,
+    /// and reading it off the behavior block is not possible because the list
+    /// deliberately carries metadata only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interaction: Option<String>,
+
     /// Which MCP servers this task may use (from behavior.mcp_servers at creation).
     /// Persisted so a CONTINUATION ("add a message to continue the task") keeps
     /// the same tool scope: the task UI sends an explicit [] when the user
@@ -137,6 +146,28 @@ pub struct AgentBehavior {
     /// enabled_tools / extra_instructions before the loop.
     #[serde(default)]
     pub intent: Option<serde_json::Value>,
+
+    /// "ask" | "build" — was this a question or a job?
+    ///
+    /// Orthogonal to `enabled_tools`: `ask` drops plan-first, task_progress,
+    /// delegation and phase routing, and narrows the allowlist to read-only.
+    /// See src/modules/ai/agent/InteractionMode.js and
+    /// docs/design/information-architecture.md §3.
+    ///
+    /// Like `mcp_servers` above, this MUST be a struct field. Serde drops
+    /// unknown keys silently, so a field that only exists on the JS side reaches
+    /// the agent as `undefined` and the run takes the other branch with no error
+    /// anywhere — which is exactly what happened when this was added to the
+    /// payload but not here.
+    #[serde(default)]
+    pub interaction: Option<String>,
+
+    /// Which agent the system prompt describes ("general" | "develop").
+    /// AgentModes sets it per mode; without a field here it was dropped at this
+    /// boundary and every task created from the UI fell back to the tier
+    /// INFERRED from the allowlist. Same failure as `interaction`, older.
+    #[serde(default)]
+    pub persona_tier: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -213,10 +244,37 @@ pub struct TestConnectionResponse {
 pub fn create_router(state: AppState) -> Router {
     let auth_token = state.auth_token.clone();
     
+    // CORS, narrowed from `Any` on all three axes.
+    //
+    // What this server can do is run shell commands and edit files, and
+    // `allow_origin(Any)` meant every page the user visits could talk to it —
+    // the bearer token was the only thing in the way, and it travels in a
+    // WebSocket URL's query string. The callers that legitimately reach this are
+    // the app's own webview and the sibling desktop apps, all of which are on
+    // loopback; nothing is served to a public site.
+    //
+    // Methods and headers are still broad because the API genuinely uses them;
+    // the ORIGIN is the axis that decides who may ask.
+    // Report_20260829.md B6. The Host check in auth.rs is the other half.
     let cors = tower_http::cors::CorsLayer::new()
         .allow_methods(tower_http::cors::Any)
         .allow_headers(tower_http::cors::Any)
-        .allow_origin(tower_http::cors::Any);
+        .allow_origin(tower_http::cors::AllowOrigin::predicate(|origin, _req| {
+            origin
+                .to_str()
+                .ok()
+                .map(|o| {
+                    o.starts_with("http://localhost")
+                        || o.starts_with("http://127.0.0.1")
+                        || o.starts_with("https://localhost")
+                        || o.starts_with("https://127.0.0.1")
+                        // The Tauri webview's own origin, which is not http(s).
+                        || o.starts_with("tauri://")
+                        || o.starts_with("http://tauri.localhost")
+                        || o.starts_with("https://tauri.localhost")
+                })
+                .unwrap_or(false)
+        }));
 
     // API Routes that require Authentication
     let api_routes = Router::new()
@@ -251,7 +309,7 @@ pub fn create_router(state: AppState) -> Router {
 async fn health_check() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "status": "ok",
-        "version": "0.1.0",
+        "version": env!("CARGO_PKG_VERSION"),
         "time": Local::now().to_rfc3339()
     }))
 }
@@ -302,6 +360,7 @@ async fn create_task(
         completed_at: None,
         workspace_path: payload.workspace_path.clone(),
         caller: payload.caller.clone(),
+        interaction: payload.behavior.as_ref().and_then(|b| b.interaction.clone()),
         mcp_servers: payload.behavior.as_ref().and_then(|b| b.mcp_servers.clone()),
         result_summary: None,
         modified_files: vec![],
@@ -352,6 +411,7 @@ fn task_meta(t: &TaskInfo) -> TaskInfo {
         completed_at: t.completed_at.clone(),
         workspace_path: t.workspace_path.clone(),
         caller: t.caller.clone(),
+        interaction: t.interaction.clone(),
         mcp_servers: t.mcp_servers.clone(),
         result_summary: t.result_summary.clone(),
         modified_files: t.modified_files.clone(),
@@ -392,8 +452,8 @@ async fn get_task(
 /// Strip the QUADRATICALLY-growing fields from a log entry for LISTING /
 /// REPLAY payloads: each per-step CHAT entry embeds the FULL conversation
 /// history + system prompt + assembled request of that step, so a task's raw
-/// logs grow O(steps²) — the dominant "selecting a task is slow" cost (see
-/// docs/design/monitor-selection-performance.md). The stripped entry carries
+/// logs grow O(steps²) — the dominant "selecting a task is slow" cost. The
+/// stripped entry carries
 /// `data.request._slim = true` and `data._idx` so the client can fetch the
 /// FULL entry on demand via GET /tasks/:id/logs/:idx (CHAT detail modal).
 pub(crate) fn slim_log_entry(entry: &serde_json::Value, idx: usize) -> serde_json::Value {
@@ -637,7 +697,7 @@ async fn continue_task(
     // agent still sees which requests were already completed, in order.
     // AgentController labels these as "[Completed request]" and pins the NEW
     // message as the current goal.
-    let (workspace, caller, chat_context, mcp_servers) = {
+    let (workspace, caller, chat_context, mcp_servers, interaction) = {
         let tasks = state.tasks.lock().unwrap();
         let task = tasks.get(&id)
             .ok_or((StatusCode::NOT_FOUND, "task not found".to_string()))?;
@@ -687,7 +747,8 @@ async fn continue_task(
         if ctx.is_empty() {
             ctx.push(serde_json::json!({ "role": "user", "content": task.prompt.clone() }));
         }
-        (task.workspace_path.clone(), task.caller.clone(), ctx, task.mcp_servers.clone())
+        (task.workspace_path.clone(), task.caller.clone(), ctx,
+         task.mcp_servers.clone(), task.interaction.clone())
     };
 
     // Re-open the task and create a fresh broadcast channel (the previous one was
@@ -707,16 +768,21 @@ async fn continue_task(
     // dropping it here would re-enable ALL servers for the continuation — and
     // a server that connected mid-task would leak its tools into later turns.
     // (The same [] must reach AgentController's setMcpServerFilter → empty Set.)
-    let behavior = mcp_servers.as_ref().map(|servers| AgentBehavior {
+    // The interaction rides along for the same reason the MCP scope does: a
+    // follow-up to a QUESTION is still a question, and re-opening it as work
+    // would put a plan-first gate in front of the second sentence.
+    let behavior = Some(AgentBehavior {
         mode: None,
         system_prompt: None,
         enabled_tools: None,
         max_iterations: None,
         response_format: None,
         extra_instructions: None,
-        mcp_servers: Some(servers.clone()),
+        mcp_servers: mcp_servers.clone(),
         mcp_context: None,
         intent: None,
+        interaction: interaction.clone(),
+        persona_tier: None,
     });
 
     let run_payload = RunTaskPayload {
@@ -962,6 +1028,7 @@ mod task_meta_tests {
             completed_at: None,
             workspace_path: Some("C:/ws".into()),
             caller: Some("monitor".into()),
+            interaction: None,
             mcp_servers: Some(vec!["backlog".into()]),
             result_summary: Some(serde_json::json!({ "summary": "done" })),
             modified_files: vec![serde_json::json!({ "path": "a.js" })],
@@ -1220,6 +1287,8 @@ mod continue_behavior_tests {
             mcp_servers: Some(servers.clone()),
             mcp_context: None,
             intent: None,
+            interaction: None,
+            persona_tier: None,
         });
         let behavior = behavior.expect("an explicit [] must produce a Some behavior");
         assert_eq!(behavior.mcp_servers, Some(vec![]));
@@ -1241,6 +1310,8 @@ mod continue_behavior_tests {
             mcp_servers: Some(servers.clone()),
             mcp_context: None,
             intent: None,
+            interaction: None,
+            persona_tier: None,
         });
         let json = serde_json::to_value(behavior.unwrap()).unwrap();
         assert_eq!(json["mcp_servers"], serde_json::json!(["backlog"]));
@@ -1261,6 +1332,7 @@ mod continue_behavior_tests {
             completed_at: Some("2026-01-01T00:01:00Z".into()),
             workspace_path: Some("C:/ws".into()),
             caller: Some("NewTask".into()),
+            interaction: None,
             mcp_servers: Some(vec![]),
             result_summary: None,
             modified_files: vec![],
@@ -1303,6 +1375,7 @@ mod continue_behavior_tests {
             completed_at: Some("2026-01-01T00:01:00Z".into()),
             workspace_path: Some("C:/ws".into()),
             caller: Some("NewTask".into()),
+            interaction: None,
             mcp_servers: None,
             result_summary: None,
             modified_files: vec![

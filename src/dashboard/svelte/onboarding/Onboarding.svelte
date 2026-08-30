@@ -183,7 +183,7 @@
                 </ul>
                 <p class="ob-muted">
                     設定は Settings からいつでも変更できます。コード作業をさせるときは、タスク作成時のモードを
-                    <strong>Develop</strong> に切り替えてください。
+                    <strong>{t('mode.develop')}</strong> に切り替えてください。
                 </p>
                 <div class="ob-actions">
                     <button class="btn btn-primary" type="button" onclick={() => onFinish?.()}>

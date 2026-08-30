@@ -13,6 +13,7 @@
   RENDERING moved here.
 -->
 <script>
+    import { t } from '../../../i18n/index.js';
     import { icon } from '../../utils/icons.js';
     import {
         cacheInsideInput, freshInput, costOf, costOfModels, fmtCost, fmtTokens, buildFileTree,
@@ -97,7 +98,7 @@
          repeating them costs height without adding information. What stays is
          what the list cannot show: the stable id, the caller and the elapsed. -->
     <div class="insp-sec">
-        <div class="insp-h">Task</div>
+        <div class="insp-h">{t('common.task')}</div>
         {#each [
             ['ID', shortId],
             ['Caller', task.caller],
@@ -117,7 +118,7 @@
          run. It is reference material, so it belongs here — beside the actions
          that act on it. -->
     <div class="insp-sec">
-        <div class="insp-h">Workspace</div>
+        <div class="insp-h">{t('common.workspace')}</div>
         <div class="insp-ws" title={ws || NO_WS}>
             {@html icon('folder')}
             <span class="insp-ws-path">{ws || NO_WS}</span>
@@ -137,7 +138,7 @@
         <!-- Only worth a row when caching actually did something. -->
         {#if cached}
             <div class="insp-row">
-                <span class="insp-k">Cached</span>
+                <span class="insp-k">{t('task.cached')}</span>
                 {#if cost}<span class="insp-cost">{fmtCost(cost.cache)}</span>{/if}
                 <span class="insp-v">{fmtTokens(cached)}</span>
             </div>
@@ -148,7 +149,7 @@
             <span class="insp-v">{fmtTokens(usage.completion_tokens || 0)}</span>
         </div>
         <div class="insp-row">
-            <span class="insp-k">Total</span>
+            <span class="insp-k">{t('common.total')}</span>
             {#if cost}<span class="insp-cost">{fmtCost(cost.total)}</span>{/if}
             <span class="insp-v">{fmtTokens(usage.total_tokens || 0)}</span>
         </div>
@@ -178,7 +179,7 @@
 
     {#if fileList.length}
         <div class="insp-sec">
-            <div class="insp-h">Changed files <span class="insp-n">{fileList.length}</span></div>
+            <div class="insp-h">{t('task.changedFiles')}<span class="insp-n">{fileList.length}</span></div>
             <div class="insp-tree">
                 <FileTree node={tree} {onOpenFile} />
                 {#if hiddenFiles > 0}
@@ -189,7 +190,7 @@
     {/if}
 
     <div class="insp-sec">
-        <div class="insp-h">Actions</div>
+        <div class="insp-h">{t('common.actions')}</div>
         <!-- Both workspace actions act on a PATH. On an MCP / research task there
              is none, and they were dead controls. -->
         {#if ws}
@@ -213,7 +214,7 @@
          you scroll TO deliberately rather than glance at. -->
     {#if chapterList.length}
         <div class="insp-sec">
-            <div class="insp-h">Chapters</div>
+            <div class="insp-h">{t('task.chapters')}</div>
             {#each chapterList as c (c.id)}
                 <button
                     type="button"

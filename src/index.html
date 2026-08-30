@@ -1,5 +1,7 @@
 <!doctype html>
-<html lang="en">
+<!-- lang="ja": the product's first language. It decides line-breaking rules,
+     which face the browser picks for CJK, and what a screen reader speaks. -->
+<html lang="ja">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -30,13 +32,10 @@
       } catch (e) { document.documentElement.dataset.cursor = 'bamboo'; }
     </script>
 
-    <!-- Google Fonts: Inter -->
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap"
-      rel="stylesheet"
-    />
+    <!-- Inter, bundled. No network at startup: see src/styles/fonts.css for
+         why the Google Fonts <link> that used to be here went, and what the
+         bundle costs (~145KB, latin subset, six weights). -->
+    <link rel="stylesheet" href="./styles/fonts.css" />
 
     <!-- Dashboard Styles -->
     <link rel="stylesheet" href="./styles/dashboard.css" />

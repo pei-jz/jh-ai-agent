@@ -16,6 +16,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, cleanup } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import Inspector from '../Inspector.svelte';
+import { t } from '../../../../i18n/index.js';
 
 afterEach(() => cleanup());
 
@@ -79,9 +80,9 @@ describe('Inspector — token flow', () => {
     });
 
     it('mentions cache ONLY when caching did something', () => {
-        expect(mountInsp({ usage: { prompt_tokens: 100 } }).textContent).not.toContain('Cached');
+        expect(mountInsp({ usage: { prompt_tokens: 100 } }).textContent).not.toContain(t('task.cached'));
         cleanup();
-        expect(mountInsp({ usage: { cache_read_input_tokens: 2100 } }).textContent).toContain('Cached');
+        expect(mountInsp({ usage: { cache_read_input_tokens: 2100 } }).textContent).toContain(t('task.cached'));
     });
 
     it('says the section is per step, and draws the chart, when there IS per-step data', () => {
@@ -122,7 +123,7 @@ describe('Inspector — cost', () => {
 describe('Inspector — workspace', () => {
     it('shows the path; it moved here out of the header', () => {
         const el = mountInsp({ task: { ...task, workspace_path: 'C:/cusor_workspace/jh-ai-agent' } });
-        expect(el.textContent).toContain('Workspace');
+        expect(el.textContent).toContain(t('common.workspace'));
         expect(el.textContent).toContain('C:/cusor_workspace/jh-ai-agent');
     });
 
@@ -217,7 +218,7 @@ describe('Inspector — changed files as a tree', () => {
 
     it('shows no files section when nothing was touched', () => {
         const el = mountInsp({ task: withWs, files: [] });
-        expect(el.textContent).not.toContain('Changed files');
+        expect(el.textContent).not.toContain(t('task.changedFiles'));
     });
 
     it('a click hands the REAL path to the callback', () => {
@@ -248,9 +249,9 @@ describe('Inspector — chapters', () => {
     });
 
     it('stays silent when there is nothing to navigate — one chapter is not a TOC', () => {
-        expect(mountInsp({ chapters: [chapters[0]] }).textContent).not.toContain('Chapters');
+        expect(mountInsp({ chapters: [chapters[0]] }).textContent).not.toContain(t('task.chapters'));
         cleanup();
-        expect(mountInsp({ chapters: [] }).textContent).not.toContain('Chapters');
+        expect(mountInsp({ chapters: [] }).textContent).not.toContain(t('task.chapters'));
     });
 
     it('a click reports the chapter id', () => {

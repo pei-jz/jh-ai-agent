@@ -60,35 +60,35 @@ export function ensureChatMarkdownStyles() {
         .chat-md li { margin-bottom: 4px; }
         .chat-md blockquote {
             border-left: 3px solid var(--accent);
-            background: var(--bg-tertiary);
+            background: var(--surface-sunken);
             padding: 6px 12px; margin: 8px 0;
-            color: var(--text-secondary);
-            border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+            color: var(--ink-soft);
+            border-radius: 0 var(--r-2) var(--r-2) 0;
         }
         
         /* Tables */
         .chat-md table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 13px; }
-        .chat-md th, .chat-md td { border: 1px solid var(--border); padding: 8px 10px; text-align: left; }
-        .chat-md th { background: var(--bg-tertiary); font-weight: 600; color: var(--accent); }
-        .chat-md tr:nth-child(even) { background: var(--bg-tertiary); }
+        .chat-md th, .chat-md td { border: 1px solid var(--line); padding: 8px 10px; text-align: left; }
+        .chat-md th { background: var(--surface-sunken); font-weight: 600; color: var(--accent); }
+        .chat-md tr:nth-child(even) { background: var(--surface-sunken); }
 
         /* Code Blocks */
         .chat-md .inline-code {
             font-family: var(--font-mono); font-size: 12px;
-            background: var(--bg-tertiary); padding: 2px 5px;
-            border-radius: 4px; color: var(--accent);
+            background: var(--surface-sunken); padding: 2px 5px;
+            border-radius: var(--r-2); color: var(--accent);
         }
         .chat-md .code-block-wrapper {
-            margin: 10px 0; border-radius: 6px; overflow: hidden; border: 1px solid var(--border);
+            margin: 10px 0; border-radius: var(--r-2); overflow: hidden; border: 1px solid var(--line);
         }
         .chat-md .code-block-header {
-            background: var(--bg-input); padding: 6px 12px;
+            background: var(--surface-input); padding: 6px 12px;
             display: flex; justify-content: space-between; align-items: center;
-            border-bottom: 1px solid var(--border);
+            border-bottom: 1px solid var(--line);
         }
         .chat-md .code-block-lang {
             font-size: 11px; font-family: var(--font-mono);
-            color: var(--text-secondary); text-transform: uppercase;
+            color: var(--ink-soft); text-transform: uppercase;
         }
         .chat-md .btn-copy-code {
             background: transparent; border: none; color: var(--accent);
@@ -96,35 +96,35 @@ export function ensureChatMarkdownStyles() {
         }
         .chat-md .btn-copy-code:hover { color: var(--accent-hover); }
         .chat-md .code-block-wrapper pre {
-            margin: 0; padding: 12px; background: var(--bg-primary); overflow-x: auto;
+            margin: 0; padding: 12px; background: var(--surface-app); overflow-x: auto;
         }
         .chat-md .code-block-wrapper code {
             /* Theme variable, NOT a hardcoded light gray — #e6edf3 was invisible
                on the light theme's near-white code background. */
-            font-family: var(--font-mono); font-size: 12.5px; color: var(--text-primary); line-height: 1.5;
+            font-family: var(--font-mono); font-size: 12.5px; color: var(--ink); line-height: 1.5;
         }
 
         /* Thought Process */
         .chat-md .thought-process-block {
-            margin: 8px 0; border-radius: 6px; border: 1px solid var(--border);
-            background: var(--bg-secondary); overflow: hidden;
+            margin: 8px 0; border-radius: var(--r-2); border: 1px solid var(--line);
+            background: var(--surface-panel); overflow: hidden;
         }
         .chat-md .thought-process-block > summary {
             cursor: pointer; padding: 8px 12px; font-size: 12px; font-weight: 500;
-            color: var(--text-secondary); background: var(--bg-tertiary);
+            color: var(--ink-soft); background: var(--surface-sunken);
             user-select: none;
         }
         .chat-md .thought-process-content {
-            padding: 12px; font-size: 12.5px; color: var(--text-secondary);
-            border-top: 1px solid var(--border);
+            padding: 12px; font-size: 12.5px; color: var(--ink-soft);
+            border-top: 1px solid var(--line);
         }
         .chat-md .thought-process-streaming {
             animation: pulse-border 2s infinite;
         }
         @keyframes pulse-border {
-            0% { border-color: var(--border); }
+            0% { border-color: var(--line); }
             50% { border-color: var(--accent); }
-            100% { border-color: var(--border); }
+            100% { border-color: var(--line); }
         }
     `;
     document.head.appendChild(style);

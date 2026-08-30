@@ -227,7 +227,7 @@ export function fmtTool(log) {
             toolTitle = `Ran Command: <code>${escapeHtml(cmd)}</code>`;
             toolClass = 'mlog-cmd log-tool';
             if (resultStr) {
-                customContentHtml = `<pre style="margin:0;font-family:var(--font-mono);font-size:10.5px;white-space:pre;overflow-x:auto;color:var(--text-primary);background:var(--bg-input);border-color:var(--border);">${escapeHtml(resultStr)}</pre>`;
+                customContentHtml = `<pre style="margin:0;font-family:var(--font-mono);font-size:10.5px;white-space:pre;overflow-x:auto;color:var(--ink);background:var(--surface-input);border-color:var(--line);">${escapeHtml(resultStr)}</pre>`;
             }
         } else if (name === 'list_files' || name === 'list_dir') {
             toolIcon = '📁';
@@ -273,7 +273,7 @@ export function fmtTool(log) {
                     <div class="mlog-tool-row" data-uid="${uid}" style="display:flex;align-items:center;width:100%;">
                         <span class="mlog-tool-name" style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:inline-block;">${toolTitle}</span>
                         ${resultStr ? `
-                            <span class="mlog-tool-result-preview" style="max-width:250px;margin-left:8px;font-size:10px;color:var(--text-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:0;">${escapeHtml(resultSnippet)}</span>
+                            <span class="mlog-tool-result-preview" style="max-width:250px;margin-left:8px;font-size:10px;color:var(--ink-faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:0;">${escapeHtml(resultSnippet)}</span>
                             <button class="mlog-expand-btn" data-uid="${uid}" data-target="tool-result-${uid}" style="margin-left:6px;flex-shrink:0;">▶</button>
                         ` : ''}
                     </div>
@@ -335,7 +335,7 @@ export function fmtStatus(log) {
         if (txt.includes('failed') || txt.includes('Error') || txt.includes('error')) {
             return `<div class="mlog mlog-error log-status"><span class="mlog-icon">⚡</span><span class="mlog-body" style="color:var(--error)">${escapeHtml(txt)}</span></div>`;
         }
-        return `<div class="mlog mlog-status log-status"><span class="mlog-icon" style="opacity:0.5">·</span><span class="mlog-body" style="color:var(--text-tertiary)">${escapeHtml(txt)}</span></div>`;
+        return `<div class="mlog mlog-status log-status"><span class="mlog-icon" style="opacity:0.5">·</span><span class="mlog-body" style="color:var(--ink-faint)">${escapeHtml(txt)}</span></div>`;
     }
 
     /** A "log" entry is CHAT-like (→ step-header button) unless it's a typed card. */
@@ -360,7 +360,7 @@ export function fmtEfficiency(d) {
         if (r.re_read_chars_approx) chips.push(`🗑 ~${k(r.re_read_chars_approx)} wasted chars`);
         if (r.compactions) chips.push(`🗜 ${r.compactions}× compact · -${k(r.compaction_chars_saved)} chars`);
         const chipsHtml = chips.map(c =>
-            `<span style="display:inline-block;padding:2px 8px;border-radius:10px;background:var(--bg-tertiary);font-size:11px">${escapeHtml(c)}</span>`
+            `<span style="display:inline-block;padding:2px 8px;border-radius:var(--r-3);background:var(--surface-sunken);font-size:11px">${escapeHtml(c)}</span>`
         ).join(' ');
         const top = (r.top_re_read_files || []);
         const topHtml = top.length
@@ -370,7 +370,7 @@ export function fmtEfficiency(d) {
               + `</table></details>`
             : '';
         const hintHtml = r.hint
-            ? `<div style="margin-top:6px;font-size:11px;color:${warn ? 'var(--error)' : 'var(--text-tertiary)'}">${escapeHtml(r.hint)}</div>`
+            ? `<div style="margin-top:6px;font-size:11px;color:${warn ? 'var(--error)' : 'var(--ink-faint)'}">${escapeHtml(r.hint)}</div>`
             : '';
         return `<div class="mlog mlog-status" style="border-left:3px solid ${warn ? 'var(--error)' : 'var(--accent)'}">
             <span class="mlog-icon">📊</span>
@@ -440,7 +440,7 @@ export function fmtTelemetry(d) {
                     <span class="${isErr ? 'mlog-tele-status-err' : 'mlog-tele-status-ok'}">${d.status || (isErr ? 'ERR' : 'OK')}</span>
                     <span class="mlog-tele-dur">${dur}</span>
                     ${usageTxt ? `<span class="mlog-tele-usage">${escapeHtml(usageTxt)}</span>` : ''}
-                    <span style="margin-left:auto;font-size:9px;color:var(--text-tertiary)">▶</span>
+                    <span style="margin-left:auto;font-size:9px;color:var(--ink-faint)">▶</span>
                 </div>
                 <div class="mlog-tele-body" id="tele-body-${uid}">
                     <div class="mlog-tele-tabs">

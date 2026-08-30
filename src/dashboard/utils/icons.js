@@ -55,6 +55,13 @@ const PATHS = {
     plus: `<path d="M10 4v12M4 10h12"/>`,
     // Minus — minimise / collapse
     minus: `<path d="M4 10h12"/>`,
+    // Palette — the theme picker. A dished board with three wells and a thumb
+    // hole. Three elements, 20px grid, like the rest of the set.
+    palette: `<path d="M10 2.6c4.1 0 7.4 2.9 7.4 6.5 0 2.1-1.7 3.3-3.4 3.3h-1.4c-1 0-1.8.8-1.8 1.8 0 .5.2.9.5 1.2.3.4.5.8.5 1.3 0 1-.8 1.7-1.8 1.7-4.1 0-7.4-3.3-7.4-7.9S5.9 2.6 10 2.6z"/><circle cx="7.2" cy="8" r="1.05" fill="currentColor" stroke="none"/><circle cx="11.2" cy="6.4" r="1.05" fill="currentColor" stroke="none"/>`,
+    // Pin / unpin — whether the request holds the top of the reading column.
+    // A drawing pin seen from the side: head, shaft, point. Three elements.
+    pin: `<path d="M7.2 2.8h5.6l-1 3.4 2.6 2.6-4 .6-2.4 3.4-.6-3.8-3.8-.6 3.4-2.4z"/><path d="M9.4 12.4L8.2 17.2"/>`,
+    'pin-off': `<path d="M7.2 2.8h5.6l-1 3.4 2.6 2.6-4 .6-2.4 3.4-.6-3.8-3.8-.6 3.4-2.4z" opacity=".45"/><path d="M9.4 12.4L8.2 17.2" opacity=".45"/><path d="M3.2 3.2l13.6 13.6"/>`,
     // Plug — generic connection / API
     plug: `<path d="M7 3v4M13 3v4M5.5 7h9v3a4.5 4.5 0 01-9 0z"/><path d="M10 14.5V17"/>`,
     // Sparkle — Gemini / "ask AI"
