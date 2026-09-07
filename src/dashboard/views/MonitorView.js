@@ -918,7 +918,22 @@ export class MonitorView {
         this._activeStepChatUid = null;
         if (!window.apiClient) return;
 
-        const wsUrl = `ws://localhost:${window.apiClient.port}/ws/tasks/${taskId}?token=${window.apiClient.token}`;
+        // The URL needs a port and a token, and having the client does not mean
+        // having either — it is constructed at startup and learns its port when
+        // the server reports it. Interpolating an absent one produced
+        // `ws://localhost:undefined/...`, which throws a DOMException out of an
+        // un-awaited caller: no connection, no message, nothing but a console
+        // line. Failing the way a dropped socket already fails at least turns
+        // the steer box off, which is the visible sign that this task is not
+        // listening.
+        const { port, token } = window.apiClient;
+        if (!port || !token) {
+            console.warn(`connectWebSocket: no ${!port ? 'port' : 'token'} yet — not connecting to ${taskId}`);
+            this._setSteerEnabled(false);
+            return;
+        }
+
+        const wsUrl = `ws://localhost:${port}/ws/tasks/${taskId}?token=${token}`;
         this.socket = new WebSocket(wsUrl);
 
         const disableSteering = () => this._setSteerEnabled(false);
