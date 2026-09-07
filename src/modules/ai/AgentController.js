@@ -135,6 +135,13 @@ export class AgentController {
     async run(prompt, workspacePath, onUpdate, onAgentStatus, onConfirm, clientContext = null, chatContext = [], onLog = null, abortSignal = null, kisContext = '', images = []) {
         const prep = await this._prepareRun({
             prompt, workspacePath, onAgentStatus, chatContext, kisContext, images,
+            // The sub-agent runner is a CLOSURE built in there, and it captures
+            // these three. They stayed behind in run() when _prepareRun was
+            // split out, so the closure referenced three names that did not
+            // exist in its scope — and, being a closure, it threw only when
+            // something actually called it. Every run_subtask since failed with
+            // `onConfirm is not defined`.
+            onConfirm, onLog, abortSignal,
         });
         const st = prep.state;
         const safety = prep.safety;
@@ -1624,7 +1631,8 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
      *
      * @returns {Promise<object>} the loop's starting context
      */
-    async _prepareRun({ prompt, workspacePath, onAgentStatus, chatContext, kisContext, images }) {
+    async _prepareRun({ prompt, workspacePath, onAgentStatus, chatContext, kisContext, images,
+                        onConfirm = null, onLog = null, abortSignal = null }) {
         chatContext = chatContext || [];
         images = images || [];
         // Resolved FIRST: the plan-first gate, the tool allowlist, the phase

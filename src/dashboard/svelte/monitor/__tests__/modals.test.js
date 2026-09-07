@@ -6,6 +6,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, fireEvent, waitFor } from '@testing-library/svelte';
 
+import { t } from '../../../../i18n/index.js';
 import ApiCallModal from '../ApiCallModal.svelte';
 import AllowlistModal from '../AllowlistModal.svelte';
 import ImageZoom from '../ImageZoom.svelte';
@@ -192,7 +193,7 @@ describe('AllowlistModal', () => {
 
     // The lists are not the whole story, and saying so is the point of the note.
     it('states that dangerous commands are always confirmed', () => {
-        expect(mountModal().container.textContent).toMatch(/always confirmed/i);
+        expect(mountModal().container.textContent).toContain(t('allow.dangerNote'));
     });
 
     it('closes from ✖ and from the backdrop', async () => {

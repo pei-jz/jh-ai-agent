@@ -33,6 +33,27 @@ fn hex_encode(bytes: &[u8]) -> String {
 /// and therefore into logs — so the Host check is the layer that does not depend
 /// on the token having stayed secret.
 ///
+
+/// The Host check on its own, for the routes the middleware does not cover.
+///
+/// `auth_middleware` is layered only on `/api`, so the two WebSocket routes —
+/// `/ws/tasks/:id` and `/mcp/ws` — validated the token and nothing else. That
+/// is backwards relative to why this check exists: the reasoning above says the
+/// Host check is the layer that does not depend on the token having stayed
+/// secret, precisely BECAUSE the token travels in a WebSocket URL's query
+/// string and therefore into logs. The route that leaks the token was the one
+/// route with no second layer.
+pub fn request_host_is_loopback<B>(request: &axum::http::Request<B>) -> bool {
+    request
+        .headers()
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(host_is_loopback)
+        // HTTP/2 sends :authority instead of Host; axum surfaces it on the URI.
+        .or_else(|| request.uri().host().map(host_is_loopback))
+        .unwrap_or(false)
+}
+
 /// Report_20260829.md B6.
 fn host_is_loopback(host: &str) -> bool {
     // Strip the port; IPv6 literals are bracketed.
@@ -189,4 +210,31 @@ mod tests {
     fn hex_encode_pads_each_byte() {
         assert_eq!(hex_encode(&[0x00, 0x0f, 0xff]), "000fff");
     }
+
+    // The WebSocket routes are not behind auth_middleware, so they call
+    // `request_host_is_loopback` directly. This pins the helper the same way
+    // the middleware's own path is pinned.
+    #[test]
+    fn the_standalone_host_check_reads_the_header_then_the_uri() {
+        use axum::http::Request;
+
+        let with_host = |h: &str| {
+            Request::builder().uri("/ws/tasks/1?token=x")
+                .header(header::HOST, h).body(()).unwrap()
+        };
+        assert!(request_host_is_loopback(&with_host("127.0.0.1:1425")));
+        assert!(request_host_is_loopback(&with_host("localhost:1425")));
+        assert!(!request_host_is_loopback(&with_host("evil.example")));
+        assert!(!request_host_is_loopback(&with_host("evil.example:1425")));
+
+        // HTTP/2 sends :authority; axum surfaces it on the URI.
+        let h2 = Request::builder()
+            .uri("http://127.0.0.1:1425/ws/tasks/1").body(()).unwrap();
+        assert!(request_host_is_loopback(&h2));
+
+        // No Host at all is not a pass.
+        let bare = Request::builder().uri("/ws/tasks/1").body(()).unwrap();
+        assert!(!request_host_is_loopback(&bare));
+    }
+
 }

@@ -153,6 +153,30 @@ const LEGACY_MODE_ALIASES = {
 
 // GENERAL is the default. The product is a general-purpose agent; making the
 // code-focused mode the default told every non-code task it was in the wrong place.
+/**
+ * Mode id → the SVG icon that stands for it (icons.js names).
+ *
+ * Lives beside `modeName` because they answer one question between them: how
+ * is this mode shown. It existed twice — in ModeDropdown and in
+ * newTaskRequest — with identical contents, which is the state right before
+ * someone adds a mode to one of them.
+ */
+export const MODE_ICON = { develop: 'code', research: 'search', automation: 'gear' };
+
+/**
+ * A mode's name without the leading emoji its `label` carries.
+ *
+ * The emoji is a decoration for surfaces that can draw one; ModeDropdown
+ * already stripped it and rendered an SVG icon in its place. Every OTHER
+ * surface is a native <select>, which cannot draw an SVG and so showed the raw
+ * emoji instead — the same list looking like two different products depending
+ * on which screen it was on. Exported so there is one answer to "what is this
+ * mode called", rather than a regex copied per view.
+ */
+export function modeName(mode) {
+    return String(mode?.label || mode?.id || '').replace(/^\S+\s+/, '');
+}
+
 export const DEFAULT_MODE_ID = 'general';
 
 /** Resolve a (possibly legacy) mode id to a current one. */

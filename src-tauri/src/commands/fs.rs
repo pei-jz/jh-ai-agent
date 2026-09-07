@@ -167,6 +167,93 @@ pub async fn read_dir(path: String) -> Result<Vec<CustomDirEntry>, String> {
     Ok(list)
 }
 
+
+/// One file, as a folder watcher needs to see it.
+#[derive(serde::Serialize)]
+pub struct ScannedFile {
+    pub path: String,
+    /// Milliseconds since the epoch. 0 when the platform will not say.
+    pub modified: u64,
+    pub size: u64,
+}
+
+/// Walk `path` and report each file with its modification time.
+///
+/// `read_dir` returns names and sizes but not mtimes, and a folder watcher has
+/// nothing to compare without them — size alone calls an edited file unchanged
+/// whenever the length happens to match.
+///
+/// `max_entries` is not optional in spirit: this runs on a timer, unattended,
+/// possibly over a directory someone points at C:\. Stopping at a limit and
+/// SAYING so beats a poll that takes a minute and blocks the next one. The
+/// truncation is reported rather than silently returning a short list, because
+/// a watcher quietly seeing half a directory is a watcher that misses things
+/// for reasons nobody can find.
+#[tauri::command]
+pub async fn scan_dir_mtimes(
+    path: String,
+    recursive: Option<bool>,
+    max_entries: Option<usize>,
+) -> Result<serde_json::Value, String> {
+    let root = std::path::PathBuf::from(&path);
+    if !root.is_dir() {
+        return Err(format!("not a directory: {}", path));
+    }
+    let cap = max_entries.unwrap_or(5000).max(1);
+    let recursive = recursive.unwrap_or(true);
+
+    let mut out: Vec<ScannedFile> = Vec::new();
+    let mut truncated = false;
+    let mut stack = vec![root];
+
+    while let Some(dir) = stack.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(e) => e,
+            // An unreadable subdirectory is not a reason to fail the whole
+            // scan; the rest of the tree is still worth watching.
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            if out.len() >= cap {
+                truncated = true;
+                break;
+            }
+            let meta = match entry.metadata() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if meta.is_dir() {
+                // Skip the directories nobody means to watch: they change
+                // constantly and would drown every real edit.
+                let name = entry.file_name().to_string_lossy().to_string();
+                if matches!(name.as_str(), ".git" | "node_modules" | "target" | "dist" | ".venv" | "__pycache__") {
+                    continue;
+                }
+                if recursive {
+                    stack.push(entry.path());
+                }
+                continue;
+            }
+            let modified = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            out.push(ScannedFile {
+                path: entry.path().to_string_lossy().to_string(),
+                modified,
+                size: meta.len(),
+            });
+        }
+        if truncated {
+            break;
+        }
+    }
+
+    Ok(serde_json::json!({ "files": out, "truncated": truncated }))
+}
+
 #[tauri::command]
 pub async fn create_dir(path: String, guard: tauri::State<'_, PathGuard>) -> Result<(), String> {
     guard.ensure_allowed(&path)?;

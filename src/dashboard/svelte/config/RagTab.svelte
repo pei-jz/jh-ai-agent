@@ -43,7 +43,7 @@
 <div class="card settings-card cfg-tab-card">
     <div class="card-header cfg-tab-head-plain">
         <h3>{@html icon('search', 15)} RAG Indexing</h3>
-        <p class="subtitle">Index your workspace for semantic code search (Auto-RAG)</p>
+        <p class="subtitle">{t('rag.subtitle')}</p>
     </div>
     <div class="provider-card-fields">
         <div class="input-group">
@@ -61,7 +61,7 @@
             <span class="input-label">{t('rag.dirs')}</span>
             <div id="rag-dir-list" class="cfg-rag-dirs">
                 {#if !dirs.length}
-                    <div class="cfg-rag-hint">Enter a workspace path and click "Load Directories".</div>
+                    <div class="cfg-rag-hint">{t('rag.enterPath')}</div>
                 {:else}
                     {#each dirs as dir (dir)}
                         {@const isExcluded = excluded.has(dir)}
@@ -97,9 +97,8 @@
 
         <div class="cfg-rag-start">
             <!-- Not implemented. Saying so beats a button that does nothing. -->
-            <button class="btn btn-primary" id="btn-rag-start" disabled>🚧 Coming soon</button>
-            <span class="cfg-rag-hint">Semantic indexing is not available yet — this feature is
-                under development.</span>
+            <button class="btn btn-primary" id="btn-rag-start" disabled>{t('rag.comingSoon')}</button>
+            <span class="cfg-rag-hint">{t('rag.notAvailable')}</span>
         </div>
     </div>
 </div>

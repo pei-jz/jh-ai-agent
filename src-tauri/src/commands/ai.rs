@@ -321,7 +321,21 @@ pub async fn llm_chat_native<R: Runtime>(
             h.insert("Content-Type", "application/json".parse().unwrap());
             (url, h, key)
         }
-        _ => return Err(format!("Unsupported provider: {}", resolved_provider)),
+        // A provider name we do not implement — OR, far more often, an instance
+        // id that survived the connection it named. `resolved_provider` still
+        // holding an `inst_...` means the lookup above found nothing, and
+        // "Unsupported provider: inst_1788132762016" tells nobody that. Say which
+        // of the two it is, and where the missing thing is configured.
+        _ => {
+            return Err(if resolved_provider.starts_with("inst_") {
+                format!(
+                    "接続 {} が設定に見つかりません（削除されたか、設定が失われています）。リクエストは送信していません。設定 → LLM接続 で接続を追加し直し、モデルルーティングの Fast/Deep もこの接続を指すように選び直してください。",
+                    resolved_provider
+                )
+            } else {
+                format!("Unsupported provider: {}", resolved_provider)
+            });
+        }
     };
 
     // Construct body (Provider specific)

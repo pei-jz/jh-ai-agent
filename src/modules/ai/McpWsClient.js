@@ -125,6 +125,24 @@ export class McpWsClient {
                 }
             } else if (msg.method === 'notifications/message') {
                 if (this.onLog) this.onLog(`[${this.name}] ${msg.params?.text}`);
+            } else if (typeof msg.method === 'string' && msg.method.startsWith('notifications/')) {
+                // Everything a server pushes that is NOT a log line is an
+                // EVENT. This branch used to end at `notifications/message`,
+                // so a server watching something and announcing it had nowhere
+                // to land — the client read the frame and dropped it.
+                //
+                // Autonomy stage 2 turns those into trigger events. The client
+                // stays dumb about what they mean: it hands them on, and
+                // TriggerEngine decides whether any of it starts a task.
+                // docs/design/autonomy-triggers.md
+                if (this.onNotification) {
+                    this.onNotification({
+                        source: 'mcp',
+                        server: this.name,
+                        event: msg.method.slice('notifications/'.length),
+                        payload: msg.params ?? {},
+                    });
+                }
             }
         } catch (_) {
             // Ignore malformed lines

@@ -7,6 +7,8 @@
 // one thing mount.svelte.js says not to do; it only held because the component
 // happened to leave that div empty when the prop was falsy.
 
+import { t } from '../../../i18n/index.js';
+
 /** Bytes as B / KB / MB. */
 export function fmtBytes(b) {
     const n = Number(b) || 0;
@@ -47,14 +49,14 @@ export function storageUsageHtml(server = {}, storage = globalThis.localStorage)
     const scheds = entrySize('jh_schedules', storage);
 
     return `
-        <div class="cfg-storage-h">Local (localStorage)</div>
-        · Chat history (direct_ai_sessions): ${fmtBytes(chat)}<br>
-        · Old API logs (jh_api_logs): ${fmtBytes(apiLogs)} ${apiLogs > 0 ? '<span class="cfg-muted">(retired · safe to delete)</span>' : ''}<br>
-        · Schedules (jh_schedules): ${fmtBytes(scheds)}<br>
-        · localStorage total: <strong>${fmtBytes(totalSize(storage))}</strong>
-        <div class="cfg-storage-h">Server (task history)</div>
+        <div class="cfg-storage-h">${t('storage.local')}</div>
+        · ${t('storage.chat')} (direct_ai_sessions): ${fmtBytes(chat)}<br>
+        · ${t('storage.apiLogs')} (jh_api_logs): ${fmtBytes(apiLogs)} ${apiLogs > 0 ? `<span class="cfg-muted">${t('storage.retired')}</span>` : ''}<br>
+        · ${t('storage.schedules')} (jh_schedules): ${fmtBytes(scheds)}<br>
+        · ${t('storage.localTotal')}: <strong>${fmtBytes(totalSize(storage))}</strong>
+        <div class="cfg-storage-h">${t('storage.server')}</div>
         · task_history.json: ${fmtBytes(server.task_history_bytes)}<br>
-        · task_logs/ (${server.task_logs_count || 0} files): ${fmtBytes(server.task_logs_bytes)}<br>
-        · Communication log ai_communication.log: ${fmtBytes(server.comm_log_bytes)} ${server.log_dir ? '' : '<span class="cfg-muted">(not set)</span>'}
+        · task_logs/ (${server.task_logs_count || 0} ${t('storage.taskLogs')}): ${fmtBytes(server.task_logs_bytes)}<br>
+        · ${t('storage.commLog')} ai_communication.log: ${fmtBytes(server.comm_log_bytes)} ${server.log_dir ? '' : `<span class="cfg-muted">${t('storage.notSet')}</span>`}
     `;
 }

@@ -3,7 +3,7 @@
 // The unit tests cover the signature rules and the cost arithmetic; this one
 // answers the only question they cannot: does a real run actually produce a
 // trace, and does recording change what the agent does? (It must not — Step 0
-// of docs/design/agent-memory-learning.plan.md ships behaviour-neutral.)
+// of docs/scratch/agent-memory-learning.plan.md ships behaviour-neutral.)
 
 import { describe, it, expect } from 'vitest';
 import { makeHarness, toolStep, finishStep } from './agentHarness.js';

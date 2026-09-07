@@ -94,6 +94,27 @@ const BASE_STYLES = `
                     display: flex;
                     align-items: center;
                     justify-content: space-between;
+                    gap: 8px;
+                }
+                /* Home + New. Home only appears with a task open — with nothing
+                   selected you are already on the start screen. */
+                .mpl-actions {
+                    display: flex;
+                    align-items: center;
+                    gap: 6px;
+                    flex: none;
+                }
+                /* Smaller than New: New starts something, Home just goes back —
+                   and the header row is 8px of padding, so weight here crowds
+                   the count beside it. */
+                .mpl-home {
+                    text-transform: none;
+                    letter-spacing: 0;
+                    white-space: nowrap;
+                    padding: 3px 8px;
+                    font-size: var(--fs-xs);
+                    font-weight: 600;
+                    gap: 4px;
                 }
                 /* ── Composer (svelte/monitor/Composer.svelte) ──────────────
                    The prompt box at the top of the list. Sized to sit ABOVE the
@@ -122,8 +143,15 @@ const BASE_STYLES = `
                 .mcomp-ta-wrap { position: relative; }
                 .mcomp-ta {
                     width: 100%;
-                    max-height: 180px;
-                    resize: none;
+                    /* Matches MAX_H in Composer.svelte: past this it scrolls
+                       rather than growing without end. A dragged box may exceed
+                       it — that is the user's call, not the auto-grow's. */
+                    max-height: 420px;
+                    /* Draggable in both directions. The start screen is mostly
+                       empty space and a long request is easier to check in a
+                       box the shape of what you are writing. */
+                    resize: both;
+                    min-width: 240px;
                     font-family: inherit;
                     font-size: var(--fs-md);
                     line-height: 1.55;
@@ -179,8 +207,24 @@ const BASE_STYLES = `
                     background: var(--accent);
                     border: 1px solid var(--accent);
                     border-radius: var(--r-2);
-                    padding: 0 16px;
+                    padding: 0 12px;
                     cursor: pointer;
+                    display: inline-flex;
+                    align-items: center;
+                    gap: 8px;
+                }
+                /* The key that does the same thing, on the thing it does.
+                   A shortcut is only useful if you find out it exists. */
+                .mcomp-kbd {
+                    font-family: var(--font-mono);
+                    font-size: 10px;
+                    font-weight: 600;
+                    letter-spacing: 0;
+                    padding: 1px 5px;
+                    border-radius: var(--r-1);
+                    background: color-mix(in srgb, var(--on-accent) 18%, transparent);
+                    border: 1px solid color-mix(in srgb, var(--on-accent) 28%, transparent);
+                    opacity: 0.85;
                 }
                 .mcomp-send:hover:not(:disabled) { background: var(--accent-hover); }
                 .mcomp-send:disabled { opacity: 0.5; cursor: default; }
@@ -1392,6 +1436,10 @@ const BASE_STYLES = `
                 .hub-intent { border-style: solid; }
                 .hub-res { border-style: dashed; }
 
-            `;
+            
+    /* An approval nobody can answer any more. Stated, not hidden: the request
+       really was made, and the person is owed the reason it is now inert. */
+    .mconfirm-stale { color: var(--ink-faint); font-size: var(--fs-sm); }
+`;
 
 export const MONITOR_STYLES = BASE_STYLES + TIMELINE_STYLES;

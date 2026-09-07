@@ -19,7 +19,7 @@
 //
 // It is still injected text, which is why it ships behind a flag: the v2
 // injection experiment is in flight, and a fourth injection would make its
-// result unattributable (docs/design/agent-memory-learning.plan.md §4.4.3).
+// result unattributable (docs/scratch/agent-memory-learning.plan.md §4.4.3).
 //
 // PURE — no I/O.
 

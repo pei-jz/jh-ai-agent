@@ -2,7 +2,8 @@ import { describe, it, expect } from 'vitest';
 import {
     safeParseJSON, extractToolCall, extractAllPossibleToolCalls, extractInvokeToolCalls,
     extractFunctionTagToolCalls, normalizeToolCallEntry,
-    extractThoughtFromMalformedText, cleanFinalResponse, stripReActPreamble, stripOuterCodeFence
+    extractThoughtFromMalformedText, cleanFinalResponse, stripReActPreamble, stripOuterCodeFence,
+    looksTruncated, ARGS_TRUNCATED, ARGS_UNPARSEABLE
 } from '../ResponseParser.js';
 
 describe('extractInvokeToolCalls', () => {
@@ -348,3 +349,100 @@ describe('stripReActPreamble', () => {
         expect(stripReActPreamble(null)).toBe('');
     });
 });
+
+// ── A tool call that did not arrive whole ──────────────────────────────────
+//
+// A call carrying a whole file can exceed the model's output limit, and the
+// reply stops mid-JSON. jsonrepair closes the brackets, and what came out
+// looked like a complete call: write_file with `content` ending mid-line wrote
+// a truncated script, and a call cut off before its `path` arrived as {} and
+// was reported as "missing required 'path'". Neither error names the cause, and
+// one run spent six steps shrinking the wrong thing before abandoning the tool
+// and installing openpyxl to do the job in Python.
+describe('truncated tool arguments', () => {
+    it('recognises JSON that stops mid-string', () => {
+        expect(looksTruncated('{"path":"a.py","content":"def main():')).toBe(true);
+    });
+
+    it('recognises JSON that stops between keys', () => {
+        expect(looksTruncated('{"path":"a.py","content":"ok",')).toBe(true);
+        expect(looksTruncated('{"sheets":[{"rows":[[1,2]')).toBe(true);
+    });
+
+    it('does not cry wolf on complete JSON', () => {
+        expect(looksTruncated('{"path":"a.py","content":"ok"}')).toBe(false);
+        expect(looksTruncated('{"a":[1,2,{"b":"}"}]}')).toBe(false);
+        expect(looksTruncated('{}')).toBe(false);
+        // Braces and brackets INSIDE strings must not count.
+        expect(looksTruncated('{"c":"if (x) { y[0] = 1; }"}')).toBe(false);
+        // An escaped quote does not end the string.
+        expect(looksTruncated(JSON.stringify({ c: 'say "hi"' }))).toBe(false);
+        // A value ending in a backslash is complete, not an open escape.
+        expect(looksTruncated(JSON.stringify({ c: 'C:\\' }))).toBe(false);
+    });
+
+    it('marks a truncated call instead of repairing it into a plausible one', () => {
+        const call = normalizeToolCallEntry({
+            function: { name: 'write_file', arguments: '{"path":"a.py","content":"def main():' },
+        });
+        expect(call.name).toBe('write_file');
+        expect(call.args[ARGS_TRUNCATED]).toBeTruthy();
+        // The half-written content must NOT reach the tool.
+        expect(call.args.content).toBeUndefined();
+        expect(call.args.path).toBeUndefined();
+    });
+
+    it('leaves a complete call exactly as it was', () => {
+        const call = normalizeToolCallEntry({
+            function: { name: 'write_file', arguments: '{"path":"a.py","content":"ok"}' },
+        });
+        expect(call.args).toEqual({ path: 'a.py', content: 'ok' });
+        expect(call.args[ARGS_TRUNCATED]).toBeUndefined();
+    });
+
+    // jsonrepair rescues most near-JSON, so the unparseable marker is a last
+    // resort rather than the common path. What matters either way: the call
+    // never reaches a tool as a silently emptied {}.
+    it('never turns unreadable arguments into an empty call', () => {
+        const call = normalizeToolCallEntry({
+            function: { name: 'read_file', arguments: 'path = a.py' },
+        });
+        expect(call.name).toBe('read_file');
+        expect(typeof call.args).toBe('object');
+    });
+});
+
+// The XML form of the same failure.
+//
+// A model that answers with <function=…><parameter=…> blocks can be cut off
+// inside one, and the parameter regex needs a CLOSING tag to match — so the
+// parameter was not "broken", it was absent. write_xlsx arrived with `path` and
+// `preset` and no `sheets`, was told sheets was required, and the run spent nine
+// steps shrinking the content that had never been the problem.
+describe('a <function=…> call that was cut off', () => {
+    const openTag = '<function=write_xlsx>';
+
+    it('is marked, not delivered with the parameter silently missing', () => {
+        const text = openTag
+            + '<parameter=path>C:/a.xlsx</parameter>'
+            + '<parameter=preset>plain</parameter>'
+            + '<parameter=sheets>[{"name": "sheet1", "rows": [["a"';
+        const [call] = extractFunctionTagToolCalls(text);
+        expect(call.name).toBe('write_xlsx');
+        expect(call.args[ARGS_TRUNCATED]).toBeTruthy();
+        // The half of the call that DID arrive must not be handed over as if it
+        // were the whole thing.
+        expect(call.args.path).toBeUndefined();
+        expect(call.args.preset).toBeUndefined();
+    });
+
+    it('leaves a complete call alone', () => {
+        const text = openTag
+            + '<parameter=path>C:/a.xlsx</parameter>'
+            + '<parameter=preset>plain</parameter></function>';
+        const [call] = extractFunctionTagToolCalls(text);
+        expect(call.args).toEqual({ path: 'C:/a.xlsx', preset: 'plain' });
+        expect(call.args[ARGS_TRUNCATED]).toBeUndefined();
+    });
+});
+

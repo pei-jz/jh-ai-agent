@@ -187,6 +187,23 @@ JSON FORMATTING RULES (critical — most failures come from these):
         // Use the effective limit (honors per-connection context_window override
         // and the real provider) so DeepSeek/Qwen/etc. aren't mis-sized to 32K.
         const modelLimit = llmService.getEffectiveModelLimit();
+
+        // The ceiling on ONE REPLY — including the tool call in it.
+        //
+        // A tool call that carries a whole file or a whole workbook can exceed
+        // it, and the reply is then cut off in the middle of an argument: what
+        // reaches the tool is a call with a parameter missing, which reads as a
+        // mistake the model did not make. It cannot avoid a wall it has not been
+        // told about, so the number is stated, with the consequence and the way
+        // round it.
+        // Optional: assembling the prompt must not fail because a service
+        // (or a test double) does not carry this accessor.
+        const replyLimit = llmService.getMaxOutputTokens?.() || null;
+        const replyLimitBlock = replyLimit
+            ? `<reply_limit_tokens>${replyLimit.toLocaleString()}</reply_limit_tokens>
+<reply_limit_note>One reply — including the tool call inside it — is capped at ${replyLimit.toLocaleString()} tokens. A call that would exceed it is CUT OFF mid-argument and nothing runs. When the content is large (a long file, a many-sheet workbook), write it in pieces: create the file with the first part, then extend it with the tools that append or update. Splitting is the intended way to do this, not a workaround.</reply_limit_note>
+`
+            : '';
         const systemBudget = Math.floor(modelLimit * 0.4);
 
         // Project Info (in-memory, cheap)
@@ -475,7 +492,7 @@ user's request and your own knowledge of the code; discard out-of-scope opinions
 <environment>
 <project_root>${root}</project_root>
 <model_limit_tokens>${modelLimit.toLocaleString()}</model_limit_tokens>
-</environment>
+${replyLimitBlock}</environment>
 
 <project_summary>
 ${projectInfo}

@@ -59,6 +59,43 @@ describe('Settings → Usage', () => {
         await waitFor(() => expect(container.textContent).toMatch(/Kimi|k3/));
     });
 
+    // metricsOf takes an OPTIONS OBJECT, and this passed it the clock — a
+    // number. Every option fell back to its default, so `rateFor` was undefined
+    // and spend came out as exactly $0 no matter how many tokens ran, while the
+    // table beside it listed 405k. The old test only looked for the model NAME,
+    // which StatsPane renders either way, so nothing caught it.
+    it('shows a real amount, not a zero, when the model is priced', async () => {
+        // Dated against the real clock: the spend window is measured from
+        // Date.now(), not from the fixture's NOW.
+        const recent = new Date(Date.now() - 3600_000).toISOString();
+        const { container } = mount({
+            tasks: [task({
+                started_at: recent, completed_at: recent,
+                // 1M in at $3 + 1M out at $15 = $18.00
+                model_usage: { 'i2:k3': { prompt_tokens: 1_000_000, completion_tokens: 1_000_000 } },
+            })],
+            config: { llm_instances: RATED },
+        });
+        await waitFor(() => expect(container.textContent).toMatch(/\$18/));
+        expect(container.textContent).not.toMatch(/トークン使用量を記録していません/);
+    });
+
+    it('the spend window actually moves when a range is picked', async () => {
+        const eightDaysAgo = new Date(Date.now() - 8 * 24 * 3600_000).toISOString();
+        const { container } = mount({
+            tasks: [task({
+                started_at: eightDaysAgo, completed_at: eightDaysAgo,
+                model_usage: { 'i2:k3': { prompt_tokens: 1_000_000, completion_tokens: 1_000_000 } },
+            })],
+            config: { llm_instances: RATED },
+        });
+        // Outside the default 7-day window.
+        await waitFor(() => expect(container.textContent).toMatch(/実行されたタスクはありません|記録していません/));
+        const btn = [...container.querySelectorAll('.ds-range-btn')].find(b => b.textContent.trim() === '30d');
+        await fireEvent.click(btn);
+        await waitFor(() => expect(container.textContent).toMatch(/\$18/));
+    });
+
     // A failed fetch must not look like "you spent nothing".
     it('says the read failed instead of showing a convincing zero', async () => {
         const { container } = mount({ fail: true });

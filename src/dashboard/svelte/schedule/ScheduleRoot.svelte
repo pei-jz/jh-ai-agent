@@ -18,6 +18,8 @@
     import { untrack } from 'svelte';
     import ScheduleList from './ScheduleList.svelte';
     import ScheduleDetail from './ScheduleDetail.svelte';
+    import TriggerPanel from './TriggerPanel.svelte';
+    import WatcherPanel from './WatcherPanel.svelte';
     import {
         loadSchedules, saveSchedules, newSchedule, validateForSave,
     } from '../../views/schedule/scheduleModel.js';
@@ -48,6 +50,12 @@
     let running = $state(false);
     /** Bumped every 30s so the relative "Next: …" text re-derives. */
     let tick = $state(0);
+
+    // Schedules and triggers answer the same question — "what makes the agent
+    // run when I am not asking it to?" — so they share this view instead of
+    // taking a sixth rail destination. What differs is only the thing that
+    // decides to fire: a clock, or something happening outside.
+    let pane = $state('time');
 
     const agentModes = Object.values(AGENT_MODES);
     const servers = $derived(
@@ -158,7 +166,20 @@
             <h1>{t('sched.title')}</h1>
             <p class="subtitle">{t('sched.subtitle')}</p>
         </div>
+        <div class="sch-tabs" role="tablist">
+            <button role="tab" aria-selected={pane === 'time'}
+                class:active={pane === 'time'} onclick={() => (pane = 'time')}>{t('trig.tab.time')}</button>
+            <button role="tab" aria-selected={pane === 'event'}
+                class:active={pane === 'event'} onclick={() => (pane = 'event')}>{t('trig.tab.event')}</button>
+            <button role="tab" aria-selected={pane === 'watch'}
+                class:active={pane === 'watch'} onclick={() => (pane = 'watch')}>{t('wch.title')}</button>
+        </div>
     </div>
+    {#if pane === 'watch'}
+        <div class="sch-layout"><WatcherPanel /></div>
+    {:else if pane === 'event'}
+        <div class="sch-layout"><TriggerPanel /></div>
+    {:else}
     <div class="sch-layout">
         <ScheduleList
             {schedules}
@@ -181,12 +202,11 @@
             {onDelete}
         />
     </div>
+    {/if}
 </div>
 
 <style>
-    .sch-layout {
-        display: flex;
-        gap: 0;
-        height: calc(100vh - var(--titlebar-height) - 60px);
-    }
+    /* .sch-tabs / .sch-layout moved to dashboard.css: JobsRoot and
+       JobTimeline are built on them too, and a Svelte <style> is scoped to one
+       component. */
 </style>

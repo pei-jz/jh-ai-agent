@@ -21,8 +21,10 @@
 //
 // Writing:
 //   xlsx (new)               → rust_xlsxwriter (pure Rust; no C toolchain)
-//   xlsx (edit in place)     → umya-spreadsheet, which round-trips the file so
-//                              formulas, formats and untouched sheets survive
+//   xlsx (edit in place)     → commands/xlsx_edit.rs, which rewrites the target
+//                              worksheet's XML and copies every other part of the
+//                              package through as bytes, so nothing it does not
+//                              understand can be lost
 //   docx                     → OOXML written directly with the zip writer
 //
 // Not implemented: writing pptx. A deck is a layout problem (EMU geometry, theme
@@ -33,6 +35,14 @@
 use serde::Serialize;
 use std::io::{Cursor, Read};
 use crate::path_guard::PathGuard;
+// Value and formula edits go through the surgical writer; see its header.
+use super::xlsx_edit;
+// Column widths, number formats and the house styles a new workbook gets.
+use super::xlsx_style;
+// Appending a format to the stylesheet, so a restyle never rebuilds the file.
+use super::xlsx_stylesheet;
+// Reading the existing formatting back out, so an edit can match it.
+use super::xlsx_inspect;
 use tauri::State;
 
 /// Cap on how much text one document may contribute, so a 50-sheet workbook
@@ -68,6 +78,13 @@ pub struct OfficeDoc {
     pub truncated: bool,
     /// Embedded images, when the caller asked for them.
     pub images: Vec<OfficeImage>,
+    /// A summary of the sheet FORMATTING, when the caller asked for it.
+    ///
+    /// Values alone are enough to answer a question and not enough to change
+    /// the file in keeping with itself — an agent that has never seen the
+    /// existing format has to invent one. See commands/xlsx_inspect.rs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
 }
 
 /// Vision-capable formats. EMF/WMF are vector formats no LLM accepts, so they are
@@ -294,7 +311,7 @@ fn read_spreadsheet(bytes: Vec<u8>, ext: &str, max_chars: usize, sheet: Option<&
     };
 
     let truncated = text.len() >= max_chars;
-    Ok(OfficeDoc { text, kind: ext.to_string(), parts, truncated, images: Vec::new() })
+    Ok(OfficeDoc { text, kind: ext.to_string(), parts, truncated, images: Vec::new(), format: None })
 }
 
 /// Render one sheet as a Markdown table. Returns false if the budget ran out
@@ -454,6 +471,7 @@ fn read_docx(bytes: Vec<u8>, max_chars: usize) -> Result<OfficeDoc, String> {
         parts: vec![format!("{} paragraphs", count)],
         truncated,
         images: Vec::new(),
+        format: None,
     })
 }
 
@@ -499,6 +517,7 @@ fn read_pptx(bytes: Vec<u8>, max_chars: usize) -> Result<OfficeDoc, String> {
         parts: vec![format!("{} slides", total)],
         truncated,
         images: Vec::new(),
+        format: None,
     })
 }
 
@@ -509,6 +528,7 @@ pub async fn read_office_document(
     max_chars: Option<usize>,
     sheet: Option<String>,
     include_images: Option<bool>,
+    with_format: Option<bool>,
     guard: State<'_, PathGuard>,
 ) -> Result<OfficeDoc, String> {
     guard.ensure_allowed(&path)?;
@@ -537,17 +557,38 @@ pub async fn read_office_document(
         Vec::new()
     };
 
+    // The formatting summary comes from the package, like the images, and only
+    // for the formats that have one. A failure here must not cost the caller the
+    // document: an unreadable stylesheet is a reason to omit the summary, not to
+    // refuse the read.
+    let format = if with_format.unwrap_or(false) && matches!(ext.as_str(), "xlsx" | "xlsm") {
+        match xlsx_inspect::describe(&bytes, want_sheet) {
+            Ok(s) => Some(s),
+            Err(e) => Some(format!("(書式を読めませんでした: {})", e)),
+        }
+    } else {
+        None
+    };
+
     let mut doc = match ext.as_str() {
         "xlsx" | "xlsm" | "xls" | "ods" => read_spreadsheet(bytes, &ext, cap, want_sheet),
         "docx" => read_docx(bytes, cap),
         "pptx" => read_pptx(bytes, cap),
+        // The "cannot" answers. Three parts, like every other error here: what
+        // happened, that nothing ran, and what to do instead. An agent told only
+        // that something is unsupported invents its own way round —
+        // docs/design/tool-failure-policy.md §2 B.
         "doc" | "ppt" => Err(format!(
-            "Legacy binary .{} is not supported — save it as .{}x and retry.",
+            "Cannot read a legacy binary .{}: this reader handles the OOXML formats only, and              nothing was read. Open it and save it as .{}x, then read that — or ask the user to.",
             ext, ext
         )),
-        other => Err(format!("Not an Office document: .{}", other)),
+        other => Err(format!(
+            "Not an Office document: .{}. Nothing was read. read_office handles              xlsx / xlsm / xls / ods / docx / pptx; for anything else use read_file.",
+            other
+        )),
     }?;
     doc.images = images;
+    doc.format = format;
     Ok(doc)
 }
 
@@ -748,9 +789,10 @@ fn write_cell(
     cell: &serde_json::Value,
     fmt: Option<&rust_xlsxwriter::Format>,
 ) -> Result<(), rust_xlsxwriter::XlsxError> {
-    let (val, style_name) = cell_value(cell);
-    let f = fmt.or_else(|| style_name.and_then(|_| None)); // placeholder; real resolve below
-    let _ = f;
+    // The caller has already resolved the format (apply_sheet's `resolve`
+    // picks named style > header > banding > column default) and passes it in
+    // as `fmt`; there is nothing left to work out here.
+    let (val, _) = cell_value(cell);
     match val {
         serde_json::Value::Number(n) => {
             let v = n.as_f64().unwrap_or(0.0);
@@ -776,126 +818,303 @@ fn write_cell(
 }
 
 /// Write an .xlsx workbook. Numbers stay numeric so Excel can compute on them.
+/// Lay one sheet out: values, preset, widths, print setup.
+///
+/// Split out of write_xlsx so the LOOK can be tested. The command itself needs
+/// a Tauri State and a real path, which is exactly the machinery a test of
+/// "does a header get a filter and a sensible column width" should not need.
+pub fn apply_sheet(
+    sheet: &mut rust_xlsxwriter::Worksheet,
+    spec: &SheetSpec,
+    preset: Option<&str>,
+    i: usize,
+) -> Result<(), String> {
+    use rust_xlsxwriter::{Format, FormatAlign, FormatBorder};
+
+    if let Some(name) = spec.name.as_deref().filter(|n| !n.is_empty()) {
+        // Excel rejects >31 chars and a few characters outright; fall back to
+        // the default name rather than failing the whole write.
+        let safe: String = name.chars().filter(|c| !"[]:*?/\\".contains(*c)).take(31).collect();
+        let _ = sheet.set_name(&safe);
+    }
+
+    // Named styles: parsed once per sheet, referenced by cells via {"v":…,"style":…}.
+    let mut styles: std::collections::HashMap<String, Format> = std::collections::HashMap::new();
+    if let Some(sv) = spec.styles.as_ref().and_then(serde_json::Value::as_object) {
+        for (k, v) in sv {
+            if let Some(cs) = CellStyle::from_value(v) {
+                styles.insert(k.clone(), cs.to_format());
+            }
+        }
+    }
+
+    let design = spec.design.clone().unwrap_or(serde_json::Value::Null);
+    let use_header = design.get("header").and_then(serde_json::Value::as_bool).unwrap_or(true);
+
+    // A preset is the answer to "what should this look like if nobody
+    // says?" — and nobody ever says. A model composing a spreadsheet is
+    // thinking about the numbers, so left to itself it produced 8.43-wide
+    // columns, amounts reading 1800, and everything flush left.
+    let look = xlsx_style::preset(
+        design
+            .get("preset")
+            .and_then(serde_json::Value::as_str)
+            .or(preset),
+    );
+
+    // ── what each column holds ──────────────────────────────────────────
+    let ncols = spec.rows.iter().map(|r| r.len()).max().unwrap_or(0);
+    let data_start = if use_header { 1 } else { 0 };
+    let mut col_kind = Vec::with_capacity(ncols);
+    let mut col_w = Vec::with_capacity(ncols);
+    for c in 0..ncols {
+        let header_text: Option<String> = if use_header {
+            spec.rows
+                .first()
+                .and_then(|r| r.get(c))
+                .and_then(|v| cell_value(v).0.as_str().map(str::to_string))
+        } else {
+            None
+        };
+        let values: Vec<&serde_json::Value> = spec
+            .rows
+            .iter()
+            .skip(data_start)
+            .filter_map(|r| r.get(c))
+            .map(|v| cell_value(v).0)
+            .collect();
+        let kind = xlsx_style::infer_column(header_text.as_deref(), &values);
+        let widths: Vec<f64> = values
+            .iter()
+            .map(|v| xlsx_style::rendered_width(v, kind, None))
+            .collect();
+        col_w.push(xlsx_style::column_width(header_text.as_deref(), &widths, kind));
+        col_kind.push(kind);
+    }
+
+    // ── the formats the preset implies ──────────────────────────────────
+    let grid = look.grid.and_then(parse_color);
+    let mut header_fmt = Format::new().set_bold();
+    if let Some(rgb) = look.header_fill.and_then(parse_color) {
+        header_fmt = header_fmt.set_background_color(rgb);
+    }
+    if let Some(rgb) = look.header_font_color.and_then(parse_color) {
+        header_fmt = header_fmt.set_font_color(rgb);
+    }
+    if let Some(f) = look.base_font {
+        header_fmt = header_fmt.set_font_name(f);
+    }
+    if let Some(rgb) = grid {
+        header_fmt = header_fmt.set_border(FormatBorder::Thin).set_border_color(rgb);
+    }
+    // A header is a label, not data: centre it and let it wrap so a long
+    // title does not force the whole column wide.
+    header_fmt = header_fmt
+        .set_align(FormatAlign::Center)
+        .set_align(FormatAlign::VerticalCenter)
+        .set_text_wrap();
+
+    let build_col_fmt = |kind: xlsx_style::ColumnKind, zebra: Option<u32>| {
+        let mut f = Format::new();
+        if let Some(nf) = kind.num_format() {
+            f = f.set_num_format(nf);
+        }
+        if kind.align_right() {
+            f = f.set_align(FormatAlign::Right);
+        }
+        if kind.wrap() {
+            f = f.set_text_wrap().set_align(FormatAlign::Top);
+        } else {
+            f = f.unset_text_wrap();
+        }
+        if let Some(rgb) = grid {
+            f = f.set_border(FormatBorder::Thin).set_border_color(rgb);
+        }
+        if let Some(rgb) = zebra {
+            f = f.set_background_color(rgb);
+        }
+        if let Some(name) = look.base_font {
+            f = f.set_font_name(name);
+        }
+        f
+    };
+    let zebra_rgb = look.zebra.and_then(parse_color);
+    let col_fmt: Vec<Format> = col_kind.iter().map(|k| build_col_fmt(*k, None)).collect();
+    let col_fmt_alt: Vec<Format> = col_kind
+        .iter()
+        .map(|k| build_col_fmt(*k, zebra_rgb))
+        .collect();
+
+    // Widths: measured, unless the caller named one.
+    let explicit = design.get("col_widths").and_then(serde_json::Value::as_object);
+    for (c, w) in col_w.iter().enumerate() {
+        let named = explicit.and_then(|o| {
+            o.iter().find_map(|(k, v)| {
+                match (a1_to_rc(&format!("{}1", k)), v.as_f64()) {
+                    (Some((_, kc)), Some(kw)) if kc as usize == c => Some(kw),
+                    _ => None,
+                }
+            })
+        });
+        let _ = sheet.set_column_width(c as u16, named.unwrap_or(*w));
+    }
+
+    // A named style the caller asked for beats the preset; the preset
+    // beats nothing at all. That order is the whole contract: presets are
+    // defaults, never overrides.
+    let resolve = |r: usize, c: usize, style_name: Option<&str>| -> Option<&Format> {
+        if let Some(f) = style_name.and_then(|n| styles.get(n)) {
+            return Some(f);
+        }
+        if r == 0 && use_header {
+            return Some(&header_fmt);
+        }
+        let banded = zebra_rgb.is_some() && (r - data_start) % 2 == 1;
+        if banded { col_fmt_alt.get(c) } else { col_fmt.get(c) }
+    };
+
+    for (r, row) in spec.rows.iter().enumerate() {
+        for (c, cell) in row.iter().enumerate() {
+            let (_, style_name) = cell_value(cell);
+            write_cell(sheet, r as u32, c as u16, cell, resolve(r, c, style_name))
+                .map_err(|e| format!("sheet {} cell ({},{}): {}", i, r, c, e))?;
+        }
+    }
+
+    // Merges after cells: rust_xlsxwriter's merge_range overwrites the whole
+    // range with one string, so merging here would blank the top-left value.
+    // Re-write the top-left cell of each merged range afterwards.
+    for (r1, c1, r2, c2) in merge_ranges(&design) {
+        let _ = sheet.merge_range(r1, c1, r2, c2, "", &Format::default());
+        if let Some(row) = spec.rows.get(r1 as usize) {
+            if let Some(cell) = row.get(c1 as usize) {
+                let (_, style_name) = cell_value(cell);
+                let fmt = resolve(r1 as usize, c1 as usize, style_name);
+                let _ = write_cell(sheet, r1, c1, cell, fmt);
+            }
+        }
+    }
+
+    // A header band wants room for the wrapped title it now allows.
+    if use_header && !spec.rows.is_empty() {
+        if let Some(h) = look.header_height {
+            let _ = sheet.set_row_height(0, h);
+        }
+    }
+
+    // Freeze the header row, so scrolling a long sheet keeps the labels.
+    // An explicit `freeze` still wins, including `0` for "do not".
+    match design.get("freeze").and_then(serde_json::Value::as_u64) {
+        Some(f) => { let _ = sheet.set_freeze_panes(f as u32, 0); }
+        None if look.freeze_header && use_header && !spec.rows.is_empty() => {
+            let _ = sheet.set_freeze_panes(1, 0);
+        }
+        None => {}
+    }
+
+    // A filter on the header row is what makes a table usable at all.
+    let nrows = spec.rows.len() as u32;
+    if look.autofilter && use_header && nrows > 1 && ncols > 0 {
+        let _ = sheet.autofilter(0, 0, nrows - 1, (ncols - 1) as u16);
+    }
+
+    // Print setup — the LLM most often wants the sheet to fit on one page.
+    // Paper sizes are u8 constants in this rust_xlsxwriter version: A4=9,
+    // A3=8, A5=11, Letter=1.
+    let paper = design.get("paper").and_then(serde_json::Value::as_str).map(str::to_uppercase);
+    let paper_code: u8 = match paper.as_deref() {
+        Some("A3") => 8,
+        Some("A5") => 11,
+        Some("LETTER") => 1,
+        _ => 9, // A4 — Excel's default anyway, set explicitly for determinism
+    };
+    let _ = sheet.set_paper_size(paper_code);
+    match design.get("orientation").and_then(serde_json::Value::as_str) {
+        Some("landscape") => { let _ = sheet.set_landscape(); }
+        Some("portrait") => { let _ = sheet.set_portrait(); }
+        _ => {}
+    }
+    // rust_xlsxwriter has no fit-to-pages; scaling is the closest equivalent.
+    // fit_to_pages: N ⇒ scale down to roughly 1/N of the natural size, so
+    // taller sheets land on fewer printed pages.
+    if let Some(n) = design.get("fit_to_pages").and_then(serde_json::Value::as_u64) {
+        let n = n.clamp(1, 100) as u16;
+        let _ = sheet.set_print_scale((100.0 / n as f64).round() as u16);
+    }
+    if design.get("fit_to_width").and_then(serde_json::Value::as_bool).unwrap_or(look.fit_to_width) {
+        // Fit the WIDTH to one page and leave the height to run on: a table
+        // squeezed onto one sheet vertically is unreadable, while one that
+        // spills sideways is unusable.
+        let _ = sheet.set_print_fit_to_pages(1, 0);
+    }
+    if design.get("orientation").and_then(serde_json::Value::as_str).is_none() && look.landscape {
+        let _ = sheet.set_landscape();
+    }
+    // Without this, page 2 of a printed table has no column headings at all.
+    if look.repeat_header && use_header && nrows > 1 {
+        let _ = sheet.set_repeat_rows(0, 0);
+    }
+    if look.page_footer {
+        let _ = sheet.set_footer("&C&P / &N");
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn write_xlsx(
     path: String,
     sheets: Vec<SheetSpec>,
+    overwrite: Option<bool>,
+    preset: Option<String>,
     guard: State<'_, PathGuard>,
 ) -> Result<String, String> {
-    use rust_xlsxwriter::{Format, Workbook};
+    use rust_xlsxwriter::Workbook;
 
     guard.ensure_allowed(&path)?;
     if sheets.is_empty() {
         return Err("write_xlsx requires at least one sheet".into());
     }
 
-    let mut book = Workbook::new();
-    // Header row: bold, but NOT wrapped — the default is off, and we keep it
-    // off explicitly so long header titles stay one line tall.
-    let header = Format::new().set_bold().unset_text_wrap();
+    // write_xlsx BUILDS A NEW WORKBOOK. Pointed at a file that already exists it
+    // replaces it whole — every sheet the caller did not pass, every formula,
+    // every chart, gone, with a success message. An agent that reads a workbook,
+    // decides on a change and then "writes it back" through here destroys the
+    // file it was asked to edit. So the existing file is the one thing it will
+    // not do without being told twice.
+    refuse_to_replace(&path, overwrite)?;
 
-    for (i, spec) in sheets.iter().enumerate() {
-        let sheet = book.add_worksheet();
-        if let Some(name) = spec.name.as_deref().filter(|n| !n.is_empty()) {
-            // Excel rejects >31 chars and a few characters outright; fall back to
-            // the default name rather than failing the whole write.
-            let safe: String = name.chars().filter(|c| !"[]:*?/\\".contains(*c)).take(31).collect();
-            let _ = sheet.set_name(&safe);
-        }
+    // Built beside the destination, checked, and only then given the name.
+    //
+    // A write that stops part-way used to leave the half-written file AT the
+    // path the user asked for: a workbook whose text all pointed into a
+    // zero-byte string table, valid enough to open as a zip and refused by
+    // Excel. Writing elsewhere first means a failure costs nothing, and a file
+    // that is already there is not destroyed by a write that never finished.
+    let temp = format!("{}.jhai-partial", path);
+    let _ = std::fs::remove_file(&temp);
 
-        // Named styles: parsed once per sheet, referenced by cells via {"v":…,"style":…}.
-        let mut styles: std::collections::HashMap<String, Format> = std::collections::HashMap::new();
-        if let Some(sv) = spec.styles.as_ref().and_then(serde_json::Value::as_object) {
-            for (k, v) in sv {
-                if let Some(cs) = CellStyle::from_value(v) {
-                    styles.insert(k.clone(), cs.to_format());
-                }
-            }
+    let built = xlsx_edit::without_panicking("write_xlsx", || {
+        let mut book = Workbook::new();
+        for (i, spec) in sheets.iter().enumerate() {
+            let sheet = book.add_worksheet();
+            apply_sheet(sheet, spec, preset.as_deref(), i)?;
         }
-
-        let design = spec.design.clone().unwrap_or(serde_json::Value::Null);
-        // Column widths, if the LLM asked for them (widths are in character units).
-        if let Some(ws) = design.get("col_widths").and_then(serde_json::Value::as_object) {
-            for (k, v) in ws {
-                let (c, w) = match (a1_to_rc(&format!("{}1", k)), v.as_f64()) {
-                    (Some((_, c)), Some(w)) => (c, w),
-                    _ => continue,
-                };
-                let _ = sheet.set_column_width(c, w);
-            }
-        }
-
-        for (r, row) in spec.rows.iter().enumerate() {
-            for (c, cell) in row.iter().enumerate() {
-                let (row_i, col_i) = (r as u32, c as u16);
-                let (_, style_name) = cell_value(cell);
-                // Resolve the format: explicit named style wins, then the header
-                // bold (first row, unless `header:false`), then plain.
-                let use_header = design.get("header").and_then(serde_json::Value::as_bool).unwrap_or(true);
-                let fmt: Option<&Format> = if r == 0 && use_header && style_name.is_none() {
-                    Some(&header)
-                } else {
-                    style_name.and_then(|n| styles.get(n))
-                };
-                write_cell(sheet, row_i, col_i, cell, fmt)
-                    .map_err(|e| format!("sheet {} cell ({},{}): {}", i, r, c, e))?;
-            }
-        }
-
-        // Merges after cells: rust_xlsxwriter's merge_range overwrites the whole
-        // range with one string, so merging here would blank the top-left value.
-        // Re-write the top-left cell of each merged range afterwards.
-        for (r1, c1, r2, c2) in merge_ranges(&design) {
-            let _ = sheet.merge_range(r1, c1, r2, c2, "", &Format::default());
-            if let Some(row) = spec.rows.get(r1 as usize) {
-                if let Some(cell) = row.get(c1 as usize) {
-                    let (_, style_name) = cell_value(cell);
-                    let use_header = design.get("header").and_then(serde_json::Value::as_bool).unwrap_or(true);
-                    let fmt: Option<&Format> = if r1 == 0 && use_header && style_name.is_none() {
-                        Some(&header)
-                    } else {
-                        style_name.and_then(|n| styles.get(n))
-                    };
-                    let _ = write_cell(sheet, r1, c1, cell, fmt);
-                }
-            }
-        }
-
-        // Freeze the header row / first columns, so scrolling keeps the labels.
-        if let Some(f) = design.get("freeze").and_then(serde_json::Value::as_u64) {
-            let _ = sheet.set_freeze_panes(f as u32, 0);
-        }
-
-        // Print setup — the LLM most often wants the sheet to fit on one page.
-        // Paper sizes are u8 constants in this rust_xlsxwriter version: A4=9,
-        // A3=8, A5=11, Letter=1.
-        let paper = design.get("paper").and_then(serde_json::Value::as_str).map(str::to_uppercase);
-        let paper_code: u8 = match paper.as_deref() {
-            Some("A3") => 8,
-            Some("A5") => 11,
-            Some("LETTER") => 1,
-            _ => 9, // A4 — Excel's default anyway, set explicitly for determinism
-        };
-        let _ = sheet.set_paper_size(paper_code);
-        match design.get("orientation").and_then(serde_json::Value::as_str) {
-            Some("landscape") => { let _ = sheet.set_landscape(); }
-            Some("portrait") => { let _ = sheet.set_portrait(); }
-            _ => {}
-        }
-        // rust_xlsxwriter has no fit-to-pages; scaling is the closest equivalent.
-        // fit_to_pages: N ⇒ scale down to roughly 1/N of the natural size, so
-        // taller sheets land on fewer printed pages.
-        if let Some(n) = design.get("fit_to_pages").and_then(serde_json::Value::as_u64) {
-            let n = n.clamp(1, 100) as u16;
-            let _ = sheet.set_print_scale((100.0 / n as f64).round() as u16);
-        }
-        if design.get("fit_to_width").and_then(serde_json::Value::as_bool).unwrap_or(false) {
-            // Conservative: scale to 50% is far enough to fit most sheets on one page.
-            let _ = sheet.set_print_scale(50);
-        }
+        book.save(&temp).map_err(|e| format!("Failed to write {}: {}", path, e))
+    });
+    if let Err(e) = built {
+        let _ = std::fs::remove_file(&temp);
+        return Err(e);
     }
 
-    book.save(&path).map_err(|e| format!("Failed to write {}: {}", path, e))?;
+    let bytes = std::fs::read(&temp).map_err(|e| format!("Failed to read back {}: {}", temp, e))?;
+    if let Err(e) = xlsx_edit::verify_workbook(&bytes) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(format!("{} — {}", path, e));
+    }
+    std::fs::rename(&temp, &path).map_err(|e| {
+        let _ = std::fs::remove_file(&temp);
+        format!("Failed to move the finished workbook into place at {}: {}", path, e)
+    })?;
     let sheet_count = sheets.len();
     let row_count: usize = sheets.iter().map(|s| s.rows.len()).sum();
     Ok(format!("Wrote {} ({} sheet(s), {} rows)", path, sheet_count, row_count))
@@ -1070,6 +1289,26 @@ pub async fn write_docx(
     Ok(format!("Wrote {} ({} paragraphs)", path, paras))
 }
 
+// ── What an in-place edit costs ─────────────────────────────────────────────
+
+/// Refuse to replace a workbook that already exists.
+///
+/// Split out from write_xlsx so the rule can be tested without a Tauri State.
+fn refuse_to_replace(path: &str, overwrite: Option<bool>) -> Result<(), String> {
+    if !std::path::Path::new(path).exists() || overwrite.unwrap_or(false) {
+        return Ok(());
+    }
+    Err(format!(
+        "{} already exists. write_xlsx CREATES a workbook: it would replace this file          entirely, and every sheet, formula, chart and format not passed in this call          would be gone.
+         
+         DO NOT delete the file and create it again — that is the same loss by another          route, and it is what this refusal exists to prevent.
+         
+         To change cells in an existing workbook, use update_xlsx (or append_xlsx_row to          add a line); both edit in place and keep everything else. If the user really          asked for the file to be REPLACED from scratch, pass overwrite: true on this          same call.",
+        path
+    ))
+}
+
+
 // ── Editing an existing .xlsx ────────────────────────────────────────────────
 
 /// One cell to change: an A1 address and the value to put there.
@@ -1091,14 +1330,16 @@ pub struct CellEdit {
 
 /// Apply cell edits to an EXISTING workbook, in place.
 ///
-/// This is a different job from write_xlsx, not a variant of it. rust_xlsxwriter
-/// cannot read a file, so "read it and write it back" would silently discard every
-/// formula, every format and every sheet the agent did not touch — for the ledgers and
-/// forms this is aimed at, that is data loss dressed up as an edit. umya-spreadsheet
-/// round-trips the package, so untouched content survives byte-for-byte where it can.
+/// Nothing here rebuilds the workbook. A value or a formula is written into the
+/// worksheet XML and every other part of the package is copied through as bytes;
+/// a format is appended to xl/styles.xml and the cell is pointed at the new
+/// entry. Charts, pivot tables, macros, images and the formatting of every cell
+/// the caller did not name come out exactly as they went in — not because they
+/// are handled, but because they are never read.
 ///
-/// Numbers stay numeric so Excel keeps computing on them; a string starting with `=`
-/// is written as a FORMULA, because that is unambiguously what it means in a cell.
+/// Numbers stay numeric so Excel keeps computing on them; a string starting with
+/// `=` is written as a FORMULA, because that is unambiguously what it means in a
+/// cell. Passing only `style` leaves the contents alone.
 #[tauri::command]
 pub async fn update_xlsx(
     path: String,
@@ -1116,203 +1357,157 @@ pub async fn update_xlsx(
             path
         ));
     }
+    let original = std::fs::read(file).map_err(|e| format!("Failed to read {}: {}", path, e))?;
 
-    let mut book = umya_spreadsheet::reader::xlsx::read(file)
-        .map_err(|e| format!("Failed to open {}: {:?}", path, e))?;
-
-    // Collected BEFORE any mutable borrow, so a bad sheet name can still be reported
-    // alongside the real ones — a bare "not found" costs the agent another blind
-    // round-trip.
-    let sheet_names: Vec<String> = book
-        .sheet_collection()
-        .iter()
-        .map(|s| s.name().to_string())
-        .collect();
-    let first_sheet = sheet_names.first().cloned().ok_or("The workbook has no sheets")?;
-
-    let mut applied = 0usize;
+    let mut targets = Vec::with_capacity(edits.len());
+    let mut restyled = 0usize;
     for (i, edit) in edits.iter().enumerate() {
-        let sheet_name = edit.sheet.clone().unwrap_or_else(|| first_sheet.clone());
-        let addr = edit.cell.trim().to_uppercase();
-        if addr.is_empty() {
-            return Err(format!("edit {}: `cell` is required (an A1 address such as D14)", i));
-        }
-
-        if !sheet_names.contains(&sheet_name) {
+        let style = match &edit.style {
+            Some(v) => {
+                let spec = xlsx_stylesheet::StyleSpec::from_json(v)
+                    .map_err(|e| format!("edit {}: {}", i, e))?;
+                if spec.is_empty() { None } else { Some(spec) }
+            }
+            None => None,
+        };
+        if edit.value.is_none() && style.is_none() {
             return Err(format!(
-                "edit {}: no sheet named \"{}\". Available sheets: {}",
-                i, sheet_name, sheet_names.join(", ")
+                "edit {}: nothing to do — pass `value` to change the cell, `style` to restyle it,                  or both.",
+                i
             ));
         }
-        // umya returns a Result here, not an Option.
-        let sheet = book
-            .sheet_by_name_mut(&sheet_name)
-            .map_err(|e| format!("edit {}: could not open sheet \"{}\": {:?}", i, sheet_name, e))?;
+        if style.is_some() {
+            restyled += 1;
+        }
 
-        let cell = sheet.cell_mut(&*addr);
-        if let Some(value) = &edit.value {
-            match value {
-                serde_json::Value::Number(n) => {
-                    cell.set_value_number(n.as_f64().unwrap_or(0.0));
-                }
-                serde_json::Value::Bool(b) => {
-                    cell.set_value_bool(*b);
-                }
-                // Null CLEARS the cell rather than writing the text "null".
-                serde_json::Value::Null => {
-                    cell.set_value("");
-                }
-                other => {
-                    let text = other.as_str().map(str::to_string).unwrap_or_else(|| other.to_string());
-                    if let Some(f) = text.strip_prefix('=') {
-                        // In a spreadsheet a leading `=` is a formula, never a literal.
-                        cell.set_formula(f);
-                    } else {
-                        cell.set_value(text);
-                    }
+        let write = match &edit.value {
+            // Style-only: the contents are left exactly as they are, formula and
+            // cached value included.
+            None => xlsx_edit::CellWrite::Keep,
+            Some(serde_json::Value::Number(n)) => xlsx_edit::CellWrite::Number(n.as_f64().unwrap_or(0.0)),
+            Some(serde_json::Value::Bool(b)) => xlsx_edit::CellWrite::Bool(*b),
+            Some(serde_json::Value::Null) => xlsx_edit::CellWrite::Clear,
+            Some(other) => {
+                let text = other.as_str().map(str::to_string).unwrap_or_else(|| other.to_string());
+                match text.strip_prefix('=') {
+                    Some(f) => xlsx_edit::CellWrite::Formula(f.to_string()),
+                    None => xlsx_edit::CellWrite::Text(text),
                 }
             }
-        }
-        if let Some(style) = &edit.style {
-            apply_edit_style(cell, style)
-                .map_err(|e| format!("edit {} cell {}: {}", i, addr, e))?;
-        }
-        applied += 1;
+        };
+
+        let mut target = xlsx_edit::target_from(edit.sheet.clone(), &edit.cell, write)
+            .map_err(|e| format!("edit {}: {}", i, e))?;
+        target.style = style;
+        targets.push(target);
     }
 
-    umya_spreadsheet::writer::xlsx::write(&book, file)
-        .map_err(|e| format!("Failed to save {}: {:?}", path, e))?;
+    let out = xlsx_edit::without_panicking("update_xlsx", || {
+        let out = xlsx_edit::edit_workbook(&original, &targets)?;
+        // Checked BEFORE it replaces the original. An edit that produced a
+        // half-written package used to overwrite the workbook it was editing.
+        xlsx_edit::verify_workbook(&out)?;
+        Ok(out)
+    })?;
+    std::fs::write(file, &out).map_err(|e| format!("Failed to save {}: {}", path, e))?;
 
-    Ok(format!("Updated {} ({} cell(s))", path, applied))
+    let styled_note = if restyled > 0 {
+        format!(" {} of them restyled, by ADDING to the stylesheet — no existing format was                  changed, so no other cell moved.", restyled)
+    } else {
+        String::new()
+    };
+    Ok(format!(
+        "Updated {} ({} cell(s)).{} Everything else in the workbook — charts, pivot tables,          macros, images, conditional formatting, and the formatting of every cell not named          here — was copied through untouched.",
+        path,
+        targets.len(),
+        styled_note
+    ))
 }
 
-/// Apply a write_xlsx-style style spec to a cell in an EXISTING workbook,
-/// MERGING onto whatever style the cell already has — only the named attributes
-/// are changed, everything else survives.
+/// Add one row to the bottom of a sheet, formatted like the row above it.
 ///
-/// umya-spreadsheet's Style is a bag of optional parts (font/fill/alignment/…),
-/// so "read the cell's style, mutate the part, write it back" is the safe shape:
-/// a cell that was already bold+red keeps that when only `bg` is edited.
-fn apply_edit_style(
-    cell: &mut umya_spreadsheet::Cell,
-    style: &serde_json::Value,
-) -> Result<(), String> {
-    use umya_spreadsheet::structs::{
-        Border, Color, HorizontalAlignmentValues, VerticalAlignmentValues,
+/// The most common edit anyone makes to a business workbook is "one more line
+/// on the 明細", and doing it with plain cell writes gets the values right and
+/// the look wrong: a cell that did not exist has no format to inherit, so the
+/// new row lands unruled in the middle of a ruled table. This copies the last
+/// row's shape — its height, and each column's style index — and drops the
+/// values into it.
+///
+/// `{row}` in a formula is replaced with the number of the row being added, so
+/// the caller does not have to know it in advance.
+#[tauri::command]
+pub async fn append_xlsx_row(
+    path: String,
+    sheet: Option<String>,
+    values: serde_json::Map<String, serde_json::Value>,
+    guard: State<'_, PathGuard>,
+) -> Result<String, String> {
+    guard.ensure_allowed(&path)?;
+    let file = std::path::Path::new(&path);
+    if !file.exists() {
+        return Err(format!("{} does not exist.", path));
+    }
+    if values.is_empty() {
+        return Err("append_xlsx_row requires at least one column value".into());
+    }
+
+    let original = std::fs::read(file).map_err(|e| format!("Failed to read {}: {}", path, e))?;
+
+    // The row number is only known after the sheet has been scanned, so the
+    // placeholder is resolved in two passes: append once to learn the number,
+    // then again with the formulas filled in. Cheap — these files are small —
+    // and it keeps the caller from having to guess.
+    let build = |row: Option<u32>| -> Result<std::collections::BTreeMap<u32, xlsx_edit::CellWrite>, String> {
+        let mut out = std::collections::BTreeMap::new();
+        for (col, v) in values.iter() {
+            let idx = xlsx_edit::column_index(col)
+                .ok_or_else(|| format!("\"{}\" is not a column letter (A, B, AA…)", col))?;
+            let write = match v {
+                serde_json::Value::Number(n) => xlsx_edit::CellWrite::Number(n.as_f64().unwrap_or(0.0)),
+                serde_json::Value::Bool(b) => xlsx_edit::CellWrite::Bool(*b),
+                serde_json::Value::Null => xlsx_edit::CellWrite::Clear,
+                other => {
+                    let text = other.as_str().map(str::to_string).unwrap_or_else(|| other.to_string());
+                    match text.strip_prefix('=') {
+                        Some(f) => xlsx_edit::CellWrite::Formula(match row {
+                            Some(r) => f.replace("{row}", &r.to_string()),
+                            None => f.to_string(),
+                        }),
+                        None => xlsx_edit::CellWrite::Text(text),
+                    }
+                }
+            };
+            out.insert(idx, write);
+        }
+        Ok(out)
     };
 
-    let obj = match style.as_object() {
-        Some(o) => o,
-        None => return Err("style must be an object".into()),
+    let probe = xlsx_edit::append_row(
+        &original,
+        &xlsx_edit::RowAppend { sheet: sheet.clone(), values: build(None)? },
+    )?;
+    let result = xlsx_edit::without_panicking("append_xlsx_row", || {
+        let r = xlsx_edit::append_row(
+            &original,
+            &xlsx_edit::RowAppend { sheet: sheet.clone(), values: build(Some(probe.row))? },
+        )?;
+        xlsx_edit::verify_workbook(&r.bytes)?;
+        Ok(r)
+    })?;
+
+    std::fs::write(file, &result.bytes).map_err(|e| format!("Failed to save {}: {}", path, e))?;
+
+    let inherited = if result.inherited {
+        format!("Its formatting was copied from row {}.", result.row - 1)
+    } else {
+        "There was no row above to take formatting from, so it is unformatted.".into()
     };
-
-    let mut st = cell.style().clone();
-    let mut touched = false;
-
-    // ── Font ────────────────────────────────────────────────────────────────
-    let mut font = st.font().cloned().unwrap_or_default();
-    let mut font_touched = false;
-    if let Some(b) = obj.get("bold").and_then(serde_json::Value::as_bool) {
-        font.font_bold_mut().set_val(b);
-        font_touched = true;
-    }
-    if let Some(b) = obj.get("italic").and_then(serde_json::Value::as_bool) {
-        font.font_italic_mut().set_val(b);
-        font_touched = true;
-    }
-    if let Some(sz) = obj.get("size").and_then(serde_json::Value::as_f64) {
-        font.font_size_mut().set_val(sz);
-        font_touched = true;
-    }
-    if let Some(f) = obj.get("font").and_then(serde_json::Value::as_str) {
-        font.font_name_mut().set_val(f);
-        font_touched = true;
-    }
-    if let Some(c) = obj.get("color").and_then(serde_json::Value::as_str) {
-        if let Some(rgb) = parse_color(c) {
-            // parse_color returns a u32; format it as the 6-digit hex umya wants.
-            font.color_mut().set_argb_str(format!("{:06X}", rgb));
-            font_touched = true;
-        }
-    }
-    if font_touched {
-        st.set_font(font);
-        touched = true;
-    }
-
-    // ── Fill (background) ───────────────────────────────────────────────────
-    if let Some(c) = obj.get("bg").and_then(serde_json::Value::as_str) {
-        if let Some(rgb) = parse_color(c) {
-            let mut fill = st.fill().cloned().unwrap_or_default();
-            let pf = fill.pattern_fill_mut();
-            // PatternFill::set_background_color takes a Color; a solid fill needs
-            // the pattern set to solid and the colour as the background.
-            pf.set_background_color(Color::default().set_argb_str(format!("{:06X}", rgb)).clone());
-            pf.set_pattern_type(umya_spreadsheet::structs::PatternValues::Solid);
-            st.set_fill(fill);
-            touched = true;
-        }
-    }
-
-    // ── Border (all four sides, same style) ────────────────────────────────
-    if let Some(b) = obj.get("border").and_then(serde_json::Value::as_str) {
-        let style_str = match b {
-            "medium" => Border::BORDER_MEDIUM,
-            "thick" => Border::BORDER_THICK,
-            _ => Border::BORDER_THIN,
-        };
-        let mut borders = st.borders().cloned().unwrap_or_default();
-        borders.left_mut().set_border_style(style_str);
-        borders.right_mut().set_border_style(style_str);
-        borders.top_mut().set_border_style(style_str);
-        borders.bottom_mut().set_border_style(style_str);
-        st.set_borders(borders);
-        touched = true;
-    }
-
-    // ── Alignment ───────────────────────────────────────────────────────────
-    let mut align = st.alignment().cloned().unwrap_or_default();
-    let mut align_touched = false;
-    if let Some(a) = obj.get("align").and_then(serde_json::Value::as_str) {
-        let h = match a {
-            "center" => HorizontalAlignmentValues::Center,
-            "right" => HorizontalAlignmentValues::Right,
-            _ => HorizontalAlignmentValues::Left,
-        };
-        align.set_horizontal(h);
-        align_touched = true;
-    }
-    if let Some(a) = obj.get("valign").and_then(serde_json::Value::as_str) {
-        let v = match a {
-            "top" => VerticalAlignmentValues::Top,
-            "middle" => VerticalAlignmentValues::Center,
-            _ => VerticalAlignmentValues::Bottom,
-        };
-        align.set_vertical(v);
-        align_touched = true;
-    }
-    if let Some(w) = obj.get("wrap").and_then(serde_json::Value::as_bool) {
-        align.set_wrap_text(w);
-        align_touched = true;
-    }
-    if align_touched {
-        st.set_alignment(align);
-        touched = true;
-    }
-
-    // ── Number format ───────────────────────────────────────────────────────
-    if let Some(n) = obj.get("numfmt").and_then(serde_json::Value::as_str) {
-        let mut nf = st.numbering_format().cloned().unwrap_or_default();
-        nf.set_format_code(n);
-        st.set_numbering_format(nf);
-        touched = true;
-    }
-
-    if touched {
-        cell.set_style(st);
-    }
-    Ok(())
+    Ok(format!(
+        "Added row {} to \"{}\". {} NOTE: ranges were NOT extended — a SUM above the new row,          the autofilter and any table range still cover what they covered before. If a total          should include this row, update that formula with update_xlsx.",
+        result.row, result.sheet, inherited
+    ))
 }
+
 
 #[cfg(test)]
 mod office_tests {
@@ -1910,160 +2105,8 @@ two");
         let _ = std::fs::remove_file(path);
     }
 
-    /// update_xlsx's style arm: applying a style spec to a cell MERGES onto the
-    /// existing style and only touches the named attributes.
-    #[test]
-    fn apply_edit_style_merges_onto_existing_style() {
-        use umya_spreadsheet::reader::xlsx::read;
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!("jhai_office_updstyle_{}.xlsx", std::process::id()));
 
-        // A workbook whose cell C3 is already bold+red.
-        {
-            use umya_spreadsheet::writer::xlsx::write;
-            let mut book = umya_spreadsheet::new_file();
-            let mut sheet = book.get_sheet_by_name_mut("Sheet1").unwrap();
-            let cell = sheet.cell_mut("C3");
-            let mut st = cell.style().clone();
-            let mut font = st.font().cloned().unwrap_or_default();
-            font.font_bold_mut().set_val(true);
-            font.color_mut().set_argb_str("FFFF0000");
-            st.set_font(font);
-            cell.set_style(st);
-            write(&book, &path).unwrap();
-        }
 
-        // Now restyle only the background + border — bold+red must survive.
-        let (st_after_bg, st_after_border);
-        {
-            let mut book = read(&path).unwrap();
-            let sheet = book.get_sheet_by_name_mut("Sheet1").unwrap();
-            let cell = sheet.cell_mut("C3");
-            apply_edit_style(cell, &serde_json::json!({ "bg": "#FFF2CC" })).unwrap();
-            st_after_bg = cell.style().clone();
-            apply_edit_style(cell, &serde_json::json!({ "border": "thin" })).unwrap();
-            st_after_border = cell.style().clone();
-            // Persist so the round-trip is covered too.
-            umya_spreadsheet::writer::xlsx::write(&book, &path).unwrap();
-        }
-
-        // In-memory: bg merged on, bold survived, border untouched by bg edit.
-        let font = st_after_bg.font().expect("font must survive the merge");
-        assert!(font.font_bold().val(), "bold must survive a bg-only edit");
-        assert_eq!(st_after_bg.fill().unwrap().pattern_fill().unwrap().pattern_type(),
-            &umya_spreadsheet::structs::PatternValues::Solid, "bg must become a solid fill");
-        // Border edit adds all four sides.
-        let borders = st_after_border.borders().expect("border was added");
-        assert_eq!(borders.top().border_style(), "thin");
-        assert_eq!(borders.bottom().border_style(), "thin");
-        assert_eq!(borders.left().border_style(), "thin");
-        assert_eq!(borders.right().border_style(), "thin");
-
-        // Round-trip: bold survives the file write/read cycle too.
-        let mut book = read(&path).unwrap();
-        let sheet = book.get_sheet_by_name_mut("Sheet1").unwrap();
-        let st = sheet.get_cell("C3").unwrap().style();
-        assert!(st.font().unwrap().font_bold().val(), "bold must survive the round-trip");
-
-        let _ = std::fs::remove_file(path);
-    }
-
-    /// update_xlsx's style arm must survive a real file round-trip for the
-    /// attributes the agent is most likely to restyle (bold, fill, border).
-    ///
-    /// NOTE: umya-spreadsheet 3.0.1's READER does not parse the per-side style
-    /// of <border> elements (borders_crate::set_attributes pushes a default
-    /// Borders for every <border> tag). The WRITER is correct — this test proves
-    /// styles.xml carries a thin border and the cell references it — so Excel
-    /// renders the border. But umya re-reading the file reports it as "none",
-    /// which means a SECOND update_xlsx call cannot see the first call's border.
-    /// That is a library limitation, documented here rather than silently relied on.
-    #[test]
-    fn apply_edit_style_border_survives_round_trip() {
-        use umya_spreadsheet::reader::xlsx::read;
-        use umya_spreadsheet::writer::xlsx::write;
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!("jhai_office_border_{}.xlsx", std::process::id()));
-
-        {
-            let mut book = umya_spreadsheet::new_file();
-            let sheet = book.get_sheet_by_name_mut("Sheet1").unwrap();
-            sheet.cell_mut("B2").set_value("x");
-            write(&book, &path).unwrap();
-        }
-        {
-            let mut book = read(&path).unwrap();
-            let sheet = book.get_sheet_by_name_mut("Sheet1").unwrap();
-            apply_edit_style(sheet.cell_mut("B2"), &serde_json::json!({ "border": "thin" })).unwrap();
-            write(&book, &path).unwrap();
-        }
-
-        // The written package must be correct: styles.xml defines a thin border
-        // and the cell references it via a non-zero style index.
-        {
-            use zip::ZipArchive;
-            use std::io::Read;
-            {
-                let bytes = std::fs::read(&path).unwrap();
-                let mut zip = ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
-                if let Ok(mut f) = zip.by_name("xl/styles.xml") {
-                    let mut s = String::new();
-                    f.read_to_string(&mut s).unwrap();
-                    assert!(s.contains("thin"), "styles.xml must define a thin border: {}", s);
-                    assert!(s.contains("applyBorder=\"1\""), "cellXfs must apply the border: {}", s);
-                }
-                let _ = zip;
-            }
-            {
-                let bytes = std::fs::read(&path).unwrap();
-                let mut zip = ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
-                if let Ok(mut f) = zip.by_name("xl/worksheets/sheet1.xml") {
-                    let mut s = String::new();
-                    f.read_to_string(&mut s).unwrap();
-                    assert!(s.contains("s=\"2\""), "B2 must carry a non-zero style index: {}", s);
-                }
-                let _ = zip;
-            }
-        }
-
-        // Value + bold still round-trip cleanly.
-        let mut book = read(&path).unwrap();
-        let sheet = book.get_sheet_by_name_mut("Sheet1").unwrap();
-        let cell = sheet.get_cell("B2").unwrap();
-        assert_eq!(cell.value(), "x", "value must survive the write/read cycle");
-
-        let _ = std::fs::remove_file(path);
-    }
-
-    /// A style-only edit (no value) must not clobber the cell's content.
-    #[test]
-    fn update_xlsx_style_only_keeps_value() {
-        use umya_spreadsheet::reader::xlsx::read;
-        use umya_spreadsheet::writer::xlsx::write;
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!("jhai_office_updval_{}.xlsx", std::process::id()));
-
-        {
-            let mut book = umya_spreadsheet::new_file();
-            let sheet = book.get_sheet_by_name_mut("Sheet1").unwrap();
-            sheet.cell_mut("A1").set_value("keep me");
-            write(&book, &path).unwrap();
-        }
-        {
-            let mut book = read(&path).unwrap();
-            let sheet = book.get_sheet_by_name_mut("Sheet1").unwrap();
-            apply_edit_style(sheet.cell_mut("A1"), &serde_json::json!({ "bold": true })).unwrap();
-            write(&book, &path).unwrap();
-        }
-        {
-            let mut book = read(&path).unwrap();
-            let sheet = book.get_sheet_by_name_mut("Sheet1").unwrap();
-            let cell = sheet.get_cell("A1").unwrap();
-            assert_eq!(cell.get_value(), "keep me");
-            assert!(cell.style().font().unwrap().font_bold().val());        }
-
-        let _ = std::fs::remove_file(path);
-    }
 }
 
 
@@ -2227,5 +2270,166 @@ mod sheet_ref_tests {
     fn does_not_mistake_a_function_call_for_a_sheet() {
         // No '!' means no reference, however much it looks like a name.
         assert!(sheets_in_formula("=VLOOKUP(A1,B:C,2,FALSE)").is_empty());
+    }
+}
+
+
+#[cfg(test)]
+mod preset_tests {
+    use super::*;
+
+    fn spec(rows: serde_json::Value, design: Option<serde_json::Value>) -> SheetSpec {
+        SheetSpec {
+            name: Some("明細".into()),
+            rows: serde_json::from_value(rows).unwrap(),
+            design,
+            styles: None,
+        }
+    }
+
+    /// The sample the acceptance criterion is about: headers and a few columns,
+    /// and NOTHING said about how it should look.
+    fn sample() -> serde_json::Value {
+        serde_json::json!([
+            ["品目", "数量", "単価", "金額", "年", "備考"],
+            ["ステンレスねじ M4x10", 120, 25, 3000, 2026,
+             "在庫僅少のため次回発注時に数量を見直すこと。納期は通常より一週間ほど余分にかかる。"],
+            ["亜鉛メッキ板金 t1.6", 4, 1800, 7200, 2025, "図面Aに準拠"],
+            ["エポキシ塗料 2kg", 2, 3200, 6400, 2026, "屋外用"]
+        ])
+    }
+
+    fn build(preset: Option<&str>, design: Option<serde_json::Value>, out: &str) {
+        let mut book = rust_xlsxwriter::Workbook::new();
+        let sheet = book.add_worksheet();
+        apply_sheet(sheet, &spec(sample(), design), preset, 0).unwrap();
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/fidelity");
+        let _ = std::fs::create_dir_all(&dir);
+        book.save(dir.join(out)).unwrap();
+    }
+
+    /// Writes the workbooks scripts/xlsx_preset.py inspects. Column widths,
+    /// number formats and print titles are not things this side can check
+    /// honestly — rust_xlsxwriter would be confirming its own output — so a
+    /// second reader does it. See docs/design/xlsx-fidelity.md §4.
+    #[test]
+    fn dumps_preset_samples_for_the_python_check() {
+        build(None, None, "preset-default.xlsx");
+        build(Some("plain"), None, "preset-plain.xlsx");
+        build(Some("report"), None, "preset-report.xlsx");
+        // An explicit design still wins over the preset.
+        build(
+            Some("business-ja"),
+            Some(serde_json::json!({ "freeze": 0, "col_widths": { "A": 40 } })),
+            "preset-override.xlsx",
+        );
+    }
+
+    /// A workbook that came out of write_xlsx with an EMPTY xl/sharedStrings.xml
+    /// — structurally a zip, and refused by Excel and by openpyxl alike.
+    ///
+    /// Reproduces the shape that produced it: two sheets, Japanese text, a
+    /// design carrying col_widths.
+    #[test]
+    fn a_two_sheet_workbook_has_a_readable_string_table() {
+        use std::io::Read;
+        let mut book = rust_xlsxwriter::Workbook::new();
+        for (i, name) in ["表紙", "詳細"].iter().enumerate() {
+            let sheet = book.add_worksheet();
+            let spec = SheetSpec {
+                name: Some((*name).into()),
+                rows: serde_json::from_value(serde_json::json!([
+                    ["項目", "内容"],
+                    ["目的", "エージェントの詳細設計"],
+                    ["範囲", "xlsx 書き込み"]
+                ])).unwrap(),
+                design: Some(serde_json::json!({ "col_widths": { "A": 18, "B": 60 } })),
+                styles: None,
+            };
+            apply_sheet(sheet, &spec, None, i).unwrap();
+        }
+        // 21 rows x 4 columns, like the sheet that came out broken.
+        {
+            let sheet = book.add_worksheet();
+            let mut rows = vec![serde_json::json!(["ID", "項目", "説明", "備考"])];
+            for i in 1..=20 {
+                rows.push(serde_json::json!([
+                    i,
+                    format!("項目{}", i),
+                    format!("この項目の説明文です（{}）", i),
+                    "―"
+                ]));
+            }
+            let spec = SheetSpec {
+                name: Some("一覧".into()),
+                rows: serde_json::from_value(serde_json::Value::Array(rows)).unwrap(),
+                design: Some(serde_json::json!({ "col_widths": { "A": 8 } })),
+                styles: None,
+            };
+            apply_sheet(sheet, &spec, None, 2).unwrap();
+        }
+
+        let out = std::env::temp_dir().join(format!("two-sheet-{}.xlsx", std::process::id()));
+        book.save(&out).unwrap();
+
+        let bytes = std::fs::read(&out).unwrap();
+        let _ = std::fs::remove_file(&out);
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut ss = String::new();
+        zip.by_name("xl/sharedStrings.xml")
+            .expect("no shared string table at all")
+            .read_to_string(&mut ss)
+            .unwrap();
+        assert!(!ss.trim().is_empty(), "xl/sharedStrings.xml is EMPTY — Excel calls that damaged");
+        assert!(ss.contains("目的"), "the strings are missing from the table: {}", ss);
+    }
+
+    #[test]
+    fn a_sheet_with_no_rows_does_not_panic() {
+        let mut book = rust_xlsxwriter::Workbook::new();
+        let sheet = book.add_worksheet();
+        apply_sheet(sheet, &spec(serde_json::json!([]), None), None, 0).unwrap();
+    }
+
+    #[test]
+    fn ragged_rows_do_not_panic() {
+        let mut book = rust_xlsxwriter::Workbook::new();
+        let sheet = book.add_worksheet();
+        let rows = serde_json::json!([["a", "b", "c"], [1], [1, 2, 3, 4, 5]]);
+        apply_sheet(sheet, &spec(rows, None), None, 0).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod overwrite_tests {
+    #[test]
+    fn creating_over_an_existing_workbook_is_refused() {
+        let e = super::refuse_to_replace("tests/fixtures/styled.xlsx", None).unwrap_err();
+        assert!(e.contains("update_xlsx"), "the error must name the tool that edits in place");
+        assert!(e.contains("overwrite"), "and the way to override it");
+    }
+
+    /// The refusal has to close the door it used to leave open.
+    ///
+    /// Faced with "this file already exists", the agent deleted the file and
+    /// created it again — the same loss by another route, arrived at by
+    /// reading a message that only said what NOT to pass. So the message now
+    /// names the workaround and rules it out.
+    #[test]
+    fn the_refusal_rules_out_deleting_the_file_instead() {
+        let e = super::refuse_to_replace("tests/fixtures/styled.xlsx", None).unwrap_err();
+        assert!(e.contains("DO NOT delete the file"), "{}", e);
+        assert!(e.contains("update_xlsx"), "{}", e);
+        assert!(e.contains("append_xlsx_row"), "{}", e);
+    }
+
+    #[test]
+    fn a_new_path_is_allowed() {
+        assert!(super::refuse_to_replace("tests/fixtures/does-not-exist.xlsx", None).is_ok());
+    }
+
+    #[test]
+    fn an_explicit_overwrite_is_allowed() {
+        assert!(super::refuse_to_replace("tests/fixtures/styled.xlsx", Some(true)).is_ok());
     }
 }

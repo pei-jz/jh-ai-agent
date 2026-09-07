@@ -1,6 +1,6 @@
 // TraceRecorder — the per-session record of what each tool call did.
 //
-// Step 0 of docs/design/agent-memory-learning.plan.md: the measurement floor the
+// Step 0 of docs/scratch/agent-memory-learning.plan.md: the measurement floor the
 // rest of the memory work stands on. It answers the two questions Failure Cards
 // (Step 1) need and nothing today can answer:
 //

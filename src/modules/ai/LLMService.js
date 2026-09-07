@@ -374,6 +374,19 @@ class LLMService {
      * logic should call THIS rather than tokenEstimator.getModelLimit() directly, so the
      * user's per-connection context_window is always honored.
      */
+    /**
+     * How many tokens one REPLY may contain, or null when the provider decides.
+     *
+     * Not the context window — that is getEffectiveModelLimit(). This is the cap
+     * on what the model can say in a single turn, and it is the ceiling a tool
+     * call carrying a whole file runs into: the reply stops mid-argument, and
+     * what reaches the tool is a call with a parameter missing. The agent cannot
+     * see that ceiling unless it is told, so the system prompt states it.
+     */
+    getMaxOutputTokens() {
+        return Number(this.currentMaxOutputTokens) || null;
+    }
+
     getEffectiveModelLimit() {
         return tokenEstimator.getModelLimit(
             this.currentModel,

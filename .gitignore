@@ -92,3 +92,10 @@ tauri-signing-*
 # 404 on GitHub while this rule stands. Either drop the links, or commit the
 # one file the release procedure needs:  git add -f docs/RELEASING.md
 docs/
+
+# docs/scratch/ is the working pile: point-in-time reports, model reviews, plan
+# snapshots, one-off experiments. Listed separately and AFTER docs/ although
+# that line already covers it — because the day someone relaxes the rule above
+# to publish docs/design/, this line is what stops a folder of stale review
+# reports going out with it. A redundant rule is cheaper than that mistake.
+docs/scratch/

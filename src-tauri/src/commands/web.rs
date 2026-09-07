@@ -227,12 +227,23 @@ pub async fn web_search<R: tauri::Runtime>(
 /// `allow_hosts` is the user's escape hatch (Settings → General → Fetch allowed
 /// hosts), passed through by the caller. Absent/empty ⇒ nothing private is
 /// reachable, which is the default — see the SSRF guard above.
+/// `raw: true` returns a JSON envelope with the status and the body as
+/// separate fields, instead of the human-readable form that prefixes the body
+/// with a status line.
+///
+/// The two callers want different things and were given the same string. The
+/// agent READS the status line; a watcher PARSES the body, and that prefix made
+/// every JSON.parse fail — silently, because a failed parse left the whole
+/// response as an opaque string whose watched path then resolved to null on
+/// every poll. A null that never changes is a watcher that never fires and
+/// never says why.
 #[tauri::command]
 pub async fn fetch_url(
     url: String,
     headers: Option<Vec<(String, String)>>,
     proxy: Option<String>,
     allow_hosts: Option<Vec<String>>,
+    raw: Option<bool>,
 ) -> Result<String, String> {
     // Enforced here, in the backend, rather than in the JS tool handler: the
     // handler is the layer an agent's own output can influence, and this is the
@@ -348,6 +359,13 @@ pub async fn fetch_url(
         ""
     };
 
+    if raw.unwrap_or(false) {
+        return Ok(serde_json::json!({
+            "status": status.as_u16(),
+            "body": text,
+            "truncated": truncated,
+        }).to_string());
+    }
     Ok(format!("{}\n\n{}{}", status_line, text, trunc_note))
 }
 
@@ -375,7 +393,7 @@ mod tests {
             .await;
 
         let url = format!("{}/test", mock_server.uri());
-        let res = fetch_url(url, None, None, allow_loopback()).await.unwrap();
+        let res = fetch_url(url, None, None, allow_loopback(), None).await.unwrap();
         assert!(res.contains("HTTP 200 OK"));
         assert!(res.contains("Hello, World!"));
     }
@@ -391,7 +409,7 @@ mod tests {
             .await;
 
         let url = format!("{}/large", mock_server.uri());
-        let res = fetch_url(url, None, None, allow_loopback()).await.unwrap();
+        let res = fetch_url(url, None, None, allow_loopback(), None).await.unwrap();
         assert!(res.contains("[Response truncated at 500 KB]"));
         assert!(res.len() <= (500 * 1024) + 1000);
     }
@@ -493,7 +511,45 @@ mod tests {
             .await;
 
         let url = format!("{}/bounce", mock_server.uri());
-        let err = fetch_url(url, None, None, allow_loopback()).await.unwrap_err();
+        let err = fetch_url(url, None, None, allow_loopback(), None).await.unwrap_err();
         assert!(err.contains("not a public address"), "unexpected: {}", err);
     }
+
+    // The two output shapes, because giving the watcher the human-readable one
+    // is what made every JSON.parse fail — and a failed parse looked exactly
+    // like "nothing changed".
+    #[tokio::test]
+    async fn raw_mode_separates_the_status_from_the_body() {
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = server.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for stream in server.incoming().take(2) {
+                let mut s = stream.unwrap();
+                let mut buf = [0u8; 1024];
+                let _ = s.read(&mut buf);
+                let body = "{\"n\":7}";
+                let _ = s.write_all(format!(
+                    "HTTP/1.1 200 OK
+Content-Type: application/json
+Content-Length: {}
+
+{}",
+                    body.len(), body).as_bytes());
+            }
+        });
+        let url = format!("http://127.0.0.1:{}/x", port);
+
+        let readable = fetch_url(url.clone(), None, None, allow_loopback(), None).await.unwrap();
+        assert!(readable.starts_with("HTTP 200"), "{}", readable);
+
+        let raw = fetch_url(url, None, None, allow_loopback(), Some(true)).await.unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["status"], 200);
+        // The body is exactly what the server sent — parseable on its own.
+        let inner: serde_json::Value =
+            serde_json::from_str(v["body"].as_str().unwrap()).unwrap();
+        assert_eq!(inner["n"], 7);
+    }
+
 }

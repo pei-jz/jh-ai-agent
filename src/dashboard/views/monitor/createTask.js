@@ -65,6 +65,7 @@ export async function startSelectedMcp(selectedMcp = [], servers = {}, mcp = def
 export async function createTask({
     prompt, workspace, modeId, selectedMcp = [], mcpServers = {},
     images = [], caller = 'NewTask', interaction = 'build',
+    chatContext = [],
     client, mcp = defaultMcpManager,
 }) {
     await startSelectedMcp(selectedMcp, mcpServers, mcp);
@@ -79,7 +80,42 @@ export async function createTask({
             images,
             caller,
             interaction,
+            chatContext,
         })),
     });
+    // Remember the workspace we just ran in.
+    //
+    // The picker offers `approved_projects`, and that list only ever grew from
+    // the folder picker in Settings and the first-run wizard. A workspace used
+    // for an actual task — typed in, carried over from a template, handed in by
+    // another app — was not on it, so the list stayed short while the task
+    // history filled with workspaces that were not in it. Running somewhere IS
+    // approving it, which is what the backend already has to believe to do the
+    // work.
+    //
+    // Best-effort: the task is created either way, and failing to remember a
+    // path must not fail the run.
+    rememberWorkspace(workspace, client).catch(() => {});
+
     return res.task_id;
+}
+
+/** Append `ws` to approved_projects if it is not already there. */
+export async function rememberWorkspace(ws, client) {
+    const path = String(ws || '').trim();
+    if (!path || !client?.getConfig || !client?.updateConfig) return false;
+
+    const config = (await client.getConfig()) || {};
+    const projects = Array.isArray(config.approved_projects) ? config.approved_projects : [];
+    // Windows paths differ only by separator and case far too often for an
+    // exact match to be the right test.
+    const norm = (p) => String(p)
+        .replace(/[\\/]+$/, '')          // trailing separators
+        .replace(/\\/g, '/')             // backslashes
+        .toLowerCase();                 // Windows is case-insensitive
+    const same = (a, b) => norm(a) === norm(b);
+    if (projects.some(p => same(p, path))) return false;
+
+    await client.updateConfig({ approved_projects: [...projects, path] });
+    return true;
 }

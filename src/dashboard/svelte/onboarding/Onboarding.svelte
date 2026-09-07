@@ -171,23 +171,23 @@
                 {/if}
                 <div class="ob-actions">
                     <button class="btn btn-secondary" type="button"
-                        onclick={() => onPickWorkspace?.()}>{@html icon('folder', 13)} フォルダを選ぶ</button>
+                        onclick={() => onPickWorkspace?.()}>{@html icon('folder', 13)} {t('onboarding.pickFolder')}</button>
                 </div>
 
             {:else}
                 <ul class="ob-ready">
-                    <li>{@html icon('report', 14)} <strong>資料を読ませる</strong> — Excel / Word / PowerPoint をそのまま読み、要点や集計を出します。</li>
-                    <li>{@html icon('table', 14)} <strong>成果物を作らせる</strong> — Excel（新規・既存の部分更新）や Word 文書を出力します。</li>
-                    <li>{@html icon('search', 14)} <strong>調べさせる</strong> — Web とローカルの資料を横断して調査レポートにまとめます。</li>
-                    <li>{@html icon('clock', 14)} <strong>定期実行</strong> — 毎朝の集計などを Schedule に登録できます。</li>
+                    <li>{@html icon('report', 14)} <strong>{t('onboarding.can.read')}</strong> — {t('onboarding.can.read.detail')}</li>
+                    <li>{@html icon('table', 14)} <strong>{t('onboarding.can.write')}</strong> — {t('onboarding.can.write.detail')}</li>
+                    <li>{@html icon('search', 14)} <strong>{t('onboarding.can.research')}</strong> — {t('onboarding.can.research.detail')}</li>
+                    <li>{@html icon('clock', 14)} <strong>{t('onboarding.can.schedule')}</strong> — {t('onboarding.can.schedule.detail')}</li>
                 </ul>
                 <p class="ob-muted">
-                    設定は Settings からいつでも変更できます。コード作業をさせるときは、タスク作成時のモードを
-                    <strong>{t('mode.develop')}</strong> に切り替えてください。
+                    {t('onboarding.settingsNote')}
+                    <strong>{t('mode.develop')}</strong>{t('onboarding.settingsNote.tail')}
                 </p>
                 <div class="ob-actions">
                     <button class="btn btn-primary" type="button" onclick={() => onFinish?.()}>
-                        はじめる</button>
+                        {t('onboarding.start')}</button>
                 </div>
             {/if}
         </div>

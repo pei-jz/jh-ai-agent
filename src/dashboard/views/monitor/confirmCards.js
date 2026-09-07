@@ -1,6 +1,7 @@
 // One implementation for all of these — see utils/html.js for what the
 // nine local copies disagreed about.
 import { escapeHtml } from '../../utils/html.js';
+import { t } from '../../../i18n/index.js';
 
 // confirmCards — pure formatters for the Monitor's approval cards (P4 split
 // from MonitorView.js). None of these touch the DOM or view state; every input
@@ -115,6 +116,21 @@ export function fmtConfirmResolved(data, approved) {
 }
 
 /**
+ * An approval that was never answered, on a run that has stopped.
+ *
+ * Not the same as settled: nobody said yes or no. But the promise it would have
+ * resolved died with the run, so the buttons cannot work — and offering them
+ * produces the worst version of this, where clicking does nothing at all and
+ * the card comes back looking live the next time the task is opened.
+ */
+export function fmtConfirmStale(data, note) {
+    const what = data?.command || data?.path || data?.message || '';
+    return `<div class="mlog mlog-status log-status"><span class="mlog-icon">⏸</span>`
+        + `<span class="mlog-body"><strong>${escapeHtml(String(what).slice(0, 160))}</strong>`
+        + `<br><span class="mconfirm-stale">${escapeHtml(note)}</span></span></div>`;
+}
+
+/**
  * Build the approval-card markup. Pure — the caller supplies everything the
  * card needs (the workspace's auto-approve state and its toggles).
  *
@@ -131,33 +147,42 @@ export function fmtConfirm(data, idPrefix = 'confirm', wsAutoApprove = false, ws
     if (data.type === 'command_confirm') {
         const dangerous = data.risk === 'dangerous';
         const riskBadge = dangerous
-            ? `<span class="mconfirm-risk">⚠️ Dangerous command</span>`
+            ? `<span class="mconfirm-risk">${t('confirm.danger')}</span>`
             : '';
-        inner = `<h4>🛡 Command Approval ${riskBadge}</h4><p>${escapeHtml(data.message || '')}</p><pre><code>${escapeHtml(data.command || '')}</code></pre>`;
+        inner = `<h4>${t('confirm.title')} ${riskBadge}</h4><p>${escapeHtml(data.message || '')}</p><pre><code>${escapeHtml(data.command || '')}</code></pre>`;
         // "Always allow" recurs for normal commands; dangerous can never be
         // whitelisted (allowAlways is false for them from the handler).
         if (data.allowAlways) {
-            alwaysBtn = `<button class="btn btn-secondary btn-approve-always" data-confirm-id="${cid}" title="Approve now and auto-allow this command pattern in future">✓ Always allow</button>`;
+            alwaysBtn = `<button class="btn btn-secondary btn-approve-always" data-confirm-id="${cid}" title="${t('confirm.always.title')}">${t('confirm.always')}</button>`;
         }
-        // Per-workspace auto-approve toggle (normal commands only; dangerous
-        // always confirm). The caller reads/writes localStorage via the
-        // auto-approve helpers above.
-        if (!dangerous && ws) {
+        // Per-workspace auto-approve toggle — for TERMINAL COMMANDS only.
+        //
+        // Every approval-gated tool sends type:'command_confirm', so this card
+        // is also what a write_xlsx or a delete_file looks like. Only
+        // run_command carries `risk`, and only run_command consults the
+        // auto-approve list (ToolExecutor._isCommandApproved); the write tools
+        // always prompt. Offering the checkbox on their cards promised
+        // something nothing would honour — the next write asked again, and a
+        // user who had ticked it read that as the run being stuck.
+        const isTerminalCommand = !!data.risk;
+        if (isTerminalCommand && !dangerous && ws) {
             const on = wsAutoApprove;
-            autoWs = `<label class="mconfirm-autows"><input type="checkbox" class="cb-autows" data-ws="${escapeHtml(ws)}" ${on ? 'checked' : ''}> Auto-approve commands in this workspace from now on (dangerous ones are always confirmed)</label>`;
+            autoWs = `<label class="mconfirm-autows"><input type="checkbox" class="cb-autows" data-ws="${escapeHtml(ws)}" ${on ? 'checked' : ''}> ${t('confirm.autoWs')}</label>`;
         }
-        autoWs += `<div class="mconfirm-manage"><a class="acm-open" title="Manage approved commands">🛡 Manage allowlist</a></div>`;
+        if (isTerminalCommand) {
+            autoWs += `<div class="mconfirm-manage"><a class="acm-open" title="${t('confirm.manage.title')}">${t('confirm.manage')}</a></div>`;
+        }
     } else if (data.type === 'diff_review') {
-        inner = `<h4>📝 File Modification</h4><p><code>${escapeHtml(data.path || '')}</code></p><p>${escapeHtml(data.message || '')}</p>${renderSimpleDiff(data.oldContent || '', data.newContent || '')}`;
+        inner = `<h4>${t('confirm.diff')}</h4><p><code>${escapeHtml(data.path || '')}</code></p><p>${escapeHtml(data.message || '')}</p>${renderSimpleDiff(data.oldContent || '', data.newContent || '')}`;
     }
     return `
         <div class="mconfirm-box log-confirm-request" id="${idPrefix}-${cid}" data-confirm-card="${cid}">
             ${inner}
             ${autoWs}
             <div class="mconfirm-actions">
-                <button class="btn btn-success btn-approve" data-confirm-id="${cid}">Approve</button>
+                <button class="btn btn-success btn-approve" data-confirm-id="${cid}">${t('confirm.approve')}</button>
                 ${alwaysBtn}
-                <button class="btn btn-error btn-reject" data-confirm-id="${cid}">Reject</button>
+                <button class="btn btn-error btn-reject" data-confirm-id="${cid}">${t('confirm.reject')}</button>
             </div>
         </div>
     `;

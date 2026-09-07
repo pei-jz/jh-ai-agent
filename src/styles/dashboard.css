@@ -741,36 +741,27 @@ body {
   flex-shrink: 0;
 }
 
-/* Label hidden — shown only in tooltip */
+/* The rail's labels are VISIBLE.
+   They were `display: none` here while Sidebar.js rendered them, on the
+   understanding that the CSS tooltip below carried the name instead. That
+   tooltip drew `attr(data-tooltip)` — an attribute nothing has ever set — so
+   what actually appeared on hover was an empty bordered box, and the rail was
+   five unlabelled glyphs. Being invisible is also why these labels were the
+   last English left in a Japanese UI. */
 .sidebar-item-label {
-  display: none;
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
+  line-height: 1;
+  /* 68px of rail minus the padding: a long localisation ellipsises rather than
+     widening the rail or wrapping to two lines. */
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-/* ── Sidebar item tooltip ──────────────────────────────────── */
-.sidebar-item::after {
-  content: attr(data-tooltip);
-  position: absolute;
-  left: calc(var(--sidebar-width) + 10px);
-  top: 50%;
-  transform: translateY(-50%) translateX(-4px);
-  background: var(--surface-sunken);
-  color: var(--ink);
-  padding: 5px 11px;
-  border-radius: var(--r-2);
-  font-size: var(--fs-sm);
-  font-weight: 500;
-  white-space: nowrap;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.15s ease, transform 0.15s ease;
-  border: 1px solid var(--line);
-  box-shadow: var(--shadow-pop);
-  z-index: 1000;
-}
-.sidebar-item:hover::after {
-  opacity: 1;
-  transform: translateY(-50%) translateX(0);
-}
+/* No CSS tooltip: the name is on screen. `title` still carries the Ctrl+N
+   shortcut, which is a reminder — the thing a tooltip is actually for. */
 
 /* Below the rule: the app itself (Settings, the build), not the work. Settings
    keeps the full .sidebar-item treatment — same hit area, same active rail —
@@ -2453,3 +2444,295 @@ tr:hover td {
   margin: 0 0 14px;
 }
 .fatal-hint { color: var(--ink-faint); font-size: var(--fs-sm); margin: 0; }
+
+
+/* ── View shell ──────────────────────────────────────────────────────────
+   `.view-container` / `.view-header` are used by the Schedule, Settings and
+   Memory roots and were defined NOWHERE — three class names that looked like a
+   layout and contributed nothing, which is why a view's title sat hard against
+   the panel under it. (The rail's `data-tooltip` was the same shape of bug.)
+
+   Deliberately minimal: these views already own their internals, so this only
+   supplies the gap between a view's heading and its content — the one thing all
+   three were missing and none could get on their own. */
+/* The host a view is mounted into (ScheduleView.js). Also previously named
+   but never defined, so the view had no height to fill and had to guess at one
+   with calc(100vh - …). */
+.schedule-root {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.view-container {
+  display: flex;
+  flex-direction: column;
+  flex: 1;          /* ignored when the parent is not a flex container */
+  min-height: 0;
+}
+.view-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+/* ── Schedule / Trigger form ─────────────────────────────────────────────
+   Shared by ScheduleDetail.svelte and TriggerPanel.svelte, which sit behind
+   one tab switch and must therefore be indistinguishable.
+
+   Global rather than component-scoped BECAUSE of that. These lived in
+   ScheduleDetail's <style>, where Svelte scopes them to that component, so
+   TriggerPanel's markup used the same class names and matched nothing — the
+   trigger form rendered with browser defaults (labels inline, fields at their
+   intrinsic width) next to a form that looked designed. One definition is also
+   the only way "matching" survives the next change to either. */
+/* The reading side IS the ground; nothing is layered on it. */
+.sch-detail-panel {
+    flex: 1;
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+.sch-detail-header {
+    padding: 10px 16px;
+    background: var(--surface-sunken);
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--ink);
+}
+.sch-detail-next { margin-left: auto; font-size: 11px; font-weight: 400; color: var(--ink-faint); }
+.sch-detail-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+}
+.sch-field { display: flex; flex-direction: column; gap: 6px; }
+.sch-field label, .sch-label {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--ink-soft);
+}
+.sch-label-note { font-weight: 400; text-transform: none; font-size: 10px; color: var(--ink-faint); }
+.sch-note { font-size: 11px; color: var(--ink-faint); }
+.sch-input, .sch-textarea, .sch-select {
+    background: var(--surface-input);
+    border: 1px solid var(--line);
+    border-radius: var(--r-2);
+    color: var(--ink);
+    font-size: 13px;
+    padding: 9px 12px;
+    outline: none;
+    font-family: var(--font-sans);
+    transition: border-color 0.15s;
+}
+.sch-input:focus, .sch-textarea:focus, .sch-select:focus { border-color: var(--accent); }
+.sch-textarea { resize: vertical; min-height: 80px; }
+.sch-select { cursor: pointer; }
+.sch-select-auto { width: auto; }
+
+/* ── Event sources and rules (Watchers / Triggers) ───────────────────────
+   Shared by TriggerPanel.svelte and WatcherPanel.svelte. Global for the same
+   reason the schedule form above is: a Svelte <style> is scoped to one
+   component, so a second panel written against these names would silently get
+   browser defaults instead. */
+/* Layout only. Fields reuse .sch-field / .sch-input / .sch-select /
+   .sch-textarea, which live in dashboard.css so this form and the schedule
+   form behind the neighbouring tab share ONE definition. */
+.trg { display: flex; flex-direction: column; gap: 12px; height: 100%; }
+.trg-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
+.trg-head h2 { margin: 0; font-size: var(--fs-xl); }
+.subtitle { color: var(--ink-faint); font-size: var(--fs-sm); margin: 4px 0; }
+.trg-body { display: grid; grid-template-columns: minmax(220px, 300px) 1fr; gap: 16px; min-height: 0; flex: 1; }
+.trg-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; border-right: 1px solid var(--line); }
+.trg-item { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+.trg-item.active { background: var(--accent-surface); }
+.trg-pick { flex: 1; text-align: left; background: none; border: 0; cursor: pointer; color: inherit; display: flex; flex-direction: column; gap: 2px; }
+.trg-name { font-weight: 600; }
+.trg-match { color: var(--ink-faint); font-size: var(--fs-sm); }
+.trg-stopped { color: var(--warning); font-size: var(--fs-sm); font-weight: 600; }
+.trg-toggle { display: flex; align-items: center; gap: 4px; font-size: var(--fs-sm); white-space: nowrap; }
+.trg-empty { color: var(--ink-faint); padding: 20px 24px; }
+
+/* The form itself. Two columns so it is filled in without scrolling; a
+   field that needs the width says so with .trg-span. Collapses to one
+   column when the pane is too narrow for two to be readable. */
+.trg-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px 16px;
+    align-items: start;
+}
+.trg-span { grid-column: 1 / -1; }
+@media (max-width: 720px) {
+    .trg-grid { grid-template-columns: 1fr; }
+}
+
+.trg-row { display: flex; align-items: center; gap: 8px; }
+.trg-grow { flex: 1; min-width: 0; }
+.trg-mode { flex: 0 0 auto; }
+.trg-eq { color: var(--ink-faint); }
+.trg-rowbtn { padding: 6px 10px; flex: 0 0 auto; }
+/* Matches the select beside it. The folder glyph fills only the lower
+   half of its 20x20 box, so it reads a size smaller than it is set to —
+   it needs both the larger size AND a button tall enough to sit in. */
+.trg-browse {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    align-self: stretch;
+    padding: 0 14px;
+    flex: 0 0 auto;
+}
+/* Three short numbers on one line, each with its label beside it: they are
+   tuning with working defaults, not fields the form is about. */
+.trg-guards { flex-wrap: wrap; }
+.trg-guards label { font-size: var(--fs-sm); color: var(--ink-soft); white-space: nowrap; }
+.trg-guards .sch-input { width: 88px; }
+.trg-prompt-box { min-height: 72px; }
+.trg-actions { display: flex; gap: 8px; margin-top: 14px; }
+
+/* "When does this run" — the segmented type picker, the big time field and
+   the seven day circles. Owned here because ScheduleFields, ScheduleDetail
+   and the setup wizard all render them; three scoped copies is what made
+   the wizard look like a worse version of a screen we already had. */
+.sch-type-group { display: flex; gap: 6px; }
+.sch-type-btn {
+    flex: 1;
+    padding: 7px 10px;
+    border-radius: var(--r-2);
+    border: 1.5px solid var(--line);
+    background: var(--surface-sunken);
+    color: var(--ink-soft);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    text-align: center;
+    transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.sch-type-btn.selected { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+
+.sch-time-row { display: flex; align-items: center; gap: 12px; }
+.sch-time-input {
+    background: var(--surface-input);
+    border: 1px solid var(--line);
+    border-radius: var(--r-2);
+    color: var(--ink);
+    font-size: 16px;
+    font-family: var(--font-mono);
+    font-weight: 700;
+    padding: 8px 14px;
+    outline: none;
+    width: 120px;
+}
+.sch-time-input:focus { border-color: var(--accent); }
+.sch-datetime-input {
+    background: var(--surface-input);
+    border: 1px solid var(--line);
+    border-radius: var(--r-2);
+    color: var(--ink);
+    font-size: 14px;
+    font-family: var(--font-mono);
+    padding: 8px 12px;
+    outline: none;
+    width: 100%;
+    box-sizing: border-box;
+}
+.sch-datetime-input:focus { border-color: var(--accent); }
+
+.sch-days-picker { display: flex; gap: 6px; }
+.sch-day-btn {
+    width: 34px; height: 34px;
+    border-radius: 50%;
+    border: 1.5px solid var(--line);
+    background: var(--surface-sunken);
+    color: var(--ink-soft);
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: background 0.12s, border-color 0.12s, color 0.12s;
+    display: flex; align-items: center; justify-content: center;
+}
+.sch-day-btn.selected { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+
+/* A checkbox with its label beside it. Three components need it; it had two
+   identical scoped copies, which agree until someone edits one. */
+.trg-check { display: flex; align-items: center; gap: 6px; font-size: var(--fs-sm); }
+.trg-check input { width: auto; }
+
+/* A list of code-ish facts a form has to show: the payload fields an event
+   carries, the hosts a recipe will reach. Used by the watcher panel and by the
+   setup wizard, so it lives here — a component-scoped copy is exactly the bug
+   `sharedFormStyles.test.js` exists to catch. */
+.wch-fields { list-style: none; margin: 0; padding: 0; }
+.wch-fields li { display: flex; gap: 10px; align-items: baseline; padding: 2px 0; }
+.wch-fields code { white-space: nowrap; }
+
+/* Everything wrong with what you just filled in, all at once. */
+.rec-problems {
+    margin: 10px 0 0; padding: 8px 12px 8px 28px; border-radius: var(--r-2);
+    background: var(--error-surface); color: var(--error); font-size: var(--fs-sm);
+}
+
+.trg-view { display: flex; flex-direction: column; gap: 10px; }
+.trg-view h3, .trg-view h4 { margin: 0; }
+.trg-prompt, .trg-curl {
+    background: var(--surface-sunken); border: 1px solid var(--line);
+    border-radius: var(--r-2); padding: 10px; white-space: pre-wrap;
+    word-break: break-all; font-size: var(--fs-sm); margin: 0;
+}
+.trg-runs { list-style: none; margin: 0; padding: 0; font-size: var(--fs-sm); }
+.trg-runs li { display: flex; gap: 10px; padding: 3px 0; border-bottom: 1px solid var(--line); }
+.trg-runs .err { color: var(--error); }
+
+/* ── Tab strip and split layout ──────────────────────────────────────────
+   Used by ScheduleRoot, JobsRoot and JobTimeline. Global because a Svelte
+   <style> is scoped to the component that wrote it, so the second and third
+   users of a class silently get browser defaults. */
+.sch-tabs { display: flex; gap: 4px; }
+.sch-tabs button {
+    background: none; border: 1px solid var(--line); border-radius: var(--r-2);
+    padding: 5px 14px; cursor: pointer; color: var(--ink-soft);
+}
+.sch-tabs button.active { background: var(--accent-surface); color: var(--ink); border-color: var(--accent); }
+/* Fills what the header leaves, rather than guessing at it. The `- 60px`
+   that stood here was the header's assumed height; adding the tab strip
+   made the guess wrong, and any future line in the header would too. */
+.sch-layout {
+    display: flex;
+    gap: 0;
+    flex: 1;
+    min-height: 0;
+}
+.sch-tabs { margin-top: 2px; }
+
+/* A labelled group inside the watcher/job forms. Global for the same reason as
+   the rest of this vocabulary: more than one component uses it. */
+.fld-group {
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  padding: 10px 12px;
+  margin: 0;
+}
+.fld-group legend {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-soft);
+  padding: 0 6px;
+}

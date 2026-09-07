@@ -59,7 +59,7 @@ describe('ConnectionTable', () => {
         // The agent uses the first one, so the marker has to be there.
         const el = table({ instances: [inst({ id: 'a' }), inst({ id: 'b' })], activeId: null });
         expect(el.querySelector('tr.is-active [data-id]').dataset.id).toBe('a');
-        expect(el.textContent).toContain('★ ACTIVE');
+        expect(el.textContent).toContain(t('conn.active'));
     });
 
     it('honours a stored active id', () => {

@@ -451,6 +451,124 @@ pub fn os_notify(title: String, body: String) -> Result<(), String> {
     n.show().map(|_| ()).map_err(|e| e.to_string())
 }
 
+/// A watcher script's own ceiling. A poll that outlives its interval is stuck.
+const SCRIPT_TIMEOUT_SECS: u64 = 60;
+
+/// Run one watcher script: config on stdin, secrets in the environment.
+///
+/// Deliberately NOT `run_command`, for three reasons that are all about the
+/// same fact — a watcher runs unattended, on a timer, with nobody to answer a
+/// confirmation dialog:
+///
+///   • `cwd` is REQUIRED and always goes through the path guard. `run_command`
+///     skips the guard entirely when `cwd` is empty, which is fine for a call a
+///     human just approved and is not fine for one that fires at 03:00.
+///   • the environment carries the recipe's secrets, so a token never has to be
+///     typed into a command line — where it would be stored in `jh_watchers`
+///     (localStorage: synced, backed up, screen-shared) and visible in the
+///     process list.
+///   • stdin carries the config and the previous state, so a script does not
+///     have to invent its own storage — and with it, its own broken version of
+///     "do not fire on the first run".
+///
+/// The dangerous-command check happens on the JavaScript side before this is
+/// called (scriptContract.scriptRefusal); this is the backstop that makes the
+/// working directory claim true regardless.
+#[tauri::command]
+pub async fn run_watcher_script(
+    command: String,
+    cwd: String,
+    env: std::collections::HashMap<String, String>,
+    stdin_data: Option<String>,
+    timeout_secs: Option<u64>,
+    guard: tauri::State<'_, crate::path_guard::PathGuard>,
+) -> Result<String, String> {
+    if command.trim().is_empty() {
+        return Err("監視スクリプトのコマンドが空です。".to_string());
+    }
+    if cwd.trim().is_empty() {
+        return Err(
+            "監視スクリプトには実行フォルダが必要です（無人で走るので、\
+             どこで実行されるかを曖昧にできません）。"
+                .to_string(),
+        );
+    }
+    guard.ensure_allowed(&cwd)?;
+
+    let limit = Duration::from_secs(timeout_secs.filter(|s| *s > 0).unwrap_or(SCRIPT_TIMEOUT_SECS));
+
+    tokio::task::spawn_blocking(move || run_script_blocking(command, cwd, env, stdin_data, limit))
+        .await
+        .map_err(|e| format!("Watcher script task failed to run: {}", e))?
+}
+
+fn run_script_blocking(
+    command: String,
+    cwd: String,
+    env: std::collections::HashMap<String, String>,
+    stdin_data: Option<String>,
+    limit: Duration,
+) -> Result<String, String> {
+    use std::io::Write;
+
+    let (program, args) = shell_spec();
+    let mut cmd = Command::new(program);
+    cmd.args(args);
+    cmd.arg(&command);
+    cmd.current_dir(&cwd);
+
+    for (k, v) in env {
+        // Shape only. WHICH names a recipe may set is decided in
+        // scriptContract.buildScriptEnv, where the recipe's variables and the
+        // app's own (`JH_WATCHER_*`) are merged and the app's win; by the time
+        // the map arrives here the reserved ones are legitimately in it.
+        let valid = !k.is_empty()
+            && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            && !k.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(true);
+        if valid {
+            cmd.env(k, v);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("監視スクリプトを起動できません: {}", e))?;
+
+    // Written and then CLOSED. Left open, a script that reads to EOF waits for
+    // input that will never come and is killed by the timeout instead — which
+    // reads as "the script hangs" rather than "nobody closed the pipe".
+    if let Some(mut sink) = child.stdin.take() {
+        let _ = sink.write_all(stdin_data.unwrap_or_default().as_bytes());
+    }
+
+    let out_handle = child.stdout.take().map(|p| thread::spawn(move || read_all(p)));
+    let err_handle = child.stderr.take().map(|p| thread::spawn(move || read_all(p)));
+
+    let status = wait_with_timeout(&mut child, limit);
+    let stdout = out_handle.and_then(|h| h.join().ok()).unwrap_or_default();
+    let stderr = err_handle.and_then(|h| h.join().ok()).unwrap_or_default();
+
+    match status {
+        Ok(st) if st.success() => Ok(stdout),
+        Ok(_) => Err(format!(
+            "監視スクリプトが失敗しました:\nStdout: {}\nStderr: {}",
+            stdout, stderr
+        )),
+        Err(e) if e == "__TIMEOUT__" => Err(timeout_error(&command, limit.as_secs(), &stdout, &stderr)),
+        Err(e) => Err(e),
+    }
+}
+
 #[cfg(all(test, windows))]
 mod tests {
     use super::NOTIFY_APP_ID;

@@ -30,7 +30,7 @@ import {
 import {
     handleGitStatus, handleGitDiff, handleGitLog, handleGitCommit
 } from './tools/handlers/gitHandlers.js';
-import { handleReadOffice, handleWriteXlsx, handleWriteDocx, handleUpdateXlsx } from './tools/handlers/officeHandlers.js';
+import { handleReadOffice, handleWriteXlsx, handleWriteDocx, handleUpdateXlsx, handleAppendXlsxRow } from './tools/handlers/officeHandlers.js';
 import { handleListResources, handleReadResource } from './tools/handlers/resourceHandlers.js';
 import { handleReadSkill, handleReadSkillFile } from './tools/handlers/skillHandlers.js';
 import { resourceRegistry } from './agent/ResourceRegistry.js';
@@ -42,6 +42,8 @@ import {
 import { handleOpenQuestion } from './tools/handlers/openQuestionHandlers.js';
 import { OpenQuestions } from './agent/OpenQuestions.js';
 import { isPathInScope, WRITE_ENFORCED_TOOLS } from './agent/SubagentRoles.js';
+// Markers the response parser leaves when a tool call did not arrive whole.
+import { ARGS_TRUNCATED, ARGS_UNPARSEABLE } from './agent/ResponseParser.js';
 
 // ── Per-tool watchdog budgets (ms) ─────────────────────────────────────────
 // Only INVESTIGATION tools appear here: they cannot prompt the user and have a
@@ -60,6 +62,32 @@ const TOOL_TIMEOUT_MS = {
     verify_syntax: 60000,
     fetch_url: 60000,
     web_search: 60000,
+};
+
+// ── Post-approval budgets (ms) ─────────────────────────────────────────────
+// The write tools were excluded from the table above because they wait for a
+// person, and a person taking five minutes to click is not a hang. True — but
+// that reasoning covered the WHOLE handler, including the part that runs after
+// the click, and that part is ordinary bounded work.
+//
+// So a write that never returned looked exactly like a write nobody had
+// approved yet: no error, no status, nothing in the log. One `write_xlsx` sat
+// like that for 83 minutes with the feed showing "承認済み" and then silence.
+//
+// These budgets start when the approval clears (see `_armPostApproval`), so the
+// wait for the human stays unbounded and the work after it does not.
+// `run_command` is still absent on purpose: it has its own timeout and a build
+// or a test run is legitimately long.
+const POST_APPROVAL_TIMEOUT_MS = {
+    write_xlsx: 180000,
+    update_xlsx: 180000,
+    append_xlsx_row: 60000,
+    write_docx: 120000,
+    write_file: 60000,
+    edit_file: 60000,
+    apply_patch: 60000,
+    delete_file: 30000,
+    move_file: 30000,
 };
 
 // ── Built-in tool dispatch table ───────────────────────────────────────────
@@ -97,6 +125,7 @@ const TOOL_HANDLERS = {
     write_xlsx:  (ex, c) => handleWriteXlsx(ex, c.args, c.onConfirm, c.onAgentStatus),
     write_docx:  (ex, c) => handleWriteDocx(ex, c.args, c.onConfirm, c.onAgentStatus),
     update_xlsx: (ex, c) => handleUpdateXlsx(ex, c.args, c.onConfirm, c.onAgentStatus),
+    append_xlsx_row: (ex, c) => handleAppendXlsxRow(ex, c.args, c.onConfirm, c.onAgentStatus),
     // Written procedures the user maintains. The catalogue in the system prompt
     // carries names and descriptions; these fetch the actual steps.
     read_skill:      (ex, c) => handleReadSkill(ex, c.args, c.onAgentStatus),
@@ -994,6 +1023,7 @@ export class ToolExecutor {
             case 'apply_patch':
             case 'write_xlsx':
             case 'update_xlsx':
+            case 'append_xlsx_row':
             case 'write_docx':
                 return this._isWriteAllowed(pickPath()) ? 'Allow' : 'Ask';
             // Browser tools: side-effecting ones (navigate/click/type/eval) ask;
@@ -1033,9 +1063,26 @@ export class ToolExecutor {
      *                                     "no onConfirm ⇒ silent execution" hole)
      */
     async _confirmUnsafe(isSafe, onConfirm, payload) {
-        if (isSafe) return true;
+        if (isSafe) { this._armPostApproval(); return true; }
         if (!onConfirm) return false;
-        return !!(await onConfirm(payload));
+        const answer = await onConfirm(payload);
+        // The question is closed either way; from here on the tool is doing
+        // work, and work that does not come back is a hang, not patience.
+        if (answer) this._armPostApproval();
+        return !!answer;
+    }
+
+    /**
+     * Start the clock on the work that follows an approval.
+     *
+     * Set by `_withToolTimeout` before it hands control to the handler, and
+     * called from `_confirmUnsafe` — one place, so every approval-gated tool is
+     * covered without each handler having to remember.
+     */
+    _armPostApproval() {
+        const arm = this._postApprovalArm;
+        this._postApprovalArm = null;   // once per call
+        try { arm?.(); } catch (_) { /* the watchdog is best-effort */ }
     }
 
     /**
@@ -1266,32 +1313,120 @@ export class ToolExecutor {
      * Deliberately NOT applied to everything:
      *   • run_command  — has its own configurable timeout, and may be long
      *   • run_subtask  — a whole sub-agent run
-     *   • the write/edit tools — they await USER APPROVAL inside the handler,
-     *     and a person taking five minutes to click is not a hang
      * MCP tools keep their own transport-level timeout.
+     *
+     * The write/edit tools are not exempt any more, they are DEFERRED: they wait
+     * for a person inside the handler, so their clock starts when the approval
+     * clears (POST_APPROVAL_TIMEOUT_MS + `_armPostApproval`). Waiting for a
+     * human stays unbounded; the work after the click does not.
      *
      * A timeout cannot cancel the underlying work (JS has no such primitive) —
      * it unblocks the LOOP and hands the model a readable error it can act on.
      */
     _withToolTimeout(name, promise) {
         const ms = TOOL_TIMEOUT_MS[name];
-        if (!ms) return promise;
+        const afterApproval = POST_APPROVAL_TIMEOUT_MS[name];
+        if (!ms && !afterApproval) { this._postApprovalArm = null; return promise; }
         return new Promise((resolve) => {
             let settled = false;
-            const timer = setTimeout(() => {
+            let timer = null;
+            const fire = (budget, waited) => {
                 if (settled) return;
                 settled = true;
                 resolve(
-                    `Error: ${name} timed out after ${Math.round(ms / 1000)}s and was abandoned. ` +
+                    `Error: ${name} ${waited} after ${Math.round(budget / 1000)}s and was abandoned. ` +
                     `The work may still be running in the background. Narrow the request ` +
-                    `(a smaller path / more specific query) or use a different tool.`
+                    `(fewer sheets / a smaller path / a more specific query) or use a different tool.`
                 );
-            }, ms);
+            };
+            if (ms) timer = setTimeout(() => fire(ms, 'timed out'), ms);
+            // Armed by `_confirmUnsafe` the moment the user approves. Until then
+            // there is no clock: the card on screen IS the explanation for the
+            // wait, and a hang is only a hang once the waiting is over.
+            this._postApprovalArm = afterApproval
+                ? () => {
+                    if (settled || timer) return;
+                    timer = setTimeout(() => fire(afterApproval, 'did not return'), afterApproval);
+                }
+                : null;
+            const done = () => { settled = true; clearTimeout(timer); this._postApprovalArm = null; };
             Promise.resolve(promise).then(
-                (v) => { if (!settled) { settled = true; clearTimeout(timer); resolve(v); } },
-                (e) => { if (!settled) { settled = true; clearTimeout(timer); resolve(`Error executing ${name}: ${e?.message || e}`); } },
+                (v) => { if (!settled) { done(); resolve(v); } },
+                (e) => { if (!settled) { done(); resolve(`Error executing ${name}: ${e?.message || e}`); } },
             );
         });
+    }
+
+    /**
+     * Say — once per run — that the work has left the tools that guarantee
+     * anything about it.
+     *
+     * Producing an .xlsx with a Python script is a legitimate move when the
+     * built-in writer genuinely cannot do the job (docs/design/tool-failure-policy.md
+     * §2 B). What is not acceptable is that it happens in SILENCE: the user is
+     * still using an app whose promise is "it will not corrupt your workbook",
+     * and at that moment the promise has stopped applying — no verification, no
+     * preset, no in-place edit, plus whatever the script installs.
+     *
+     * Detection is deliberately narrow: a general-purpose tool carrying the name
+     * of an Office library. It only ever raises a notice, so a false positive
+     * costs a line of text.
+     */
+    _noticeOfficeBypass(text, onAgentStatus) {
+        if (this._officeBypassNoticed) return;
+        if (!/openpyxl|xlsxwriter|python-docx|docxtpl|to_excel|ExcelWriter|Workbook\(\)/i.test(String(text || ''))) return;
+        this._officeBypassNoticed = true;
+        const msg = '⚠ Office ファイルをスクリプトで作成しようとしています。'
+            + 'この経路では write_xlsx / update_xlsx の保証（壊れたブックを出さない・'
+            + '書式を保つ・既存を残す）は一切かかりません。';
+        onAgentStatus?.({ event: 'status', status: 'running', message: msg });
+        this.onToolEvent?.('notice', { kind: 'office_bypass', message: msg });
+    }
+
+    /**
+     * Remember that a guard refused to REPLACE this file.
+     *
+     * Faced with "this file already exists", the agent deleted it and created it
+     * again — the same loss by another route. A refusal that can be walked
+     * around is not a refusal, and no wording prevents that: the only place that
+     * sees both calls is here.
+     *
+     * docs/design/tool-failure-policy.md §2 C.
+     */
+    _noteRefusedReplace(path, reason) {
+        if (!path) return;
+        if (!this._refusedReplace) this._refusedReplace = new Map();
+        this._refusedReplace.set(String(path).replace(/\\/g, '/').toLowerCase(), reason || '');
+    }
+
+    /** Clear it — the user (or an explicit overwrite) allowed the replacement. */
+    _clearRefusedReplace(path) {
+        if (!path || !this._refusedReplace) return;
+        this._refusedReplace.delete(String(path).replace(/\\/g, '/').toLowerCase());
+    }
+
+    /**
+     * Why a destructive call on this path must not proceed, or null.
+     *
+     * Only the paths a guard actually refused are held back — this is not a
+     * general block on deleting things.
+     */
+    _refusedReplaceReason(path) {
+        if (!path || !this._refusedReplace) return null;
+        const key = String(path).replace(/\\/g, '/').toLowerCase();
+        if (!this._refusedReplace.has(key)) return null;
+        return `Error: ${path} is a file this task was already refused permission to REPLACE`
+            + ` (${this._refusedReplace.get(key) || 'a guard declined it'}). Deleting it and`
+            + ` writing it again is the same outcome the refusal exists to prevent, so it is`
+            + ` blocked here.
+`
+            + `Do one of these instead:
+`
+            + `  • change the contents in place with update_xlsx / append_xlsx_row, which keep`
+            + ` everything you are not editing;
+`
+            + `  • ask the user with ask_user whether the file may be replaced from scratch,`
+            + ` and pass overwrite: true if they say yes.`;
     }
 
     async executeTool(call, onAgentStatus, onConfirm) {
@@ -1303,6 +1438,34 @@ export class ToolExecutor {
         const isNative = this.toolDefinitions.some(t => t.name === name);
         if (isNative && this._toolAllowlist && !this._toolAllowlist.has(name)) {
             return `Error: Tool "${name}" is not enabled for this task. Allowed tools: ${[...this._toolAllowlist].join(', ')}.`;
+        }
+
+        // The call never arrived in one piece.
+        //
+        // A tool call carrying a whole file can exceed the model's output limit,
+        // and the reply is then cut off mid-JSON. That used to be repaired
+        // silently — brackets closed, the object handed over as if complete — so
+        // write_file wrote a truncated script, and a call cut off before its
+        // `path` came through as "missing required 'path'". The model has no way
+        // to guess any of that from the error, and one run spent six steps
+        // shrinking the wrong thing before giving up on the tool and installing
+        // openpyxl to do the job in Python.
+        if (args && typeof args === 'object' && args[ARGS_TRUNCATED]) {
+            return `Error: your call to '${name}' was CUT OFF before it finished — the arguments `
+                + `hit the model's output limit, so nothing was executed (${args[ARGS_TRUNCATED]}). `
+                + `The tool is fine; the call was too big for one message. Send it in pieces: `
+                + `for a file, write the first part and then append the rest; for a workbook, `
+                + `create it with the first sheet and add the remaining rows with `
+                + `append_xlsx_row or update_xlsx. Note that this is not a problem with the `
+                + `tool: the same content sent through any other tool — a shell command, a `
+                + `script — is cut off at the same place, because the limit is on what you `
+                + `can say in one message.`;
+        }
+        if (args && typeof args === 'object' && args[ARGS_UNPARSEABLE]) {
+            return `Error: the arguments for '${name}' were not valid JSON and could not be `
+                + `repaired (${args[ARGS_UNPARSEABLE]}). Nothing was executed. Re-send the call `
+                + `with valid JSON — check for unescaped backslashes and quotes inside string `
+                + `values.`;
         }
 
         const rawPath = args.path || args.file_path || args.filepath || args.file || args.dir || args.directory;

@@ -36,7 +36,13 @@ pub async fn mcp_ws_handler(
     ws: WebSocketUpgrade,
     Query(q): Query<McpWsQuery>,
     State(state): State<AppState>,
+    request: axum::extract::Request,
 ) -> impl IntoResponse {
+    // See ws.rs: the token is in the query string here too, so the Host check
+    // is the layer that still holds once it has leaked.
+    if !crate::server::auth::request_host_is_loopback(&request) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     if q.token != state.auth_token {
         return StatusCode::UNAUTHORIZED.into_response();
     }

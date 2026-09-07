@@ -22,8 +22,21 @@
 //   • `token_usage` is per-CALL, not cumulative. Overwriting showed only the last
 //     step's tokens — zero whenever the final step was tool-only.
 
-/** Events that are never stored: high-volume, or already handled out of band. */
-const NEVER_STORED = new Set(['command_chunk', 'confirm_resolved']);
+/**
+ * Events that are never stored: high-volume, or already handled out of band.
+ *
+ * `confirm_resolved` was here, and must not be. It is the ONLY authoritative
+ * record that an approval was answered — `resolvedConfirmIds` says so in as
+ * many words — and dropping it meant that record never reached the list the
+ * same function then read. Re-opening a task therefore rebuilt every approval
+ * card from a log with no answers in it, fell back to a heuristic, and offered
+ * buttons for questions that had been settled long ago. Clicking one sent an
+ * id nobody was waiting for, and nothing happened.
+ *
+ * It is skipped from the Raw Log's own display (see logs.js), so keeping it
+ * costs one tiny entry per approval and no noise.
+ */
+const NEVER_STORED = new Set(['command_chunk']);
 
 /**
  * Decide what a packet is for, given the connection's current gate.

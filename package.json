@@ -1,7 +1,7 @@
 {
   "name": "jh-ai-agent",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "license": "MIT OR Apache-2.0",
   "description": "J.H AI Agent — standalone Tauri-based AI agent server that backs the JH application family (JHEditor, JHER, JH Task Manager).",
@@ -13,6 +13,7 @@
     "release:preflight": "node scripts/release-preflight.mjs",
   "release:manifest": "node scripts/make-latest-json.mjs",
   "notices": "node scripts/make-third-party-notices.mjs",
+  "test:xlsx": "cargo test --manifest-path src-tauri/Cargo.toml --lib xlsx && cargo test --manifest-path src-tauri/Cargo.toml --lib preset_tests && python -X utf8 scripts/xlsx_fidelity.py && python -X utf8 scripts/xlsx_preset.py && python -X utf8 scripts/xlsx_append.py",
   "release:portable": "node scripts/make-portable.mjs",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",

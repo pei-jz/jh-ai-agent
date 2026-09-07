@@ -195,12 +195,30 @@ describe('Composer — starting a task', () => {
 });
 
 describe('Composer — the keyboard', () => {
-    it('Enter sends', async () => {
+    it('Ctrl+Enter sends', async () => {
+        const { container, request } = mount({ workspace: 'C:/proj' });
+        await open(container);
+        await fireEvent.input(ta(container), { target: { value: 'go' } });
+        await fireEvent.keyDown(ta(container), { key: 'Enter', ctrlKey: true });
+        await waitFor(() => expect(request).toHaveBeenCalled());
+    });
+
+    it('Cmd+Enter sends too', async () => {
+        const { container, request } = mount({ workspace: 'C:/proj' });
+        await open(container);
+        await fireEvent.input(ta(container), { target: { value: 'go' } });
+        await fireEvent.keyDown(ta(container), { key: 'Enter', metaKey: true });
+        await waitFor(() => expect(request).toHaveBeenCalled());
+    });
+
+    // A request worth writing carefully runs to several lines, and the key that
+    // ends a line was sending it half-written.
+    it('a bare Enter is a newline, not a send', async () => {
         const { container, request } = mount({ workspace: 'C:/proj' });
         await open(container);
         await fireEvent.input(ta(container), { target: { value: 'go' } });
         await fireEvent.keyDown(ta(container), { key: 'Enter' });
-        await waitFor(() => expect(request).toHaveBeenCalled());
+        expect(request).not.toHaveBeenCalled();
     });
 
     it('Shift+Enter does not send', async () => {
@@ -209,6 +227,12 @@ describe('Composer — the keyboard', () => {
         await fireEvent.input(ta(container), { target: { value: 'go' } });
         await fireEvent.keyDown(ta(container), { key: 'Enter', shiftKey: true });
         expect(request).not.toHaveBeenCalled();
+    });
+
+    it('says which key sends, next to the button that does it', async () => {
+        const { container } = mount({ workspace: 'C:/proj' });
+        await open(container);
+        expect(container.querySelector('.mcomp-send').textContent).toContain('Ctrl+Enter');
     });
 
     // The one this app must never get wrong: confirming an IME candidate with
@@ -432,5 +456,54 @@ describe('the draft belongs to the view', () => {
         await fireEvent.input(ta(container), { target: { value: 'go' } });
         await fireEvent.click(send(container));
         await waitFor(() => expect(onText).toHaveBeenLastCalledWith(''));
+    });
+});
+
+// The box you actually write in.
+//
+// The ceiling was 180px — about six lines — so a request long enough to be worth
+// writing carefully scrolled its own opening line out of sight while you typed.
+describe('how tall the box may get', () => {
+    const ta = (c) => c.querySelector('.mcomp-ta');
+
+    it('grows well past six lines before it starts scrolling', () => {
+        const { container } = mount({ place: 'hero' });
+        const el = ta(container);
+        // jsdom reports scrollHeight 0, so drive the clamp directly: what is
+        // pinned here is the CEILING the component applies, not the measurement.
+        Object.defineProperty(el, 'scrollHeight', { value: 9999, configurable: true });
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        expect(parseInt(el.style.height, 10)).toBe(420);
+    });
+
+    // pointerup fires for an ordinary CLICK into the box as well. Marking every
+    // click as a resize switched auto-grow off the moment you clicked in to
+    // type — three lines and no growth, whatever you wrote.
+    it('clicking into the box does not count as a resize', () => {
+        const { container } = mount({ place: 'hero' });
+        const el = ta(container);
+        el.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+        el.dispatchEvent(new Event('pointerup', { bubbles: true }));
+
+        Object.defineProperty(el, 'scrollHeight', { value: 9999, configurable: true });
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+
+        expect(parseInt(el.style.height, 10)).toBe(420);
+    });
+
+    it('a real drag IS remembered, and survives the next keystroke', () => {
+        const { container } = mount({ place: 'hero' });
+        const el = ta(container);
+        // The height changes between down and up — that is what a drag is.
+        Object.defineProperty(el, 'offsetHeight', { value: 60, configurable: true });
+        el.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+        Object.defineProperty(el, 'offsetHeight', { value: 600, configurable: true });
+        el.dispatchEvent(new Event('pointerup', { bubbles: true }));
+
+        el.style.height = '600px';
+        Object.defineProperty(el, 'scrollHeight', { value: 40, configurable: true });
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+
+        expect(el.style.height).toBe('600px');
     });
 });

@@ -43,10 +43,13 @@ vi.mock('../ConversationMemory.js', () => ({
 }));
 
 let nativeTools = true;
+/** null ⇒ the provider decides, which is a real configuration. */
+let maxOutput = 8192;
 vi.mock('../LLMService.js', () => ({
     default: {
         getCurrentModel: () => 'openai:gpt-4o',
         getEffectiveModelLimit: () => 100000,
+        getMaxOutputTokens: () => maxOutput,
         supportsNativeTools: () => nativeTools,
         getCurrentProvider: () => 'openai',
     },
@@ -273,5 +276,30 @@ describe('the skill catalogue', () => {
 
     it('adds nothing when no skills are installed', async () => {
         expect(await build({ kis: '' })).not.toContain('<knowledge_items>');
+    });
+});
+
+// The ceiling the agent kept walking into without being told it was there.
+//
+// A tool call carrying a whole workbook can exceed the REPLY limit, and the
+// reply is then cut off mid-argument: what reaches the tool is a call with a
+// parameter missing, which reads as a mistake the model did not make. One run
+// spent nine steps shrinking content that had never been the problem.
+describe('the reply-size ceiling', () => {
+    it('states the number, what happens at it, and the way round it', async () => {
+        const prompt = await build();
+        expect(prompt).toContain('<reply_limit_tokens>8,192</reply_limit_tokens>');
+        expect(prompt).toMatch(/CUT OFF/);
+        expect(prompt).toMatch(/in pieces/);
+        // Not the context window — a different number with a different meaning.
+        expect(prompt).toContain('<model_limit_tokens>100,000</model_limit_tokens>');
+    });
+
+    it('says nothing when the provider decides the limit', async () => {
+        maxOutput = null;
+        contextBuilder.invalidate?.();
+        const prompt = await build();
+        maxOutput = 8192;
+        expect(prompt).not.toContain('reply_limit_tokens');
     });
 });

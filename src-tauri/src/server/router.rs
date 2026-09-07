@@ -289,6 +289,8 @@ pub fn create_router(state: AppState) -> Router {
         .route("/config", get(get_config).put(update_config))
         .route("/config/test", post(test_connection))
         .route("/stats", get(get_stats))
+        // Autonomy stage 2: the outside world pushing IN.
+        .route("/events", post(post_event))
         .layer(axum::middleware::from_fn(auth_middleware))
         .layer(Extension(AuthToken(auth_token.clone())));
 
@@ -502,6 +504,19 @@ pub struct LogsQuery {
 ///
 /// Returns `(slice_start, entries)`. `slice_start` is the ORIGINAL index of the
 /// first returned entry, so the client knows whether earlier ones exist — the
+/// Absolute index of `task.logs[0]` — the origin of the in-memory half.
+///
+/// Three routes have to agree on ONE index space, (sidecar ++ un-checkpointed
+/// tail), because `_idx` travels between them: the listing stamps it, the socket
+/// replay stamps it, and the detail modal fetches by it. They each derived the
+/// origin themselves, and the socket derived it differently — it published
+/// memory-relative positions as absolute, so on a task continued after a restart
+/// the modal fetched an unrelated entry and its Tool / Sent tabs vanished.
+/// One function, so there is nothing left to disagree about.
+pub(crate) fn memory_base(on_disk: usize, persisted: usize, in_memory: usize) -> usize {
+    on_disk.saturating_sub(persisted.min(in_memory))
+}
+
 /// per-entry `_idx` used by the CHAT detail modal stays absolute either way.
 pub(crate) fn log_window(total: usize, q: &LogsQuery) -> (usize, usize) {
     let end = q.before.map(|b| b.min(total)).unwrap_or(total);
@@ -568,6 +583,59 @@ async fn get_task_logs(
     Ok(Json(slim))
 }
 
+/// POST /api/events — an external event that may start a task.
+///
+/// The intake for autonomy stage 2. Mail, CI, a deploy, a monitoring alert:
+/// none of those speak MCP, but every one of them speaks "POST some JSON at a
+/// URL", which is why this is the adapter that covers the real examples. It is
+/// behind the same auth token as every other route.
+///
+/// This endpoint DOES NOT decide anything. It hands the event to the frontend,
+/// where TriggerEngine owns matching, dedupe, debounce, the cooldown and the
+/// hourly cap. Putting any of that here would split the rules across two
+/// languages and two processes — and the rules are the whole feature.
+///
+/// The response says the event was RECEIVED, never that it ran something. A
+/// sender that is told "202, accepted" and sees nothing happen has been told
+/// the truth: the event arrived and matched no enabled trigger.
+async fn post_event(
+    State(state): State<AppState>,
+    Json(mut payload): Json<serde_json::Value>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
+    // `event` is the one required field: without a name there is nothing for a
+    // trigger to match on, and accepting it would be accepting an event that
+    // can never fire anything.
+    let name = normalize_event(&mut payload, &Local::now().to_rfc3339())
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let _ = state.app_handle.emit("trigger-event", payload);
+    Ok((StatusCode::ACCEPTED, Json(serde_json::json!({ "status": "accepted", "event": name }))))
+}
+
+/// Validate and stamp an inbound event; returns its name.
+///
+/// Split out from the handler so it can be tested without a running server —
+/// it holds the two rules that decide whether an event is usable at all.
+pub(crate) fn normalize_event(
+    payload: &mut serde_json::Value,
+    received_at: &str,
+) -> Result<String, String> {
+    // `event` is the one required field: without a name there is nothing for a
+    // trigger to match on, so accepting it would mean accepting an event that
+    // can never fire anything and telling the sender it was fine.
+    let name = payload.get("event").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    if name.is_empty() {
+        return Err("an event needs a non-empty \"event\" name — nothing was accepted".to_string());
+    }
+    if let Some(obj) = payload.as_object_mut() {
+        // Stamped here rather than trusted from the sender: the arrival time is
+        // ours to know, and a sender with a wrong clock would otherwise skew
+        // every window the engine computes.
+        obj.insert("receivedAt".to_string(), serde_json::json!(received_at));
+        obj.entry("source").or_insert(serde_json::json!("webhook"));
+    }
+    Ok(name)
+}
+
 /// GET /tasks/:id/logs/:idx — the FULL (un-slimmed) log entry at index `idx`.
 /// Used by the Monitor's CHAT detail modal to lazily load the heavy request
 /// payload (history / system_prompt / sent_request / tools) for one step.
@@ -583,7 +651,7 @@ async fn get_task_log_entry(
         let tasks = state.tasks.lock().unwrap();
         match tasks.get(&id) {
             Some(task) => {
-                let base = on_disk.saturating_sub(crate::persisted_log_count(&id).min(task.logs.len()));
+                let base = memory_base(on_disk, crate::persisted_log_count(&id), task.logs.len());
                 (true, idx.checked_sub(base).and_then(|j| task.logs.get(j)).cloned())
             }
             None => (false, None),
@@ -1390,4 +1458,108 @@ mod continue_behavior_tests {
         assert_eq!(back.modified_files[0]["original"], "old");
         assert_eq!(back.modified_files[0]["current"], "new");
     }
+
+    // ── one index space ──────────────────────────────────────────────────
+    //
+    // `_idx` is stamped by the listing AND by the socket replay, and fetched by
+    // the detail modal. If the two stampers disagree the modal silently fetches
+    // the wrong entry: it finds no `request` on it, hydration yields nothing,
+    // and the Tool / Sent tabs are simply absent — which is what a task
+    // continued after a restart showed.
+
+    // A task whose whole log is still in memory: nothing is on disk yet, so
+    // memory starts at 0 and local positions happen to BE absolute. This is the
+    // case that made the old code look correct.
+    #[test]
+    fn memory_starts_at_zero_when_nothing_is_checkpointed() {
+        assert_eq!(memory_base(0, 0, 12), 0);
+    }
+
+    // The case that broke: continued after a restart. 500 entries are in the
+    // sidecar, memory was reloaded empty and now holds only the 30 new ones, and
+    // none of those are checkpointed. Memory therefore begins at 500 — replaying
+    // it as 0..30 published thirty indices that all name someone else's entry.
+    #[test]
+    fn memory_starts_after_the_sidecar_for_a_continued_task() {
+        assert_eq!(memory_base(500, 0, 30), 500);
+    }
+
+    // Steady state mid-run: 480 entries have been flushed to the sidecar and
+    // memory still holds all 500 — the flushed ones plus 20 not yet written.
+    // Memory therefore still begins at absolute 0.
+    #[test]
+    fn a_flushed_prefix_still_held_in_memory_keeps_the_origin_at_zero() {
+        assert_eq!(memory_base(480, 480, 500), 0);
+    }
+
+    // The socket replay and the listing must place the same entry at the same
+    // index. This is the assertion the two hand-rolled copies could not make.
+    #[test]
+    fn the_replay_and_the_listing_agree_on_where_an_entry_sits() {
+        let (on_disk, persisted, in_memory) = (500usize, 0usize, 30usize);
+
+        // Listing: the tail begins at `on_disk` and runs to `on_disk + tail`.
+        let total = on_disk + (in_memory - persisted.min(in_memory));
+        let (start, end) = log_window(total, &LogsQuery { limit: Some(400), before: None });
+        // Absolute index the listing gives the j-th entry of the tail.
+        let listing_idx = |j: usize| on_disk + j;
+        assert!(start < end);
+
+        // Replay: the same entry, stamped from the shared origin.
+        let replay_idx = |j: usize| memory_base(on_disk, persisted, in_memory) + j;
+
+        for j in 0..in_memory {
+            assert_eq!(listing_idx(j), replay_idx(j), "entry {} of the tail", j);
+        }
+    }
+
+    // And the detail-modal fetch has to land on that same entry: it subtracts
+    // the origin to index memory, so origin + j must round-trip back to j.
+    #[test]
+    fn fetching_a_replayed_index_lands_on_the_entry_that_was_replayed() {
+        let (on_disk, persisted, in_memory) = (500usize, 0usize, 30usize);
+        let base = memory_base(on_disk, persisted, in_memory);
+        for j in 0..in_memory {
+            let published = base + j;
+            assert_eq!(published.checked_sub(base), Some(j));
+        }
+        // Anything earlier than the origin is not in memory at all and must fall
+        // through to the sidecar rather than reading the wrong slot.
+        assert_eq!((base - 1).checked_sub(base), None);
+    }
+
+
+    // ── the event intake ─────────────────────────────────────────────────
+
+    #[test]
+    fn an_event_without_a_name_is_refused() {
+        let mut p = serde_json::json!({ "payload": { "repo": "x" } });
+        let err = normalize_event(&mut p, "T").unwrap_err();
+        assert!(err.contains("nothing was accepted"), "{}", err);
+
+        // Whitespace is not a name either.
+        let mut blank = serde_json::json!({ "event": "   " });
+        assert!(normalize_event(&mut blank, "T").is_err());
+    }
+
+    #[test]
+    fn an_event_is_stamped_with_our_clock_not_the_senders() {
+        let mut p = serde_json::json!({ "event": "ci.failed", "receivedAt": "1999-01-01" });
+        assert_eq!(normalize_event(&mut p, "2026-09-04T23:00:00+09:00").unwrap(), "ci.failed");
+        assert_eq!(p["receivedAt"], "2026-09-04T23:00:00+09:00");
+    }
+
+    // Defaulted, not forced: an event that names its own source (an MCP relay
+    // posting on behalf of something else) keeps it.
+    #[test]
+    fn source_defaults_to_webhook_and_is_kept_when_given() {
+        let mut p = serde_json::json!({ "event": "x" });
+        normalize_event(&mut p, "T").unwrap();
+        assert_eq!(p["source"], "webhook");
+
+        let mut q = serde_json::json!({ "event": "x", "source": "mcp" });
+        normalize_event(&mut q, "T").unwrap();
+        assert_eq!(q["source"], "mcp");
+    }
+
 }

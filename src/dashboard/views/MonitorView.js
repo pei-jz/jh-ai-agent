@@ -1,6 +1,7 @@
 import { openPathInDefaultApp, ensureResultViewStyles, renderMarkdown, normalizeLeakedEscapes } from '../utils/resultView.js';
 import { extractNarration } from '../utils/narration.js';
 import { invoke } from '@tauri-apps/api/core';
+import { t } from '../../i18n/index.js';
 import { mcpManager } from '../../modules/ai/McpManager.js';
 // The steering input still uses the shared "/" helper; the New Task modal now
 // attaches its own instance inside NewTaskModal.svelte.
@@ -36,7 +37,7 @@ import { extractThoughtSummary, fmtThought, formatThoughtDetail, fmtTool, fmtFil
 // P4 monolith split: approval-card markup, token-usage aggregation and the
 // All-Logs step-grouping loop live in monitor/ pure modules; this file keeps
 // the view orchestration (DOM + WS + Svelte mounts).
-import { fmtConfirm, fmtConfirmResolved, resolvedConfirmIds, renderSimpleDiff, isWsAutoApprove, setWsAutoApprove } from './monitor/confirmCards.js';
+import { fmtConfirm, fmtConfirmResolved, fmtConfirmStale, resolvedConfirmIds, renderSimpleDiff, isWsAutoApprove, setWsAutoApprove } from './monitor/confirmCards.js';
 import { usageTotals as resolveUsageTotals } from './monitor/usageTotals.js';
 import { buildLogSteps, chatButtonHtml, requestDividerHtml } from './monitor/logs.js';
 // The task socket's GATE — replay discard, the timestamp fallback, token
@@ -253,6 +254,10 @@ export class MonitorView {
     _switchTask(taskId) {
         if (!taskId) return;
         if (taskId === this.selectedTaskId) return;
+        // Opening something IS leaving the start screen, so the suppression Home
+        // set no longer applies. Set before the fallbacks below, because every
+        // path from here is "open this task" whichever route it takes.
+        this._wentHome = false;
         const task = (this.tasks || []).find(t => t.id === taskId);
         const mounted = document.getElementById(ROOT_HOST);
         if (!task || !mounted) {
@@ -482,7 +487,7 @@ export class MonitorView {
         const urlParams = getHashParams();
         if (urlParams.id && this.tasks.some(t => t.id === urlParams.id)) {
             this.selectedTaskId = urlParams.id;
-        } else if (!this.selectedTaskId) {
+        } else if (!this.selectedTaskId && !this._wentHome) {
             // Opening Work used to select the newest task, which meant the
             // welcome screen could never appear: yesterday's finished run was
             // always sitting there instead.
@@ -490,6 +495,11 @@ export class MonitorView {
             // A RUNNING task still wins, because that is the one case where
             // something is happening that you would want to see without asking.
             // Anything finished is history, and history is what the list is for.
+            //
+            // `_wentHome` is the exception: asking for the start screen is an
+            // explicit request for NOTHING to be selected, and this rule would
+            // otherwise put the running task straight back — which is what Home
+            // appeared to do nothing about.
             const running = (this.tasks || []).filter(t => rowStatus(t.status) === 'running');
             if (running.length) {
                 this.selectedTaskId = running
@@ -623,7 +633,21 @@ export class MonitorView {
         if (data?.confirmId && this._resolvedConfirms().has(data.confirmId)) {
             return fmtConfirmResolved(data, this._confirmOutcome(data.confirmId));
         }
-        const ws = this.tasks?.find(t => t.id === this.selectedTaskId)?.workspace_path || '';
+        const task = this.tasks?.find(t => t.id === this.selectedTaskId);
+        // Unanswered, on a run that has ENDED. The promise it would settle went
+        // with the run, so the buttons cannot work — and a button that does
+        // nothing is worse than no button, because the next thing the person
+        // tries is clicking it again.
+        //
+        // Read from `_taskFinished`, which the live path maintains, and NOT
+        // from the task list: that list is fetched periodically, so a run that
+        // started a moment ago can still be absent or stale in it — and being
+        // wrong in that direction would make a genuinely live approval
+        // unclickable, which is the same failure pointing the other way.
+        if (data?.confirmId && this._taskFinished) {
+            return fmtConfirmStale(data, t('confirm.stale'));
+        }
+        const ws = task?.workspace_path || '';
         return fmtConfirm(data, idPrefix, isWsAutoApprove(ws), ws);
     }
 
@@ -910,6 +934,7 @@ export class MonitorView {
             // `this.logs`, which the raw log derives from.
             if (!preserveResults) this._syncRawLog();
             this._setSteerEnabled(true);
+            this._flushPendingConfirmResponse();
         };
 
         this.socket.onmessage = (ev) => {
@@ -933,6 +958,16 @@ export class MonitorView {
                     replayCutoffTs: this._replayCutoffTs,
                 });
                 if (route.kind === 'replay-done') {
+                    // The socket replays only what the server still holds in
+                    // memory. For a task CONTINUED after a restart the earlier
+                    // half lives in the sidecar and never comes down the wire —
+                    // so the Story opened part-way through a run and there was
+                    // no "load earlier" to get back, because `_logStart` only
+                    // ever got set on the HTTP path. `base` is the absolute
+                    // index this replay started at: > 0 means earlier entries
+                    // exist and the button belongs on screen.
+                    const base = Number(packet?.data?.base);
+                    if (Number.isFinite(base) && base > 0) this._logStart = base;
                     if (route.flush) this._flushReplay();
                     if (route.endDiscard) {
                         this._discardUntilReplayDone = false;
@@ -2024,16 +2059,36 @@ export class MonitorView {
         this._sync();
     }
 
-    /** Abort the running task — the header's ⏹, and the steer row's ⏹ Stop. */
-    _abortTask() {
-        if (!confirm('Abort this agent task?')) return;
+    /**
+     * Abort the running task — the header's ⏹, and the steer row's ⏹ Stop.
+     *
+     * BOTH routes, always. The socket carries it to the run in progress; the
+     * HTTP DELETE reaches the task even if this window's socket has quietly
+     * gone. They converge on the same `abort-task` event, and the second one
+     * arriving after the run has already stopped is a no-op — which is a much
+     * better failure than a Stop button that did nothing because the only route
+     * it tried was the one that was broken.
+     *
+     * @param {boolean} ask false to skip the confirmation (the caller asked).
+     */
+    _abortTask(ask = true) {
+        if (ask && !confirm(t('task.stop.confirm'))) return;
+
         if (this.socket?.readyState === WebSocket.OPEN) {
-            this.socket.send(JSON.stringify({ action: 'abort' }));
-        } else if (window.apiClient && this.selectedTaskId) {
-            window.apiClient.abortTask(this.selectedTaskId);
+            this.socket.send(JSON.stringify({ event: 'abort', action: 'abort' }));
         }
-        // The button is prop-driven: the status change that follows swaps it for
-        // Delete on its own, so there is nothing to disable by hand.
+        if (window.apiClient && this.selectedTaskId) {
+            Promise.resolve(window.apiClient.abortTask(this.selectedTaskId)).catch(() => {});
+        }
+
+        // Say it was received. Stopping is not instant — an LLM call already in
+        // flight has to come back first — and with no acknowledgement the wait
+        // is indistinguishable from the button not working, which is what it was
+        // reported as.
+        // `error` priority: it must outrank the tool/thought line the run is
+        // still emitting on its way down, or the acknowledgement is overwritten
+        // by the very work being stopped.
+        this._updateActiveStepStatus(`⏹ ${t('task.stopping')}`, 'error');
     }
 
     /** Remove the task from history (memory + disk), then go back to the list. */
@@ -2094,6 +2149,36 @@ export class MonitorView {
      * class onto it. Prop pushes are batched (see mount.svelte.js), so calling
      * this from several places in one turn costs one render.
      */
+    /**
+     * Back to the start screen: nothing selected, nothing stopped.
+     *
+     * Two things have to be true at once, and each was undone by the other on
+     * the first attempt:
+     *
+     *   • the ?id= has to go, or the next render re-selects from the URL — but
+     *     ASSIGNING the hash makes the router rebuild the view, and a fresh
+     *     view's render() auto-selects the running task. replaceState changes
+     *     the URL without a navigation, so this instance survives.
+     *   • render() auto-selects a running task when nothing is selected, which
+     *     is right on entry to Work and wrong immediately after someone asked
+     *     for the start screen. `_wentHome` is that exception, and it lasts
+     *     until a task is actually opened (_switchTask clears it).
+     *
+     * Repaints with _sync(), NOT render(). `render()` returns the shell as an
+     * HTML string for the router to insert — calling it here built a string
+     * nobody used, so the state changed and the screen did not, until some
+     * unrelated interaction (dragging the divider) happened to call _sync() and
+     * the start screen appeared as if by accident.
+     */
+    _goHome() {
+        this.selectedTaskId = null;
+        this._wentHome = true;
+        if (window.location.hash !== '#monitor') {
+            history.replaceState(null, '', '#monitor');
+        }
+        this._sync();
+    }
+
     _sync() {
         if (this._destroyed) return;
         const host = document.getElementById(ROOT_HOST);
@@ -2128,6 +2213,13 @@ export class MonitorView {
             ask: this._askProps(),
 
             onNewTask: () => this._openNewTaskModal(),
+
+            // Back to the start screen. Deselecting is all it takes: the right
+            // pane shows Welcome — and the one composer — when no task is open.
+            //
+            // The run keeps going. Nothing here stops or detaches it; the list
+            // on the left still shows it, and clicking it comes straight back.
+            onHome: () => this._goHome(),
             onFilter: (f) => {
                 // A manual tab choice suppresses the auto-switch-to-Story on
                 // completion — it must not yank the reader off what they opened.
@@ -2198,12 +2290,8 @@ export class MonitorView {
             focusRequest: this._steerFocusSeq || 0,
             onZoom: (src) => this._openImageZoom(src),
             onStop: () => {
-                if (!confirm('Stop this running task?')) return;
-                if (this.socket?.readyState === WebSocket.OPEN) {
-                    this.socket.send(JSON.stringify({ action: 'abort' }));
-                } else if (window.apiClient && this.selectedTaskId) {
-                    window.apiClient.abortTask(this.selectedTaskId);
-                }
+                if (!confirm(t('task.stop.confirm'))) return;
+                this._abortTask(/* ask */ false);
             },
             onSend: (msg) => this._sendSteer(msg),
             onReady: (api) => { this._steerApi = api; },
@@ -2341,6 +2429,34 @@ export class MonitorView {
         return false;
     }
 
+    /**
+     * Send an approval that could not be delivered when it was clicked.
+     *
+     * Called from onopen. The run is blocked until this arrives, so it goes out
+     * before anything else the reconnect does.
+     */
+    _flushPendingConfirmResponse() {
+        const q = this._pendingConfirmResponse;
+        if (!q || this.socket?.readyState !== WebSocket.OPEN) return;
+        this._pendingConfirmResponse = null;
+        this.socket.send(q.packet);
+        this._markConfirmResolved(q.confirmId, q.approved, /*byOther*/ false);
+    }
+
+    /** Say plainly that the answer has not reached the run yet. */
+    _showConfirmUndelivered(confirmId, message = '接続が切れています — 再接続して送信します…') {
+        document.querySelectorAll(`[data-confirm-card="${confirmId}"]`).forEach(card => {
+            const actions = card.querySelector('.mconfirm-actions');
+            if (!actions) return;
+            if (actions.querySelector('.mconfirm-undelivered')) return;
+            const note = document.createElement('span');
+            note.className = 'mconfirm-undelivered';
+            note.style.cssText = 'color:var(--warning);font-weight:600;margin-left:8px';
+            note.textContent = message;
+            actions.appendChild(note);
+        });
+    }
+
     sendConfirmResponse(confirmId, approved, always = false) {
         // Nothing identifies the request, so the server cannot be told which
         // approval this answers. Saying so beats a button that does nothing —
@@ -2350,9 +2466,40 @@ export class MonitorView {
                 + 'Stop the task and run it again.');
             return;
         }
-        if (this.socket?.readyState === WebSocket.OPEN) {
-            this.socket.send(JSON.stringify({ event: 'confirm_response', data: { confirmId, approved, always, modifiedContent: null } }));
+        const packet = JSON.stringify({
+            event: 'confirm_response',
+            data: { confirmId, approved, always, modifiedContent: null },
+        });
+
+        // The answer has to LEAVE this window before the card may claim it did.
+        //
+        // This used to send only when the socket happened to be open, and then
+        // mark the card approved either way. With the socket closed — a reload,
+        // a dropped connection, a task switch — the run went on waiting for an
+        // answer that never left the browser, while the card said 🟢 Approved
+        // and the step sat on "Writing spreadsheet…" for ever. The UI reported
+        // the opposite of what had happened.
+        if (this.socket?.readyState !== WebSocket.OPEN) {
+            this._pendingConfirmResponse = { confirmId, packet, approved };
+            this._showConfirmUndelivered(confirmId);
+            // Reconnecting replays the log and re-opens the socket; the queued
+            // answer goes out from onopen.
+            if (this.selectedTaskId) this.connectWebSocket(this.selectedTaskId, true);
+            return;
         }
+        this.socket.send(packet);
+
+        // The answer left this window; that is not the same as it arriving.
+        // If the run had already ended, the bridge drops it as an unknown id
+        // and NOTHING happens — which is exactly what "I pressed approve and it
+        // did not continue" looks like. The run's own `confirm_resolved` is the
+        // acknowledgement; not seeing one shortly after means it went nowhere.
+        clearTimeout(this._confirmAckTimer);
+        this._confirmAckTimer = setTimeout(() => {
+            if (this._resolvedConfirms().has(confirmId)) return;
+            this._showConfirmUndelivered(confirmId, t('confirm.undelivered'));
+        }, 4000);
+
         // Optimistically mark the card as resolved on this client.
         // The server will also fan-out a `confirm_resolved` event that hits any
         // OTHER client connected to the same task (e.g. JHEditor when this one

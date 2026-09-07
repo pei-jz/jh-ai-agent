@@ -213,14 +213,50 @@
         return () => { slash?.destroy(); slash = null; };
     });
 
+    /** Ceiling on the grown height, in px. Above this the box scrolls. */
+    const MAX_H = 420;
+
     function grow() {
         if (!taEl) return;
+        // A height the USER dragged to wins: re-measuring would undo the drag on
+        // the next keystroke, which is worse than a box that is the wrong size.
+        if (taEl.dataset.userSized === '1') return;
         taEl.style.height = 'auto';
-        // 30 closed (one line), 60 open (room to see what you are writing), 180
-        // ceiling. The floor changes with `open` so the box visibly makes room
-        // when you start rather than reserving it in advance.
+        // 30 closed (one line), 60 open (room to see what you are writing).
+        //
+        // The ceiling was 180px — about six lines — and a request long enough to
+        // be worth writing carefully hit it immediately, leaving the top of what
+        // you were writing scrolled out of sight. 420 is roughly half the window
+        // on a laptop: enough for a paragraph or two, and still leaving the list
+        // and the run visible behind it. Past that it scrolls.
         const floor = open ? 60 : 30;
-        taEl.style.height = Math.min(180, Math.max(floor, taEl.scrollHeight)) + 'px';
+        taEl.style.height = Math.min(MAX_H, Math.max(floor, taEl.scrollHeight)) + 'px';
+    }
+
+    /**
+     * Remember that the box was DRAGGED, so auto-grow stops fighting it.
+     *
+     * The height at pointer-down is compared with the height at pointer-up,
+     * because `pointerup` fires for an ordinary click into the box as well. The
+     * first version marked every click as a resize, so auto-grow switched itself
+     * off the moment you clicked in to type — three lines and no growth,
+     * whatever you wrote.
+     */
+    let sizeAtPointerDown = 0;
+
+    function onPointerDown() {
+        sizeAtPointerDown = taEl ? taEl.offsetHeight : 0;
+    }
+
+    function onPointerUp() {
+        if (!taEl) return;
+        if (Math.abs(taEl.offsetHeight - sizeAtPointerDown) > 2) {
+            taEl.dataset.userSized = '1';
+            // The 420px cap is on the AUTO-grow, not on the person dragging the
+            // handle. Leaving it in place makes the drag stop dead at 420 with
+            // the pointer still moving, which reads as a broken handle.
+            taEl.style.maxHeight = 'none';
+        }
     }
 
     // Re-measure when the box opens or closes, or when it is re-mounted in the
@@ -270,10 +306,16 @@
         // While the "/" popup is up those keys are its own.
         if (popupEl && popupEl.style.display !== 'none'
             && ['Enter', 'Escape', 'ArrowUp', 'ArrowDown'].includes(e.key)) return;
-        // Enter sends, Shift+Enter is a newline. `isComposing` keeps an IME
-        // candidate selection from submitting — the failure this app must never
-        // have, since Japanese is its first language.
-        if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+        // Ctrl+Enter (or Cmd+Enter) sends; a bare Enter is a newline.
+        //
+        // Enter used to send, which is right for a chat box and wrong for this
+        // one: a request worth writing carefully runs to several lines, and the
+        // key that ends a line was sending it half-written. The steering box
+        // below the timeline already works this way.
+        //
+        // `isComposing` keeps an IME candidate selection from submitting — the
+        // failure this app must never have, since Japanese is its first language.
+        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.isComposing) {
             e.preventDefault();
             send();
         }
@@ -321,7 +363,9 @@
             oninput={(e) => { setPrompt(e.currentTarget.value); grow(); }}
             class="mcomp-ta"
             rows="1"
-            placeholder={busy ? 'もう一件依頼する…' : '何をしますか？'}
+            onpointerdown={onPointerDown}
+            onpointerup={onPointerUp}
+            placeholder={busy ? t('composer.placeholder.busy') : t('composer.placeholder')}
             onkeydown={onKeydown}
             disabled={creating}
         ></textarea>
@@ -336,18 +380,19 @@
             <span class="mcomp-int" role="group" aria-label={t('composer.interaction')}>
                 <button type="button" class="mcomp-int-btn is-ask"
                     aria-pressed={interaction === ASK}
-                    title="聞く — 読み取り専用・計画なし・すぐ答える"
+                    title={t('composer.ask.title')}
                     onclick={() => (pickedInteraction = ASK)}>聞く</button>
                 <button type="button" class="mcomp-int-btn is-build"
                     aria-pressed={interaction === BUILD}
-                    title="頼む — 計画を先に・フルツール"
+                    title={t('composer.build.title')}
                     onclick={() => (pickedInteraction = BUILD)}>頼む</button>
             </span>
             <!-- "送信", not the mode's own word: the chip beside it already says
                  which kind of run this is, and labelling this one 聞く put the
                  same word on two controls that do different things. -->
             <button type="button" class="mcomp-send" onclick={send} disabled={creating}>
-                {creating ? '…' : '送信'}
+                {creating ? '…' : t('composer.send')}
+                {#if !creating}<kbd class="mcomp-kbd">{t('composer.sendKey')}</kbd>{/if}
             </button>
         </div>
 
@@ -361,7 +406,7 @@
             title={`${ws || '(no workspace)'} · ${modeName(mode)}`}
             onclick={() => onDetails?.({ prompt: prompt.trim(), ws: ws.trim(), interaction })}>
             {@html icon('folder', 11)}
-            <span class="mcomp-ctx-ws">{wsName || 'ワークスペース未設定'}</span>
+            <span class="mcomp-ctx-ws">{wsName || t('composer.noWorkspace')}</span>
             <span class="mcomp-ctx-sep">·</span>
             {@html icon(MODE_ICON[mode?.id] || 'gear', 11)}
             <span class="mcomp-ctx-mode">{modeName(mode)}</span>

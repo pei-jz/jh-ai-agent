@@ -797,6 +797,29 @@ pub fn run() {
             // Find an open port, fallback to 14300
             let port = get_free_port().unwrap_or(14300);
 
+            // Publish it, so a LOCAL tool can find us.
+            //
+            // The server binds 127.0.0.1 and 14300 is only the first choice —
+            // a second copy, or anything else holding that port, moves us to a
+            // random one. Everything on this machine that wants to POST an
+            // event (the mail watcher, a git hook, a CI runner) then has no way
+            // to know where to send it, and the trigger it was set up for
+            // simply never fires. The token stays in ai_config.json; this file
+            // carries only the address, so a second copy of a secret is not
+            // created to solve an addressing problem.
+            {
+                let dir = app.path().app_config_dir().unwrap_or_default();
+                let _ = std::fs::create_dir_all(&dir);
+                let _ = std::fs::write(
+                    dir.join("server.json"),
+                    serde_json::json!({
+                        "port": port,
+                        "events_url": format!("http://127.0.0.1:{}/api/events", port),
+                        "note": "Local callers only — the server binds 127.0.0.1 and rejects a non-loopback Host. The auth token is in ai_config.json.",
+                    }).to_string(),
+                );
+            }
+
             // Setup state
             let tasks = Arc::new(Mutex::new(HashMap::<String, TaskInfo>::new()));
             let task_senders = Arc::new(Mutex::new(HashMap::<String, tokio::sync::broadcast::Sender<String>>::new()));
@@ -1168,6 +1191,15 @@ pub fn run() {
             commands::fs::read_file,
             commands::fs::write_file,
             commands::fs::read_dir,
+            commands::fs::scan_dir_mtimes,
+            commands::mailwatch::imap_check,
+            commands::mailwatch::set_watcher_secret,
+            commands::mailwatch::has_watcher_secret,
+            commands::mailwatch::get_watcher_secret,
+            commands::recipes::list_watcher_recipes,
+            commands::recipes::write_watcher_recipe,
+            commands::recipes::delete_watcher_recipe,
+            commands::recipes::watcher_recipes_dir,
             commands::fs::create_dir,
             commands::fs::delete_dir,
             commands::fs::file_exists,
@@ -1203,9 +1235,11 @@ pub fn run() {
             commands::office::read_office_document,
             commands::office::write_xlsx,
             commands::office::update_xlsx,
+            commands::office::append_xlsx_row,
             commands::office::write_docx,
             // Shell operations
             commands::shell::run_command,
+            commands::shell::run_watcher_script,
             commands::shell::get_shell_info,
             commands::shell::open_path_default,
             commands::shell::os_notify,

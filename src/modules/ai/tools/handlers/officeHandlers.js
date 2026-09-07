@@ -12,6 +12,7 @@ export async function handleReadOffice(ctx, args, onAgentStatus, resolvedPath) {
     if (!path) return "Error: read_office requires a 'path' parameter.";
     const sheet = typeof args?.sheet === 'string' && args.sheet.trim() ? args.sheet.trim() : null;
     const wantImages = args?.include_images === true;
+    const wantFormat = args?.with_format === true;
     onAgentStatus?.(`Reading Office document: ${path}${sheet ? ` [${sheet}]` : ''}...`);
     try {
         const doc = await invoke('read_office_document', {
@@ -19,6 +20,7 @@ export async function handleReadOffice(ctx, args, onAgentStatus, resolvedPath) {
             maxChars: Number.isFinite(args?.max_chars) ? args.max_chars : null,
             sheet,
             includeImages: wantImages,
+            withFormat: wantFormat,
         });
         ctx.onToolEvent?.('read_office', { path, kind: doc.kind, sheet });
 
@@ -44,19 +46,145 @@ export async function handleReadOffice(ctx, args, onAgentStatus, resolvedPath) {
             imageNote = `\n\n[No usable embedded images found. Vector art (EMF/WMF) and icons below the size floor are skipped.]`;
         }
 
-        return header + doc.text + note + imageNote;
+        // The formatting summary goes AFTER the values: the data is what was
+        // asked for, and the format is context for changing it.
+        const formatNote = doc.format
+            ? '\n\n## 書式\n\n' + doc.format
+            : '';
+        return header + doc.text + note + formatNote + imageNote;
     } catch (e) {
         return `Error: read_office failed — ${e?.message || e}`;
     }
+}
+
+/**
+ * append_xlsx_row — one more line on a table, formatted like the line above.
+ *
+ * Separate from update_xlsx because the row number is not something the caller
+ * can know: it is wherever the sheet currently ends. `{row}` in a formula is
+ * substituted on the Rust side once that number is known.
+ */
+export async function handleAppendXlsxRow(ctx, args, onConfirm, onAgentStatus) {
+    const path = ctx.resolvePath ? ctx.resolvePath(args?.path) : args?.path;
+    if (!path) return "Error: append_xlsx_row requires a 'path' parameter.";
+    const values = args?.values;
+    if (!values || typeof values !== 'object' || Array.isArray(values) || !Object.keys(values).length) {
+        return 'Error: append_xlsx_row requires "values": an object keyed by column letter, e.g. {"A": "ワッシャー", "B": 50, "D": "=B{row}*C{row}"}.';
+    }
+    const sheet = typeof args?.sheet === 'string' && args.sheet.trim() ? args.sheet.trim() : null;
+
+    const ok = await ctx._confirmUnsafe(false, onConfirm, {
+        type: 'command_confirm',
+        command: `append_xlsx_row ${path}`,
+        message: `AI wants to append a row to:\n\n${path}${sheet ? ` [${sheet}]` : ''}\n` + Object.entries(values).map(([k, v]) => `  ${k}: ${v}`).join('\n'),
+    });
+    if (!ok) return 'Error: append_xlsx_row denied by user.';
+
+    onAgentStatus?.(`Appending a row to: ${path}...`);
+    try {
+        const msg = await invoke('append_xlsx_row', { path, sheet, values });
+        ctx._recordModification?.(path, null, '(xlsx append)');
+        ctx.onToolEvent?.('file_modified', { path, action: 'modify', diff: `~ ${msg}` });
+        return msg;
+    } catch (e) {
+        return `Error: append_xlsx_row failed — ${e?.message || e}`;
+    }
+}
+
+/**
+ * Accept the shapes a model actually produces, not only the documented one.
+ *
+ * Three arrive often enough to be worth meeting, and every one of them was
+ * costing a run several steps of guesswork:
+ *
+ *   sheets as a STRING — the XML tool-call form carries every parameter as
+ *     text, so a JSON array reaches us as its source. Array.isArray said no and
+ *     the caller was told `sheets` was missing while looking at a request that
+ *     plainly contained it.
+ *
+ *   overwrite as "True" — Python spelling, and `=== true` is false for it.
+ *
+ *   rows keyed by COLUMN LETTER — [{ "A": …, "B": … }] instead of [[…, …]].
+ *     Unambiguous, arguably nicer for a sparse row, and rejected outright. The
+ *     model corrected itself to the array form and then produced the object
+ *     form again on the next call, which is what "繰り返し失敗" looks like.
+ *
+ * Normalising is not leniency for its own sake: each of these has exactly one
+ * reading, so refusing them buys nothing and costs a round trip.
+ */
+export function normalizeSheetsArg(raw) {
+    let sheets = raw;
+    if (typeof sheets === 'string') {
+        try {
+            sheets = JSON.parse(sheets);
+        } catch (_) {
+            return null;
+        }
+    }
+    if (!Array.isArray(sheets) || sheets.length === 0) return null;
+
+    return sheets.map((sheet) => {
+        if (!sheet || typeof sheet !== 'object') return sheet;
+        let rows = sheet.rows;
+        if (typeof rows === 'string') {
+            try { rows = JSON.parse(rows); } catch (_) { return sheet; }
+        }
+        if (!Array.isArray(rows)) return { ...sheet, rows };
+
+        // Column-letter rows → positional. Widened to the longest row so a
+        // sparse one does not shift the columns after it.
+        const looksKeyed = rows.some(r => r && !Array.isArray(r) && typeof r === 'object');
+        if (!looksKeyed) return { ...sheet, rows };
+
+        const index = (letters) => {
+            let n = 0;
+            for (const ch of String(letters).toUpperCase()) {
+                if (ch < 'A' || ch > 'Z') return -1;
+                n = n * 26 + (ch.charCodeAt(0) - 64);
+            }
+            return n - 1;
+        };
+        const converted = rows.map((r) => {
+            if (Array.isArray(r)) return r;
+            if (!r || typeof r !== 'object') return [r];
+            const out = [];
+            for (const [k, v] of Object.entries(r)) {
+                const i = index(k);
+                if (i < 0) continue;              // not a column letter — drop it
+                while (out.length < i) out.push(null);
+                out[i] = v;
+            }
+            return out;
+        });
+        return { ...sheet, rows: converted };
+    });
+}
+
+/** "True" / "1" / true → true. Anything else → false. */
+export function truthyArg(v) {
+    if (typeof v === 'boolean') return v;
+    if (typeof v === 'number') return v === 1;
+    if (typeof v === 'string') return /^(true|1|yes)$/i.test(v.trim());
+    return false;
 }
 
 /** write_xlsx — produce a spreadsheet deliverable. */
 export async function handleWriteXlsx(ctx, args, onConfirm, onAgentStatus) {
     const path = ctx.resolvePath ? ctx.resolvePath(args?.path) : args?.path;
     if (!path) return "Error: write_xlsx requires a 'path' parameter.";
-    const sheets = Array.isArray(args?.sheets) ? args.sheets : null;
-    if (!sheets || sheets.length === 0) {
-        return 'Error: write_xlsx requires "sheets": [{ name?, rows: [[cell, …], …], design?, styles? }]. The first row of each sheet is styled as a header by default.';
+    const sheets = normalizeSheetsArg(args?.sheets);
+    if (!sheets) {
+        // Say what ARRIVED. "requires sheets" while the request visibly contains
+        // sheets reads as the tool being broken, and sends the model looking for
+        // a mistake somewhere else entirely.
+        const got = args?.sheets === undefined
+            ? 'nothing'
+            : `${typeof args.sheets}: ${JSON.stringify(args.sheets).slice(0, 200)}`;
+        return 'Error: write_xlsx could not read "sheets". Got ' + got + '.' + '\n'
+            + 'Expected: [{ name?, rows: [["A1","B1"], ["A2","B2"]], design?, styles? }]. '
+            + 'Rows may also be keyed by column letter — [{"A": "A1", "B": "B1"}] — and the '
+            + 'whole array may arrive as a JSON string; both are accepted. What is not '
+            + 'accepted is an empty array or JSON that does not parse.';
     }
     // Guard against malformed sheet structures before spending a confirmation.
     const badSheet = sheets.findIndex(s => !s || !Array.isArray(s.rows) || s.rows.length === 0);
@@ -73,12 +201,26 @@ export async function handleWriteXlsx(ctx, args, onConfirm, onAgentStatus) {
 
     onAgentStatus?.(`Writing spreadsheet: ${path}...`);
     try {
-        const msg = await invoke('write_xlsx', { path, sheets });
+        const msg = await invoke('write_xlsx', {
+            path, sheets,
+            overwrite: truthyArg(args?.overwrite),
+            preset: typeof args?.preset === 'string' ? args.preset : null,
+        });
+        // An explicit overwrite is the user's intent coming through, so an
+        // earlier refusal on this path no longer stands.
+        if (truthyArg(args?.overwrite)) ctx._clearRefusedReplace?.(path);
         ctx._recordModification?.(path, null, '(xlsx)');
         ctx.onToolEvent?.('file_modified', { path, action: 'create', diff: `+ ${msg}` });
         return msg;
     } catch (e) {
-        return `Error: write_xlsx failed — ${e?.message || e}`;
+        const text = String(e?.message || e);
+        // The overwrite guard declined. Remember it: the refusal protects the
+        // FILE, not this one call, and the obvious way round it is to delete the
+        // file and start again. docs/design/tool-failure-policy.md §2 C.
+        if (/already exists/.test(text)) {
+            ctx._noteRefusedReplace?.(path, 'write_xlsx refused to replace it');
+        }
+        return `Error: write_xlsx failed — ${text}`;
     }
 }
 

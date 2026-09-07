@@ -82,11 +82,19 @@ describe('routePacket — streaming and buffering', () => {
 
     // These two are handled out of band; storing them would replay an already
     // answered approval and bloat the log with stdout.
-    it('buffers but does not store the two events that must never be replayed', () => {
-        for (const e of ['command_chunk', 'confirm_resolved']) {
-            expect(routePacket(pkt(e), { ...FRESH, replaying: true }))
-                .toEqual({ kind: 'buffer', store: false });
-        }
+    it('buffers but does not store per-token command output', () => {
+        expect(routePacket(pkt('command_chunk'), { ...FRESH, replaying: true }))
+            .toEqual({ kind: 'buffer', store: false });
+    });
+
+    // `confirm_resolved` used to be dropped here too, and it is the ONLY
+    // authoritative record that an approval was answered. Dropping it meant
+    // re-opening a task rebuilt every approval card from a log with no answers
+    // in it, offered buttons for questions settled long ago, and clicking one
+    // sent an id nobody was waiting for — so nothing happened.
+    it('KEEPS the record that an approval was answered', () => {
+        expect(routePacket(pkt('confirm_resolved', { confirmId: 'c1' }), { ...FRESH, replaying: true }))
+            .toEqual({ kind: 'buffer', store: true });
     });
 });
 

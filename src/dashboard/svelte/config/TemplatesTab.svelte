@@ -108,21 +108,20 @@
                                  another; locked rather than silently renaming. -->
                             <input id="tpl-key" class="input" type="text" bind:value={form.key}
                                 readonly={isEdit} class:cfg-readonly={isEdit}
-                                placeholder="e.g. backlog (letters, numbers, hyphens)">
-                            <p class="input-hint">{t('tmpl.invoke')}<code>/name</code> in chat</p>
+                                placeholder={t('tmpl.name.placeholder')}>
+                            <p class="input-hint">{t('tmpl.invoke')}<code>/name</code> {t('skill.invoke.tail')}</p>
                         </div>
                         <div class="input-group">
                             <label class="input-label" for="tpl-label">{t('tmpl.label')}<span class="cfg-req">*</span></label>
                             <input id="tpl-label" class="input" type="text" bind:value={form.label}
-                                placeholder="e.g. Backlog task registration">
+                                placeholder={t('tmpl.title.placeholder')}>
                         </div>
                     </div>
                     <div class="input-group">
                         <label class="input-label" for="tpl-prompt">{t('tmpl.promptText')}<span class="cfg-req">*</span></label>
                         <textarea id="tpl-prompt" class="textarea" rows="5" bind:value={form.prompt}
                             placeholder={t('tmpl.placeholder')}></textarea>
-                        <p class="input-hint">This text is expanded into the chat input when the
-                            slash command is selected</p>
+                        <p class="input-hint">{t('tmpl.expandHint')}</p>
                     </div>
                     <div class="input-group">
                         <label class="input-label" for="tpl-icon">{t('common.icon')}</label>
@@ -142,7 +141,7 @@
         {#if !templates.length}
             <div class="cfg-empty">
                 <span class="cfg-empty-ic">📝</span>
-                <p>{t('tmpl.none')}<br>Create one with the "Add new" button.</p>
+                <p>{t('tmpl.none')}<br>{t('tmpl.createHint')}</p>
             </div>
         {:else}
             <div class="table-wrap">

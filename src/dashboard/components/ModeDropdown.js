@@ -6,16 +6,9 @@
 // the user understands the choice while selecting. Used by ChatView (agent mode
 // bar) and the Monitor new-task modal.
 
-import { AGENT_MODES, resolveModeId, DEFAULT_MODE_ID } from '../../modules/ai/AgentModes.js';
+import { AGENT_MODES, resolveModeId, DEFAULT_MODE_ID, modeName, MODE_ICON } from '../../modules/ai/AgentModes.js';
 import { icon } from '../utils/icons.js';
 
-// Mode id → SVG icon name (icons.js).
-const MODE_ICON = { develop: 'code', research: 'search', automation: 'gear' };
-
-/** Mode label without its leading emoji (we render an SVG icon instead). */
-function modeName(mode) {
-    return (mode.label || mode.id).replace(/^\S+\s+/, '');
-}
 
 export class ModeDropdown {
     constructor(selectedId, onChange) {

@@ -61,26 +61,33 @@ export function taskBehavior(modeId, selectedMcp = [], interaction = BUILD) {
     };
 }
 
+
+// Re-exported, not redefined. Composer and NewTaskModal reach for these from
+// here because this is the module they already use for the request shape; the
+// definitions themselves live with the modes.
+export { MODE_ICON, modeName } from '../../../modules/ai/AgentModes.js';
+
 /**
  * The POST body for /tasks.
  *
  * `images` is omitted rather than sent empty, because the server distinguishes
  * "no images" from "an empty image list" when choosing a vision-capable model.
  */
-export function taskPayload({ prompt, workspace, modeId, selectedMcp = [], images = [], caller = 'NewTask', interaction = BUILD }) {
+export function taskPayload({
+    prompt, workspace, modeId, selectedMcp = [], images = [],
+    caller = 'NewTask', interaction = BUILD, chatContext = [],
+}) {
     return {
         prompt,
         workspace_path: workspace,
         caller,
         behavior: taskBehavior(modeId, selectedMcp, interaction),
         images: images.length > 0 ? images : undefined,
+        // Prior exchange, when the caller already has one. The server and the
+        // agent have carried this end-to-end all along; the only caller that
+        // needed it and did not send it was Spotlight, which had just paid for
+        // an answer and then threw it away.
+        chat_context: chatContext.length > 0 ? chatContext : undefined,
     };
 }
 
-/** Mode id → the icon name used for its button (mirrors ModeDropdown). */
-export const MODE_ICON = { develop: 'code', research: 'search', automation: 'gear' };
-
-/** A mode's label without its leading emoji — an SVG icon is drawn instead. */
-export function modeName(mode) {
-    return String(mode?.label || mode?.id || '').replace(/^\S+\s+/, '');
-}

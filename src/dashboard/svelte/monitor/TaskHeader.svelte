@@ -78,9 +78,9 @@
                      and the Inspector already carry them, and the header's job is
                      the numbers that change while you watch. What stays: the
                      wall-clock elapsed and the token totals. -->
-                <span class="mdh-chip"><b>{elapsed}</b> elapsed</span>
+                <span class="mdh-chip"><b>{elapsed}</b> {t('task.elapsed')}</span>
                 <span class="mdh-chip" title={t('task.tokens.title')}>
-                    <b>{compactTokens(usage.total_tokens)}</b> tokens
+                    <b>{compactTokens(usage.total_tokens)}</b> {t('task.tokensLabel')}
                 </span>
                 <span class="mdh-tokens-bd">(<span
                     title={t('task.tokens.in')}>↑{n(usage.prompt_tokens)}</span> · <span
@@ -114,7 +114,7 @@
             <span class="mdh-ctx-pct">{plan.done}/{plan.total}{plan.allDone ? ' ✓' : ''}</span>
         </div>
     {/if}
-    <div class="mdh-ctx" title="How full the model's context window is (last LLM call's input vs the window)">
+    <div class="mdh-ctx" title={t('task.contextTitle')}>
         <span class="mdh-ctx-label">{t('common.context')}</span>
         <span class="mdh-ctx-track">
             <span class="mdh-ctx-fill" class:is-danger={gauge.danger} style={`width:${gauge.pct}%`}></span>
