@@ -1394,3 +1394,47 @@ describe('going Home', () => {
         expect(v._wentHome).toBe(false);
     });
 });
+
+describe('connectWebSocket — a URL is not built out of values we do not have', () => {
+    // `window.apiClient` existing does not mean it knows its port yet: it is
+    // created at startup and learns the port when the server reports it. In
+    // that window the template produced `ws://localhost:undefined/...` and
+    // `new WebSocket()` threw a DOMException — out of an un-awaited caller, so
+    // it surfaced as an unhandled rejection: no connection, and nothing said so.
+    let made;
+    beforeEach(() => {
+        mount();
+        made = [];
+        vi.stubGlobal('WebSocket', class {
+            constructor(url) { made.push(url); }
+            close() {}
+        });
+    });
+
+    const connect = (client) => {
+        window.apiClient = client;
+        v.connectWebSocket('T1');
+    };
+
+    it('connects when the port and token are both known', () => {
+        connect({ port: 8765, token: 'tok' });
+        expect(made).toEqual(['ws://localhost:8765/ws/tasks/T1?token=tok']);
+    });
+
+    it('does not throw, or connect, before the port is known', () => {
+        expect(() => connect({ token: 'tok' })).not.toThrow();
+        expect(made).toEqual([]);
+    });
+
+    it('does not throw, or connect, without a token', () => {
+        expect(() => connect({ port: 8765 })).not.toThrow();
+        expect(made).toEqual([]);
+    });
+
+    it('turns the steer box off, so the task visibly is not listening', () => {
+        const seen = [];
+        v._setSteerEnabled = (on) => seen.push(on);
+        connect({ port: 8765 });          // no token
+        expect(seen).toContain(false);
+    });
+});
