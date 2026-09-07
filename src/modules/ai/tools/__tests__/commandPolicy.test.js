@@ -123,3 +123,37 @@ describe('isApprovedByPatterns', () => {
         expect(isApprovedByPatterns('ls', null)).toBe(false);
     });
 });
+
+describe('a word inside a flag, a path or a cmdlet name is not a command', () => {
+    // The reported failure: `Get-Date -Format "yyyy-MM-dd dddd"` was DANGEROUS,
+    // because the disk rule matched the `-Format` PARAMETER. Dangerous
+    // overrides both the whitelist and the auto-approve toggle, so the same
+    // harmless command was queued for approval every time with no way to stop
+    // it — the approval prompt stopped meaning anything.
+    it.each([
+        ['Get-Date -Format "yyyy-MM-dd dddd"', 'the -Format parameter'],
+        ['Format-Table', 'a cmdlet whose name starts with Format'],
+        ['Get-Process | Format-List', 'the same, after a pipe'],
+        ['npm run build -- --format=esm', 'a build flag'],
+        ['Get-Content docs/reboot.md', 'a file called reboot'],
+        ['node scripts/attrib.js', 'a script called attrib'],
+    ])('%s is not dangerous (%s)', (cmd) => {
+        expect(classifyCommand(cmd)).not.toBe('dangerous');
+    });
+
+    // …and the destructive forms are still caught. The narrowing must not have
+    // been paid for with a miss.
+    it.each([
+        'format C:',
+        'format /fs:ntfs',
+        'shutdown /s /t 0',
+        'sudo reboot',
+        'make && reboot',
+        'sudo shutdown -h now',
+        'chmod 777 /',
+        'diskpart',
+        'Restart-Computer',
+    ])('%s is still dangerous', (cmd) => {
+        expect(classifyCommand(cmd)).toBe('dangerous');
+    });
+});

@@ -62,6 +62,25 @@ class TaskBridge {
                 // swallowed in silence: the card that produced this click looked
                 // live, and the user is owed the knowledge that it was not.
                 console.warn('TaskBridge: confirm-response for an unknown or already-settled confirmation:', confirmId);
+                // And a console line is not "the user is owed the knowledge".
+                //
+                // If some OTHER task is still parked on a question, this answer
+                // was meant for it and did not arrive: the card in the feed says
+                // 承認済み (the client marks it optimistically the moment the
+                // packet leaves the browser) while the run waits for an answer
+                // that will never come — no error, no status, nothing in the
+                // log, for as long as the app stays open.
+                //
+                // Say it where the person is looking. It cannot repair the
+                // mismatch, but "your approval did not reach the run" is the
+                // difference between pressing Stop now and waiting an hour.
+                for (const [, waiting] of this.pendingConfirmations) {
+                    this.emitTaskEvent(waiting.taskId, 'status', {
+                        status: 'running',
+                        message: '⚠️ 承認の応答が実行中の確認と一致しませんでした（この画面のカードは古い可能性があります）。'
+                            + 'この実行はまだ承認を待っています — もう一度承認するか、中止してください。',
+                    });
+                }
                 return;
             }
             if (promise) {
@@ -295,7 +314,42 @@ class TaskBridge {
             // behind would keep a dead task's dialog live in the registry.
             this._settlePendingConfirmations(taskId);
             this.activeAgents.delete(taskId);
+            // A run started BY a trigger holds that trigger's concurrency slot.
+            // Released here rather than on the success path: a run that threw
+            // still ended, and a slot never given back means the trigger goes
+            // quiet for ever with no error to explain it.
+            this._releaseTrigger(behavior, taskId);
         }
+    }
+
+
+    /**
+     * Hand a triggered run's concurrency slot back.
+     *
+     * The trigger that started this run is carried in the behavior it was
+     * created with (TriggerManager._fire), so nothing has to be looked up.
+     * Imported lazily: the bridge should not depend on the autonomy layer at
+     * module load, and a build with no triggers configured still works.
+     */
+    async _releaseTrigger(behavior, taskId) {
+        const jobId = behavior?.mcp_context?.job?.id;
+        if (!jobId) return;
+        try {
+            const { jobManager } = await import('../ai/jobs/JobManager.js');
+            // What it cost, recorded at the moment it is knowable. `reconcile`
+            // exists for the case where the app was closed in between; a total
+            // that quietly under-reports is worse than no total.
+            let usage = null;
+            let cost = 0;
+            try {
+                const task = await globalThis.window?.apiClient?.getTask?.(taskId);
+                usage = task?.token_usage || null;
+                // Priced here, from the task's per-model breakdown: the token
+                // report has no cost field of its own.
+                cost = await jobManager._priceTask(task);
+            } catch (_) { /* reconcile will pick it up later */ }
+            jobManager.noteUsage(jobId, taskId, usage, cost);
+        } catch (_) { /* nothing to release if the module is absent */ }
     }
 
     /**

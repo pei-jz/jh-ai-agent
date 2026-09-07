@@ -28,7 +28,7 @@
 <div class="sch-list-panel">
     <div class="sch-list-header">
         <span>Schedules ({schedules.length})</span>
-        <button type="button" class="btn btn-primary sch-new" onclick={() => onNew?.()}>+ New</button>
+        <button type="button" class="btn btn-primary sch-new" onclick={() => onNew?.()}>{t('sched.new')}</button>
     </div>
     <div class="sch-list-body">
         {#if visible.length === 0}

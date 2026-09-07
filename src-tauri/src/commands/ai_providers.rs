@@ -229,6 +229,41 @@ pub(crate) fn openai_tools_to_gemini(tools: &serde_json::Value) -> Option<Vec<se
 ///   • `additionalProperties`, `strict`, `title` dropped (unsupported)
 ///   • `null` removed from `enum`
 ///   • recurses into `properties` and `items`
+/// The output-token ceiling to ask Anthropic for when the connection does not
+/// name one.
+///
+/// Anthropic makes `max_tokens` mandatory, so "leave it blank" still has to
+/// become a number, and that number caps the whole reply — the tool call in it
+/// included. A flat 8192 was the Claude 3.5 ceiling; on a 4.x model it throws
+/// away seven eighths of what the model can write, and for an agent that writes
+/// its deliverable inside a tool call that is the deliverable's size limit.
+///
+/// Asking for MORE than a model allows is a hard 400, not a clamp, so this is
+/// deliberately conservative: a name we do not recognise gets 8192, which every
+/// Claude model accepts. Matched on substrings because deployments carry dated
+/// suffixes (claude-sonnet-4-5-20260101).
+fn default_max_output(model: &str) -> u32 {
+    let m = model.to_ascii_lowercase();
+    // Most specific first: "claude-3-5-sonnet" must not be caught by "sonnet".
+    const CAPS: &[(&str, u32)] = &[
+        ("claude-3-5-sonnet", 8_192),
+        ("claude-3-5-haiku", 8_192),
+        ("claude-3-opus", 4_096),
+        ("claude-3-sonnet", 4_096),
+        ("claude-3-haiku", 4_096),
+        ("claude-3-7-sonnet", 64_000),
+        ("claude-opus-4", 32_000),
+        ("claude-sonnet-4", 64_000),
+        ("claude-haiku-4", 64_000),
+    ];
+    for (needle, cap) in CAPS {
+        if m.contains(needle) {
+            return *cap;
+        }
+    }
+    8_192
+}
+
 fn gemini_schema(node: &serde_json::Value) -> serde_json::Value {
     let obj = match node.as_object() {
         Some(o) => o,
@@ -726,14 +761,25 @@ pub(crate) fn build_request_body(
                 }
             }
             {
-                // Anthropic REQUIRES max_tokens. Use the configured value, else a
-                // sane 8192 default (previously a hardcoded 8096 — a typo that also
-                // ignored model capability). temperature is optional.
+                // Anthropic REQUIRES max_tokens, so a blank field still has to
+                // resolve to a number — and that number is the ceiling on the
+                // whole reply, tool call included.
+                //
+                // It was a flat 8192, which is the Claude 3.5 cap. On a 4.x model
+                // that is an eighth of what the model can produce, and for an
+                // agent whose deliverable is written INSIDE a tool call it is the
+                // deliverable's size limit: a workbook of any size stops
+                // mid-argument and the call arrives with a parameter missing.
+                // See docs/design/tool-failure-policy.md §0.
+                //
+                // Model-aware now, and still 8192 when the model is unknown:
+                // asking for more than a model allows is a hard API error, so an
+                // unrecognised name gets the value that works everywhere.
                 let mut body = serde_json::json!({
                     "model": model,
                     "messages": full_messages,
                     "stream": true,
-                    "max_tokens": resolved_max_tokens.unwrap_or(8192)
+                    "max_tokens": resolved_max_tokens.unwrap_or_else(|| default_max_output(model))
                 });
                 if let Some(temp) = resolved_temperature {
                     body["temperature"] = serde_json::json!(temp);
@@ -902,3 +948,52 @@ pub(crate) fn build_request_body(
         _ => unreachable!(),
     }
 }
+
+#[cfg(test)]
+mod max_output_tests {
+    use super::default_max_output;
+
+    /// The flat 8192 this replaced was the Claude 3.5 ceiling. On a 4.x model it
+    /// threw away seven eighths of what the model can write — and for an agent
+    /// that writes its deliverable inside a tool call, that ceiling IS the
+    /// deliverable's size limit.
+    #[test]
+    fn a_4x_model_is_not_held_to_the_3_5_ceiling() {
+        assert_eq!(default_max_output("claude-sonnet-4-5-20260101"), 64_000);
+        assert_eq!(default_max_output("claude-haiku-4-5"), 64_000);
+        assert_eq!(default_max_output("claude-opus-4-1"), 32_000);
+    }
+
+    /// Asking for more than a model allows is a 400, not a clamp — so the older
+    /// models must keep their real, smaller ceilings.
+    #[test]
+    fn an_older_model_keeps_its_own_smaller_ceiling() {
+        assert_eq!(default_max_output("claude-3-5-sonnet-20241022"), 8_192);
+        assert_eq!(default_max_output("claude-3-5-haiku-latest"), 8_192);
+        assert_eq!(default_max_output("claude-3-opus-20240229"), 4_096);
+    }
+
+    /// "claude-3-5-sonnet" must not be caught by a looser "sonnet" rule.
+    #[test]
+    fn the_more_specific_name_wins() {
+        assert_ne!(
+            default_max_output("claude-3-5-sonnet-20241022"),
+            default_max_output("claude-sonnet-4-5")
+        );
+    }
+
+    /// A name we do not recognise gets the value every Claude model accepts.
+    /// Guessing high here is an outright API error.
+    #[test]
+    fn an_unknown_model_gets_the_value_that_always_works() {
+        assert_eq!(default_max_output("claude-9-experimental"), 8_192);
+        assert_eq!(default_max_output(""), 8_192);
+        assert_eq!(default_max_output("something-else"), 8_192);
+    }
+
+    #[test]
+    fn the_case_of_the_name_does_not_matter() {
+        assert_eq!(default_max_output("Claude-Sonnet-4-5"), 64_000);
+    }
+}
+

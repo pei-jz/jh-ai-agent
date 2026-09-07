@@ -19,7 +19,15 @@ pub async fn ws_handler(
     Path(id): Path<String>,
     Query(auth): Query<WsAuth>,
     State(state): State<AppState>,
+    request: axum::extract::Request,
 ) -> impl IntoResponse {
+    // Host BEFORE token, for the same reason /api does it: a page that has been
+    // DNS-rebound to this loopback server must not reach the handler at all.
+    // This route needs it most — the token arrives in the query string, so it
+    // is the one credential that reliably ends up in logs and history.
+    if !crate::server::auth::request_host_is_loopback(&request) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     if auth.token != state.auth_token {
         return StatusCode::UNAUTHORIZED.into_response();
     }
@@ -71,10 +79,32 @@ async fn handle_socket(socket: WebSocket, task_id: String, state: AppState) {
     // After an app restart the task is restored from `task_history.json` with
     // an empty logs vec. If memory is empty but a sidecar file exists, load
     // the persisted logs so the WS replay still works for old completed tasks.
+    // Where this replay sits in the ONE index space every other log route uses:
+    // (sidecar file ++ the un-checkpointed tail still in memory). `task.logs`
+    // is memory-relative, and emitting `i` as `_idx` published those local
+    // positions as if they were absolute. Two things broke, both only for a
+    // task CONTINUED after a restart — when the sidecar holds a history that
+    // memory does not:
+    //
+    //   • the CHAT detail modal fetches GET /tasks/:id/logs/:idx to rehydrate
+    //     the payload the slimming strips (history / system_prompt /
+    //     sent_request / tools). Reading a local index as an absolute one
+    //     returned some unrelated entry, so hydration found no `request` and
+    //     the Tool / Sent tabs simply were not there;
+    //   • the client had no way to know earlier entries existed at all, so
+    //     "load earlier" never appeared and the Story could not be scrolled
+    //     back to where the task actually began.
+    let mut replay_base = {
+        let on_disk = crate::task_log_line_count(&state.history_path, &task_id);
+        crate::server::router::memory_base(
+            on_disk, crate::persisted_log_count(&task_id), stored_logs.len())
+    };
     if stored_logs.is_empty() {
         let disk_logs = crate::load_task_logs(&state.history_path, &task_id);
         if !disk_logs.is_empty() {
             stored_logs = disk_logs;
+            // The whole file — so this replay starts at the true beginning.
+            replay_base = 0;
         }
     }
 
@@ -87,7 +117,7 @@ async fn handle_socket(socket: WebSocket, task_id: String, state: AppState) {
     // which made replay of long tasks the dominant selection cost. The client
     // fetches a step's full payload on demand via GET /tasks/:id/logs/:idx.
     for (i, log_entry) in stored_logs.iter().enumerate() {
-        let slim = crate::server::router::slim_log_entry(log_entry, i);
+        let slim = crate::server::router::slim_log_entry(log_entry, replay_base + i);
         if let Ok(msg_str) = serde_json::to_string(&slim) {
             if ws_sender.send(Message::Text(msg_str)).await.is_err() {
                 return;
@@ -101,7 +131,9 @@ async fn handle_socket(socket: WebSocket, task_id: String, state: AppState) {
     // backends that don't send it.
     let done_marker = serde_json::json!({
         "event": "replay_done",
-        "data": { "count": stored_logs.len() },
+        "data": { "count": stored_logs.len(), "base": replay_base },  // `base` > 0 ⇒ earlier entries exist on disk; the client pages
+                  // back to them over HTTP rather than replaying a
+                  // 500 MB sidecar down the socket.
         "timestamp": Local::now().to_rfc3339()
     });
     if let Ok(msg_str) = serde_json::to_string(&done_marker) {
@@ -133,13 +165,38 @@ async fn handle_socket(socket: WebSocket, task_id: String, state: AppState) {
     while let Some(Ok(message)) = receiver.next().await {
         if let Message::Text(text) = message {
             if let Ok(client_event) = serde_json::from_str::<serde_json::Value>(&text) {
-                let event_name = client_event["event"].as_str().unwrap_or("");
+                // `action` as well as `event`.
+                //
+                // The Monitor sends {"action":"abort"} while everything else it
+                // sends is {"event":…}. Reading only `event` made abort a no-op
+                // over a live socket — and a live socket is exactly the state you
+                // are in while watching the task you want to stop. The HTTP
+                // fallback only ran when the socket was CLOSED, so Stop worked
+                // when you were not looking at the task and did nothing when you
+                // were. Accepting both spellings means a client that has not been
+                // updated can still stop a run.
+                let event_name = client_event["event"]
+                    .as_str()
+                    .or_else(|| client_event["action"].as_str())
+                    .unwrap_or("");
 
                 match event_name {
                     "abort" => {
-                        relay_handle.abort();
+                        // Ask first; do not tear down the pipe that carries the
+                        // answer.
+                        //
+                        // This used to abort the relay and break out of the loop
+                        // BEFORE the run had a chance to report itself aborted —
+                        // so the one client guaranteed not to see the result of
+                        // the stop was the client that pressed it. The socket
+                        // closed, the row stayed "running" until something
+                        // refetched, and Stop looked like it had done nothing.
+                        //
+                        // The relay stays up and the loop keeps reading, exactly
+                        // as it does while a task is running: the agent emits its
+                        // own `aborted` status through the normal path, and this
+                        // socket delivers it like any other event.
                         let _ = app_handle.emit("abort-task", serde_json::json!({ "taskId": task_id_clone }));
-                        break;
                     }
                     "confirm_response" => {
                         if let Some(payload) = client_event.get("data") {

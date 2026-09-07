@@ -144,12 +144,12 @@
                 <div class="input-group">
                     <label class="input-label" for="modal-inst-name">{t('conn.name')}</label>
                     <input id="modal-inst-name" class="input" type="text"
-                        bind:value={form.name} placeholder="e.g. My Connection">
+                        bind:value={form.name} placeholder={t('conn.name.placeholder')}>
                 </div>
                 <div class="input-group">
                     <label class="input-label" for="modal-inst-model">{t('conn.model')}</label>
                     <input id="modal-inst-model" class="input" type="text"
-                        bind:value={form.model} placeholder="e.g. gpt-4o, claude-3-5-sonnet">
+                        bind:value={form.model} placeholder={t('conn.model.placeholder')}>
                 </div>
             </div>
 
@@ -182,7 +182,7 @@
                 <div class="input-group" id="modal-version-group">
                     <label class="input-label" for="modal-inst-version">{t('conn.apiVersion')}</label>
                     <input id="modal-inst-version" class="input" type="text"
-                        bind:value={form.api_version} placeholder="e.g. 2024-08-01-preview">
+                        bind:value={form.api_version} placeholder={t('conn.apiVersion.placeholder')}>
                 </div>
             {/if}
 
@@ -190,9 +190,8 @@
                 <label class="input-label" for="modal-inst-context">{t('conn.contextWindow')}</label>
                 <input id="modal-inst-context" class="input" type="number" min="0" step="1024"
                     bind:value={form.context_window}
-                    placeholder="Auto-detect (leave blank). e.g. 65536 for DeepSeek, 131072 for Qwen">
-                <small class="cfg-hint">Set this for models we don't recognize so history
-                    compaction uses the correct window. Leave blank to auto-detect by model name.</small>
+                    placeholder={t('conn.window.placeholder')}>
+                <small class="cfg-hint">{t('conn.window.hint')}</small>
             </div>
 
             <div class="input-group">
@@ -200,7 +199,7 @@
                 <input id="modal-inst-maxout" class="input" type="number" min="0" step="256"
                     bind:value={form.max_output_tokens}
                     placeholder={t('conn.maxOutput.placeholder')}>
-                <small class="cfg-hint">Caps the model's reply length. Leave blank for the provider default.</small>
+                <small class="cfg-hint">{t('conn.maxOutput.hint')}</small>
             </div>
 
             <!-- Vision is a per-connection FACT, not something a model name can be
@@ -224,16 +223,15 @@
             </div>
 
             <div class="input-group">
-                <label class="input-label" for="modal-inst-temp">Temperature (optional, 0.0–2.0)</label>
+                <label class="input-label" for="modal-inst-temp">{t('conn.temp.label')}</label>
                 <input id="modal-inst-temp" class="input" type="number" min="0" max="2" step="0.1"
                     bind:value={form.temperature}
-                    placeholder="Provider default (blank). Use ~0.2 for reliable agent tool-use.">
-                <small class="cfg-hint">Lower = more deterministic (better for tool-calling).
-                    Leave blank for the provider default.</small>
+                    placeholder={t('conn.temp.placeholder')}>
+                <small class="cfg-hint">{t('conn.temp.hint')}</small>
             </div>
 
             <div class="input-group">
-                <span class="input-label">Pricing — USD per 1M tokens (optional)</span>
+                <span class="input-label">{t('conn.pricing.label')}</span>
                 <div class="cfg-price-row">
                     <input id="modal-inst-cost-in" class="input" type="number" min="0" step="0.01"
                         bind:value={form.cost_per_1m_input} placeholder={t('conn.rate.in')}>
@@ -242,9 +240,7 @@
                     <input id="modal-inst-cost-out" class="input" type="number" min="0" step="0.01"
                         bind:value={form.cost_per_1m_output} placeholder={t('conn.rate.out')}>
                 </div>
-                <small class="cfg-hint">Used for the dashboard cost estimate when THIS model is
-                    active. e.g. GPT-4o ≈ 2.5 / — / 10; Claude Sonnet ≈ 3 / 0.3 / 15.
-                    Cache blank ⇒ ~10% of input.</small>
+                <small class="cfg-hint">{t('conn.pricing.hint')}</small>
             </div>
         </div>
 
@@ -265,7 +261,7 @@
         <div class="modal-actions cfg-modal-actions">
             <button class="btn btn-secondary cfg-btn-test" id="btn-modal-test"
                 disabled={testStatus?.state === 'testing'}
-                onclick={() => onTest?.(collect())}>⚡ Test Connection</button>
+                onclick={() => onTest?.(collect())}>{t('conn.test')}</button>
             <div class="cfg-modal-confirm">
                 <button class="btn btn-secondary" id="btn-modal-cancel"
                     onclick={() => onCancel?.()}>{t('common.cancel')}</button>

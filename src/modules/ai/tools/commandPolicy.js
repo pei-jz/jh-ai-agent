@@ -17,6 +17,29 @@
 // ── Dangerous: matched anywhere in the command (case-insensitive). ──────────
 // Deliberately broad; a false "dangerous" only costs one extra confirmation,
 // whereas a miss could auto-run something destructive.
+
+/**
+ * `\b` is not enough to say "this is a command".
+ *
+ * It matches inside a flag (`-Format`), inside a hyphenated cmdlet
+ * (`Format-Table`), and inside a path (`docs/reboot.md`). The disk rule below
+ * therefore classified `Get-Date -Format "yyyy-MM-dd"` as DANGEROUS — and
+ * dangerous overrides the whitelist and the auto-approve toggle, so the same
+ * harmless command was queued for approval every single time with no way to
+ * make it stop.
+ *
+ * A command is in command position when it starts the line or follows a
+ * separator, is not preceded by `-` or `/` (a flag), and is not followed by `-`
+ * (a hyphenated cmdlet name). `after` says what must come next for the match to
+ * be about the destructive form.
+ */
+function commandPosition(word, after = '(\\s|$)') {
+    // Only the character IMMEDIATELY before the word decides. An earlier
+    // version also demanded a separator, which dropped `sudo reboot` and
+    // `make && reboot` — exactly the forms that must still be caught.
+    return new RegExp(`(?<![-/\\\\w.])${word}${after}`, 'i');
+}
+
 const DANGEROUS_PATTERNS = [
     // File/dir deletion (POSIX + Windows + PowerShell)
     /(^|[\s;&|(])(rm|rmdir|del|erase|rd|unlink|rimraf)(\s|$)/i,
@@ -24,9 +47,18 @@ const DANGEROUS_PATTERNS = [
     /(^|[\s;&|(])ri\s+-/i,                       // PS Remove-Item alias with args
     // Disk / filesystem
     /(^|[\s;&|(])dd\s+/i,
-    /\b(mkfs\w*|fdisk|diskpart|format)\b/i,
+    /\b(mkfs\w*|fdisk|diskpart)\b/i,
+    // `format` only in its destructive shape: `format C:`, `format /fs:ntfs`,
+    // or bare. NOT the `-Format` parameter, and not `Format-Table` /
+    // `Format-List` — which are among the most common PowerShell commands
+    // there are, and were all being called dangerous.
+    commandPosition('format', '(\\s+[a-z]:|\\s+/|\\s*$)'),
     // Power / process control
-    /\b(shutdown|reboot|halt|poweroff|logoff|restart-computer|stop-computer)\b/i,
+    // In command position: `Get-Content docs/reboot.md` is a read, and was
+    // being treated as a power command because of the file's name.
+    commandPosition('(shutdown|reboot|halt|poweroff|logoff)'),
+    // Hyphenated cmdlet names are unambiguous; a word boundary is enough.
+    /\b(restart-computer|stop-computer)\b/i,
     /\b(stop-process|taskkill|pkill|killall)\b/i,
     /(^|[\s;&|(])kill\s+/i,
     // Destructive git
@@ -36,7 +68,7 @@ const DANGEROUS_PATTERNS = [
     /\bgit\s+(filter-branch|filter-repo)\b/i,
     /\bgit\s+checkout\s+--\s/i,
     // Permissions / ownership / registry
-    /\b(chmod|chown|icacls|takeown|attrib)\b/i,
+    commandPosition('(chmod|chown|icacls|takeown|attrib)'),
     /\breg\s+(delete|add|import)\b/i,
     // Arbitrary code exec via pipe / eval / download-and-run
     /\b(iex|invoke-expression)\b/i,

@@ -67,7 +67,7 @@
                         </td>
                         <td class="cfg-inst-name">
                             {inst.name}
-                            {#if isActive}<span class="cfg-active-tag">★ ACTIVE</span>{/if}
+                            {#if isActive}<span class="cfg-active-tag">{t('conn.active')}</span>{/if}
                         </td>
                         <td><code class="cfg-model">{inst.model}</code></td>
                         <td class="cfg-base-url">{inst.base_url || 'Default'}</td>

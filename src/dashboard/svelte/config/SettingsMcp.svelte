@@ -19,7 +19,7 @@
         oninput={(e) => onChange?.(e.currentTarget.value)}
     ></textarea>
     <p class="input-hint cfg-hint-spaced">
-        Edit the MCP servers config in JSON format. Example:
+        {t('mcp.jsonHint')}
         <code>{'{"sqlite": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-sqlite"]}}'}</code>
     </p>
 </div>

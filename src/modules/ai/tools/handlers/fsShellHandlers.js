@@ -11,6 +11,13 @@ import { classifyCommand } from '../commandPolicy.js';
 
 /** delete_file — single-file delete, confirmation required outside workspace. */
 export async function handleDeleteFile(ctx, args, onConfirm, onAgentStatus, resolvedPath) {
+    // A refusal protects the FILE, not the call that was refused. Deleting a
+    // workbook that write_xlsx just declined to replace reaches the same end by
+    // another road, which is what happened the first time this guard existed
+    // only as wording. docs/design/tool-failure-policy.md §2 C.
+    const blocked = ctx._refusedReplaceReason?.(resolvedPath);
+    if (blocked) return blocked;
+
     const isSafeRootDel = ctx._isInsideWorkspace(resolvedPath);
     const okDel = await ctx._confirmUnsafe(isSafeRootDel, onConfirm, {
         type: 'command_confirm',
@@ -75,6 +82,9 @@ export async function handleMoveFile(ctx, args, onConfirm, onAgentStatus) {
 
 /** run_command — always-gated shell execution with live streaming + timeout. */
 export async function handleRunCommand(ctx, args, onConfirm, onAgentStatus) {
+    // Leaving the specialised tools is allowed; doing it invisibly is not.
+    // docs/design/tool-failure-policy.md 原則2.
+    ctx._noticeOfficeBypass?.(args?.command, onAgentStatus);
     // A call with no command must FAIL, not prompt.
     //
     // Without this the missing value flowed straight into the approval dialog,

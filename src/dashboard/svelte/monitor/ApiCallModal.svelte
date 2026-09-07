@@ -12,6 +12,7 @@
 -->
 <script>
     import { apiCallTabs, callHeadline, callsTitle, slimEntries } from '../../views/monitor/apiCallView.js';
+    import { t } from '../../../i18n/index.js';
 
     let {
         entries = [],
@@ -42,6 +43,8 @@
         openTab = next.map(r => r.defaultIndex);
     }
 
+    let incomplete = $state(0);
+
     $effect(() => {
         const list = Array.isArray(entries) ? entries : [];
         build(list);
@@ -55,15 +58,29 @@
             // tools from every entry, because keeping them makes the payload
             // O(steps²). They are fetched here, for the calls actually opened.
             // A failure degrades to the slim view rather than an empty dialog.
+            let missed = 0;
             try {
                 await Promise.all(slim.map(async (en) => {
                     const full = await client()?.getTaskLogEntry?.(taskId, en._idx);
                     if (full?.data?.request) {
                         en.request = full.data.request;
                         if (full.data.response !== undefined) en.response = full.data.response;
+                    } else {
+                        missed++;
                     }
                 }));
-            } catch (_) { /* keep what we have */ }
+            } catch (_) {
+                missed = slim.length;
+            }
+            // Say when the fetch came back with nothing.
+            //
+            // Silence here looks exactly like a broken dialog: the listing
+            // strips history / system_prompt / sent_request / tools, so a failed
+            // hydration leaves Params / Response / Headers and nothing else —
+            // the tabs appear to have been REMOVED. An entry for a step that has
+            // not been flushed to the log yet is the common cause, and it fixes
+            // itself once the step ends.
+            incomplete = missed;
             if (!alive) return;
             build(list);
             loading = false;
@@ -95,6 +112,9 @@
     <div class="mchat-box" role="dialog" aria-label="API Call Details">
         <div class="mchat-header">
             <span class="mchat-title">{title}{loading ? ' · loading…' : ''}</span>
+            {#if incomplete > 0 && !loading}
+                <span class="mchat-incomplete">{t('apicall.incomplete', { n: incomplete })}</span>
+            {/if}
             <button class="mchat-close" type="button" title="Close (Esc)" onclick={() => onClose?.()}>✕</button>
         </div>
 
@@ -155,6 +175,11 @@
     .mchat-title {
         font-size: 12.5px; font-weight: 600;
         color: var(--ink); font-family: var(--font-mono);
+    }
+    /* Why the tab row is short, said next to the tab row. */
+    .mchat-incomplete {
+        font-size: 11px; font-weight: 500;
+        color: var(--warning); margin-left: 10px;
     }
     .mchat-close {
         background: none; border: none; color: var(--ink-faint);

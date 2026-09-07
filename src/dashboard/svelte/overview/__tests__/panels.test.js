@@ -90,12 +90,12 @@ describe('the memory pane', () => {
 
     it('does not claim a verdict when nothing has been surfaced yet', () => {
         const el = paneOf({ memory: mem({ cards: [card()] }) });
-        expect(el.textContent).toMatch(/nothing to judge yet/);
+        expect(el.textContent).toMatch(t('mem.working.none', { total: 1 }));
     });
 
     it('leads with whether the lessons actually held', () => {
         const el = paneOf({ memory: mem({ cards: [card({ shown: 4, recurrences_after_hit: 0 })] }) });
-        expect(el.textContent).toMatch(/Is it working\?/);
+        expect(el.textContent).toMatch(t('mem.working'));
         expect(el.querySelector('.dm-bar')).toBeTruthy();
     });
 

@@ -144,7 +144,7 @@
             </div>
         {/if}
         <div class="insp-row">
-            <span class="insp-k">Out</span>
+            <span class="insp-k">{t('task.out')}</span>
             {#if cost}<span class="insp-cost">{fmtCost(cost.out)}</span>{/if}
             <span class="insp-v">{fmtTokens(usage.completion_tokens || 0)}</span>
         </div>

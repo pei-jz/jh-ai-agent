@@ -16,6 +16,7 @@
   cannot promise one thing and the run do another.
 -->
 <script>
+    import { t } from '../../../i18n/index.js';
     import { ASK, BUILD } from '../../../modules/ai/agent/InteractionMode.js';
     import { looksReadOnly } from '../../../modules/ai/agent/TaskComplexity.js';
     import { icon } from '../../utils/icons.js';
@@ -45,19 +46,19 @@
 </script>
 
 <div class="wel">
-    <h2 class="wel-title">何をしますか？</h2>
+    <h2 class="wel-title">{t('welcome.title')}</h2>
     <!-- It used to say "短い質問も、長い作業も、同じ入力欄からです" while the
          input was a 240px sliver in the other column. The box is here now, so
          the text says the one thing the box does not: that the mode is a guess
          you can change. -->
     <p class="wel-lede">
-        短い質問も、長い作業も、ここから。モードは文面から推定され、チップで変えられます。
+        {t('welcome.lede')}
     </p>
 
     {@render children?.()}
 
     {#if presets.length}
-        <span class="wel-or">よく使う依頼から</span>
+        <span class="wel-or">{t('welcome.presets')}</span>
         <div class="wel-presets">
             {#each presets as p (p.key)}
                 <button type="button" class="wel-preset" onclick={() => onPick?.(p)}
@@ -71,7 +72,7 @@
         <!-- No templates yet. A link, not an empty frame: the thing to do is
              make one, and this is where you would want to be told that. -->
         <a class="wel-add" href="#config?tab=templates">
-            {@html icon('plus', 12)} よく使う依頼をテンプレートにすると、ここから1クリックで始められます
+            {@html icon('plus', 12)} {t('welcome.templateHint')}
         </a>
     {/if}
 </div>

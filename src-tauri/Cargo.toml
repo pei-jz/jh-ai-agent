@@ -1,6 +1,6 @@
 [package]
 name = "jh-ai-agent"
-version = "0.1.0"
+version = "0.2.0"
 description = "J.H AI Agent — standalone Tauri-based AI agent server."
 authors = ["J.H AI Agent Contributors"]
 edition = "2021"
@@ -74,9 +74,6 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 quick-xml = "0.36"
 rust_xlsxwriter = "0.79"
 # EDITING an existing workbook is a different job from writing a new one:
-# rust_xlsxwriter cannot read, so "read it and write it back" would silently drop
-# every formula, format and untouched sheet. umya-spreadsheet round-trips the file.
-umya-spreadsheet = "3"
 # Embedded Office images are handed to the vision path as base64.
 base64 = "0.22"
 # Licence-key signature verification (commands/license.rs). Verification only —
@@ -93,7 +90,19 @@ globset = "0.4"
 
 # Encoding detection and conversion for file I/O
 encoding_rs = "0.8"
+imap = "2.4"
+native-tls = "0.2.18"
+mailparse = "0.16.1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# NOT a dependency of the product any more, only of a test fixture.
+#
+# Editing an .xlsx used to go through it: read the whole workbook into a model,
+# mutate, write the model back. That deletes everything the model does not
+# represent — charts went, and 3.0.1 dropped style="thin" from every border it
+# wrote, so a ruled table came back with no lines and Excel reported nothing.
+# commands/xlsx_edit.rs replaced it with surgery on the package itself, so the
+# library that could do that is no longer linked into what we ship.
+umya-spreadsheet = "3.1"
 wiremock = "0.6.5"

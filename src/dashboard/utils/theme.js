@@ -17,16 +17,24 @@
  * then the textured family (ported from JHEditor / the Task app) grouped
  * together, because that is how someone browsing them thinks about the set.
  */
+import { t } from '../../i18n/index.js';
+
 export const THEMES = ['light', 'dark', 'paper', 'paper-subtle', 'bamboo-ancient', 'kakejiku'];
 
-/** Display name and one line of what it is, for the picker. */
+/**
+ * The catalogue key for each theme's name and its one-line description.
+ *
+ * Held as KEYS rather than as text: the picker is chrome like everything else,
+ * and it used to be the one place in the app that stayed Japanese whatever the
+ * user had chosen — "Memory" beside 「知っていること」 in the same row.
+ */
 const META = {
-    light:            { label: 'ライト',       hint: '既定。白地に violet' },
-    dark:             { label: 'ダーク',       hint: '暗所向け。cyan' },
-    paper:            { label: '古紙',         hint: '罫のある紙。臙脂' },
-    'paper-subtle':   { label: '白紙',         hint: '白い紙に苔緑' },
-    'bamboo-ancient': { label: '竹簡',         hint: '焦げ竹の簡。銅青' },
-    kakejiku:         { label: '掛け軸',       hint: '絹本の軸装。藍' },
+    light:            { label: 'theme.light',       hint: 'theme.light.hint' },
+    dark:             { label: 'theme.dark',        hint: 'theme.dark.hint' },
+    paper:            { label: 'theme.paper',       hint: 'theme.paper.hint' },
+    'paper-subtle':   { label: 'theme.paperSubtle', hint: 'theme.paperSubtle.hint' },
+    'bamboo-ancient': { label: 'theme.bamboo',      hint: 'theme.bamboo.hint' },
+    kakejiku:         { label: 'theme.kakejiku',    hint: 'theme.kakejiku.hint' },
 };
 
 /** Anything unrecognised (or absent) falls back to the shipped default. */
@@ -36,11 +44,11 @@ export function normalizeTheme(theme) {
 
 /** [{ id, label, hint }] in picker order. */
 export function themeList() {
-    return THEMES.map(id => ({ id, ...META[id] }));
+    return THEMES.map(id => ({ id, label: t(META[id].label), hint: t(META[id].hint) }));
 }
 
 export function themeLabel(theme) {
-    return META[normalizeTheme(theme)].label;
+    return t(META[normalizeTheme(theme)].label);
 }
 
 /**

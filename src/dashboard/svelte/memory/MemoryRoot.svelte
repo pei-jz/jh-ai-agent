@@ -280,10 +280,10 @@
         <div class="mem-tabs" role="tablist">
             <button type="button" class="mem-tab" class:is-on={tab === 'digest'}
                 role="tab" aria-selected={tab === 'digest'}
-                onclick={() => (tab = 'digest')}>{@html icon('memory', 13)} 知っていること</button>
+                onclick={() => (tab = 'digest')}>{@html icon('memory', 13)} {t('mem.tab.known')}</button>
             <button type="button" class="mem-tab" class:is-on={tab === 'edit'}
                 role="tab" aria-selected={tab === 'edit'}
-                onclick={() => (tab = 'edit')}>{@html icon('template', 13)} 編集</button>
+                onclick={() => (tab = 'edit')}>{@html icon('template', 13)} {t('mem.tab.edit')}</button>
         </div>
 
         <span class="mem-ws">
@@ -291,7 +291,7 @@
                  browse button beside it covers a folder that is not approved yet. -->
             <select class="mem-ws-input" bind:value={workspace} aria-label={t('common.workspace')}
                 onchange={loadAll}>
-                <option value="">(ワークスペースを選択)</option>
+                <option value="">{t('mem.pickWorkspace')}</option>
                 {#if workspace && !projects.includes(workspace)}
                     <option value={workspace}>{workspace}</option>
                 {/if}

@@ -11,6 +11,8 @@ import { ScheduleView } from './dashboard/views/ScheduleView.js';
 // AnalyticsView is now embedded inside the Overview dashboard (no standalone route).
 import { taskBridge } from './modules/bridge/TaskBridge.js';
 import { scheduleManager } from './modules/ai/ScheduleManager.js';
+import { jobManager } from './modules/ai/jobs/JobManager.js';
+import { watcherManager } from './modules/ai/triggers/WatcherManager.js';
 import { mcpManager } from './modules/ai/McpManager.js';
 import { install as installErrorReporter, recentErrors } from './dashboard/utils/errorReporter.js';
 import { showNotification } from './dashboard/utils/notifications.js';
@@ -746,15 +748,27 @@ async function onExpandApp() {
     const inSpotlight = document.body.classList.contains('spotlight-mode');
     const hash = await promoteSpotlightRun();
 
+    // Work is the destination either way.
+    //
+    // With nothing to promote this used to call open_main_window, which brings
+    // the window forward and says nothing about WHERE — so the app appeared on
+    // whatever route it was last left on, which is not what "Open App" from a
+    // search box means. Naming the route makes the button do one thing.
+    const target = hash || '#monitor';
+
     if (inSpotlight) {
         clearAiAnswer();
         try {
-            if (hash) await invoke('spotlight_navigate', { hash });
-            else await invoke('open_main_window');
-        } catch (e) { console.error(e); }
+            await invoke('spotlight_navigate', { hash: target });
+        } catch (e) {
+            console.error(e);
+            // The user asked to open the app; a failed navigate must not leave
+            // them looking at a search box that did nothing.
+            try { await invoke('open_main_window'); } catch (_) {}
+        }
         return;
     }
-    if (hash) window.location.hash = hash;
+    window.location.hash = target;
     hideSearch();
 }
 
@@ -784,6 +798,19 @@ async function promoteSpotlightRun() {
             selectedMcp: [],
             interaction: ASK,
             caller: 'Spotlight',
+            // The exchange Spotlight already had, handed over as history.
+            //
+            // Without it the run received only the question and answered it
+            // again from scratch — a second call, a second wait, and a second
+            // bill for something already on screen. Carrying it means the run
+            // opens where the conversation left off, which is what "open this
+            // in the app" is asking for.
+            chatContext: _lastSpotlightAnswer
+                ? [
+                    { role: 'user', content: question },
+                    { role: 'assistant', content: _lastSpotlightAnswer },
+                ]
+                : [],
             client: window.apiClient,
         });
         return `#monitor?id=${id}`;
@@ -944,6 +971,9 @@ let _aiAbort = null;
 // query is typed/submitted.
 let _lastSpotlightQuery = '';
 let _lastSpotlightAnswerHtml = '';
+// The answer as TEXT, not markup. The rendered HTML restores the overlay;
+// only the text can be handed to a run as prior conversation.
+let _lastSpotlightAnswer = '';
 const _toolExecutor = new ToolExecutor();
 
 async function askAI(query) {
@@ -1153,6 +1183,7 @@ Your final responses and messages to the user MUST be in ${outputLanguage}.
             // Remember the rendered Q&A so reopening the spotlight restores it.
             _lastSpotlightQuery = query || '';
             _lastSpotlightAnswerHtml = answerEl.innerHTML;
+            _lastSpotlightAnswer = fullAnswer.trim();
             saveQuickSearchToHistory(processedText, fullAnswer).catch(e =>
                 console.warn('Quick-search history save failed:', e));
         }
@@ -1487,7 +1518,26 @@ window.addEventListener('DOMContentLoaded', async () => {
         }
 
         // Initialize background task scheduler
-        scheduleManager.init();
+        // ONE registry for everything that runs without being asked.
+        //
+        // `scheduleManager` and `triggerManager` are deliberately NOT started:
+        // their records were migrated into jobs, so running them as well would
+        // start every job twice. Their stores are still on disk and untouched,
+        // so the migration can be re-run or abandoned.
+        jobManager.init();
+        // Cost of runs that finished while the app was closed. A total that
+        // quietly under-reports is worse than no total.
+        jobManager.reconcile().catch(() => {});
+
+        // The app does its own watching. Before this, "run when mail arrives"
+        // meant a Python script in Windows Task Scheduler — a scheduler-owning
+        // app outsourcing the one part that makes it autonomous.
+        watcherManager.init();
+
+        await listen('trigger-event', (e) => {
+            try { jobManager.onEvent(e.payload); }
+            catch (err) { console.warn('event intake failed:', err); }
+        });
 
         // Initialize OS notification support for approval requests
         initApprovalNotifications();
@@ -1499,7 +1549,19 @@ window.addEventListener('DOMContentLoaded', async () => {
         // from the history list). open_main_window (Rust) shows/focuses us.
         await listen('spotlight-navigate', (e) => {
             const hash = e.payload?.hash;
-            if (hash) window.location.hash = hash;
+            if (!hash) return;
+            // The main window has its OWN search overlay, and the global hotkey
+            // opens both it and the spotlight window. Handing over from
+            // spotlight therefore arrives with that overlay still up, floating
+            // over the view we are about to show — which is what the user saw
+            // after "Open App": the app in front, with a search box on top of it.
+            hideSearch();
+            // Assigning the SAME hash fires no hashchange, so the view is never
+            // (re)rendered — the window comes forward showing whatever was
+            // there, which for a main window that has been hidden since start-up
+            // is an empty content area. Route explicitly when nothing changed.
+            if (window.location.hash === hash) handleRoute();
+            else window.location.hash = hash;
         });
 
         // Listen for routes

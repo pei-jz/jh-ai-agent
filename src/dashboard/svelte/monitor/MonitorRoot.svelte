@@ -73,6 +73,8 @@
         ask = null,
 
         onNewTask = null,
+        /** Back to the start screen: deselect, keep everything running. */
+        onHome = null,
         onFilter = null,
         onToggleList = null,
         onToggleInspector = null,
@@ -193,8 +195,20 @@
     <div class="mpanel-left" class:pane-hidden={listCollapsed}>
         <div class="mpanel-left-header">
             <span>{t('list.title')}<span class="mpl-count">{taskCount}</span></span>
-            <button class="btn btn-primary mpl-new" type="button" title={t('list.newDetailed')}
-                onclick={() => onNewTask?.()}>{@html icon('plus', 12)} New</button>
+            <span class="mpl-actions">
+                <!-- Home, not a second composer.
+                     There used to be an input box here AND the one in the middle
+                     of the start screen, which raised the question of which was
+                     the real one and made the same request typeable in two
+                     places. There is one box now, on the start screen, and this
+                     is how you get back to it — without stopping anything. -->
+                {#if hasTask}
+                    <button class="btn btn-secondary mpl-home" type="button" title={t('list.home.title')}
+                        onclick={() => onHome?.()}>{@html icon('home', 12)} {t('list.home')}</button>
+                {/if}
+                <button class="btn btn-primary mpl-new" type="button" title={t('list.newDetailed')}
+                    onclick={() => onNewTask?.()}>{@html icon('plus', 12)} New</button>
+            </span>
         </div>
         <!--
           The composer sits ABOVE the list rather than behind the "New" button:
@@ -209,7 +223,6 @@
           never two boxes: that would raise the question of which is the real
           one, and the draft would have to be kept in step between them.
         -->
-        {#if composer && hasTask}<Composer {...composer} place="rail" />{/if}
         {#if taskList}<TaskList {...taskList} />{/if}
     </div>
 
@@ -308,7 +321,7 @@
                         onclick={jumpToAsk}
                         onkeydown={(e) => { if (e.key === 'Enter') jumpToAsk(); }}>
                         {@html icon('question', 14)}<span>{t('task.waiting')}</span>
-                        <span class="mask-pending-go">Go to the question ↓</span>
+                        <span class="mask-pending-go">{t('task.goToQuestion')}</span>
                     </div>
                 {/if}
 

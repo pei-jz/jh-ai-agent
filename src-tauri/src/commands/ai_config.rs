@@ -440,6 +440,39 @@ pub async fn get_ai_config<R: tauri::Runtime>(
     Ok(config)
 }
 
+/// Fold the stored config into an incoming one: **any field the caller did not
+/// send keeps its stored value.**
+///
+/// This used to be a hand-written list of `if final.x.is_none() { final.x =
+/// old.x }` — twice, once here and once in the HTTP route. The two copies had
+/// already drifted by seven fields, and one field was in neither: `llm_instances`.
+/// So a partial patch (`updateConfig({ approved_projects })`, sent when a task
+/// remembers a new workspace) preserved `active_llm_instance_id` and the
+/// fast/deep routing ids while DELETING the connections they named. Every
+/// request then resolved to an instance that no longer existed.
+///
+/// Working at the JSON level makes the rule structural instead of a list: a
+/// field added to `AiConfig` tomorrow is covered without anyone remembering to
+/// add it here, in both callers at once.
+///
+/// The rule is only about what was *not mentioned*. `null`/absent means "not
+/// mentioned" ⇒ keep the stored value; any present value wins, including the
+/// sentinels this app relies on — `0` for "limit disabled", `""` for "routing
+/// not set", and `[]` for "the last connection was removed".
+pub fn merge_preserving(incoming: &AiConfig, stored: &AiConfig) -> Result<AiConfig, String> {
+    let mut new_v = serde_json::to_value(incoming).map_err(|e| e.to_string())?;
+    let old_v = serde_json::to_value(stored).map_err(|e| e.to_string())?;
+    if let (Some(n), Some(o)) = (new_v.as_object_mut(), old_v.as_object()) {
+        for (k, ov) in o {
+            let unmentioned = matches!(n.get(k), None | Some(serde_json::Value::Null));
+            if unmentioned && !ov.is_null() {
+                n.insert(k.clone(), ov.clone());
+            }
+        }
+    }
+    serde_json::from_value(new_v).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn save_ai_config<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
@@ -462,33 +495,22 @@ pub async fn save_ai_config<R: tauri::Runtime>(
     if config_path.exists() {
         {
             if let Some(old_config) = load_config_with_secrets(&config_dir) {
-                if final_config.connection_token.is_none() {
-                    final_config.connection_token = old_config.connection_token;
-                }
                 if final_config.openai_key == Some("********".to_string()) || final_config.openai_key.is_none() {
-                    final_config.openai_key = old_config.openai_key;
+                    final_config.openai_key = old_config.openai_key.clone();
                 }
                 if final_config.anthropic_key == Some("********".to_string()) || final_config.anthropic_key.is_none() {
-                    final_config.anthropic_key = old_config.anthropic_key;
+                    final_config.anthropic_key = old_config.anthropic_key.clone();
                 }
                 if final_config.gemini_key == Some("********".to_string()) || final_config.gemini_key.is_none() {
-                    final_config.gemini_key = old_config.gemini_key;
+                    final_config.gemini_key = old_config.gemini_key.clone();
                 }
                 if final_config.azure_key == Some("********".to_string()) || final_config.azure_key.is_none() {
-                    final_config.azure_key = old_config.azure_key;
+                    final_config.azure_key = old_config.azure_key.clone();
                 }
                 if final_config.tavily_api_key == Some("********".to_string()) || final_config.tavily_api_key.is_none() {
-                    final_config.tavily_api_key = old_config.tavily_api_key;
+                    final_config.tavily_api_key = old_config.tavily_api_key.clone();
                 }
-                if final_config.approved_projects.is_none() {
-                    final_config.approved_projects = old_config.approved_projects;
-                }
-                if final_config.write_allowed_paths.is_none() {
-                    final_config.write_allowed_paths = old_config.write_allowed_paths;
-                }
-                if final_config.mcp_servers.is_none() {
-                    final_config.mcp_servers = old_config.mcp_servers;
-                }
+
                 
                 // Merge llm_instances keys
                 if let Some(final_insts) = &mut final_config.llm_instances {
@@ -503,76 +525,11 @@ pub async fn save_ai_config<R: tauri::Runtime>(
                     }
                 }
 
-                // Preserve active_llm_instance_id if the client did not send it
-                if final_config.active_llm_instance_id.is_none() {
-                    final_config.active_llm_instance_id = old_config.active_llm_instance_id;
-                }
+                // Everything else: any field the caller did not mention keeps
+                // its stored value. Structural, so no field can be forgotten.
+                final_config = merge_preserving(&final_config, &old_config)?;
 
-                // Preserve Agent Safety Limits if the client didn't send them.
-                // (Sent as `null` from JS when the user explicitly wants to clear/disable
-                //  a setting — vs not sending the field at all. We use a `Some(0)` marker
-                //  in the UI for "explicitly disabled", so we only fall through to the old
-                //  value when the field is genuinely missing.)
-                if final_config.token_budget.is_none() {
-                    final_config.token_budget = old_config.token_budget;
-                }
-                if final_config.wall_clock_minutes.is_none() {
-                    final_config.wall_clock_minutes = old_config.wall_clock_minutes;
-                }
-                if final_config.no_progress_window.is_none() {
-                    final_config.no_progress_window = old_config.no_progress_window;
-                }
-                if final_config.identical_call_threshold.is_none() {
-                    final_config.identical_call_threshold = old_config.identical_call_threshold;
-                }
-                if final_config.escalate_at_step.is_none() {
-                    final_config.escalate_at_step = old_config.escalate_at_step;
-                }
-                if final_config.cycle_detection_min_repeats.is_none() {
-                    final_config.cycle_detection_min_repeats = old_config.cycle_detection_min_repeats;
-                }
-                if final_config.history_budget_ratio.is_none() {
-                    final_config.history_budget_ratio = old_config.history_budget_ratio;
-                }
-                if final_config.history_compress_ratio.is_none() {
-                    final_config.history_compress_ratio = old_config.history_compress_ratio;
-                }
-                if final_config.agent_temperature.is_none() {
-                    final_config.agent_temperature = old_config.agent_temperature;
-                }
-                if final_config.plan_mode.is_none() {
-                    final_config.plan_mode = old_config.plan_mode;
-                }
-                if final_config.output_language.is_none() {
-                    final_config.output_language = old_config.output_language;
-                }
-                if final_config.fast_model_id.is_none() {
-                    final_config.fast_model_id = old_config.fast_model_id;
-                }
-                if final_config.deep_model_id.is_none() {
-                    final_config.deep_model_id = old_config.deep_model_id;
-                }
-                if final_config.prompt_templates.is_none() {
-                    final_config.prompt_templates = old_config.prompt_templates;
-                }
-                if final_config.subagent_review.is_none() {
-                    final_config.subagent_review = old_config.subagent_review;
-                }
-                if final_config.phase_routing.is_none() {
-                    final_config.phase_routing = old_config.phase_routing.clone();
-                }
-                if final_config.playbook.is_none() {
-                    final_config.playbook = old_config.playbook.clone();
-                }
-                if final_config.read_batch_hint.is_none() {
-                    final_config.read_batch_hint = old_config.read_batch_hint.clone();
-                }
-                if final_config.memory_recall.is_none() {
-                    final_config.memory_recall = old_config.memory_recall;
-                }
-                if final_config.episode_injection.is_none() {
-                    final_config.episode_injection = old_config.episode_injection.clone();
-                }
+
             }
         }
     }
@@ -1405,4 +1362,96 @@ mod secret_field_coverage {
         assert!(!looks_like_a_credential("connection_token"));
         assert!(!secrets::SECRET_FIELDS.contains(&"connection_token"));
     }
+
+    // ── partial patches must not delete anything ─────────────────────────
+    //
+    // `updateConfig({ approved_projects })` — one field, sent when a task
+    // remembers a new workspace, and by onboarding. Every field the caller did
+    // not mention has to survive it. It did not: the connection list was the one
+    // field neither save path preserved, so a task creation silently deleted
+    // every LLM connection while leaving `active_llm_instance_id` and the
+    // fast/deep routing ids pointing at them. Every later request failed with
+    // `Unsupported provider: inst_...`.
+    #[test]
+    fn a_partial_patch_preserves_every_field_it_did_not_send() {
+        let stored: AiConfig = serde_json::from_str(r#"{
+            "llm_instances":[{"id":"inst_1","name":"A","provider":"openai","model":"gpt-4o"}],
+            "active_llm_instance_id":"inst_1",
+            "fast_model_id":"inst_1:gpt-4o",
+            "deep_model_id":"inst_1:o3",
+            "tavily_api_key":"tvly-abc",
+            "write_allowed_paths":["C:/work"],
+            "max_steps":40,
+            "escalate_at_step":12,
+            "playbook":"on",
+            "read_batch_hint":"on",
+            "episode_injection":"on",
+            "approved_projects":["C:/old"]
+        }"#).unwrap();
+
+        let patch: AiConfig = serde_json::from_str(
+            r#"{"approved_projects":["C:/old","C:/new"]}"#).unwrap();
+
+        let merged = merge_preserving(&patch, &stored).unwrap();
+
+        // The one field the caller DID send wins.
+        assert_eq!(merged.approved_projects.as_ref().unwrap().len(), 2);
+
+        // Nothing else may be lost. The connection list above all: the routing
+        // ids are preserved, so losing the instances they name is what turns a
+        // working config into one that fails every request.
+        let insts = merged.llm_instances.expect("connections were deleted");
+        assert_eq!(insts.len(), 1);
+        assert_eq!(insts[0].id, "inst_1");
+        assert_eq!(merged.active_llm_instance_id.as_deref(), Some("inst_1"));
+        assert_eq!(merged.fast_model_id.as_deref(), Some("inst_1:gpt-4o"));
+        assert_eq!(merged.deep_model_id.as_deref(), Some("inst_1:o3"));
+        assert_eq!(merged.tavily_api_key.as_deref(), Some("tvly-abc"));
+        assert_eq!(merged.write_allowed_paths.as_ref().unwrap().len(), 1);
+        assert_eq!(merged.max_steps, Some(40));
+        assert_eq!(merged.escalate_at_step, Some(12));
+        assert_eq!(merged.playbook.as_deref(), Some("on"));
+        assert_eq!(merged.read_batch_hint.as_deref(), Some("on"));
+        assert_eq!(merged.episode_injection.as_deref(), Some("on"));
+    }
+
+    // Generic version of the above: whatever fields AiConfig grows, an empty
+    // patch has to be a no-op. This is the assertion the hand-written per-field
+    // lists could not make, and why they drifted by seven fields between the
+    // Tauri command and the HTTP route.
+    #[test]
+    fn an_empty_patch_changes_nothing_at_all() {
+        let stored: AiConfig = serde_json::from_str(r#"{
+            "llm_instances":[{"id":"i","name":"n","provider":"openai","model":"m"}],
+            "active_llm_instance_id":"i","fast_model_id":"i:m","max_steps":7,
+            "output_language":"Japanese","phase_routing":"on","mcp_servers":{"x":1}
+        }"#).unwrap();
+
+        let merged = merge_preserving(&AiConfig::default(), &stored).unwrap();
+
+        assert_eq!(serde_json::to_value(&merged).unwrap(),
+                   serde_json::to_value(&stored).unwrap());
+    }
+
+    // The rule is "not mentioned", not "falsy". The sentinels this app sends to
+    // mean something explicit must still win over the stored value — otherwise
+    // removing the last connection, or clearing a routing tier, silently undoes
+    // itself on save.
+    #[test]
+    fn explicit_clears_are_not_mistaken_for_absence() {
+        let stored: AiConfig = serde_json::from_str(r#"{
+            "llm_instances":[{"id":"i","name":"n","provider":"openai","model":"m"}],
+            "fast_model_id":"i:m","max_steps":40
+        }"#).unwrap();
+
+        let patch: AiConfig = serde_json::from_str(
+            r#"{"llm_instances":[],"fast_model_id":"","max_steps":0}"#).unwrap();
+
+        let merged = merge_preserving(&patch, &stored).unwrap();
+
+        assert_eq!(merged.llm_instances.unwrap().len(), 0, "removing the last connection");
+        assert_eq!(merged.fast_model_id.as_deref(), Some(""), "routing set to (not set)");
+        assert_eq!(merged.max_steps, Some(0), "limit explicitly disabled");
+    }
+
 }

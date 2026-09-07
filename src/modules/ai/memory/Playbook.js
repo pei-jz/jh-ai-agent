@@ -1,6 +1,6 @@
 // Playbook — the shape a KIND of task takes here, extracted from runs that worked.
 //
-// Step 6 of docs/design/agent-memory-learning.plan.md. A lesson says "this went
+// Step 6 of docs/scratch/agent-memory-learning.plan.md. A lesson says "this went
 // wrong"; an insight says "this worked once". A playbook says "tasks like this
 // go like this here" — the backbone that survives across several successful runs
 // of the same kind of work.

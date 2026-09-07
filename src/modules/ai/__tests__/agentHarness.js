@@ -199,7 +199,11 @@ export function makeHarness(opts = {}) {
         setMcpContext: vi.fn(),
         setMcpRelevanceQuery: vi.fn(),
         setExcludeExternalAppMcpTools: vi.fn(),
-        setSubtaskRunner: vi.fn(),
+        // Kept, not discarded. The runner is a CLOSURE built inside
+        // _prepareRun, so whether the names it captured actually exist is only
+        // knowable by CALLING it — and a bare vi.fn() meant no test ever did.
+        // That is how `onConfirm is not defined` reached a release.
+        setSubtaskRunner: vi.fn(function (fn) { state.subtaskRunner = fn; }),
         setWriteScope: vi.fn(),
         onToolEvent: null,
         // Investigation-gate state, mirroring the real executor.
@@ -333,6 +337,8 @@ export function makeHarness(opts = {}) {
         messages() { return state.events.map(e => e.message).filter(Boolean); },
         /** True if any status message matches. */
         sawMessage(re) { return this.messages().some(m => re.test(m)); },
+        /** The sub-agent runner AgentController injected, so it can be called. */
+        get subtaskRunner() { return state.subtaskRunner; },
     };
 }
 

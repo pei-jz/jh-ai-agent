@@ -85,7 +85,7 @@ export const EDIT_TOOLS = [
  * produces is a deliverable, not project source — and a general (non-code) task has
  * to be able to update a ledger without being handed the code-editing toolset.
  */
-export const OUTPUT_TOOLS = ['write_xlsx', 'write_docx', 'update_xlsx'];
+export const OUTPUT_TOOLS = ['write_xlsx', 'write_docx', 'update_xlsx', 'append_xlsx_row'];
 
 export const WEB_TOOLS = ['fetch_url', 'web_search'];
 

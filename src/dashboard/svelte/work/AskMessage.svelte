@@ -49,7 +49,7 @@
         <div class="chat-tool-activity">
             <div class="chat-tool-head">
                 <span class="chat-tool-spinner">🔍</span>
-                <span>Using tools to research… <span class="chat-tool-names">{toolNames}</span></span>
+                <span>{t('ask.researching')} <span class="chat-tool-names">{toolNames}</span></span>
             </div>
             <details class="chat-tool-details">
                 <summary>{t('common.details')}</summary>
@@ -101,7 +101,7 @@
                     <!-- Zooming is the delegated [.chat-zoomable-img] handler on the
                          container (ChatView.init). One path, not two. -->
                     {#each msg.images as src, i (i)}
-                        <img class="chat-zoomable-img" {src} alt="attachment">
+                        <img class="chat-zoomable-img" {src} alt={t('common.attachment')}>
                     {/each}
                 </div>
             {/if}

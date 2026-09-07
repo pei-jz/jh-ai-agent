@@ -26,6 +26,9 @@ import {
  * and large-file-full-rewrite guards.
  */
 export async function handleWriteFile(ctx, args, onConfirm, onAgentStatus, resolvedPath) {
+    // A script that writes .xlsx is the same bypass as running one.
+    // docs/design/tool-failure-policy.md 原則2.
+    ctx._noticeOfficeBypass?.(args?.content, onAgentStatus);
     let finalContent = args.content ?? '';
     const encoding = args.encoding || null;
     const isSafeRoot = ctx._isWriteAllowed(resolvedPath);

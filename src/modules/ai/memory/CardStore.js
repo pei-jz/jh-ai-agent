@@ -1,6 +1,6 @@
 // CardStore — what the agent learned from a session, and how it is recalled.
 //
-// Step 1 of docs/design/agent-memory-learning.plan.md, widened on request to
+// Step 1 of docs/scratch/agent-memory-learning.plan.md, widened on request to
 // cover BOTH polarities of experience:
 //
 //   lesson   a failure that cost something          "this went wrong here before"

@@ -1,6 +1,6 @@
 // FailureSignature — PURE normalization of a tool failure into a stable key.
 //
-// Step 0 of docs/design/agent-memory-learning.plan.md. Nothing here does I/O or
+// Step 0 of docs/scratch/agent-memory-learning.plan.md. Nothing here does I/O or
 // calls an LLM: text in → { kind, loc, message, signature } out, so the rules
 // that decide "is this the SAME failure as last time?" are unit-testable and
 // pinned by tests rather than re-derived in each caller.

@@ -77,6 +77,10 @@ export class McpManager {
             try { await existing.stop(); } catch (_) {}
         }
         const client = new McpWsClient(name, connId);
+        // Server-pushed notifications become trigger events (autonomy stage 2).
+        // The manager is the only place that knows about every client, so the
+        // wiring belongs here rather than in each transport.
+        client.onNotification = (event) => this._onServerEvent(event);
         client.onClosed = () => {
             // Only drop if this exact connection is still the registered one.
             if (this.clients.get(name) === client) {
@@ -158,6 +162,10 @@ export class McpManager {
         const client = (config.transport === 'http')
             ? new McpHttpClient(name, config.url, config.headers || {})
             : new McpClient(name, config.command, config.args || [], config.env || {});
+        // Server-pushed notifications become trigger events (autonomy stage 2).
+        // The manager is the only place that knows about every client, so the
+        // wiring belongs here rather than in each transport.
+        client.onNotification = (event) => this._onServerEvent(event);
         const success = await client.start();
         if (success) {
             this.clients.set(name, client);
@@ -286,6 +294,24 @@ export class McpManager {
             this.clients.delete(name);
         }
     }
+
+    /**
+     * A connected MCP server pushed a notification.
+     *
+     * Forwarded, not interpreted: whether "a file changed on the build box"
+     * should start a run is a decision that belongs to the trigger rules, in
+     * one place, next to the dedupe and rate limits. Imported lazily so the MCP
+     * layer does not depend on the autonomy layer at module load.
+     */
+    async _onServerEvent(event) {
+        try {
+            const { jobManager } = await import('./jobs/JobManager.js');
+            jobManager.onEvent(event);
+        } catch (e) {
+            console.warn('[McpManager] trigger intake failed:', e?.message || e);
+        }
+    }
+
 }
 
 export const mcpManager = new McpManager();

@@ -366,6 +366,20 @@ class ConversationMemory {
         this.maybeConsolidate(workspacePath, onLog, modelOverride);
     }
 
+
+    /**
+     * How full the fact store has to be before consolidation is worth running.
+     *
+     * One definition, because two callers gate on it — `maybeConsolidate` (the
+     * cheap check on the hot path) and `consolidateFacts` (the real one). They
+     * were the same expression written out twice, so a change to either
+     * silently gave the cheap check and the real one different opinions about
+     * when to start.
+     */
+    _consolidateThreshold() {
+        return Math.floor(this.maxFacts * 0.8);
+    }
+
     /**
      * Fire off a consolidation pass if the store warrants one. Detached by
      * design — returns immediately, never throws, and is a no-op while another
@@ -373,7 +387,7 @@ class ConversationMemory {
      */
     maybeConsolidate(workspacePath, onLog = null, modelOverride = null) {
         if (this._consolidating) return;
-        if (!Array.isArray(this.facts) || this.facts.length < Math.floor(this.maxFacts * 0.8)) return;
+        if (!Array.isArray(this.facts) || this.facts.length < this._consolidateThreshold()) return;
         this._consolidating = true;
         // Onto the SAME queue as addEntry: consolidation rewrites `this.facts`
         // wholesale from a snapshot, so an entry merging facts concurrently would
@@ -392,7 +406,7 @@ class ConversationMemory {
      * @returns {Promise<boolean>} true if a consolidation was applied
      */
     async consolidateFacts(workspacePath, onLog = null, modelOverride = null) {
-        const threshold = Math.floor(this.maxFacts * 0.8);
+        const threshold = this._consolidateThreshold();
         if (!Array.isArray(this.facts) || this.facts.length < threshold) return false;
         try {
             const list = this.facts

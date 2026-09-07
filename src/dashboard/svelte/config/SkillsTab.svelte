@@ -73,10 +73,8 @@
     <div class="card-header cfg-tab-head">
         <div>
             <h3>{@html icon('bolt', 15)} Skills</h3>
-            <p class="subtitle">Written procedures the agent can load on demand.
-                Saved in <code>~/.config/JH AI Agent/skills/</code>. The agent is shown
-                the <strong>description only</strong> and reads the body when the skill
-                applies, so a long procedure costs nothing until it is used.</p>
+            <p class="subtitle">{t('skill.subtitle.head')}
+                <code>~/.config/JH AI Agent/skills/</code>{t('skill.subtitle.tail')}</p>
         </div>
         <button class="btn btn-primary" id="btn-skill-new" onclick={() => onNew?.()}>
             {@html icon('plus', 13)} Create new</button>
@@ -95,18 +93,16 @@
                         <div class="input-group">
                             <label class="input-label" for="skill-name">{t('skill.name')}<span class="cfg-req">*</span></label>
                             <input id="skill-name" class="input" type="text" bind:value={form.name}
-                                placeholder="e.g. backlog-register (letters, numbers, hyphens, underscores)">
-                            <p class="input-hint">{t('tmpl.invoke')}<code>/skill-name</code> in chat</p>
+                                placeholder={t('skill.name.placeholder')}>
+                            <p class="input-hint">{t('tmpl.invoke')}<code>/skill-name</code> {t('skill.invoke.tail')}</p>
                         </div>
                     {/if}
                     <div class="input-group">
                         <label class="input-label" for="skill-content">{t('skill.content')}<span class="cfg-req">*</span></label>
                         <textarea id="skill-content" class="textarea cfg-mono-area" rows="12"
                             bind:value={form.content}
-                            placeholder="# Skill title"></textarea>
-                        <p class="input-hint">{t('tmpl.startWith')}<code>---</code> header so the agent knows when this
-                            skill applies — the <code>description</code> is the only part it
-                            sees until it loads the skill:
+                            placeholder={t('skill.body.placeholder')}></textarea>
+                        <p class="input-hint">{t('tmpl.startWith')}<code>---</code> {t('skill.fm.hint')}
                         </p>
 <pre class="cfg-fm-example">---
 description: Build the monthly report from the raw export.
@@ -115,8 +111,7 @@ allowed-tools: read_office, write_xlsx
 # Monthly report
 
 1. …</pre>
-                        <p class="input-hint">Without a header the old rule still applies:
-                            the first line is the title and the next line is the description.</p>
+                        <p class="input-hint">{t('skill.noHeader')}</p>
                     </div>
                 </div>
                 {#if error}<div class="cfg-modal-errors" role="alert">{error}</div>{/if}
@@ -131,7 +126,7 @@ allowed-tools: read_office, write_xlsx
         {#if !skills.length}
             <div class="cfg-empty">
                 <span class="cfg-empty-ic">⚡</span>
-                <p>{t('skill.none')}<br>Create one with the "Create new" button.</p>
+                <p>{t('skill.none')}<br>{t('skill.createHint')}</p>
             </div>
         {:else}
             <div class="table-wrap">
@@ -157,7 +152,7 @@ allowed-tools: read_office, write_xlsx
                                         <div class="cfg-skill-desc">{s.description}</div>
                                     {:else}
                                         <div class="cfg-skill-desc is-missing">
-                                            No description — the agent cannot tell when to use this.
+                                            {t('skill.noDescription')}
                                         </div>
                                     {/if}
                                 </td>
@@ -167,8 +162,8 @@ allowed-tools: read_office, write_xlsx
                                             📁 {s.files?.length || 0}</span>
                                     {:else}
                                         <button class="btn btn-secondary btn-sm btn-skill-bundle" data-name={s.name}
-                                            title="Turn into a folder so scripts and references can be bundled with it"
-                                            onclick={() => onBundle?.(s.name)}>+ files</button>
+                                            title={t('skill.toFolder')}
+                                            onclick={() => onBundle?.(s.name)}>{t('skill.bundle')}</button>
                                     {/if}
                                 </td>
                                 <td>

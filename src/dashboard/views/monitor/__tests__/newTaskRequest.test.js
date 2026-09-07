@@ -114,3 +114,35 @@ describe('mode presentation', () => {
         }
     });
 });
+
+describe('a caller that already has the conversation hands it over', () => {
+    // Spotlight answers a question, then "Open App" promoted it into a run —
+    // with the QUESTION only. The run answered it again from scratch: a second
+    // call, a second wait, and a second bill for something already on screen.
+    const prior = [
+        { role: 'user', content: 'what changed today?' },
+        { role: 'assistant', content: 'three files under src/' },
+    ];
+
+    it('sends the prior exchange as chat_context', () => {
+        const p = taskPayload({ prompt: 'what changed today?', workspace: 'C:/w', chatContext: prior });
+        expect(p.chat_context).toEqual(prior);
+    });
+
+    // Omitted rather than sent empty: the field is optional on the wire, and an
+    // empty array reads as "there was a conversation and it was blank".
+    it('omits it entirely when there is none', () => {
+        const p = taskPayload({ prompt: 'x', workspace: 'C:/w' });
+        expect(p.chat_context).toBeUndefined();
+        expect(taskPayload({ prompt: 'x', workspace: 'C:/w', chatContext: [] }).chat_context)
+            .toBeUndefined();
+    });
+
+    it('changes nothing else about the payload', () => {
+        const withCtx = taskPayload({ prompt: 'x', workspace: 'C:/w', chatContext: prior });
+        const without = taskPayload({ prompt: 'x', workspace: 'C:/w' });
+        const { chat_context: _a, ...restA } = withCtx;
+        const { chat_context: _b, ...restB } = without;
+        expect(restA).toEqual(restB);
+    });
+});

@@ -494,6 +494,53 @@ describe('approval buttons work in the Story view', () => {
         expect(v.sendConfirmResponse).toHaveBeenCalledWith('c3', true, true);
     });
 
+    // The run is BLOCKED on this answer. Marking the card approved when the
+    // packet never left the browser told the user the opposite of what had
+    // happened: 🟢 Approved on screen, a step sitting on "Writing spreadsheet…"
+    // for ever, and no error anywhere.
+    describe('an answer that cannot be delivered', () => {
+        const withSocket = (readyState) => {
+            mount({ tasks: [task('t1')], selectedTaskId: 't1' });
+            const sent = [];
+            v.socket = { readyState, send: (p) => sent.push(p), close() {} };
+            v.connectWebSocket = vi.fn();
+            document.body.insertAdjacentHTML('beforeend',
+                `<div data-confirm-card="c9"><div class="mconfirm-actions">`
+                + `<button class="btn-approve" data-confirm-id="c9">Approve</button></div></div>`);
+            return sent;
+        };
+
+        it('is queued and announced, not reported as approved', () => {
+            const sent = withSocket(WebSocket.CLOSED);
+            v.sendConfirmResponse('c9', true);
+            expect(sent).toHaveLength(0);
+            const card = document.querySelector('[data-confirm-card="c9"]');
+            expect(card.textContent).not.toMatch(/Approved/);
+            expect(card.textContent).toMatch(/接続が切れています/);
+            expect(v._pendingConfirmResponse?.confirmId).toBe('c9');
+            expect(v.connectWebSocket).toHaveBeenCalled();
+        });
+
+        it('goes out as soon as the socket is back', () => {
+            withSocket(WebSocket.CLOSED);
+            v.sendConfirmResponse('c9', true);
+            const sent = [];
+            v.socket = { readyState: WebSocket.OPEN, send: (p) => sent.push(p), close() {} };
+            v._flushPendingConfirmResponse();
+            expect(sent).toHaveLength(1);
+            expect(JSON.parse(sent[0]).data).toMatchObject({ confirmId: 'c9', approved: true });
+            expect(v._pendingConfirmResponse).toBeNull();
+            expect(document.querySelector('[data-confirm-card="c9"]').textContent).toMatch(/Approved/);
+        });
+
+        it('sends immediately when the socket is open', () => {
+            const sent = withSocket(WebSocket.OPEN);
+            v.sendConfirmResponse('c9', true);
+            expect(sent).toHaveLength(1);
+            expect(v._pendingConfirmResponse).toBeFalsy();
+        });
+    });
+
     it('the per-workspace auto-approve checkbox still toggles', () => {
         const host = page();
         v._setWsAutoApprove = vi.fn();
@@ -1139,7 +1186,7 @@ describe('Story rebuild restores a pending approval card', () => {
         await tick();
 
         const timeline = document.querySelector('.mtl');
-        expect(timeline.textContent).toContain('🛡 Command Approval');
+        expect(timeline.textContent).toContain(t('confirm.title'));
         expect(timeline.textContent).toContain('git push --force');
         expect(timeline.querySelector('.btn-approve')).not.toBe(null);
         expect(timeline.querySelector('.btn-reject')).not.toBe(null);
@@ -1156,7 +1203,7 @@ describe('Story rebuild restores a pending approval card', () => {
         v._renderResultPanel();
         await tick();
 
-        expect(storyEl().textContent).not.toContain('🛡 Command Approval');
+        expect(storyEl().textContent).not.toContain(t('confirm.title'));
     });
 });
 
@@ -1178,7 +1225,7 @@ describe('live approval card renders in the Story (the _showTaskConfirm path)', 
         await tick();
 
         const timeline = document.querySelector('.mtl');
-        expect(timeline.textContent).toContain('🛡 Command Approval');
+        expect(timeline.textContent).toContain(t('confirm.title'));
         expect(timeline.textContent).toContain('Remove-Item -Recurse tmp');
         expect(timeline.querySelector('[data-confirm-card="conf_live_1"]')).not.toBe(null);
     });
@@ -1201,7 +1248,7 @@ describe('live approval card renders in the Story (the _showTaskConfirm path)', 
         v._renderResultPanel();
         await tick();
 
-        expect(storyEl().textContent).toContain('🛡 Command Approval');
+        expect(storyEl().textContent).toContain(t('confirm.title'));
         expect(storyEl().textContent).toContain('git push --force');
     });
 });
@@ -1210,3 +1257,140 @@ describe('live approval card renders in the Story (the _showTaskConfirm path)', 
 // (monitor/logs.js buildLogSteps) instead of the string renderer and the
 // incremental DOM builder that both derived it. Its tests, including the request
 // divider's single separator, are in svelte/monitor/__tests__/rawLog.test.js.
+
+// Stop.
+//
+// The client sent {"action":"abort"} and the server read only `event`, so over a
+// LIVE socket the message was dropped — and a live socket is exactly the state
+// you are in while watching the task you want to stop. The HTTP fallback ran
+// only when the socket was CLOSED, so Stop worked when you were not looking at
+// the task and did nothing when you were.
+describe('stopping a run', () => {
+    const armed = () => {
+        mount({ tasks: [task('t1')], selectedTaskId: 't1' });
+        const sent = [];
+        v.socket = { readyState: WebSocket.OPEN, send: (p) => sent.push(JSON.parse(p)), close() {} };
+        const aborted = [];
+        window.apiClient = { abortTask: (id) => { aborted.push(id); return Promise.resolve(); } };
+        v._updateActiveStepStatus = vi.fn();
+        globalThis.confirm = () => true;
+        return { sent, aborted };
+    };
+
+    it('sends a message the server actually reads', () => {
+        const { sent } = armed();
+        v._abortTask();
+        // `event` is what every other client message uses and what the server
+        // matches on; `action` is kept for a server that has not been updated.
+        expect(sent[0].event).toBe('abort');
+        expect(sent[0].action).toBe('abort');
+    });
+
+    it('takes BOTH routes, so one broken path cannot swallow it', () => {
+        const { sent, aborted } = armed();
+        v._abortTask();
+        expect(sent).toHaveLength(1);
+        expect(aborted).toEqual(['t1']);
+    });
+
+    it('still reaches the task when the socket is gone', () => {
+        const { aborted } = armed();
+        v.socket = { readyState: WebSocket.CLOSED, send: () => { throw new Error('closed'); } };
+        v._abortTask();
+        expect(aborted).toEqual(['t1']);
+    });
+
+    it('says it was received — stopping is not instant', () => {
+        armed();
+        v._abortTask();
+        expect(v._updateActiveStepStatus).toHaveBeenCalled();
+        const [text, type] = v._updateActiveStepStatus.mock.calls[0];
+        expect(text).toContain(t('task.stopping'));
+        // Must outrank the tool/thought line the run keeps emitting on its way
+        // down, or the acknowledgement is overwritten by the work being stopped.
+        expect(type).toBe('error');
+    });
+
+    it('does nothing when the confirmation is declined', () => {
+        const { sent, aborted } = armed();
+        globalThis.confirm = () => false;
+        v._abortTask();
+        expect(sent).toEqual([]);
+        expect(aborted).toEqual([]);
+    });
+});
+
+// Home.
+//
+// render() auto-selects a RUNNING task when nothing is selected — which is the
+// right thing on entry to Work and exactly wrong right after someone asked for
+// the start screen: Home cleared the selection and the next render put the same
+// task straight back, so the button looked inert.
+describe('going Home', () => {
+    const running = (id) => ({ ...task(id), status: 'running' });
+
+    it('leaves nothing selected, even with a task running', async () => {
+        mount({ tasks: [running('t1')], selectedTaskId: 't1' });
+        v.loadTasks = async () => {};
+        v.tasks = [running('t1')];
+
+        v._goHome();
+        await v.render();
+
+        expect(v.selectedTaskId).toBeNull();
+    });
+
+    // render() returns the shell as a STRING for the router to insert; the
+    // painting is _sync(). Calling render() here built a string nobody used, so
+    // the state changed and the screen did not — until dragging the divider
+    // happened to call _sync() and the start screen appeared out of nowhere.
+    it('repaints immediately instead of waiting for the next interaction', () => {
+        mount({ tasks: [running('t1')], selectedTaskId: 't1' });
+        v.loadTasks = async () => {};
+        const sync = vi.spyOn(v, '_sync');
+
+        v._goHome();
+
+        expect(sync).toHaveBeenCalled();
+        sync.mockRestore();
+    });
+
+    it('still picks up a running task on an ordinary entry to Work', async () => {
+        mount({ tasks: [running('t1')] });
+        v.loadTasks = async () => {};
+        v.tasks = [running('t1')];
+        v.selectedTaskId = null;
+
+        await v.render();
+
+        expect(v.selectedTaskId).toBe('t1');
+    });
+
+    it('drops the ?id= WITHOUT a navigation', () => {
+        mount({ tasks: [running('t1')], selectedTaskId: 't1' });
+        window.location.hash = '#monitor?id=t1';
+        const replace = vi.spyOn(history, 'replaceState');
+        v.loadTasks = async () => {};
+        v._sync = vi.fn();
+
+        v._goHome();
+
+        // A hash ASSIGNMENT would rebuild the view, and a fresh view's render()
+        // auto-selects the running task again — straight back where we started.
+        expect(replace).toHaveBeenCalled();
+        expect(replace.mock.calls[0][2]).toBe('#monitor');
+        replace.mockRestore();
+    });
+
+    it('opening a task afterwards lifts the suppression', async () => {
+        mount({ tasks: [running('t1')] });
+        v.loadTasks = async () => {};
+        v.tasks = [running('t1')];
+        // The state Home leaves behind: nothing selected, auto-select held off.
+        v.selectedTaskId = null;
+        v._wentHome = true;
+
+        v._switchTask('t1');
+        expect(v._wentHome).toBe(false);
+    });
+});

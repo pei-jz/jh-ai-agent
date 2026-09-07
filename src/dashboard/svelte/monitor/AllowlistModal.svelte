@@ -42,12 +42,12 @@
 >
     <div class="acm-box" role="dialog" aria-label={t('allow.title')}>
         <div class="acm-head">
-            <strong>🛡 Command approval allowlist</strong>
+            <strong>{t('allow.title')}</strong>
             <button class="acm-close" type="button" aria-label={t('common.close')} onclick={() => onClose?.()}>✖</button>
         </div>
         <div class="acm-body">
             <div>
-                <div class="acm-section">{t('allow.patterns')}<code>*</code> = prefix match)</div>
+                <div class="acm-section">{t('allow.patterns')}<code>*</code>{t('allow.prefixMatch')}</div>
                 <div class="acm-list">
                     {#each patterns as p (p)}
                         <div class="acm-row">
@@ -56,7 +56,7 @@
                                 onclick={() => remove(PATTERN_KEY, p)}>✕</button>
                         </div>
                     {:else}
-                        <div class="acm-empty">(none)</div>
+                        <div class="acm-empty">{t('allow.none')}</div>
                     {/each}
                 </div>
             </div>
@@ -70,13 +70,12 @@
                                 onclick={() => remove(WORKSPACE_KEY, w)}>✕</button>
                         </div>
                     {:else}
-                        <div class="acm-empty">(none)</div>
+                        <div class="acm-empty">{t('allow.none')}</div>
                     {/each}
                 </div>
             </div>
             <div class="acm-note">
-                Dangerous commands (rm / Remove-Item / git reset --hard / push --force …) are
-                always confirmed, whatever is on these lists.
+                {t('allow.dangerNote')}
             </div>
         </div>
     </div>

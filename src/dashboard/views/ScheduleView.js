@@ -8,7 +8,7 @@
 // init() wires it up, destroy() tears it down — so this is the only file that
 // knows the app is not entirely Svelte yet. See docs/design/svelte-migration.md.
 
-import ScheduleRoot from '../svelte/schedule/ScheduleRoot.svelte';
+import JobsRoot from '../svelte/jobs/JobsRoot.svelte';
 import { mountComponent, destroyComponent } from '../svelte/mount.svelte.js';
 
 const HOST_ID = 'schedule-root';
@@ -20,7 +20,7 @@ export class ScheduleView {
 
     init() {
         this._host = document.getElementById(HOST_ID);
-        mountComponent(ScheduleRoot, this._host);
+        mountComponent(JobsRoot, this._host);
     }
 
     destroy() {

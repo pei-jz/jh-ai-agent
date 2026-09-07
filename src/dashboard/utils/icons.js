@@ -102,6 +102,13 @@ const PATHS = {
     // Monitor / Task view — a screen with a live pulse, matching the sidebar's
     // monitor glyph. The chart-on-a-baseline it replaces filled only 9 of the
     // 20 grid (every other glyph fills ~15) and duplicated the analytics idea.
+    // Home — back to the start screen. A roof over a door, on the same 20×20
+    // grid as the rest: the eaves sit at y=9 so it optically matches `monitor`
+    // and `folder` when the two sit side by side in the rail header.
+    home: `<path d="M3 9.4 L10 3.4 L17 9.4"/>
+        <path d="M4.9 8.5V16.4h10.2V8.5"/>
+        <path d="M8.3 16.4v-4.3h3.4v4.3"/>`,
+
     monitor: `<rect x="2.3" y="3.6" width="15.4" height="12.8" rx="2.4"/>
         <path d="M5.2 10h2.1l1.5-3.1 2.3 6.2 1.4-3.1h2.3"/>`,
 

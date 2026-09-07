@@ -53,6 +53,10 @@ export const TOOL_DEFINITIONS = [
             properties: {
                 path: { type: 'string', description: 'Path to the Office document.' },
                 sheet: { type: ['string', 'null'], description: 'Optional (null to omit). Spreadsheets only: read just this sheet, by name (case-insensitive). Use the index from a previous call. Prefer this over a large max_chars for big workbooks.' },
+                with_format: {
+                    type: ['boolean', 'null'],
+                    description: 'Also report how the sheet is FORMATTED (.xlsx only): the number format and alignment of each column, the header band, column widths, merged ranges, frozen panes, autofilter, conditional formatting, data validation, and any shared formula whose first cell cannot be overwritten. Ask for this before changing a workbook you did not create — matching the format that is already there is otherwise guesswork. Summarised by column, not by cell.'
+                },
                 include_images: { type: ['boolean', 'null'], description: 'Optional (null to omit). Extract embedded images (diagrams, screenshots) and attach them to the NEXT message so you can look at them. Costs vision tokens and is capped at 6 images, so only ask when the text alone is insufficient — e.g. the document refers to a figure. Requires a vision-capable model.' },
                 max_chars: { type: ['integer', 'null'], description: 'Optional (null to omit). Cap on characters returned (default 60000).' }
             },
@@ -130,7 +134,7 @@ export const TOOL_DEFINITIONS = [
     {
         name: 'update_xlsx',
         isSafe: false,
-        description: 'EDIT specific cells of an EXISTING .xlsx in place, keeping every formula, format and untouched sheet. Address cells the A1 way (e.g. "D14") — read_office prints the column letters and row numbers you need. A string value starting with "=" is written as a formula. null clears the cell. Omit `value` and pass only `style` to restyle a cell without touching its content; the style merges onto the cell\'s existing format. Use write_xlsx to create a NEW workbook; use this to update a ledger or form you must not rebuild.',
+        description: 'EDIT specific cells of an EXISTING .xlsx in place, keeping every formula, format and untouched sheet. Address cells the A1 way (e.g. "D14") — read_office prints the column letters and row numbers you need. A string value starting with "=" is written as a formula. null clears the cell. Omit `value` and pass only `style` to restyle a cell without touching its content; the style merges onto the cell\'s existing format. Use write_xlsx to create a NEW workbook; use this to update a ledger or form you must not rebuild.\n\nLossless. The cell is rewritten inside the file itself and every other part of the workbook — charts, pivot tables, macros, images, conditional formatting, and the formatting of every cell not named here — is copied through untouched. A `style` is APPENDED to the stylesheet and only this cell is pointed at it, so restyling one cell never moves another that happened to share its format. Two things are refused outright: writing inside a merged range (Excel shows only the top-left cell, so the value would be invisible) and overwriting the cell that owns a filled-down shared formula (it would blank the rest of the range).',
         parameters: {
             type: 'object',
             properties: {
@@ -166,20 +170,47 @@ export const TOOL_DEFINITIONS = [
                         required: ['sheet', 'cell'],
                         additionalProperties: false
                     }
-                }
+                },
             },
             required: ['path', 'edits'],
             additionalProperties: false
         }
     },
     {
-        name: 'write_xlsx',
+        name: 'append_xlsx_row',
         isSafe: false,
-        description: 'Create an .xlsx workbook. Provide sheets as rows of cells; the FIRST row of each sheet is styled as a header by default. Numbers stay numeric so Excel can compute on them. Use this when the user asks for a spreadsheet deliverable.\n\nOptional per-sheet design (see `design`): col_widths, merges, freeze, header, orientation, paper, fit_to_width, fit_to_pages. Optional named styles (see `styles`): reference a style from a cell as {"v": value, "style": "name"}.',
+        description: 'Add ONE row to the bottom of a sheet in an existing .xlsx, formatted like the row above it. This is the right tool for "add a line to the 明細": a row written with update_xlsx lands unruled and unformatted, because a cell that did not exist has no format to inherit. Here the height of the last row and the format of each column are copied, so the new line matches the table. Columns the table has but you do not fill still get a cell, so the ruling runs the full width.\n\nWrite "{row}" inside a formula for the new row number, which you cannot know in advance: {"D": "=B{row}*C{row}"}.\n\nRanges are NOT extended — a SUM above the new row, the autofilter and any table range keep their old extent. The result says so; fix a total with update_xlsx afterwards.',
         parameters: {
             type: 'object',
             properties: {
-                path: { type: 'string', description: 'Destination .xlsx path.' },
+                path: { type: 'string', description: 'Existing .xlsx to append to.' },
+                sheet: { type: ['string', 'null'], description: 'Sheet name; null = the first sheet.' },
+                values: {
+                    type: 'object',
+                    description: 'Column letter → value, e.g. {"A": "ワッシャー", "B": 50, "D": "=B{row}*C{row}"}. A string starting with "=" is a formula; null clears. Omit a column to leave it empty but still formatted.',
+                    additionalProperties: {}
+                }
+            },
+            required: ['path', 'sheet', 'values'],
+            additionalProperties: false
+        }
+    },
+    {
+        name: 'write_xlsx',
+        isSafe: false,
+        description: 'Create an .xlsx workbook. Provide sheets as rows of cells; the FIRST row of each sheet is styled as a header by default. Numbers stay numeric so Excel can compute on them. Use this when the user asks for a spreadsheet deliverable. It CREATES the file: pointed at a workbook that already exists it would replace it whole, so that is refused — use update_xlsx to change cells in an existing workbook.\n\nSIZE: one call carries every cell you pass, and a reply has an output limit — a large workbook does not fit, and the call is then cut off mid-argument. Build it up instead: create the file with the FIRST sheet only, then add rows with append_xlsx_row and cells with update_xlsx. As a rule of thumb keep one call under about 200 rows in total. This is not a workaround; it is how the tool is meant to be used for anything large.\n\nOptional per-sheet design (see `design`): col_widths, merges, freeze, header, orientation, paper, fit_to_width, fit_to_pages. Optional named styles (see `styles`): reference a style from a cell as {"v": value, "style": "name"}.',
+        parameters: {
+            type: 'object',
+            properties: {
+                path: { type: 'string', description: 'Destination .xlsx path. Must not already exist unless overwrite is true.' },
+                preset: {
+                    type: ['string', 'null'],
+                    description: 'House style for the sheet: "business-ja" (default) gives a coloured header band, thin grid, frozen and filtered header row, CJK-aware column widths, thousands separators on amount columns, and print setup that fits the page width and repeats the header on every page. "report" adds banded rows and landscape. "plain" is data only — no colour, no filter, no borders — for a file another program will read. Anything you set explicitly in `design` or `styles` still wins.'
+                },
+                overwrite: {
+                    type: ['boolean', 'null'],
+                    description: 'Replace the file if it already exists. Refused by default: this tool builds a workbook from scratch, so writing over one that exists discards every sheet, formula, chart and format not passed in this call.'
+                },
                 sheets: {
                     type: 'array',
                     description: 'One entry per sheet.',

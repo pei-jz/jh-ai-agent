@@ -15,6 +15,7 @@
   which is what makes "unsaved draft" a real state rather than a label.
 -->
 <script>
+    import { modeName } from '../../../modules/ai/AgentModes.js';
     import { t } from '../../../i18n/index.js';
     import {
         DAY_LABELS, INTERVAL_OPTIONS, DOM_OPTIONS, SCHEDULE_TYPES,
@@ -116,14 +117,14 @@
                 <label for="sch-agent-mode">{t('sched.mode')}</label>
                 <select id="sch-agent-mode" class="sch-select" bind:value={form.agentModeId}>
                     {#each agentModes as m}
-                        <option value={m.id}>{m.label} — {m.description}</option>
+                        <option value={m.id}>{modeName(m)} — {m.description}</option>
                     {/each}
                 </select>
             </div>
 
             <div class="sch-field">
                 <span class="sch-label">MCP Servers
-                    {#if mcpServers.length}<span class="sch-label-note">(none selected = use all)</span>{/if}
+                    {#if mcpServers.length}<span class="sch-label-note">{t('sched.mcp.none')}</span>{/if}
                 </span>
                 {#if mcpServers.length === 0}
                     <div class="sch-note">{t('sched.noMcp')}</div>
@@ -161,7 +162,7 @@
                         <input type="time" class="sch-time-input" bind:value={form.time}>
                     </div>
                     <div class="sch-note">
-                        A day past the end of a short month runs on that month's last day — "31" still runs in February.
+                        {t('sched.monthEnd')}
                     </div>
                 </div>
             {:else if form.scheduleType === 'fixed'}
@@ -169,7 +170,7 @@
                     <label for="sch-time">{t('sched.runTime')}</label>
                     <div class="sch-time-row">
                         <input id="sch-time" type="time" class="sch-time-input" bind:value={form.time}>
-                        <span class="sch-note">at this time on the selected weekdays</span>
+                        <span class="sch-note">{t('sched.atTimeOnDays')}</span>
                     </div>
                 </div>
             {:else if form.scheduleType === 'interval'}
@@ -239,62 +240,6 @@
 </div>
 
 <style>
-    /* The reading side IS the ground; nothing is layered on it. */
-    .sch-detail-panel {
-        flex: 1;
-        background: transparent;
-        border: none;
-        border-radius: 0;
-        display: flex;
-        flex-direction: column;
-        overflow: hidden;
-    }
-    .sch-detail-header {
-        padding: 10px 16px;
-        background: var(--surface-sunken);
-        border-bottom: 1px solid var(--line);
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        font-size: 13px;
-        font-weight: 600;
-        color: var(--ink);
-    }
-    .sch-detail-next { margin-left: auto; font-size: 11px; font-weight: 400; color: var(--ink-faint); }
-    .sch-detail-body {
-        flex: 1;
-        overflow-y: auto;
-        padding: 20px 24px;
-        display: flex;
-        flex-direction: column;
-        gap: 18px;
-    }
-    .sch-field { display: flex; flex-direction: column; gap: 6px; }
-    .sch-field label, .sch-label {
-        font-size: 11px;
-        font-weight: 700;
-        text-transform: uppercase;
-        letter-spacing: 0.06em;
-        color: var(--ink-soft);
-    }
-    .sch-label-note { font-weight: 400; text-transform: none; font-size: 10px; color: var(--ink-faint); }
-    .sch-note { font-size: 11px; color: var(--ink-faint); }
-    .sch-input, .sch-textarea, .sch-select {
-        background: var(--surface-input);
-        border: 1px solid var(--line);
-        border-radius: var(--r-2);
-        color: var(--ink);
-        font-size: 13px;
-        padding: 9px 12px;
-        outline: none;
-        font-family: var(--font-sans);
-        transition: border-color 0.15s;
-    }
-    .sch-input:focus, .sch-textarea:focus, .sch-select:focus { border-color: var(--accent); }
-    .sch-textarea { resize: vertical; min-height: 80px; }
-    .sch-select { cursor: pointer; }
-    .sch-select-auto { width: auto; }
-
     .sch-mcp-box {
         background: var(--surface-input);
         border: 1px solid var(--line);
@@ -308,65 +253,6 @@
         font-weight: 400; text-transform: none; letter-spacing: 0;
     }
     .sch-check input { accent-color: var(--accent); width: 14px; height: 14px; cursor: pointer; }
-
-    .sch-type-group { display: flex; gap: 6px; }
-    .sch-type-btn {
-        flex: 1;
-        padding: 7px 10px;
-        border-radius: var(--r-2);
-        border: 1.5px solid var(--line);
-        background: var(--surface-sunken);
-        color: var(--ink-soft);
-        font-size: 12px;
-        font-weight: 600;
-        cursor: pointer;
-        text-align: center;
-        transition: background 0.12s, border-color 0.12s, color 0.12s;
-    }
-    .sch-type-btn.selected { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
-
-    .sch-time-row { display: flex; align-items: center; gap: 12px; }
-    .sch-time-input {
-        background: var(--surface-input);
-        border: 1px solid var(--line);
-        border-radius: var(--r-2);
-        color: var(--ink);
-        font-size: 16px;
-        font-family: var(--font-mono);
-        font-weight: 700;
-        padding: 8px 14px;
-        outline: none;
-        width: 120px;
-    }
-    .sch-time-input:focus { border-color: var(--accent); }
-    .sch-datetime-input {
-        background: var(--surface-input);
-        border: 1px solid var(--line);
-        border-radius: var(--r-2);
-        color: var(--ink);
-        font-size: 14px;
-        font-family: var(--font-mono);
-        padding: 8px 12px;
-        outline: none;
-        width: 100%;
-        box-sizing: border-box;
-    }
-    .sch-datetime-input:focus { border-color: var(--accent); }
-
-    .sch-days-picker { display: flex; gap: 6px; }
-    .sch-day-btn {
-        width: 34px; height: 34px;
-        border-radius: 50%;
-        border: 1.5px solid var(--line);
-        background: var(--surface-sunken);
-        color: var(--ink-soft);
-        font-size: 12px;
-        font-weight: 700;
-        cursor: pointer;
-        transition: background 0.12s, border-color 0.12s, color 0.12s;
-        display: flex; align-items: center; justify-content: center;
-    }
-    .sch-day-btn.selected { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 
     .sch-toggle-row { display: flex; align-items: center; gap: 10px; }
     .sch-toggle { position: relative; width: 42px; height: 24px; flex-shrink: 0; }

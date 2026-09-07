@@ -1,6 +1,6 @@
 // SessionMetrics — PURE measurement of one run, and the A/B comparison built on it.
 //
-// Step 3.5 of docs/design/agent-memory-learning.plan.md, added after the
+// Step 3.5 of docs/scratch/agent-memory-learning.plan.md, added after the
 // original Step 1 gate turned out to be untestable in practice: modern models
 // fail rarely, so "did the failure recurrence rate fall?" yields roughly 0.2
 // data points per session, and detecting a 0.3 → 0.1 drop needs ~60 per arm.

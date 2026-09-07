@@ -89,14 +89,14 @@
 
         {#if showTierTip}
             <p class="ds-tip">
-                {clip(s.rows[0].label, 24)} is {leadShare}% of it —
-                <a class="cfg-link" href="#config">switch models within one task</a>
-                moves the implementation phase onto the cheaper tier.
+                {t('spend.tierTip.head', { model: clip(s.rows[0].label, 24), pct: leadShare })}
+                <a class="cfg-link" href="#config">{t('spend.tierTip.link')}</a>
+                {t('spend.tierTip.tail')}
             </p>
         {:else if s.unpriced > 0}
             <p class="ds-tip">
-                {fmt(s.unpriced)} tokens were estimated —
-                <a class="cfg-link" href="#config">set $/1M rates</a> per connection.
+                {t('spend.unpriced.head', { tokens: fmt(s.unpriced) })}
+                <a class="cfg-link" href="#config">{t('spend.unpriced.link')}</a> {t('spend.unpriced.tail')}
             </p>
         {/if}
     </div>

@@ -1,6 +1,6 @@
 // FactExtraction — PURE prompt + parsing for the end-of-session summary.
 //
-// Step 3 of docs/design/agent-memory-learning.plan.md. Extracted from
+// Step 3 of docs/scratch/agent-memory-learning.plan.md. Extracted from
 // ConversationMemory._generateStructuredSummary so the two things that decide
 // what enters long-term memory — what the model is ASKED for, and how its answer
 // is read — are testable without a provider.

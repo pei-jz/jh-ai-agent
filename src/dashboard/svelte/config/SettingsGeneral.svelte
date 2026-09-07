@@ -182,13 +182,9 @@
         {#if secretStorage}
             <div class="cfg-secret-note" class:is-fallback={!secretStorage.available}>
                 {#if secretStorage.available}
-                    🔐 API keys are stored in <strong>{secretStorage.name}</strong>, not in
-                    <code>ai_config.json</code>.
+                    {t('settings.secret.stored', { store: secretStorage.name })}
                 {:else}
-                    ⚠ <strong>{secretStorage.name}</strong> is not available on this machine, so
-                    API keys stay in <code>ai_config.json</code> in plain text. Anything that copies
-                    that file — a synced profile, a backup, sending it to someone — carries the keys
-                    with it.
+                    {t('settings.secret.fallback', { store: secretStorage.name })}
                 {/if}
             </div>
         {/if}
@@ -416,7 +412,7 @@
             </div>
             <div class="cfg-cmd-add">
                 <input id="cfg-approved-cmd-new" class="input cfg-mono-input" type="text"
-                    placeholder="e.g. npm run build *" bind:value={newCommand}
+                    placeholder={t('settings.cmdPattern.placeholder')} bind:value={newCommand}
                     onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addCommand(); } }}>
                 <button class="btn btn-secondary" id="btn-approved-cmd-add" type="button"
                     onclick={addCommand}>{@html icon('plus', 12)} {t('settings.commands.add')}</button>

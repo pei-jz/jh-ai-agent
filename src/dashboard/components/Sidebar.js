@@ -26,6 +26,7 @@
 // larger survives rasterization.
 
 import { getAppVersion } from '../../modules/ai/appVersion.js';
+import { t } from '../../i18n/index.js';
 
 const ICONS = {
     // Memory — a head in profile with a filled core: what is retained, not a
@@ -72,14 +73,14 @@ export const NAV_ITEMS = [
     // "Work", not "Monitor": you START things here as well as watch them — the
     // composer moved into it and Chat folded into it as a mode.
     // docs/design/information-architecture.md §2.
-    { id: 'monitor',  label: 'Work',     icon: 'monitor' },
+    { id: 'monitor',  label: 'Work',     labelKey: 'nav.monitor',  icon: 'monitor' },
     // What the agent has learned. Its own destination since step 4 — it used to
     // be a tab in a pane that swapped away whenever a run started.
-    { id: 'memory',   label: 'Memory',   icon: 'memory' },
+    { id: 'memory',   label: 'Memory',   labelKey: 'nav.memory',   icon: 'memory' },
     // Consulted rather than worked in, but consulting it should not mean
     // opening the settings drawer. See views/UsageView.js.
-    { id: 'usage',    label: 'Usage',    icon: 'report' },
-    { id: 'schedule', label: 'Schedule', icon: 'schedule' },
+    { id: 'usage',    label: 'Usage',    labelKey: 'nav.usage',    icon: 'report' },
+    { id: 'schedule', label: 'Automation', labelKey: 'nav.schedule', icon: 'schedule' },
 ];
 
 // Settings is not one of them. It is where you go to change how the app behaves
@@ -87,7 +88,7 @@ export const NAV_ITEMS = [
 // often. Grouping it with the version in the footer says that: everything above
 // the rule is the work, everything below it is the app itself.
 export const FOOTER_ITEMS = [
-    { id: 'config', label: 'Settings', icon: 'config' },
+    { id: 'config', label: 'Settings', labelKey: 'nav.settings', icon: 'config' },
 ];
 
 export class Sidebar {
@@ -113,16 +114,20 @@ export class Sidebar {
         // `aria-current="page"` rather than a class alone: the active state has
         // to be perceivable without colour, which is a weak cue on a narrow rail
         // and weaker still under the paper themes.
-        const itemHtml = (item, index) => `
+        const itemHtml = (item, index) => {
+            const label = t(item.labelKey, null, item.label);
+            const hint = index != null ? ` (Ctrl+${index + 1})` : '';
+            return `
             <button type="button"
                  class="sidebar-item ${this.activeRoute === item.id ? 'active' : ''}"
                  data-route="${item.id}"
                  ${this.activeRoute === item.id ? 'aria-current="page"' : ''}
-                 title="${item.label}${index != null ? ` (Ctrl+${index + 1})` : ''}">
+                 title="${label}${hint}">
                 <span class="sidebar-item-icon">${svg(ICONS[item.icon])}</span>
-                <span class="sidebar-item-label">${item.label}</span>
+                <span class="sidebar-item-label">${label}</span>
             </button>
         `;
+        };
         const navHtml = NAV_ITEMS.map((it, i) => itemHtml(it, i)).join('');
         const footerHtml = FOOTER_ITEMS.map(it => itemHtml(it, null)).join('');
 

@@ -44,8 +44,7 @@
     <div class="dash-empty">
         <div class="dash-empty-ico">{@html icon('memory', 28)}</div>
         <h3>{t('mem.noWorkspace')}</h3>
-        <p>{t('mem.storedUnder')}<code>.agent/</code>. Run a task in one and
-           what it learns will show up here.</p>
+        <p>{t('mem.storedUnder')}<code>.agent/</code>{t('mem.storedUnder.tail')}</p>
     </div>
 {:else if error}
     <div class="dash-empty">
@@ -56,17 +55,16 @@
     <div class="dash-empty">
         <div class="dash-empty-ico">{@html icon('memory', 28)}</div>
         <h3>{t('mem.empty')}</h3>
-        <p>Cards appear after runs that hit a problem, or that found something worth
-           reusing. Facts appear when a run states a rule about this project.</p>
+        <p>{t('mem.empty.detail')}</p>
     </div>
 {:else}
     <div class="dm">
         <div class="dm-layers">
-            <div><span class="k">{t('mem.layer.durable')}</span><span class="v">{layers.durable}</span><span class="s">facts</span></div>
-            <div><span class="k">{t('mem.layer.episodic')}</span><span class="v">{layers.episodic}</span><span class="s">on probation</span></div>
-            <div><span class="k">{t('mem.layer.lessons')}</span><span class="v">{layers.lessons}</span><span class="s">what failed</span></div>
-            <div><span class="k">{t('mem.layer.insights')}</span><span class="v">{layers.insights}</span><span class="s">what worked</span></div>
-            <div><span class="k">{t('mem.layer.episodes')}</span><span class="v">{layers.episodes}</span><span class="s">sessions kept</span></div>
+            <div><span class="k">{t('mem.layer.durable')}</span><span class="v">{layers.durable}</span><span class="s">{t('mem.unit.facts')}</span></div>
+            <div><span class="k">{t('mem.layer.episodic')}</span><span class="v">{layers.episodic}</span><span class="s">{t('mem.unit.probation')}</span></div>
+            <div><span class="k">{t('mem.layer.lessons')}</span><span class="v">{layers.lessons}</span><span class="s">{t('mem.unit.failed')}</span></div>
+            <div><span class="k">{t('mem.layer.insights')}</span><span class="v">{layers.insights}</span><span class="s">{t('mem.unit.worked')}</span></div>
+            <div><span class="k">{t('mem.layer.episodes')}</span><span class="v">{layers.episodes}</span><span class="s">{t('mem.unit.sessions')}</span></div>
         </div>
 
         <!--
@@ -77,15 +75,13 @@
         {#if health?.total}
             <div class="dm-box">
                 <div class="dm-h">
-                    {@html icon('shield', 13)} Is it working?
+                    {@html icon('shield', 13)} {t('mem.working')}
                     {#if health.shown}
-                        <span class="more">{health.shown} of {health.total} used · half-life {HALF_LIFE_DAYS}d</span>
+                        <span class="more">{t('mem.working.used', { shown: health.shown, total: health.total, days: HALF_LIFE_DAYS })}</span>
                     {/if}
                 </div>
                 {#if !health.shown}
-                    <p class="dm-note">{health.total} card{health.total === 1 ? '' : 's'} stored,
-                       none surfaced to a run yet — so there is nothing to judge yet.
-                       This fills in as they get used.</p>
+                    <p class="dm-note">{t('mem.working.none', { total: health.total })}</p>
                 {:else}
                     <div class="dm-bar">
                         <i style="width:{pctOf(health.held)}%;background:var(--success)"></i>
@@ -93,9 +89,9 @@
                         <i style="width:{pctOf(health.failing)}%;background:var(--error)"></i>
                     </div>
                     <div class="dm-lg">
-                        <span><i class="dm-sw" style="background:var(--success)"></i><b>{health.held}</b> held — failure stopped</span>
-                        {#if health.partial}<span><i class="dm-sw" style="background:var(--warning)"></i>{health.partial} partial</span>{/if}
-                        {#if health.failing}<span><i class="dm-sw" style="background:var(--error)"></i>{health.failing} still recurring</span>{/if}
+                        <span><i class="dm-sw" style="background:var(--success)"></i><b>{health.held}</b> {t('mem.working.held')}</span>
+                        {#if health.partial}<span><i class="dm-sw" style="background:var(--warning)"></i>{health.partial} {t('mem.working.partial')}</span>{/if}
+                        {#if health.failing}<span><i class="dm-sw" style="background:var(--error)"></i>{health.failing} {t('mem.working.failing')}</span>{/if}
                     </div>
                     {#if health.failingCards.length}
                         <div class="dm-fail">
@@ -160,7 +156,7 @@
                             {@html icon(sec.ico, 13)} {sec.title}
                             <span class="badge">{sec.rows.length}</span>
                             {#if sec.note}<span class="dm-note-inline">{sec.note}</span>{/if}
-                            <a class="more" href="#config?tab=memory">Settings → Memory →</a>
+                            <a class="more" href="#config?tab=memory">{t('mem.openSettings')}</a>
                         </div>
                         {#each sec.rows as r}<MemoryRow row={r} plain {onToggleCard} />{/each}
                     </div>

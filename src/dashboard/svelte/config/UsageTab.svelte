@@ -16,9 +16,8 @@
 <script>
     import { PANEL_STYLES } from '../../views/panels.styles.js';
     import { invoke } from '@tauri-apps/api/core';
-    import { modelRates } from '../../../modules/ai/agent/ModelPhaseRouter.js';
     import {
-        KEYS, readPref, writePref, metricsOf, rateLookup, flatRateOf,
+        KEYS, readPref, writePref, metricsOf, rateLookup,
     } from '../../views/overview/overviewModel.js';
 
     import SpendPanel from '../overview/SpendPanel.svelte';
@@ -40,10 +39,28 @@
     let statsRange = $state(readPref(KEYS.statsRange, 'all'));
     let statsStatus = $state(readPref(KEYS.statsStatus, 'all'));
 
-    const metrics = $derived(metricsOf(tasks, clock));
-    const rates = $derived(modelRates(config));
-    const rateFor = $derived(rateLookup(rates));
-    const flatRate = $derived(flatRateOf(rates));
+    // These four lines were each handed the wrong thing, and every one of them
+    // produced the same symptom — a bill of exactly $0 — so fixing any one of
+    // them looked like it had not worked:
+    //
+    //   rateLookup  takes the INSTANCE ARRAY (it calls modelRates itself);
+    //               given a rates map it iterates nothing and prices nothing.
+    //   flatRateOf  takes the server's aggregate STATS, which this tab does not
+    //               fetch. There is no honest flat rate without them, and 0 is
+    //               the right answer: an unpriced model is then REPORTED as
+    //               unpriced instead of being quietly guessed at.
+    //   metricsOf   takes an options object (see below).
+    const instances = $derived(Array.isArray(config?.llm_instances) ? config.llm_instances : []);
+    const rateFor = $derived(rateLookup(instances));
+    const flatRate = 0;
+    // metricsOf takes an OPTIONS OBJECT. It used to be handed `clock` — a
+    // number — so every option fell back to its default: no rateFor, which
+    // makes spend exactly $0 however many tokens ran, and a fixed 7d window
+    // that the range buttons could not move. The panel then reported "these
+    // tasks recorded no token usage" while the table beside it listed 405k.
+    const metrics = $derived(metricsOf(tasks, {
+        spendRange, rateFor, flatRate, now: clock,
+    }));
 
     const pick = (key, setter) => (value) => { setter(value); writePref(key, value); };
 

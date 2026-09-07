@@ -1,6 +1,6 @@
 // StudyPass — learn a workspace's STRUCTURE up front, without running a task.
 //
-// Step 3.8 of docs/design/agent-memory-learning.plan.md, and the answer to a
+// Step 3.8 of docs/scratch/agent-memory-learning.plan.md, and the answer to a
 // limitation of everything before it: experience only records where the agent
 // happened to walk. Lessons come from where it failed, insights from where it
 // recovered, locators from what it searched. The result is a map of "places we

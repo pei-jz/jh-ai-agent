@@ -6,7 +6,7 @@
 // even when it is empty (an omitted list means "every server" to AgentController).
 
 import { describe, it, expect, vi } from 'vitest';
-import { createTask, startSelectedMcp } from '../createTask.js';
+import { createTask, startSelectedMcp, rememberWorkspace } from '../createTask.js';
 
 const mkMcp = (running = [], failing = []) => ({
     clients: new Set(running),
@@ -104,5 +104,59 @@ describe('createTask', () => {
         await expect(createTask({
             prompt: 'go', workspace: 'C:/p', modeId: 'develop', client, mcp: mkMcp(),
         })).rejects.toThrow('boom');
+    });
+});
+
+// The workspace list only ever grew from the folder picker and the first-run
+// wizard, so a workspace used for an actual task — typed in, carried over from a
+// template, handed in by another app — never appeared in it. The history filled
+// with workspaces the picker did not offer.
+describe('remembering where a task ran', () => {
+    const client = (projects = []) => ({
+        getConfig: vi.fn(async () => ({ approved_projects: projects })),
+        updateConfig: vi.fn(async () => ({})),
+    });
+
+    it('adds a workspace that was not on the list', async () => {
+        const c = client(['C:/a']);
+        expect(await rememberWorkspace('C:/b', c)).toBe(true);
+        expect(c.updateConfig).toHaveBeenCalledWith({ approved_projects: ['C:/a', 'C:/b'] });
+    });
+
+    it('does not add one that is already there', async () => {
+        const c = client(['C:/a']);
+        expect(await rememberWorkspace('C:/a', c)).toBe(false);
+        expect(c.updateConfig).not.toHaveBeenCalled();
+    });
+
+    // Windows hands the same folder back spelled several ways.
+    it('treats separators, trailing slashes and case as the same path', async () => {
+        const c = client(['C:/work/proj']);
+        expect(await rememberWorkspace('C:\\Work\\Proj\\', c)).toBe(false);
+        expect(c.updateConfig).not.toHaveBeenCalled();
+    });
+
+    it('does nothing without a workspace', async () => {
+        const c = client([]);
+        expect(await rememberWorkspace('   ', c)).toBe(false);
+        expect(c.getConfig).not.toHaveBeenCalled();
+    });
+});
+
+describe('prior conversation reaches the server', () => {
+    it('is forwarded, not dropped between createTask and the request', async () => {
+        const calls = [];
+        const client = {
+            request: async (path, opts) => { calls.push(JSON.parse(opts.body)); return { task_id: 't1' }; },
+            getConfig: async () => ({}),
+            updateConfig: async () => {},
+        };
+        await createTask({
+            prompt: 'q', workspace: 'C:/w', modeId: 'general', client,
+            mcp: { clients: new Map() },
+            chatContext: [{ role: 'user', content: 'q' }, { role: 'assistant', content: 'a' }],
+        });
+        expect(calls[0].chat_context).toHaveLength(2);
+        expect(calls[0].chat_context[1].content).toBe('a');
     });
 });

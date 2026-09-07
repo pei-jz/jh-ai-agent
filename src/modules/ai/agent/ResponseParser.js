@@ -70,6 +70,42 @@ export function safeParseJSON(str) {
     }
 }
 
+/** Marker keys the executor looks for. Not tool arguments — a diagnosis. */
+export const ARGS_TRUNCATED = '__args_truncated__';
+export const ARGS_UNPARSEABLE = '__args_unparseable__';
+
+/**
+ * Did this JSON stop in the middle?
+ *
+ * The difference between "malformed" and "cut off" is the difference between a
+ * bug the model can fix and a limit it has to work around, and only the second
+ * one is what happens when a tool call carries a whole file. jsonrepair closes
+ * the brackets either way, which turns a half-written argument list into a
+ * valid-looking one — a write_file whose `content` stops mid-function, or an
+ * object so short of the truncation point that it has no `path` at all.
+ *
+ * Structural, not heuristic: valid JSON is never unbalanced, so this cannot
+ * misjudge a complete payload.
+ */
+export function looksTruncated(str) {
+    if (typeof str !== 'string') return false;
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (const ch of str) {
+        if (escaped) { escaped = false; continue; }
+        if (inString) {
+            if (ch === '\\') escaped = true;
+            else if (ch === '"') inString = false;
+            continue;
+        }
+        if (ch === '"') inString = true;
+        else if (ch === '{' || ch === '[') depth++;
+        else if (ch === '}' || ch === ']') depth--;
+    }
+    return inString || escaped || depth > 0;
+}
+
 /**
  * Normalize a single tool-call entry into the canonical { name, args } shape.
  *
@@ -94,13 +130,20 @@ export function normalizeToolCallEntry(tc) {
         const s = args.trim();
         if (s === '') {
             args = {};
+        } else if (looksTruncated(s)) {
+            // NOT repaired. safeParseJSON would close the brackets and hand back
+            // an object that looks complete: write_file with `content` ending
+            // mid-line writes a truncated file, and a call cut off before its
+            // `path` arrives as {} — reported as "missing required 'path'",
+            // which sends the model looking for a mistake it did not make. It
+            // cost one run six steps and ended with the agent abandoning the
+            // tool and shelling out to Python.
+            args = { [ARGS_TRUNCATED]: `${s.length} characters, ending: …${s.slice(-60)}` };
         } else {
             try {
                 args = safeParseJSON(s);
             } catch (e) {
-                // Keep the raw string — the tool executor will surface a clear
-                // error and the model can react instead of the call vanishing.
-                args = s;
+                args = { [ARGS_UNPARSEABLE]: String(e?.message || e).slice(0, 200) };
             }
         }
     }
@@ -399,6 +442,25 @@ export function extractFunctionTagToolCalls(text) {
                 args[key] = _maybeJsonUnescape(raw);
             }
         }
+
+        // A parameter block with no closing tag means the reply stopped
+        // inside it. The loop above simply does not match such a block, so
+        // the call arrives with that argument MISSING and looking
+        // deliberate: one run called write_xlsx with `path` and `preset`
+        // and no `sheets` at all, was told "sheets is required", and spent
+        // nine steps shrinking the content — the one thing that was never
+        // the problem.
+        const opened = (inner.match(/<parameter=/g) || []).length;
+        const closed = (inner.match(/<\/parameter>/g) || []).length;
+        if (opened > closed) {
+            const tail = inner.slice(-60).replace(/\s+/g, ' ');
+            calls.push({
+                name,
+                args: { [ARGS_TRUNCATED]: `a <parameter> block never closed, ending: …${tail}` },
+            });
+            continue;
+        }
+
         calls.push({ name, args });
     }
     return calls;

@@ -96,30 +96,19 @@ pub(crate) async fn update_config(
     if state.config_path.exists() {
         if let Ok(json) = std::fs::read_to_string(&state.config_path) {
             if let Ok(old_config) = serde_json::from_str::<AiConfig>(&json) {
-                if final_config.connection_token.is_none() {
-                    final_config.connection_token = old_config.connection_token;
-                }
                 if final_config.openai_key == Some("********".to_string()) || final_config.openai_key.is_none() {
-                    final_config.openai_key = old_config.openai_key;
+                    final_config.openai_key = old_config.openai_key.clone();
                 }
                 if final_config.anthropic_key == Some("********".to_string()) || final_config.anthropic_key.is_none() {
-                    final_config.anthropic_key = old_config.anthropic_key;
+                    final_config.anthropic_key = old_config.anthropic_key.clone();
                 }
                 if final_config.gemini_key == Some("********".to_string()) || final_config.gemini_key.is_none() {
-                    final_config.gemini_key = old_config.gemini_key;
+                    final_config.gemini_key = old_config.gemini_key.clone();
                 }
                 if final_config.azure_key == Some("********".to_string()) || final_config.azure_key.is_none() {
-                    final_config.azure_key = old_config.azure_key;
+                    final_config.azure_key = old_config.azure_key.clone();
                 }
-                if final_config.approved_projects.is_none() {
-                    final_config.approved_projects = old_config.approved_projects;
-                }
-                if final_config.max_steps.is_none() {
-                    final_config.max_steps = old_config.max_steps;
-                }
-                if final_config.mcp_servers.is_none() {
-                    final_config.mcp_servers = old_config.mcp_servers;
-                }
+
 
                 // Merge llm_instances keys
                 if let Some(final_insts) = &mut final_config.llm_instances {
@@ -134,64 +123,12 @@ pub(crate) async fn update_config(
                     }
                 }
 
-                // Preserve active_llm_instance_id if the client did not send it
-                if final_config.active_llm_instance_id.is_none() {
-                    final_config.active_llm_instance_id = old_config.active_llm_instance_id;
-                }
+                // Everything else: any field the caller did not mention keeps
+                // its stored value. Structural, so no field can be forgotten.
+                final_config = crate::commands::ai_config::merge_preserving(&final_config, &old_config)
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-                // Preserve Agent Safety Limits (same rationale as save_ai_config)
-                if final_config.token_budget.is_none() {
-                    final_config.token_budget = old_config.token_budget;
-                }
-                if final_config.wall_clock_minutes.is_none() {
-                    final_config.wall_clock_minutes = old_config.wall_clock_minutes;
-                }
-                if final_config.no_progress_window.is_none() {
-                    final_config.no_progress_window = old_config.no_progress_window;
-                }
-                if final_config.identical_call_threshold.is_none() {
-                    final_config.identical_call_threshold = old_config.identical_call_threshold;
-                }
-                if final_config.cycle_detection_min_repeats.is_none() {
-                    final_config.cycle_detection_min_repeats = old_config.cycle_detection_min_repeats;
-                }
-                if final_config.history_budget_ratio.is_none() {
-                    final_config.history_budget_ratio = old_config.history_budget_ratio;
-                }
-                if final_config.history_compress_ratio.is_none() {
-                    final_config.history_compress_ratio = old_config.history_compress_ratio;
-                }
-                if final_config.agent_temperature.is_none() {
-                    final_config.agent_temperature = old_config.agent_temperature;
-                }
-                if final_config.plan_mode.is_none() {
-                    final_config.plan_mode = old_config.plan_mode;
-                }
-                if final_config.output_language.is_none() {
-                    final_config.output_language = old_config.output_language;
-                }
-                if final_config.fast_model_id.is_none() {
-                    final_config.fast_model_id = old_config.fast_model_id;
-                }
-                if final_config.deep_model_id.is_none() {
-                    final_config.deep_model_id = old_config.deep_model_id;
-                }
-                if final_config.prompt_templates.is_none() {
-                    final_config.prompt_templates = old_config.prompt_templates;
-                }
-                if final_config.subagent_review.is_none() {
-                    final_config.subagent_review = old_config.subagent_review;
-                }
-                // memory_recall was missing from this list while the Tauri
-                // command preserved it, so a save through the HTTP route reset
-                // it to the default. Same field-drop class as the routing-tier
-                // bug; fixed here rather than left next to its own fix.
-                if final_config.memory_recall.is_none() {
-                    final_config.memory_recall = old_config.memory_recall;
-                }
-                if final_config.phase_routing.is_none() {
-                    final_config.phase_routing = old_config.phase_routing;
-                }
+
             }
         }
     }
