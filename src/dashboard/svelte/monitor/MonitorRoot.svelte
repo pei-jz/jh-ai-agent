@@ -387,8 +387,13 @@
         {/if}
     </div>
 
-    <!-- Hidden while the inspector is closed. -->
-    {#if inspectorOpen}
+    <!-- Hidden while the inspector is closed — and with nothing selected, which
+         is the case it used to get wrong: it is a REFERENCE column (that task's
+         stats, files, cost), so with no task it drew an empty 264px strip and a
+         rule down the side of the start screen. Blank furniture, and it held the
+         one question on that screen out of a sixth of the window. The toggle
+         that reopens it lives in the task view, so nothing is stranded. -->
+    {#if inspectorOpen && hasTask}
         <div class="mpane-divider" title={t('insp.resize')}
             role="separator" aria-orientation="vertical"
             onpointerdown={startDrag('right')}></div>

@@ -60,3 +60,24 @@ describe('the rail header', () => {
         expect(el.querySelector('.mcomp-hero')).toBeTruthy();
     });
 });
+
+describe('the inspector column', () => {
+    // It shows THAT task's stats, files and cost. With nothing selected it has
+    // nothing to show, and what it drew instead was an empty 264px strip with a
+    // rule down the side of the start screen — furniture that pushed the one
+    // question on the screen out of a sixth of the window.
+    it('takes no room on the start screen', () => {
+        const el = mount({ welcome: {}, inspectorOpen: true, inspector: { task: null, stats: {}, usage: {} } });
+        expect(el.querySelector('.mtl-insp')).toBeNull();
+    });
+
+    it('comes back with a task open', () => {
+        const el = mount({ header, inspectorOpen: true, inspector: { task: null, stats: {}, usage: {} } });
+        expect(el.querySelector('.mtl-insp')).toBeTruthy();
+    });
+
+    it('stays closed with a task open when the user closed it', () => {
+        const el = mount({ header, inspectorOpen: false });
+        expect(el.querySelector('.mtl-insp')).toBeNull();
+    });
+});

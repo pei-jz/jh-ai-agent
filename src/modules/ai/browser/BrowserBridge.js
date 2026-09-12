@@ -137,6 +137,21 @@ class BrowserBridge {
         });
     }
 
+    /**
+     * Is the browser stack usable right now? Resolves either way — the caller
+     * is a settings screen that has to RENDER the failure, not a code path
+     * that may blow up on it. Covers both ways this breaks: no Node on PATH
+     * (the spawn fails) and no Playwright (the worker says so).
+     */
+    async probe() {
+        try {
+            await this.request('probe', {}, 20000);
+            return { ok: true, reason: '' };
+        } catch (e) {
+            return { ok: false, reason: e?.message || String(e) };
+        }
+    }
+
     /** Kill the worker process (best-effort). */
     async stop() {
         if (!this.processId) return;

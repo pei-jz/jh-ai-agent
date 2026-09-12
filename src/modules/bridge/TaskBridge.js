@@ -3,11 +3,24 @@ import { AgentController } from '../ai/AgentController.js';
 import { projectContext } from '../ai/ProjectContext.js';
 import llmService from '../ai/LLMService.js';
 
+// How many finished tasks keep their file cache for a possible continuation.
+// Continuations happen within minutes of a task finishing, so a handful covers
+// the real usage; the cap is what stops a long session accumulating file
+// contents for every task it has ever run.
+const CACHED_TASKS = 8;
+
 class TaskBridge {
     constructor() {
         this.activeAgents = new Map(); // taskId -> { controller, abortController }
         this.activeSingleShots = new Map(); // taskId -> AbortController
         this.pendingConfirmations = new Map(); // confirmId -> { resolve, reject }
+        // taskId -> the finished run's ToolExecutor file cache, so CONTINUING a
+        // task does not start blind. Every run builds a fresh AgentController
+        // (and therefore a fresh ToolExecutor), which is why this has to live
+        // out here rather than on the controller. Bounded two ways: each cache
+        // is trimmed on adoption (ToolExecutor.adoptFileCache) and only the most
+        // recent CACHED_TASKS tasks are kept.
+        this.taskFileCaches = new Map();
     }
 
     async init() {
@@ -227,6 +240,14 @@ class TaskBridge {
         const controller = new AgentController();
         const abortController = new AbortController();
 
+        // A CONTINUATION picks up where the previous run of this task left off.
+        // Only for a continuation (chatContext present): a task id being reused
+        // for unrelated work should not inherit a stale map of the workspace.
+        if (Array.isArray(chatContext) && chatContext.length > 0) {
+            const prior = this.taskFileCaches.get(taskId);
+            if (prior) controller.toolExecutor.adoptFileCache?.(prior);
+        }
+
         // Apply behavior overrides to the controller before run.
         // (controller.run reads these at the top of its loop.)
         if (behavior) {
@@ -314,6 +335,11 @@ class TaskBridge {
             // behind would keep a dead task's dialog live in the registry.
             this._settlePendingConfirmations(taskId);
             this.activeAgents.delete(taskId);
+            // What this run learned about the files it touched, kept for the
+            // continuation that may follow. In `finally` deliberately: a run that
+            // was stopped or threw is the one most likely to be continued, and
+            // its reading is no less valid for having ended badly.
+            this._rememberFileCache(taskId, controller);
             // A run started BY a trigger holds that trigger's concurrency slot.
             // Released here rather than on the success path: a run that threw
             // still ended, and a slot never given back means the trigger goes
@@ -322,6 +348,25 @@ class TaskBridge {
         }
     }
 
+
+    /**
+     * Keep a finished run's file cache for a possible continuation of that task.
+     *
+     * The map is capped at CACHED_TASKS entries, evicting the least recently
+     * finished: a long session can run dozens of tasks, and each cache holds file
+     * contents. Re-inserting moves a task back to the end, so the ones being
+     * actively continued are the ones that survive.
+     */
+    _rememberFileCache(taskId, controller) {
+        const cache = controller?.toolExecutor?.getFileCache?.();
+        if (!(cache instanceof Map) || cache.size === 0) return;
+        this.taskFileCaches.delete(taskId);
+        this.taskFileCaches.set(taskId, cache);
+        while (this.taskFileCaches.size > CACHED_TASKS) {
+            const oldest = this.taskFileCaches.keys().next().value;
+            this.taskFileCaches.delete(oldest);
+        }
+    }
 
     /**
      * Hand a triggered run's concurrency slot back.

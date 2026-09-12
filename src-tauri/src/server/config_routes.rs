@@ -199,7 +199,33 @@ pub(crate) async fn test_connection(
     let base_url = payload.base_url.unwrap_or_default();
     let api_version = payload.api_version.unwrap_or_default();
 
+    // Same dispatch trick as llm_chat_native: an openai connection in
+    // "responses" style is tested as its own dialect key.
+    let provider = if provider == "openai"
+        && payload.api_style.as_deref().unwrap_or("chat") == "responses"
+    {
+        "openai_responses"
+    } else {
+        provider
+    };
+
     let (url, headers, body) = match provider {
+        "openai_responses" => {
+            let base = if base_url.is_empty() { "https://api.openai.com/v1" } else { &base_url };
+            let url = format!("{}/responses", base.trim_end_matches('/'));
+            let mut h = reqwest::header::HeaderMap::new();
+            h.insert("Authorization", format!("Bearer {}", final_api_key).parse().map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid API Key header format: {}", e)))?);
+            h.insert("Content-Type", "application/json".parse().unwrap());
+            let body = serde_json::json!({
+                "model": model,
+                "input": "ping",
+                // 16 is the API's floor; a smaller value is rejected outright,
+                // which would look like a broken connection.
+                "max_output_tokens": 16,
+                "store": false
+            });
+            (url, h, body)
+        }
         "openai" => {
             let base = if base_url.is_empty() { "https://api.openai.com/v1" } else { &base_url };
             let url = format!("{}/chat/completions", base.trim_end_matches('/'));

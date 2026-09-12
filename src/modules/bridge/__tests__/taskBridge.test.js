@@ -18,11 +18,27 @@ vi.mock('@tauri-apps/api/event', () => ({
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(async () => ({})) }));
 
 const agentRuns = [];
+// What each run was handed from the run before it — see the file-cache suite.
+const adoptedCaches = [];
 vi.mock('../../ai/AgentController.js', () => ({
     AgentController: class {
-        constructor() { this.toolExecutor = { onToolEvent: null }; }
+        constructor() {
+            // Just enough ToolExecutor for the bridge's file-cache hand-off.
+            this._fileCache = new Map();
+            this.toolExecutor = {
+                onToolEvent: null,
+                adoptFileCache: (cache) => {
+                    adoptedCaches.push(cache);
+                    this._fileCache = new Map(cache);
+                    return cache.size;
+                },
+                getFileCache: () => this._fileCache,
+            };
+        }
         async run(prompt, workspacePath, onUpdate, onAgentStatus) {
             agentRuns.push({ prompt, workspacePath });
+            // A run always learns SOMETHING about the files it touched.
+            this._fileCache.set(`C:/w/${prompt}.js`, { content: prompt, readAt: Date.now() });
             onAgentStatus?.({ event: 'status', status: 'running', message: 'working' });
             // run() resolves with the structured result the bridge unpacks.
             return {
@@ -58,7 +74,9 @@ const runTask = (payload) => listeners.get('run-task')({ payload });
 beforeEach(async () => {
     emitted.length = 0;
     agentRuns.length = 0;
+    adoptedCaches.length = 0;
     singleShotCalls.length = 0;
+    taskBridge.taskFileCaches.clear();
     if (!listeners.has('run-task')) await taskBridge.init();
 });
 
@@ -265,5 +283,64 @@ describe('approval flow', () => {
         expect(taskBridge.pendingConfirmations.has('conf_t-b')).toBe(true);
         expect(theirs.value()).toBeUndefined();
         taskBridge.pendingConfirmations.clear();
+    });
+});
+
+// ── the file cache across a continuation ─────────────────────────────────
+//
+// Continuing a finished task builds a NEW AgentController with a NEW
+// ToolExecutor, so everything the previous run learned about the files it read
+// and edited was dropped on the floor and re-read from disk. The bridge is the
+// only object that outlives both runs, so it is where the hand-off belongs.
+describe('file cache hand-off between runs of one task', () => {
+    it('hands a continuation what the previous run of the SAME task learned', async () => {
+        await runTask({ taskId: 'k1', prompt: 'first', workspacePath: 'C:/w' });
+        await runTask({
+            taskId: 'k1', prompt: 'follow up', workspacePath: 'C:/w',
+            chatContext: [{ role: 'user', content: 'first' }, { role: 'assistant', content: 'done' }],
+        });
+        expect(adoptedCaches).toHaveLength(1);
+        expect([...adoptedCaches[0].keys()]).toContain('C:/w/first.js');
+    });
+
+    it('hands a FRESH task nothing, even when the id was used before', async () => {
+        await runTask({ taskId: 'k2', prompt: 'first', workspacePath: 'C:/w' });
+        // No chatContext: this is new work, not a continuation. Inheriting a map
+        // of unrelated files would be worse than starting cold.
+        await runTask({ taskId: 'k2', prompt: 'second', workspacePath: 'C:/w' });
+        expect(adoptedCaches).toHaveLength(0);
+    });
+
+    it('does not leak one task cache into another', async () => {
+        await runTask({ taskId: 'k3', prompt: 'alpha', workspacePath: 'C:/w' });
+        await runTask({
+            taskId: 'k4', prompt: 'beta', workspacePath: 'C:/w',
+            chatContext: [{ role: 'user', content: 'earlier' }],
+        });
+        expect(adoptedCaches).toHaveLength(0);
+    });
+
+    it('keeps only the most recent tasks, so a long session cannot grow forever', async () => {
+        for (let i = 0; i < 12; i++) {
+            await runTask({ taskId: `cap${i}`, prompt: `p${i}`, workspacePath: 'C:/w' });
+        }
+        expect(taskBridge.taskFileCaches.size).toBe(8);
+        expect(taskBridge.taskFileCaches.has('cap11')).toBe(true);
+        expect(taskBridge.taskFileCaches.has('cap0')).toBe(false);
+    });
+
+    it('carries the cache forward again across a SECOND continuation', async () => {
+        await runTask({ taskId: 'k5', prompt: 'one', workspacePath: 'C:/w' });
+        await runTask({
+            taskId: 'k5', prompt: 'two', workspacePath: 'C:/w',
+            chatContext: [{ role: 'user', content: 'one' }],
+        });
+        await runTask({
+            taskId: 'k5', prompt: 'three', workspacePath: 'C:/w',
+            chatContext: [{ role: 'user', content: 'two' }],
+        });
+        // The third run sees both earlier runs' files, not just the last one's.
+        const last = adoptedCaches[adoptedCaches.length - 1];
+        expect([...last.keys()]).toEqual(expect.arrayContaining(['C:/w/one.js', 'C:/w/two.js']));
     });
 });

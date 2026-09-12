@@ -17,35 +17,35 @@
  */
 export const SAFETY_FIELDS = [
     {
-        key: 'max_steps', label: 'Max Agent Steps', fallback: 0, min: 0, max: 10000,
+        key: 'max_steps', unit: 'steps', label: 'Max Agent Steps', fallback: 0, min: 0, max: 10000,
         placeholder: '0 = unlimited',
         hint: 'Hard step ceiling. <strong>Recommended: 0 (unlimited)</strong> — the budgets and loop detectors below are the proper safeguards.',
     },
     {
-        key: 'token_budget', label: 'Token Budget (cost cap)', fallback: 0, min: 0, max: 100000000,
+        key: 'token_budget', unit: 'tokens', label: 'Token Budget (cost cap)', fallback: 0, min: 0, max: 100000000,
         placeholder: '0 = unlimited',
         hint: 'Hard stop when cumulative prompt + completion tokens reach this number. Soft reminder at 80%. Example: <code>1000000</code> (1M tokens).',
         half: true,
     },
     {
-        key: 'wall_clock_minutes', label: 'Wall-clock Timeout (minutes)', fallback: 0, min: 0, max: 1440,
+        key: 'wall_clock_minutes', unit: 'minutes', label: 'Wall-clock Timeout (minutes)', fallback: 0, min: 0, max: 1440,
         placeholder: '0 = unlimited',
         hint: 'Hard stop after N minutes of runtime. Soft reminder at 80%. Example: <code>30</code>.',
         half: true,
     },
     {
-        key: 'no_progress_window', label: 'No-Progress Window (steps)', fallback: 15, min: 0, max: 200,
+        key: 'no_progress_window', unit: 'steps', label: 'No-Progress Window (steps)', fallback: 15, min: 0, max: 200,
         placeholder: '15',
         hint: 'If the agent runs this many consecutive steps without modifying any file (only <code>read_file</code> / <code>grep_search</code> / <code>list_files</code>), it gets a one-time reminder to either finish or report blockers. <strong>0 disables this detector.</strong> Recommended: 15.',
     },
     {
-        key: 'identical_call_threshold', label: 'Identical Call Threshold', fallback: 5, min: 0, max: 50,
+        key: 'identical_call_threshold', unit: 'times', label: 'Identical Call Threshold', fallback: 5, min: 0, max: 50,
         placeholder: '5',
         hint: 'Soft warning when the same tool+args has been called N times in a row. Hard stop only at 3× this number (warning ignored). <strong>0 disables.</strong> Increase if you keep hitting it on legitimate retries.',
         half: true,
     },
     {
-        key: 'escalate_at_step', label: 'Promote to Deep model at step', fallback: 0, min: 0, max: 1000,
+        key: 'escalate_at_step', unit: 'stepNo', label: 'Promote to Deep model at step', fallback: 0, min: 0, max: 1000,
         placeholder: '0 = never',
         // Says what the setting does. Repository history belongs in the commit
         // log, not in the help text of a field someone is trying to fill in.
@@ -53,12 +53,55 @@ export const SAFETY_FIELDS = [
         half: true,
     },
     {
-        key: 'cycle_detection_min_repeats', label: 'Cycle Detection Min Repeats', fallback: 3, min: 0, max: 20,
+        key: 'cycle_detection_min_repeats', unit: 'times', label: 'Cycle Detection Min Repeats', fallback: 3, min: 0, max: 20,
         placeholder: '3',
         hint: 'Soft warning when an ABAB or ABCABC oscillation repeats this many times. Higher = more permissive. <strong>0 disables.</strong>',
         half: true,
     },
 ];
+
+/**
+ * The behaviour settings that are a choice between two or three fixed modes.
+ *
+ * Data, for the same reason SAFETY_FIELDS is: seven near-identical blocks of
+ * markup differing only in the key and the options. It also pins the i18n key
+ * shape each one needs, which is what makes a missing per-option line findable
+ * by a test instead of by noticing an empty row on screen.
+ *
+ * For each key `k` and option `o` the catalogue must hold:
+ *   settings.<k>            the label
+ *   settings.<k>.<o>        the SHORT segment caption ("オフ", "自動")
+ *   settings.<k>.<o>.desc   one line: what happens when it is chosen
+ *   settings.<k>.hint       the long explanation, behind the "?"
+ *
+ * `advanced` mirrors what the tab already hid behind its advanced toggle.
+ * `phase_routing` is NOT here: it carries a cost estimate, a disabled state and
+ * a prerequisite warning, so it stays written out where those live.
+ */
+export const BEHAVIOR_FIELDS = [
+    // `def` is separate from the option ORDER: the buttons read off → auto →
+    // always because that is the order of strength, while the value an
+    // untouched install behaves as is `auto`. Taking the first option as the
+    // default would have shown "off" selected on a machine that plans.
+    { key: 'plan_mode', options: ['off', 'auto', 'always'], def: 'auto' },
+    { key: 'subagent_review', options: ['off', 'on'], def: 'off', advanced: true },
+    { key: 'memory_recall', options: ['on', 'auto', 'off'], def: 'on' },
+    { key: 'playbook', options: ['off', 'on'], def: 'off', advanced: true },
+    { key: 'read_batch_hint', options: ['off', 'on'], def: 'off', advanced: true },
+    { key: 'episode_injection', options: ['off', 'on'], def: 'off', advanced: true },
+];
+
+/**
+ * The i18n key for a setting, its option caption, or an option's one-liner.
+ *
+ * One function so the component, the catalogue and the tests cannot disagree
+ * about the shape — a per-option line filed under a key nobody reads renders as
+ * nothing at all, with no error anywhere.
+ */
+export function settingKey(key, option = null, part = null) {
+    const camel = key.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
+    return ['settings', camel, option, part].filter(Boolean).join('.');
+}
 
 export const OUTPUT_LANGUAGES = [
     ['Japanese', '日本語 (Japanese)'],

@@ -253,6 +253,22 @@ pub async fn llm_chat_native<R: Runtime>(
             if resolved_temperature.is_none() {
                 resolved_temperature = inst.temperature;
             }
+            // ── Wire dialect ──────────────────────────────────────────────
+            // OpenAI exposes two protocols for the same models. A connection
+            // with api_style "responses" talks to /responses instead of
+            // /chat/completions.
+            //
+            // We express that by rewriting the DISPATCH KEY to an internal
+            // dialect id rather than threading an `api_style` argument through
+            // every function: `resolved_provider` is only ever used as the key
+            // of the three `match`es below (URL, body, SSE) plus a display
+            // label, so each match grows one arm and nothing else changes.
+            // "openai_responses" is not a provider a user can pick.
+            if inst.provider == "openai"
+                && inst.api_style.as_deref().unwrap_or("chat") == "responses"
+            {
+                resolved_provider = "openai_responses".to_string();
+            }
         }
     }
 
@@ -263,6 +279,17 @@ pub async fn llm_chat_native<R: Runtime>(
             let key = resolved_api_key.or(config.openai_key).ok_or("OpenAI API key not set")?;
             let base = resolved_base_url.unwrap_or_else(|| "https://api.openai.com/v1".to_string());
             let url = format!("{}/chat/completions", base.trim_end_matches('/'));
+            let mut h = reqwest::header::HeaderMap::new();
+            h.insert("Authorization", format!("Bearer {}", key).parse().unwrap());
+            h.insert("Content-Type", "application/json".parse().unwrap());
+            (url, h, key)
+        }
+        // Same credentials and base URL as "openai" — only the path and the
+        // body/stream format differ. See build_request_body and the SSE arm.
+        "openai_responses" => {
+            let key = resolved_api_key.or(config.openai_key).ok_or("OpenAI API key not set")?;
+            let base = resolved_base_url.unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+            let url = format!("{}/responses", base.trim_end_matches('/'));
             let mut h = reqwest::header::HeaderMap::new();
             h.insert("Authorization", format!("Bearer {}", key).parse().unwrap());
             h.insert("Content-Type", "application/json".parse().unwrap());
@@ -471,6 +498,11 @@ pub async fn llm_chat_native<R: Runtime>(
         // Fix: accumulate BYTES and only ever decode/dispatch COMPLETE lines,
         // keeping the trailing partial line for the next chunk.
         let mut sse_buf: Vec<u8> = Vec::new();
+        // A Responses-API stream reports failure as an EVENT on a 200 response
+        // (response.failed / error), not as an HTTP status — the pre-stream
+        // status check above cannot see it. Hold the message and report it as a
+        // real error at end-of-stream instead of letting the turn end silently.
+        let mut stream_fail: Option<String> = None;
         let mut eos = false;
         while !eos {
             let chunk: Option<Vec<u8>> = match stream.next().await {
@@ -552,6 +584,112 @@ pub async fn llm_chat_native<R: Runtime>(
                                             }
                                         }
                                         content
+                                    } else { String::new() }
+                                } else { String::new() }
+                            }
+                            // ── Responses API (event-name based SSE) ──────────────
+                            // Each event is `event: <name>` followed by `data: {json}`.
+                            // The data payload repeats the name in its "type" field, so we
+                            // dispatch on that and ignore the `event:` lines entirely —
+                            // one less piece of cross-line state to carry.
+                            "openai_responses" => {
+                                if line.starts_with("data: ") {
+                                    let json_str = &line[6..];
+                                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(json_str) {
+                                        match json["type"].as_str().unwrap_or("") {
+                                            "response.output_text.delta" => {
+                                                json["delta"].as_str().unwrap_or_default().to_string()
+                                            }
+                                            // A function call announces itself here, with its
+                                            // id and name. The arguments stream separately.
+                                            "response.output_item.added" => {
+                                                let item = &json["item"];
+                                                if item["type"].as_str() == Some("function_call") {
+                                                    let idx = json["output_index"].as_u64().unwrap_or(0);
+                                                    // `call_id`, NOT `id`, is what a
+                                                    // function_call_output must reference on the
+                                                    // way back in — so it is what goes in the
+                                                    // envelope's `id`. That closes the round trip
+                                                    // through the JS layer with no change there.
+                                                    let call_id = item["call_id"].as_str()
+                                                        .or_else(|| item["id"].as_str())
+                                                        .unwrap_or("").to_string();
+                                                    let name = item["name"].as_str().unwrap_or("").to_string();
+                                                    let entry = tool_calls_acc.entry(idx).or_insert_with(|| serde_json::json!({
+                                                        "id": "",
+                                                        "type": "function",
+                                                        "function": { "name": "", "arguments": "" }
+                                                    }));
+                                                    if !call_id.is_empty() {
+                                                        entry["id"] = serde_json::Value::String(call_id);
+                                                    }
+                                                    if !name.is_empty() {
+                                                        entry["function"]["name"] = serde_json::Value::String(name);
+                                                    }
+                                                }
+                                                String::new()
+                                            }
+                                            "response.function_call_arguments.delta" => {
+                                                let idx = json["output_index"].as_u64().unwrap_or(0);
+                                                if let Some(frag) = json["delta"].as_str() {
+                                                    let entry = tool_calls_acc.entry(idx).or_insert_with(|| serde_json::json!({
+                                                        "id": "",
+                                                        "type": "function",
+                                                        "function": { "name": "", "arguments": "" }
+                                                    }));
+                                                    let cur = entry["function"]["arguments"].as_str().unwrap_or("").to_string();
+                                                    entry["function"]["arguments"] = serde_json::Value::String(cur + frag);
+                                                }
+                                                String::new()
+                                            }
+                                            // The authoritative complete argument string. It
+                                            // REPLACES what the deltas accumulated, so a lost or
+                                            // duplicated fragment cannot corrupt the call.
+                                            "response.function_call_arguments.done" => {
+                                                let idx = json["output_index"].as_u64().unwrap_or(0);
+                                                if let Some(args) = json["arguments"].as_str() {
+                                                    let entry = tool_calls_acc.entry(idx).or_insert_with(|| serde_json::json!({
+                                                        "id": "",
+                                                        "type": "function",
+                                                        "function": { "name": "", "arguments": "" }
+                                                    }));
+                                                    entry["function"]["arguments"] = serde_json::Value::String(args.to_string());
+                                                }
+                                                String::new()
+                                            }
+                                            // Terminal events carry the usage block. Responses
+                                            // names these fields differently from Chat Completions
+                                            // (input_tokens / output_tokens, and cached_tokens
+                                            // under input_tokens_details) — reading the Chat names
+                                            // here would leave usage all-zero and silently break
+                                            // the cost and context-gauge readouts.
+                                            "response.completed" | "response.incomplete" => {
+                                                let u = &json["response"]["usage"];
+                                                let p = u["input_tokens"].as_u64().unwrap_or(0);
+                                                let c = u["output_tokens"].as_u64().unwrap_or(0);
+                                                let t = u["total_tokens"].as_u64().unwrap_or(0);
+                                                // Subset of input_tokens, as on Chat Completions.
+                                                let cached = u["input_tokens_details"]["cached_tokens"].as_u64().unwrap_or(0);
+                                                if p > 0 { usage.prompt_tokens = p; }
+                                                if c > 0 { usage.completion_tokens = c; }
+                                                if t > 0 { usage.total_tokens = t; }
+                                                if cached > 0 { usage.cache_read_input_tokens = cached; }
+                                                String::new()
+                                            }
+                                            "response.failed" => {
+                                                let msg = json["response"]["error"]["message"].as_str()
+                                                    .unwrap_or("the provider reported a failed response");
+                                                stream_fail = Some(msg.to_string());
+                                                String::new()
+                                            }
+                                            "error" => {
+                                                let msg = json["message"].as_str()
+                                                    .unwrap_or("the provider reported a stream error");
+                                                stream_fail = Some(msg.to_string());
+                                                String::new()
+                                            }
+                                            _ => String::new(),
+                                        }
                                     } else { String::new() }
                                 } else { String::new() }
                             }
@@ -689,6 +827,20 @@ pub async fn llm_chat_native<R: Runtime>(
                 }
                 None => break,   // stream error — already reported above
             }
+        }
+
+        // A Responses stream that ended in response.failed / error produced no
+        // usable turn. Report it as an error so the agent loop can react, rather
+        // than resolving with whatever partial text arrived first.
+        if let Some(msg) = stream_fail {
+            let _ = app.emit("llm-chunk", StreamChunk {
+                request_id: rid.clone(),
+                delta: String::new(),
+                done: true,
+                error: Some(format!("API Error (openai_responses): {}", msg)),
+                usage: None,
+            });
+            return;
         }
 
         // ── Tool-call envelope emission ───────────────────────────────

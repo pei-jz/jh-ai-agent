@@ -12,12 +12,13 @@
 import ConfigRoot from '../svelte/config/ConfigRoot.svelte';
 import { mountComponent, destroyComponent } from '../svelte/mount.svelte.js';
 import { CONFIG_SECTION_STYLES, CONFIG_MODAL_STYLES } from './ConfigView.styles.js';
+import { DEFAULT_CONFIG_TAB } from './config/configModel.js';
 
 const HOST_ID = 'config-root';
 
 export class ConfigView {
     /** @param {string} [tab] deep-link target, e.g. `#config?tab=memory`. */
-    constructor(tab = 'llm') {
+    constructor(tab = DEFAULT_CONFIG_TAB) {
         this._tab = tab;
     }
 

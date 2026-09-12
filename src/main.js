@@ -26,7 +26,6 @@ import { skillManager } from './modules/ai/SkillManager.js';
 import { renderMarkdown, ensureResultViewStyles } from './dashboard/utils/resultView.js';
 import { formatMessageContent, escapeHtml, ensureChatMarkdownStyles } from './dashboard/views/chat/chatMarkdown.js';
 import { extractToolCall } from './dashboard/views/chat/chatRenderer.js';
-import { STORAGE_KEY as CHAT_SESSIONS_KEY, parseSessions, pruneSessions } from './dashboard/views/chat/chatSessions.js';
 import { icon } from './dashboard/utils/icons.js';
 import { initLocale } from './i18n/index.js';
 import { normalizeTheme, themeList, themeLabel, themeAttr } from './dashboard/utils/theme.js';
@@ -262,14 +261,17 @@ async function handleRoute() {
         // a short conversation is a Work run with interaction:'ask', not a second
         // engine. Legacy #chat links fall through to the default, like #history.
         //
-        // The stored sessions (chat_sessions.json) are deliberately NOT deleted.
-        // Nothing reads them any more, but destroying a user's history as a side
-        // effect of a navigation change is not a decision a refactor gets to make.
+        // Quick-search answers used to keep being WRITTEN to that screen's store
+        // (chat_sessions.json) after the screen itself was gone — a file nothing
+        // could open, growing on every search. The writing has been removed.
+        // Files already on disk are left alone: deleting a user's history as a
+        // side effect of a cleanup is not a decision this gets to make, and the
+        // spotlight remembers its own last answer for the session anyway.
         case 'schedule':
             viewInstance = new ScheduleView();
             break;
         case 'config':
-            viewInstance = new ConfigView(params.get('tab') || 'llm');
+            viewInstance = new ConfigView(params.get('tab') || undefined);
             break;
         default:
             // Work is where you land. The three commonest reasons to open this
@@ -1184,65 +1186,11 @@ Your final responses and messages to the user MUST be in ${outputLanguage}.
             _lastSpotlightQuery = query || '';
             _lastSpotlightAnswerHtml = answerEl.innerHTML;
             _lastSpotlightAnswer = fullAnswer.trim();
-            saveQuickSearchToHistory(processedText, fullAnswer).catch(e =>
-                console.warn('Quick-search history save failed:', e));
         }
     } catch (e) {
         if (myAbort.signal.aborted) return;
         if (curEl) curEl.innerHTML =
             `<span style="color:var(--error)">Error: ${(e?.message || String(e)).replace(/</g, '&lt;')}</span>`;
-    }
-}
-
-/**
- * Save a quick-search Q&A as a chat session (same store ChatView uses), so the
- * answer remains visible in Chat → History after the overlay closes.
- *
- * Runs in BOTH the in-app overlay and the dedicated spotlight window. Since the
- * spotlight window's localStorage could in principle be stale, the file backup
- * is merged in first so we never clobber sessions saved by the main window.
- * The active session is intentionally NOT changed — an in-progress chat in the
- * main window must keep writing to its own session.
- */
-async function saveQuickSearchToHistory(question, answer) {
-    const data = parseSessions(localStorage.getItem(CHAT_SESSIONS_KEY));
-
-    // Merge sessions from the file backup (union, newest wins by id).
-    let configDir = null;
-    try {
-        configDir = await invoke('get_app_config_dir');
-        if (configDir) {
-            const raw = await invoke('read_file', { path: `${configDir}/chat_sessions.json` });
-            if (raw) {
-                const fileData = JSON.parse(raw);
-                for (const [id, s] of Object.entries(fileData.sessions || {})) {
-                    if (!data.sessions[id]) data.sessions[id] = s;
-                }
-                if (!data.activeSessionId) data.activeSessionId = fileData.activeSessionId;
-            }
-        }
-    } catch (_) { /* backup may not exist yet */ }
-
-    const q = question.replace(/\s+/g, ' ').trim();
-    const id = Date.now().toString();
-    data.sessions[id] = {
-        id,
-        title: '🔍 ' + q.substring(0, 28) + (q.length > 28 ? '…' : ''),
-        timestamp: Date.now(),
-        messages: [
-            { role: 'user', content: question, displayContent: question },
-            { role: 'assistant', content: answer }
-        ],
-        chatMode: 'simple',
-    };
-    pruneSessions(data);
-
-    localStorage.setItem(CHAT_SESSIONS_KEY, JSON.stringify(data));
-    if (configDir) {
-        await invoke('write_file', {
-            path: `${configDir}/chat_sessions.json`,
-            content: JSON.stringify(data, null, 2)
-        });
     }
 }
 

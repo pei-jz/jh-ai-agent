@@ -485,32 +485,33 @@ export function eventsFromOutput(watcher, stdout, now = Date.now()) {
  */
 export const PAYLOAD_FIELDS = {
     folder: [
-        ['path', 'ファイルのフルパス'],
-        ['name', 'ファイル名だけ'],
-        ['kind', 'created / changed / deleted'],
-        ['size', 'バイト数'],
+        ['path', { ja: 'ファイルのフルパス', en: 'Full path to the file' }],
+        ['name', { ja: 'ファイル名だけ', en: 'File name only' }],
+        ['kind', { ja: 'created / changed / deleted', en: 'created / changed / deleted' }],
+        ['size', { ja: 'バイト数', en: 'Size in bytes' }],
     ],
     mail: [
-        ['from', '差出人'],
-        ['to', '宛先'],
-        ['subject', '件名'],
-        ['date', '送信日時'],
-        ['body', '本文（先頭2000文字）'],
+        ['from', { ja: '差出人', en: 'Sender' }],
+        ['to', { ja: '宛先', en: 'Recipient' }],
+        ['subject', { ja: '件名', en: 'Subject' }],
+        ['date', { ja: '送信日時', en: 'Date sent' }],
+        ['body', { ja: '本文（先頭2000文字）', en: 'Body (first 2000 characters)' }],
     ],
     http: [
-        ['value', '今回の値（まとめ方を適用した後）'],
-        ['previous', '前回の値'],
-        ['url', '見に行った URL'],
+        ['value', { ja: '今回の値（まとめ方を適用した後）', en: 'The value now, after combining' }],
+        ['previous', { ja: '前回の値', en: 'The value last time' }],
+        ['url', { ja: '見に行った URL', en: 'The URL that was read' }],
     ],
     command: [
-        ['line', '出力の1行（JSON を出した場合はその中身がそのまま入ります）'],
+        ['line', { ja: '出力の1行（JSON を出した場合はその中身がそのまま入ります）',
+                   en: 'One line of output (a JSON line arrives as its own fields)' }],
     ],
     slack: [
-        ['text', 'メッセージ本文'],
-        ['user', '書いた人の ID'],
-        ['channel', 'チャンネル ID'],
-        ['ts', 'Slack のタイムスタンプ'],
-        ['thread_ts', 'スレッド元（無ければ null）'],
+        ['text', { ja: 'メッセージ本文', en: 'Message text' }],
+        ['user', { ja: '書いた人の ID', en: 'Id of whoever wrote it' }],
+        ['channel', { ja: 'チャンネル ID', en: 'Channel id' }],
+        ['ts', { ja: 'Slack のタイムスタンプ', en: 'Slack timestamp' }],
+        ['thread_ts', { ja: 'スレッド元（無ければ null）', en: 'Thread parent, or null' }],
     ],
 };
 
@@ -522,8 +523,8 @@ export const PAYLOAD_FIELDS = {
  * them into one shape would mean naming a file's path `value`.
  */
 export const COMMON_FIELDS = [
-    ['watcher', 'この監視の名前'],
-    ['at', '検出した時刻 (ms)'],
+    ['watcher', { ja: 'この監視の名前', en: 'The name of this watcher' }],
+    ['at', { ja: '検出した時刻 (ms)', en: 'When it was seen (ms)' }],
 ];
 
 /** The fields a watcher of this type emits, common ones first. */

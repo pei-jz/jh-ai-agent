@@ -41,10 +41,24 @@ describe('initialPhase', () => {
         expect(initialPhase({ ...ON, freshTurn: true })).toBe('execute');
     });
 
-    // The expensive mistake: a continuation turn already HAS its plan, so
+    // The expensive mistake: an APPROVAL turn already has its plan, so
     // re-entering the plan phase would put the deep model on execution.
-    it('never re-plans on a continuation turn', () => {
-        expect(initialPhase({ ...ON, freshTurn: false, planFirst: true, complex: true })).toBe('execute');
+    it('never re-plans when the turn is resuming an approved plan', () => {
+        expect(initialPhase({ ...ON, freshTurn: false, resumedPlan: true, planFirst: true, complex: true }))
+            .toBe('execute');
+    });
+
+    // The other half of that: a task that COMPLETED and is being asked something
+    // new arrives as a continuation too, and it has no plan behind it. Judging it
+    // by "is this a continuation" handed every follow-up to the fast model, so the
+    // same request got a different model depending on whether the user typed it
+    // into the finished task or a new one.
+    it('plans for a complex follow-up to a completed task', () => {
+        expect(initialPhase({ ...ON, freshTurn: false, complex: true })).toBe('plan');
+    });
+
+    it('still skips the plan phase for a simple follow-up', () => {
+        expect(initialPhase({ ...ON, freshTurn: false })).toBe('execute');
     });
 });
 

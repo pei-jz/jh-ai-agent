@@ -45,6 +45,29 @@ export function isPlanRevision(text) {
 }
 
 /**
+ * True when a continuation is the user APPROVING the plan they were shown —
+ * i.e. they clicked the approval option on the plan-first card.
+ *
+ * Matched in both languages regardless of the current locale: the plan may have
+ * been presented before the UI language was changed, and the answer is stored
+ * verbatim. Kept deliberately tight (the button text, or a bare yes-to-proceed)
+ * so a request that merely CONTAINS "進めて" alongside new instructions is not
+ * mistaken for a plain approval.
+ *
+ * Its one consumer is the phase router: an approval turn already has its plan,
+ * so it must not re-enter the (deep-model) plan phase. See
+ * agent/ModelPhaseRouter.js `initialPhase`.
+ */
+export function isPlanApproval(text) {
+    const s = String(text || '').trim();
+    if (!s || s.length > 60) return false;
+    if (isPlanRevision(s)) return false;
+    return /^(はい|ok|yes)?[、,\s]*(この計画で)?(進めて|実装して|お願いします|proceed)/i.test(s)
+        || /^yes,?\s*proceed\b/i.test(s)
+        || /^(承認|approve[d]?)$/i.test(s);
+}
+
+/**
  * Strip the revision marker line from a typed revision so only the user's own
  * words reach the agent ("✏️ 計画修正: 変更対象ファイルを絞る" → "変更対象ファイルを絞る").
  */

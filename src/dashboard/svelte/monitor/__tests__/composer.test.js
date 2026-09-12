@@ -24,6 +24,7 @@ vi.mock('../../../../modules/ai/SkillManager.js', () => ({
 }));
 
 import Composer from '../Composer.svelte';
+import { AGENT_MODES, modeName } from '../../../../modules/ai/AgentModes.js';
 
 const CONFIG = { approved_projects: ['C:/proj', 'C:/other'], mcp_servers: {} };
 
@@ -44,8 +45,28 @@ function mount(props = {}) {
 
 const ta = (c) => c.querySelector('.mcomp-ta');
 /** The workspace is a NAME on a status line now, not a field. */
-const wsText = (c) => c.querySelector('.mcomp-ctx-ws')?.textContent || '';
-const ctxTitle = (c) => c.querySelector('.mcomp-ctx')?.getAttribute('title') || '';
+/**
+ * The workspace and mode are PICKERS on the status line now.
+ *
+ * Not native selects: the list is ours (ContextPicker.svelte), so these drive
+ * the button and read the rows the way a person does.
+ */
+const pickers = (c) => [...c.querySelectorAll('.ctxp-btn')];
+const wsBtn = (c) => pickers(c)[0] || null;
+const modeBtn = (c) => pickers(c)[1] || null;
+/** What the workspace picker shows — the folder NAME, not the path. */
+const wsText = (c) => wsBtn(c)?.querySelector('.ctxp-cur')?.textContent?.trim() || '';
+const modeText = (c) => modeBtn(c)?.querySelector('.ctxp-cur')?.textContent?.trim() || '';
+/** The full path lives on the button's title, as it did on the old one. */
+const ctxTitle = (c) => wsBtn(c)?.getAttribute('title') || '';
+/** Open a picker and return its rows. */
+async function rows(c, btn) {
+    await fireEvent.click(btn);
+    await waitFor(() => expect(c.querySelector('.ctxp-list')).toBeTruthy());
+    return [...c.querySelectorAll('.ctxp-opt')];
+}
+const rowName = (r) => r.querySelector('.ctxp-name')?.textContent?.trim() || '';
+const rowNamed = (list, text) => list.find(r => rowName(r) === text);
 const send = (c) => c.querySelector('.mcomp-send');
 
 /**
@@ -246,20 +267,110 @@ describe('Composer — the keyboard', () => {
     });
 });
 
+describe('Composer — the status line is operable', () => {
+    // It used to be one button that SAID the workspace and the mode and opened
+    // the modal to change either — so the commonest adjustment, "run this
+    // somewhere else", cost a modal, a scroll and a close.
+    it('offers every approved project, and sends to the one picked', async () => {
+        const { container, request } = mount({ workspace: 'C:/proj' });
+        await open(container);
+        await waitFor(() => expect(wsBtn(container)).toBeTruthy());
+
+        const list = await rows(container, wsBtn(container));
+        // The folder NAME reads; the full path disambiguates two called the same.
+        expect(list.map(rowName)).toEqual(expect.arrayContaining(['proj', 'other']));
+        expect(list.map(r => r.querySelector('.ctxp-hint')?.textContent.trim()))
+            .toEqual(expect.arrayContaining(['C:/proj', 'C:/other']));
+
+        await fireEvent.click(rowNamed(list, 'other'));
+        await waitFor(() => expect(wsText(container)).toBe('other'));
+        await fireEvent.input(ta(container), { target: { value: 'work please' } });
+        await fireEvent.click(send(container));
+
+        await waitFor(() => expect(request).toHaveBeenCalled());
+        expect(body(request).workspace_path).toBe('C:/other');
+    });
+
+    it('sends the mode picked here, without opening Details', async () => {
+        const { container, request, onDetails } = mount({ workspace: 'C:/proj' });
+        await open(container);
+        const list = await rows(container, modeBtn(container));
+        // Every mode says what it may do - the reason to choose one.
+        expect(list.every(r => r.querySelector('.ctxp-hint'))).toBe(true);
+
+        await fireEvent.click(rowNamed(list, modeName(AGENT_MODES.no_edit)));
+        await waitFor(() => expect(modeText(container)).toBe(modeName(AGENT_MODES.no_edit)));
+        await fireEvent.input(ta(container), { target: { value: 'have a look' } });
+        await fireEvent.click(send(container));
+
+        await waitFor(() => expect(request).toHaveBeenCalled());
+        expect(body(request).behavior.system_prompt)
+            .toBe(AGENT_MODES.no_edit.behavior.system_prompt);
+        expect(onDetails).not.toHaveBeenCalled();
+    });
+
+    it('closes on Escape, and on a click outside', async () => {
+        const { container } = mount({ workspace: 'C:/proj' });
+        await open(container);
+        await rows(container, wsBtn(container));
+        await fireEvent.keyDown(wsBtn(container), { key: 'Escape' });
+        expect(container.querySelector('.ctxp-list')).toBeNull();
+
+        await rows(container, wsBtn(container));
+        await fireEvent.pointerDown(document.body);
+        await waitFor(() => expect(container.querySelector('.ctxp-list')).toBeNull());
+    });
+
+    it('opens the folder dialog for anywhere not on the list', async () => {
+        invoke.mockImplementation(async (cmd) => {
+            if (cmd === 'get_ai_config') return CONFIG;
+            if (cmd === 'select_folder') return 'D:/elsewhere';
+            return '';
+        });
+        const { container, request } = mount({ workspace: 'C:/proj' });
+        await open(container);
+        const list = await rows(container, wsBtn(container));
+        await fireEvent.click(list.at(-1));      // the "choose a folder" row
+
+        // Picked, shown, and used - running somewhere is approving it.
+        await waitFor(() => expect(wsText(container)).toBe('elsewhere'));
+        await fireEvent.input(ta(container), { target: { value: 'go on' } });
+        await fireEvent.click(send(container));
+        await waitFor(() => expect(request).toHaveBeenCalled());
+        expect(body(request).workspace_path).toBe('D:/elsewhere');
+    });
+
+    it('keeps the workspace when the folder dialog is cancelled', async () => {
+        invoke.mockImplementation(async (cmd) => {
+            if (cmd === 'get_ai_config') return CONFIG;
+            if (cmd === 'select_folder') return null;   // cancelled
+            return '';
+        });
+        const { container } = mount({ workspace: 'C:/proj' });
+        await open(container);
+        const list = await rows(container, wsBtn(container));
+        await fireEvent.click(list.at(-1));
+
+        // "Choose a folder" is an action row, never a value - a cancelled
+        // dialog must not leave it showing as though it were the workspace.
+        await waitFor(() => expect(wsText(container)).toBe('proj'));
+    });
+});
+
 describe('Composer — handing off to the full modal', () => {
     it('passes what is already typed to Details rather than discarding it', async () => {
         const { container, onDetails } = mount({ workspace: 'C:/proj' });
         await open(container);
         await fireEvent.input(ta(container), { target: { value: 'needs an attachment' } });
-        await fireEvent.click(container.querySelector('.mcomp-ctx'));
+        await fireEvent.click(container.querySelector('.mcomp-ctx-more'));
         expect(onDetails).toHaveBeenCalledWith(
             expect.objectContaining({ prompt: 'needs an attachment', ws: 'C:/proj' }));
     });
 
     it('shows the mode it will use, so Details is not the only way to know', async () => {
-        const { container } = mount({ modeId: 'research' });
+        const { container } = mount({ modeId: 'no_edit' });
         await open(container);
-        expect(container.querySelector('.mcomp-ctx-mode').textContent.toLowerCase()).toContain('research');
+        expect(modeText(container)).toBe(modeName(AGENT_MODES.no_edit));
     });
 
     // A missing workspace cannot be fixed here any more, so saying "required"

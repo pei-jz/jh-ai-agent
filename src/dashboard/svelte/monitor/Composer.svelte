@@ -30,6 +30,8 @@
     import { skillManager } from '../../../modules/ai/SkillManager.js';
     import { SlashCommands } from '../../components/SlashCommands.js';
     import { validateNewTask, modeName, MODE_ICON } from '../../views/monitor/newTaskRequest.js';
+    import { modeDescription } from '../../../modules/ai/AgentModes.js';
+    import ContextPicker from './ContextPicker.svelte';
     import { ASK, BUILD } from '../../../modules/ai/agent/InteractionMode.js';
     import { looksReadOnly } from '../../../modules/ai/agent/TaskComplexity.js';
     import { createTask } from '../../views/monitor/createTask.js';
@@ -77,7 +79,60 @@
     } = $props();
 
     const client = () => api ?? window.apiClient;
-    const activeMode = $derived(modeId || DEFAULT_MODE_ID);
+
+    /**
+     * The mode, pickable here.
+     *
+     * Local, because the view owns the REMEMBERED one and learns the new one
+     * the way it learns the workspace: from `onCreated` after a send. Keeping a
+     * second writable prop in step with the view was the alternative, for a
+     * value that only matters at send time.
+     */
+    let pickedMode = $state(null);
+    const activeMode = $derived(pickedMode || modeId || DEFAULT_MODE_ID);
+
+    /** The row that opens the folder dialog rather than being a workspace. */
+    const BROWSE = '__browse';
+
+    /** A folder's own name, which is what identifies it at a glance. */
+    const folderName = (p) =>
+        String(p || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() || String(p || '');
+
+    /**
+     * The approved projects, plus whatever is set now, plus "find one".
+     *
+     * The full path is the second line rather than the label: two projects
+     * called `app` under different parents are the same word otherwise.
+     */
+    const wsOptions = $derived([
+        ...(ws && !projects.includes(ws) ? [{ value: ws, label: folderName(ws), hint: ws }] : []),
+        ...projects.map(p => ({ value: p, label: folderName(p), hint: p })),
+        { value: BROWSE, label: t('composer.ws.browse'), always: true },
+    ]);
+
+    /** Each mode with what it is allowed to do — the reason to pick one. */
+    const modeOptions = $derived(
+        Object.values(AGENT_MODES).map(m => ({
+            value: m.id, label: modeName(m), hint: modeDescription(m),
+        })));
+
+    /**
+     * Pick a workspace, or go and find one.
+     *
+     * Cancelling the dialog leaves the workspace ALONE — the picker's own value
+     * never moved, because "find one" is an action row rather than a value.
+     */
+    async function pickWorkspace(value) {
+        if (value !== BROWSE) { ws = value; return; }
+        try {
+            const sel = await invoke('select_folder');
+            if (sel) {
+                ws = sel;
+                // Running somewhere is approving it, so it joins the list.
+                if (!projects.includes(sel)) projects = [...projects, sel];
+            }
+        } catch (_) { /* cancelled */ }
+    }
     const mode = $derived(AGENT_MODES[activeMode] || AGENT_MODES[DEFAULT_MODE_ID]);
 
     // Seeded ONCE. `untrack` marks the capture as deliberate — reading the prop
@@ -108,31 +163,6 @@
     });
     let ws = $state(untrack(() => workspace));
     let creating = $state(false);
-
-    // The box is one line until it is being used. `open` is what reveals the
-    // controls — an empty three-line textarea plus six controls made the column
-    // look full before anything was in it.
-    //
-    // Tracked on the WHOLE composer, not the textarea. Pressing a button starts
-    // with the textarea losing focus, so a textarea-scoped blur closed the box —
-    // unmounting the very button being pressed — and the click never landed.
-    // That is why every control "just reverted" the box.
-    let focused = $state(false);
-    // The hero placement is ALWAYS open: it is the only thing on the screen, so
-    // there is nothing for the collapsed state to make room for — and a large
-    // empty middle containing one thin closed line is what this exists to fix.
-    const open = $derived(place === 'hero' || focused || !!prompt.trim());
-
-    /**
-     * The workspace as a NAME, not a path.
-     *
-     * Windows and POSIX separators both, because the field accepts whatever the
-     * folder picker returned and the user may have pasted the other kind. The
-     * full path is still the button's title — this only changes what is shown.
-     */
-    const wsName = $derived(
-        String(ws || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() || ''
-    );
 
     // ── The interaction axis: asked, or given a job? ────────────────────────
     //
@@ -180,6 +210,20 @@
         })();
         return () => { alive = false; };
     });
+
+    // The box is one line until it is being used. `open` is what reveals the
+    // controls — an empty three-line textarea plus six controls made the column
+    // look full before anything was in it.
+    //
+    // Tracked on the WHOLE composer, not the textarea. Pressing a button starts
+    // with the textarea losing focus, so a textarea-scoped blur closed the box —
+    // unmounting the very button being pressed — and the click never landed.
+    // That is why every control "just reverted" the box.
+    let focused = $state(false);
+    // The hero placement is ALWAYS open: it is the only thing on the screen, so
+    // there is nothing for the collapsed state to make room for — and a large
+    // empty middle containing one thin closed line is what this exists to fix.
+    const open = $derived(place === 'hero' || focused || !!prompt.trim());
 
     let taEl = $state(null);
     let popupEl = $state(null);
@@ -397,21 +441,34 @@
         </div>
 
         <!--
-          Where it will run and how, as a sentence rather than as fields. Pressing
-          it opens the modal that owns all of it (workspace, mode, MCP,
-          attachments) — one target instead of three, and the two things it shows
-          are the two the user would check before sending.
+          Where it will run and how — CHANGEABLE here.
+          It used to be one button that said the two values and opened the modal
+          to change either, so the commonest adjustment (run this somewhere else)
+          cost a modal, a scroll and a close. The modal still owns what does not
+          fit on a line — MCP servers and attachments — and "⋯" is the way to it.
         -->
-        <button type="button" class="mcomp-ctx"
-            title={`${ws || '(no workspace)'} · ${modeName(mode)}`}
-            onclick={() => onDetails?.({ prompt: prompt.trim(), ws: ws.trim(), interaction })}>
-            {@html icon('folder', 11)}
-            <span class="mcomp-ctx-ws">{wsName || t('composer.noWorkspace')}</span>
+        <div class="mcomp-ctx">
+            <ContextPicker
+                glyph="folder"
+                label={t('trig.workspace')}
+                title={ws || t('composer.noWorkspace')}
+                value={ws}
+                options={wsOptions}
+                onPick={pickWorkspace} />
+
             <span class="mcomp-ctx-sep">·</span>
-            {@html icon(MODE_ICON[mode?.id] || 'gear', 11)}
-            <span class="mcomp-ctx-mode">{modeName(mode)}</span>
-            <span class="mcomp-ctx-more">⋯</span>
-        </button>
+
+            <ContextPicker
+                glyph={MODE_ICON[mode?.id] || 'gear'}
+                label={t('trig.agent')}
+                title={modeName(mode)}
+                value={activeMode}
+                options={modeOptions}
+                onPick={(id) => (pickedMode = id)} />
+
+            <button type="button" class="mcomp-ctx-more" title={t('composer.details')}
+                onclick={() => onDetails?.({ prompt: prompt.trim(), ws: ws.trim(), interaction })}>⋯</button>
+        </div>
 
     {/if}
 </div>

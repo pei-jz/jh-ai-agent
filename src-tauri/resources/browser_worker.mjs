@@ -12,11 +12,12 @@
 //   ←  { id, result }  |  { id, error: { message } }
 //
 // Methods (all params optional unless noted):
+//   probe       {}                                     is Playwright resolvable? { ok } or an error
 //   launch      { headless?, browser? }                start browser (default chromium headless)
 //   navigate    { url }                                goto URL, returns { title, url }
 //   click       { selector }                           click element
 //   type        { selector, text, clear? }             fill input
-//   screenshot  { path?, fullPage? }                   save PNG, returns { path, bytes }
+//   screenshot  { path?, fullPage?, inline? }          save PNG, returns { path, bytes, data? }
 //   eval        { script }                             evaluate JS in page, returns { value }
 //   content     {}                                     returns { html } (truncated)
 //   close       {}                                     close browser
@@ -28,6 +29,12 @@ import readline from 'node:readline';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
+
+// Cap on the screenshot we hand back inline. A viewport shot is ~100-300 KB;
+// a tall fullPage one runs to megabytes, and every byte crosses the stdio
+// bridge on ONE line and then costs image tokens on each request it rides in.
+// Past the cap the file is still written — only the inline copy is dropped.
+const MAX_INLINE_SCREENSHOT_BYTES = 2 * 1024 * 1024;
 
 let browser = null;
 let context = null;
@@ -99,6 +106,14 @@ async function ensurePage() {
 }
 
 const handlers = {
+    // Answers "is Playwright there?" without launching a browser, so the
+    // settings screen can re-check after an install without paying for a
+    // chromium start-up just to find out.
+    async probe() {
+        await loadPlaywright();
+        return { ok: true };
+    },
+
     async launch(params = {}) {
         const pw = await loadPlaywright();
         const name = params.browser || 'chromium';
@@ -136,7 +151,15 @@ const handlers = {
         const p = await ensurePage();
         const path = params.path || `screenshot_${Date.now()}.png`;
         const buf = await p.screenshot({ path, fullPage: !!params.fullPage });
-        return { path, bytes: buf.length };
+        const out = { path, bytes: buf.length };
+        // The PNG also rides back inline so the agent can actually LOOK at the
+        // page it just rendered. Without this the model only ever learned that
+        // a file exists somewhere, which is worth nothing to it.
+        if (params.inline !== false) {
+            if (buf.length <= MAX_INLINE_SCREENSHOT_BYTES) out.data = buf.toString('base64');
+            else out.inline_skipped = 'too_large';
+        }
+        return out;
     },
 
     async eval(params = {}) {

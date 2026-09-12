@@ -87,7 +87,15 @@
            inside the text keeps those three as three things. */
         gap: var(--space-4);
         width: 100%;
-        max-width: 620px;
+        /* One decided measure for everything on this screen — the box, the
+           templates, the lot.
+           620px left the pane looking half-used once the inspector column
+           stopped taking a sixth of it. Uncapped was worse: a text box running
+           the full width of a maximised window has no shape, the Send button
+           ends up a hand's travel from the caret, and the eye has nothing to
+           come back to. 880 spends the room that was reclaimed and stops
+           there. */
+        max-width: 880px;
         text-align: center;
     }
     .wel > :global(.mcomp) { width: 100%; }
@@ -116,7 +124,6 @@
         flex-direction: column;
         gap: var(--space-2);
         width: 100%;
-        max-width: 460px;
         margin-top: var(--space-2);
     }
     /* A preset IS a control, so it keeps its edge — see the "Regions, not cards"

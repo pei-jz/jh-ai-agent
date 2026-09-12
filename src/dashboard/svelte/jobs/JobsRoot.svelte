@@ -175,14 +175,15 @@
                 <WatcherPanel />
             </div>
         </div>
+    {:else if !jobs.length}
+        <div class="sch-layout">
+            <SetupWizard onDone={wizardDone} onCancel={() => {}} />
+        </div>
     {:else}
         <div class="sch-layout">
             <ul class="trg-list jobs-list">
                 {#if !jobs.length}
-                    <li class="trg-empty">
-                        {t('jobs.empty')}
-                        <button class="btn btn-primary" onclick={onWizard}>{t('jobs.wizard')}</button>
-                    </li>
+                    <li class="trg-empty">{t('jobs.empty')}</li>
                 {/if}
                 {#each jobs as job (job.id)}
                     <li class="trg-item" class:active={selectedId === job.id}>

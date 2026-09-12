@@ -27,14 +27,19 @@
 -->
 <script>
     import { t } from '../../../i18n/index.js';
+    import { untrack } from 'svelte';
     import { invoke } from '@tauri-apps/api/core';
+    import { SlashCommands } from '../../components/SlashCommands.js';
     import { icon } from '../../utils/icons.js';
     import { AGENT_MODES, DEFAULT_MODE_ID, modeName } from '../../../modules/ai/AgentModes.js';
     import { recipeRegistry } from '../../../modules/ai/triggers/RecipeRegistry.js';
     import { watcherManager, fieldSecretId } from '../../../modules/ai/triggers/WatcherManager.js';
     import { jobManager } from '../../../modules/ai/jobs/JobManager.js';
+    import { skillManager } from '../../../modules/ai/SkillManager.js';
+    import { promptTemplateManager } from '../../../modules/ai/PromptTemplateManager.js';
     import { recipeHosts, payloadFields } from '../../../modules/ai/triggers/recipes/recipeFormat.js';
     import ScheduleFields from '../schedule/ScheduleFields.svelte';
+    import JobCatalog from './JobCatalog.svelte';
     import {
         STEPS, startOptions, findOption, initialState, stepProblems, buildPlan,
         timeTemplates, applyTemplate,
@@ -50,10 +55,29 @@
     } = $props();
 
     let recipes = $state([]);
-    let step = $state('start');
+    // 'catalog' is where the wizard OPENS. It is not a fourth step — the
+    // indicator still shows three — because it asks a different kind of
+    // question: not "which of these three am I on" but "do you know what you
+    // want yet". Answering it either picks a template (and lands on step 2 with
+    // both halves filled) or hands over to the trigger list unchanged.
+    let step = $state('catalog');
     let state = $state(initialState(null));
     let projects = $state([]);
+    let configuredMcp = $state([]);
+    // The skills that exist, for chip titles. The "/" popup reads the managers
+    // directly; this copy is only so a pinned skill shows its title rather than
+    // its file name, and so one that no longer exists can say so.
+    let skills = $state([]);
     let saving = $state(false);
+
+    // Step 3's prompt box works like the task composer's: "/" expands a prompt
+    // template or attaches a skill. Same helper, same behaviour — a second way
+    // of picking the same two things (a select and a checkbox list) was one
+    // more thing to learn for no difference in what it does.
+    let promptEl = $state(null);
+    let popupEl = $state(null);
+    let chipsEl = $state(null);
+    let slash = null;
     let templateNote = $state('');
 
     $effect(() => {
@@ -66,8 +90,54 @@
             try { config = (await invoke('get_ai_config')) || {}; } catch (_) { /* not under Tauri */ }
             if (!alive) return;
             projects = Array.isArray(config.approved_projects) ? config.approved_projects : [];
+            // Which MCP servers are configured, so a card can say what is
+            // missing instead of failing on its first run.
+            let mcp = config.mcp_servers;
+            try { if (typeof mcp === 'string') mcp = JSON.parse(mcp); } catch (_) { mcp = null; }
+            if (mcp && mcp.mcpServers) mcp = mcp.mcpServers;
+            configuredMcp = mcp && typeof mcp === 'object' ? Object.keys(mcp) : [];
+            try { promptTemplateManager.loadFromConfig(config); } catch (_) { /* none */ }
+            let found = [];
+            try { found = (await skillManager.refresh()) || []; } catch (_) { found = []; }
+            if (!alive) return;
+            skills = found;
+            // Titles arrived after the chips were drawn from bare names.
+            slash?.setSkills(skillChips(state.job.skills));
         })();
         return () => { alive = false; };
+    });
+
+    /**
+     * The job's pinned skills as chips.
+     *
+     * A name with no skill behind it keeps its chip, marked, rather than being
+     * dropped: a preset can pin a skill this machine does not have, and a job
+     * saved still pinning it would refuse every run over a name nothing on
+     * screen mentions.
+     */
+    function skillChips(names = []) {
+        return (names || []).map((name) => {
+            const s = skills.find(x => x.name === name);
+            if (s) return { name, title: s.title || name };
+            return { name, title: skills.length ? `${name}（${t('jobs.skills.missing')}）` : name };
+        });
+    }
+
+    // The popup lives only while step 3 is on screen; going Back unmounts the
+    // textarea and this tears it down with it.
+    $effect(() => {
+        if (!promptEl || !popupEl || !chipsEl) return;
+        const sc = new SlashCommands(promptEl, popupEl, chipsEl, {
+            // The chips ARE the job's skill list. Only names are kept: the body
+            // is read when the job runs, so an edit in the Skills tab reaches
+            // the next run instead of a copy taken today.
+            onSkillsChange: (list) => { state.job.skills = list.map(s => s.name); },
+        });
+        slash = sc;
+        // Untracked: this effect is about the ELEMENTS. Reading the skill list
+        // here would re-create the helper every time a chip is added.
+        untrack(() => sc.setSkills(skillChips(state.job.skills)));
+        return () => { sc.destroy(); if (slash === sc) slash = null; };
     });
 
     const groups = $derived(startOptions(recipes));
@@ -75,6 +145,8 @@
     const recipe = $derived(option?.recipe || null);
     const problems = $derived(stepProblems(step, state, option));
     const stepIndex = $derived(STEPS.indexOf(step));
+    /** The entry screen sits before step 1, so the dots read as "not started". */
+    const shownIndex = $derived(step === 'catalog' ? -1 : stepIndex);
     const templates = $derived(timeTemplates(recipes));
 
     /** What the recipe will talk to. The fact that decides whether to run it. */
@@ -95,12 +167,33 @@
         step = 'setup';
     }
 
+    /**
+     * A catalogue card is an option that already knows its work.
+     *
+     * For a clock template the schedule and the prompt both come from the
+     * recipe, so `applyTemplate` runs too and step 2 opens on a filled-in form
+     * rather than a default one.
+     */
+    function pickCard(card) {
+        const option = findOption(recipes, card.id);
+        if (!option) return;
+        state = initialState(option);
+        if (card.recipe?.schedule) state = applyTemplate(state, card.recipe);
+        templateNote = card.missingMcp?.length
+            ? t('wiz.mcp.missing', { names: card.missingMcp.join(', ') })
+            : '';
+        step = 'setup';
+    }
+
     function next() {
         if (problems.length) return;
         step = STEPS[Math.min(STEPS.length - 1, stepIndex + 1)];
     }
     function back() {
-        if (stepIndex <= 0) { onCancel(); return; }
+        if (step === 'catalog') { onCancel(); return; }
+        // Step 1 goes back to the catalogue, not out of the wizard: someone who
+        // opened "自分で作る" by mistake should not have to start over.
+        if (stepIndex <= 0) { step = 'catalog'; return; }
         step = STEPS[stepIndex - 1];
     }
 
@@ -117,6 +210,26 @@
         if (!r) return;
         state = applyTemplate(state, r);
         templateNote = t('wiz.tpl.applied', { name: r.name });
+        // The template replaced the skills along with the prompt; the chips
+        // are drawn by the helper, which cannot see `state` change.
+        slash?.setSkills(skillChips(state.job.skills));
+    }
+
+    /**
+     * Every server worth a checkbox: the configured ones, plus any the job
+     * already names that are NOT configured.
+     *
+     * The second half matters. A template that needs "backlog" on a machine
+     * without it would otherwise show no box at all — and the job would be
+     * saved still asking for a server nothing on screen mentions.
+     */
+    const mcpChoices = $derived([...new Set([...configuredMcp, ...(state.job.mcpServers || [])])]);
+
+    /** Tick or untick one MCP server, keeping `[]` for "none". */
+    function toggleMcp(name, on) {
+        const cur = new Set(state.job.mcpServers || []);
+        if (on) cur.add(name); else cur.delete(name);
+        state.job.mcpServers = [...cur];
     }
 
     const agentModes = Object.values(AGENT_MODES);
@@ -156,14 +269,18 @@
   <div class="wiz">
     <div class="wiz-steps">
         {#each STEPS as s, i (s)}
-            <span class="wiz-step" class:active={s === step} class:done={i < stepIndex}>
+            <span class="wiz-step" class:active={s === step} class:done={shownIndex >= 0 && i < shownIndex}>
                 <span class="wiz-num">{i + 1}</span>{t(`wiz.step.${s}`)}
             </span>
         {/each}
     </div>
 
     <div class="wiz-body">
-    {#if step === 'start'}
+    {#if step === 'catalog'}
+        <JobCatalog {recipes} {configuredMcp}
+            onPick={pickCard} onCustom={() => (step = 'start')} />
+
+    {:else if step === 'start'}
         <p class="sch-note">{t('wiz.start.hint')}</p>
         {#each groups as g (g.group)}
             <h4 class="wiz-group">{t(`wiz.group.${g.group}`)}</h4>
@@ -185,9 +302,11 @@
                  baseline and no host, so this step is the schedule and nothing
                  else — using the same control the schedule screen uses. -->
             <p class="sch-note">{t('wiz.time.hint')}</p>
+            {#if templateNote}<p class="rec-lock">{templateNote}</p>{/if}
             <ScheduleFields bind:value={state.schedule} idPrefix="wiz" />
         {:else}
             <p class="sch-note">{recipe?.description || ''}</p>
+            {#if templateNote}<p class="rec-lock">{templateNote}</p>{/if}
             <div class="wiz-grid">
                 <div class="sch-field wiz-wide">
                     <label for="wiz-wname">{t('wiz.watcherName')}</label>
@@ -275,8 +394,22 @@
                     placeholder={t('jobs.purpose.ph')} bind:value={state.job.purpose} />
             </div>
             <div class="sch-field wiz-wide">
-                <label for="wiz-prompt">{t('trig.prompt')}</label>
-                <textarea id="wiz-prompt" class="sch-textarea" rows="6" bind:value={state.job.prompt}></textarea>
+                <label for="wiz-prompt">{t('trig.prompt')} <span class="wiz-slash-hint">{t('wiz.prompt.slash')}</span></label>
+                <!-- Chips are the job's pinned skills; the popup opens above
+                     the box when it starts with "/". Both are drawn by the
+                     same helper the task composer uses. -->
+                <!-- A preset fills this box, and people read a filled box as
+                     fixed. It is the one field that decides what the job
+                     actually does, so it says outright that it is theirs. -->
+                {#if state.job.prompt}
+                    <span class="sch-note">{t('wiz.prompt.editable')}</span>
+                {/if}
+                <div class="sc-chips wiz-chips" bind:this={chipsEl}></div>
+                <div class="wiz-prompt-wrap">
+                    <div class="slash-popup wiz-slash" bind:this={popupEl}></div>
+                    <textarea id="wiz-prompt" class="sch-textarea" rows="6" bind:this={promptEl}
+                        bind:value={state.job.prompt}></textarea>
+                </div>
                 {#if fields.length}
                     <details class="wiz-vars">
                         <summary>{t('wiz.vars')}</summary>
@@ -288,6 +421,33 @@
                     </details>
                 {/if}
             </div>
+            <!-- Which OUTSIDE systems the work may touch — none unless ticked.
+                 Kept as a list rather than a "/" command: a server is not
+                 something you write into the prompt, it is a permission. -->
+            <fieldset class="fld-group wiz-wide wiz-tools">
+                <legend>{t('wiz.tools')}</legend>
+
+                <span class="sch-label">{t('jobs.mcp')}</span>
+                <span class="sch-note">{t('jobs.mcp.hint')}</span>
+                {#if !mcpChoices.length}
+                    <span class="sch-note">{t('jobs.mcp.none')}</span>
+                {:else}
+                    <div class="wiz-checks">
+                        {#each mcpChoices as name (name)}
+                            <label class="trg-check">
+                                <input type="checkbox"
+                                    checked={(state.job.mcpServers || []).includes(name)}
+                                    onchange={(e) => toggleMcp(name, e.currentTarget.checked)} />
+                                <span>{name}</span>
+                                {#if !configuredMcp.includes(name)}
+                                    <span class="rec-lock">{t('wiz.mcp.unset')}</span>
+                                {/if}
+                            </label>
+                        {/each}
+                    </div>
+                {/if}
+            </fieldset>
+
             <div class="sch-field wiz-wide">
                 <label for="wiz-ws">{t('trig.workspace')}</label>
                 <div class="trg-row">
@@ -324,11 +484,11 @@
 
     <div class="wiz-foot">
         <button class="btn btn-secondary" onclick={back}>
-            {stepIndex <= 0 ? t('jobs.cancel') : t('wiz.back')}
+            {step === 'catalog' ? t('jobs.cancel') : t('wiz.back')}
         </button>
         {#if step === 'work'}
             <button class="btn btn-primary" disabled={saving || problems.length > 0} onclick={finish}>{t('wiz.finish')}</button>
-        {:else if step !== 'start'}
+        {:else if step !== 'start' && step !== 'catalog'}
             <button class="btn btn-primary" disabled={problems.length > 0} onclick={next}>{t('wiz.next')}</button>
         {/if}
     </div>
@@ -381,5 +541,16 @@
     .wiz-opt-desc { color: var(--ink-soft); font-size: var(--fs-sm); line-height: 1.4; }
 
     .wiz-vars summary { cursor: pointer; font-size: var(--fs-sm); color: var(--ink-soft); }
+    /* The popup is positioned against this box (it opens ABOVE the textarea,
+       as in the task composer) and starts hidden until "/" is typed. */
+    .wiz-prompt-wrap { position: relative; display: flex; flex-direction: column; }
+    .wiz-slash { display: none; }
+    .wiz-chips { margin: 2px 0 0; }
+    .wiz-slash-hint { font-weight: normal; color: var(--ink-faint); font-size: var(--fs-sm); }
+    .wiz-tools { display: flex; flex-direction: column; gap: 4px; }
+    .wiz-tools .sch-label { margin-top: 6px; }
+    /* Checkboxes flow in rows: eight skills one per line pushed the Create
+       button a screen away. */
+    .wiz-checks { display: flex; flex-wrap: wrap; gap: 4px 16px; }
     .wiz-foot { display: flex; gap: 8px; padding-top: 12px; border-top: 1px solid var(--line-soft); }
 </style>

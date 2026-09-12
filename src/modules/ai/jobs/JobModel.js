@@ -20,6 +20,12 @@
 //
 // See the design report and docs/design/autonomy-triggers.md §11.
 
+// PURE still: `t()` is a synchronous lookup in a static catalog, with no I/O and
+// no state of its own. It is here because the one thing this file returns FOR A
+// PERSON — the line the list shows under a job's name — was written in Japanese
+// in the source, and stayed Japanese in an English UI.
+import { t } from '../../../i18n/index.js';
+
 /** A job with nothing filled in. */
 export const JOB_DEFAULTS = {
     enabled: false,        // as with triggers: never live the moment it exists
@@ -28,6 +34,11 @@ export const JOB_DEFAULTS = {
     workspacePath: '',
     agentModeId: null,
     mcpServers: [],
+    // Skills PINNED to this job, by name. Every run still sees the whole
+    // catalogue and may load any skill it judges relevant; a pinned one is
+    // loaded whether or not the model would have picked it. That difference
+    // matters only when nobody is watching — which is exactly when a job runs.
+    skills: [],
     triggers: [],
     // Guards live on the JOB, not per trigger: "do not run this more than N
     // times an hour" is a property of the work, not of one way of starting it.
@@ -43,6 +54,29 @@ export const JOB_DEFAULTS = {
     spent: { tokens: 0, cost: 0, runs: 0 },
     runs: [],
 };
+
+/**
+ * The prompt a run is actually sent: pinned skills first, then the work.
+ *
+ * The same shape `/skill` produces in the chat composer
+ * (SlashCommands.buildPrompt), so a procedure reads identically whether a
+ * person attached it or a job did.
+ *
+ * Bodies are read at RUN time and passed in here, never stored on the job. A
+ * skill is edited in the Skills tab; a copy baked into the job the day it was
+ * created would keep running the old procedure for ever, with nothing on
+ * either screen to say the two had drifted.
+ *
+ * @param {string} prompt
+ * @param {Array<{name: string, title?: string, body: string}>} loaded
+ */
+export function withSkills(prompt, loaded = []) {
+    const bodies = (loaded || [])
+        .filter(s => s && s.body)
+        .map(s => `# Skill: ${s.title || s.name} (/${s.name})\n${s.body}`);
+    if (!bodies.length) return prompt || '';
+    return `${bodies.join('\n\n')}\n\n---\n\n${prompt || ''}`;
+}
 
 /** Runs kept per job. Enough to answer "why did this run?", not a log. */
 export const RUN_HISTORY = 100;
@@ -73,13 +107,13 @@ export function monthDay(dayOfMonth, now) {
  * trigger without the two living in different subsystems.
  */
 export function timeTriggerDue(trigger, now) {
-    const t = trigger || {};
-    const type = t.scheduleType || 'fixed';
+    const tr = trigger || {};
+    const type = tr.scheduleType || 'fixed';
     const hhmm = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
 
     if (type === 'once') {
-        if (!t.onceAt) return false;
-        const target = new Date(t.onceAt);
+        if (!tr.onceAt) return false;
+        const target = new Date(tr.onceAt);
         return target.getFullYear() === now.getFullYear()
             && target.getMonth() === now.getMonth()
             && target.getDate() === now.getDate()
@@ -90,17 +124,17 @@ export function timeTriggerDue(trigger, now) {
     if (type === 'monthly') {
         // A day of the MONTH, so the weekday list does not apply — combining
         // them would produce a schedule that skips most months.
-        return now.getDate() === monthDay(t.dayOfMonth ?? 1, now) && t.time === hhmm;
+        return now.getDate() === monthDay(tr.dayOfMonth ?? 1, now) && tr.time === hhmm;
     }
 
-    const days = t.days || [1, 2, 3, 4, 5];
+    const days = tr.days || [1, 2, 3, 4, 5];
     if (!days.includes(now.getDay())) return false;
 
     if (type === 'interval') {
-        const intervalMin = Math.max(1, parseInt(t.intervalMinutes, 10) || 60);
+        const intervalMin = Math.max(1, parseInt(tr.intervalMinutes, 10) || 60);
         return now.getMinutes() % intervalMin === 0;
     }
-    return t.time === hhmm;      // fixed
+    return tr.time === hhmm;      // fixed
 }
 
 /** Did this job already run inside the same minute as `now`? */
@@ -116,6 +150,15 @@ export function ranThisMinute(job, now) {
 }
 
 /**
+ * "Not set", in the app's language.
+ *
+ * A getter rather than a constant: the catalog is read when the summary is
+ * built, so switching language re-labels the list instead of keeping whatever
+ * was current when this module was first imported.
+ */
+export const unsetLabel = () => t('jobs.sum.unset');
+
+/**
  * A short, readable line for what starts a job.
  *
  * Never empty. This is the only thing the list shows about a trigger, and a
@@ -123,25 +166,28 @@ export function ranThisMinute(job, now) {
  * from a rendering bug, and giving no hint that the fix is to finish filling it
  * in.
  */
-export const UNSET = '(未設定)';
-
 export function triggerSummary(trigger) {
-    const t = trigger || {};
-    if (t.kind === 'time') {
-        const type = t.scheduleType || 'fixed';
-        if (type === 'interval') return `${t.intervalMinutes || 60}分ごと`;
-        if (type === 'monthly') return `毎月${t.dayOfMonth ?? 1}日 ${t.time || UNSET}`;
-        if (type === 'once') return t.onceAt ? `${t.onceAt} に1回` : `1回だけ ${UNSET}`;
-        return t.time || UNSET;
+    const tr = trigger || {};
+    const unset = unsetLabel();
+    if (tr.kind === 'time') {
+        const type = tr.scheduleType || 'fixed';
+        if (type === 'interval') return t('jobs.sum.interval', { n: tr.intervalMinutes || 60 });
+        if (type === 'monthly') {
+            return t('jobs.sum.monthly', { day: tr.dayOfMonth ?? 1, time: tr.time || unset });
+        }
+        if (type === 'once') {
+            return tr.onceAt ? t('jobs.sum.once', { at: tr.onceAt }) : t('jobs.sum.onceUnset');
+        }
+        return tr.time || unset;
     }
-    if (t.kind === 'event') {
-        const m = t.match || {};
-        return m.event || (m.eventPrefix ? `${m.eventPrefix}*` : 'すべて');
+    if (tr.kind === 'event') {
+        const m = tr.match || {};
+        return m.event || (m.eventPrefix ? `${m.eventPrefix}*` : t('jobs.sum.anyEvent'));
     }
-    if (t.kind === 'watch') {
-        return t.sourceName || t.sourceId || t.source?.type || UNSET;
+    if (tr.kind === 'watch') {
+        return tr.sourceName || tr.sourceId || tr.source?.type || unset;
     }
-    return t.kind || UNSET;
+    return tr.kind || unset;
 }
 
 /**
@@ -198,7 +244,7 @@ export function jobFromSchedule(s) {
     return {
         ...JOB_DEFAULTS,
         id: `job_${s.id || Date.now()}`,
-        name: s.name || (s.prompt || '').slice(0, 40) || '(無題)',
+        name: s.name || (s.prompt || '').slice(0, 40) || t('jobs.untitled2'),
         purpose: '',
         enabled: !!s.enabled,
         prompt: s.prompt || '',
@@ -217,24 +263,24 @@ export function jobFromSchedule(s) {
 }
 
 /** One trigger → one job with a single event trigger. */
-export function jobFromTrigger(t) {
+export function jobFromTrigger(tr) {
     return {
         ...JOB_DEFAULTS,
-        id: `job_${t.id || Date.now()}`,
-        name: t.name || t.id || '(無題)',
-        enabled: !!t.enabled,
-        prompt: t.prompt || '',
-        workspacePath: t.workspacePath || '',
-        agentModeId: t.agentModeId || null,
-        mcpServers: Array.isArray(t.mcpServers) ? t.mcpServers : [],
-        triggers: [{ kind: 'event', match: { ...(t.match || {}) } }],
-        debounceMs: t.debounceMs ?? JOB_DEFAULTS.debounceMs,
-        cooldownMs: t.cooldownMs ?? JOB_DEFAULTS.cooldownMs,
-        dedupeWindowMs: t.dedupeWindowMs ?? JOB_DEFAULTS.dedupeWindowMs,
-        maxPerHour: t.maxPerHour ?? JOB_DEFAULTS.maxPerHour,
-        concurrency: t.concurrency || JOB_DEFAULTS.concurrency,
-        disabledReason: t.disabledReason,
-        runs: Array.isArray(t.runs) ? t.runs.slice(-RUN_HISTORY) : [],
+        id: `job_${tr.id || Date.now()}`,
+        name: tr.name || tr.id || t('jobs.untitled2'),
+        enabled: !!tr.enabled,
+        prompt: tr.prompt || '',
+        workspacePath: tr.workspacePath || '',
+        agentModeId: tr.agentModeId || null,
+        mcpServers: Array.isArray(tr.mcpServers) ? tr.mcpServers : [],
+        triggers: [{ kind: 'event', match: { ...(tr.match || {}) } }],
+        debounceMs: tr.debounceMs ?? JOB_DEFAULTS.debounceMs,
+        cooldownMs: tr.cooldownMs ?? JOB_DEFAULTS.cooldownMs,
+        dedupeWindowMs: tr.dedupeWindowMs ?? JOB_DEFAULTS.dedupeWindowMs,
+        maxPerHour: tr.maxPerHour ?? JOB_DEFAULTS.maxPerHour,
+        concurrency: tr.concurrency || JOB_DEFAULTS.concurrency,
+        disabledReason: tr.disabledReason,
+        runs: Array.isArray(tr.runs) ? tr.runs.slice(-RUN_HISTORY) : [],
         migratedFrom: 'trigger',
     };
 }
@@ -260,16 +306,16 @@ export function sourceFromWatcher(w) {
  */
 export function linkWatchers(jobs, sources) {
     for (const job of jobs) {
-        job.triggers = job.triggers.map((t) => {
-            if (t.kind !== 'event') return t;
-            const name = t.match?.event;
-            if (!name) return t;
+        job.triggers = job.triggers.map((tr) => {
+            if (tr.kind !== 'event') return tr;
+            const name = tr.match?.event;
+            if (!name) return tr;
             const src = sources.find(s => s.eventName === name);
             // REPLACED, not paired. Adding a watch trigger beside the event
             // trigger produced the thing this fixes: two rows to fill in for
             // one intention, the second of which only repeats the name the
             // first already knows.
-            return src ? { kind: 'watch', sourceId: src.id } : t;
+            return src ? { kind: 'watch', sourceId: src.id } : tr;
         });
     }
     return jobs;

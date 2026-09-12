@@ -8,12 +8,15 @@
 -->
 <script>
     import { t } from '../../../i18n/index.js';
+    import { untrack } from 'svelte';
     import { invoke } from '@tauri-apps/api/core';
+    import { SlashCommands } from '../../components/SlashCommands.js';
     import { icon } from '../../utils/icons.js';
     import { AGENT_MODES, DEFAULT_MODE_ID, modeName } from '../../../modules/ai/AgentModes.js';
     import { triggerSummary, overBudget } from '../../../modules/ai/jobs/JobModel.js';
     import { mcpManager } from '../../../modules/ai/McpManager.js';
     import { promptTemplateManager } from '../../../modules/ai/PromptTemplateManager.js';
+    import { skillManager } from '../../../modules/ai/SkillManager.js';
     import ScheduleFields from '../schedule/ScheduleFields.svelte';
 
     let {
@@ -30,7 +33,16 @@
 
     let projects = $state([]);
     let mcpNames = $state([]);
-    let templates = $state([]);
+    // Only for chip titles; the "/" popup reads the managers directly.
+    let skills = $state([]);
+
+    // The prompt box works like the task composer's: "/" expands a template or
+    // attaches a skill, and the attached skills ARE the job's pinned list.
+    let promptEl = $state(null);
+    let popupEl = $state(null);
+    let chipsEl = $state(null);
+    let slash = null;
+
     $effect(() => {
         let alive = true;
         (async () => {
@@ -39,12 +51,39 @@
             if (!alive) return;
             projects = Array.isArray(config.approved_projects) ? config.approved_projects : [];
             mcpNames = Object.keys(config.mcp_servers || mcpManager.serversConfig?.mcpServers || {});
-            try {
-                promptTemplateManager.loadFromConfig(config);
-                templates = promptTemplateManager.getAll() || [];
-            } catch (_) { templates = []; }
+            try { promptTemplateManager.loadFromConfig(config); } catch (_) { /* none */ }
+            let found = [];
+            try { found = (await skillManager.refresh()) || []; } catch (_) { found = []; }
+            if (!alive) return;
+            skills = found;
+            slash?.setSkills(skillChips(untrack(() => job?.skills)));
         })();
         return () => { alive = false; };
+    });
+
+    /**
+     * The job's pinned skills as chips. A pinned name with no skill behind it
+     * keeps its chip, marked, so it can be removed — hiding it would leave the
+     * job refusing every run over a name nothing on screen mentions.
+     */
+    function skillChips(names = []) {
+        return (names || []).map((name) => {
+            const s = skills.find(x => x.name === name);
+            if (s) return { name, title: s.title || name };
+            return { name, title: skills.length ? `${name}（${t('jobs.skills.missing')}）` : name };
+        });
+    }
+
+    // Lives while the edit form is on screen. Keyed on the elements only;
+    // reading `job.skills` here would rebuild the helper on every chip.
+    $effect(() => {
+        if (!promptEl || !popupEl || !chipsEl) return;
+        const sc = new SlashCommands(promptEl, popupEl, chipsEl, {
+            onSkillsChange: (list) => { if (job) job.skills = list.map(s => s.name); },
+        });
+        slash = sc;
+        untrack(() => sc.setSkills(skillChips(job?.skills)));
+        return () => { sc.destroy(); if (slash === sc) slash = null; };
     });
 
     /**
@@ -58,15 +97,6 @@
         const cur = new Set(job.mcpServers || []);
         if (on) cur.add(name); else cur.delete(name);
         job.mcpServers = [...cur];
-    }
-
-    /** Paste a template's text into the prompt rather than replacing it. */
-    function insertTemplate(key) {
-        if (!key) return;
-        const tpl = promptTemplateManager.get(key);
-        const body = tpl?.prompt || tpl?.text || '';
-        if (!body) return;
-        job.prompt = job.prompt ? `${job.prompt}\n${body}` : body;
     }
 
     const agentModes = Object.values(AGENT_MODES);
@@ -143,24 +173,20 @@
             </div>
 
             <div class="sch-field trg-span">
-                <label for="job-prompt">{t('trig.prompt')}</label>
-                <textarea id="job-prompt" class="sch-textarea" rows="4" bind:value={job.prompt}></textarea>
-                {#if templates.length}
-                    <div class="trg-row">
-                        <select class="sch-select job-tpl"
-                            onchange={(e) => { insertTemplate(e.currentTarget.value); e.currentTarget.value = ''; }}>
-                            <option value="">{t('jobs.tpl')}</option>
-                            {#each templates as tpl (tpl.key)}
-                                <option value={tpl.key}>{tpl.icon || ''} {tpl.label || tpl.key}</option>
-                            {/each}
-                        </select>
-                    </div>
-                {/if}
+                <label for="job-prompt">{t('trig.prompt')} <span class="job-slash-hint">{t('wiz.prompt.slash')}</span></label>
+                <!-- Skills attached with "/" show as chips and are PINNED:
+                     loaded on every run, whatever the model would have chosen.
+                     Every run still sees the whole catalogue as well. -->
+                <div class="sc-chips job-chips" bind:this={chipsEl}></div>
+                <div class="job-prompt-wrap">
+                    <div class="slash-popup job-slash" bind:this={popupEl}></div>
+                    <textarea id="job-prompt" class="sch-textarea" rows="4" bind:this={promptEl}
+                        bind:value={job.prompt}></textarea>
+                </div>
             </div>
 
-            <!-- The tools this job may reach for. Skills are NOT here: the
-                 catalogue is offered to every run automatically and the agent
-                 loads a body when one applies, so there is nothing to pick. -->
+            <!-- Which OUTSIDE systems the job may touch. A list, not a "/"
+                 command: a server is a permission, not text in the prompt. -->
             <div class="sch-field trg-span">
                 <span class="sch-label">{t('jobs.mcp')}</span>
                 <span class="sch-note">{t('jobs.mcp.hint')}</span>
@@ -178,7 +204,6 @@
                         {/each}
                     </div>
                 {/if}
-                <span class="sch-note">{t('jobs.skills.hint')}</span>
             </div>
 
             <div class="sch-field">
@@ -346,7 +371,11 @@
     .job-trlist { list-style: none; margin: 0; padding: 0; }
     .job-trlist li { display: flex; gap: 8px; align-items: center; padding: 2px 0; }
     .job-num { width: 110px; }
-    .job-tpl { max-width: 320px; }
+    /* The "/" popup opens above the box, as in the task composer. */
+    .job-prompt-wrap { position: relative; display: flex; flex-direction: column; }
+    .job-slash { display: none; }
+    .job-chips { margin: 2px 0 0; }
+    .job-slash-hint { font-weight: normal; color: var(--ink-faint); font-size: var(--fs-sm); }
     .job-mcp { display: flex; flex-wrap: wrap; gap: 10px 18px; }
     .job-spend {
         display: flex; gap: 20px; align-items: baseline; flex-wrap: wrap;

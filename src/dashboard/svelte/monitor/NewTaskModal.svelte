@@ -21,7 +21,7 @@
     import { untrack } from 'svelte';
     import { invoke } from '@tauri-apps/api/core';
     import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
-    import { AGENT_MODES, DEFAULT_MODE_ID } from '../../../modules/ai/AgentModes.js';
+    import { AGENT_MODES, DEFAULT_MODE_ID, modeDescription } from '../../../modules/ai/AgentModes.js';
     import { ASK, BUILD } from '../../../modules/ai/agent/InteractionMode.js';
     import { looksReadOnly } from '../../../modules/ai/agent/TaskComplexity.js';
     import { mcpManager } from '../../../modules/ai/McpManager.js';
@@ -85,7 +85,7 @@
     let fileInputEl = $state(null);
     let slash = null;
 
-    const modeDesc = $derived(AGENT_MODES[modeId]?.description || '');
+    const modeDesc = $derived(modeDescription(AGENT_MODES[modeId]));
     const mcpNames = $derived(Object.keys(mcpServers));
 
     $effect(() => {
@@ -274,7 +274,7 @@
                 <div class="nt-mode-group">
                     {#each modes as mo (mo.id)}
                         <button type="button" class="nt-mode-btn" class:sel={mo.id === modeId}
-                            data-id={mo.id} title={mo.description || ''}
+                            data-id={mo.id} title={modeDescription(mo)}
                             onclick={() => (modeId = mo.id)}>
                             <span class="nt-mode-ico">{@html icon(MODE_ICON[mo.id] || 'gear')}</span>
                             <span class="nt-mode-name">{modeName(mo)}</span>

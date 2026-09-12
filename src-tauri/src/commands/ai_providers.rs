@@ -23,7 +23,7 @@ pub(crate) fn model_supports_vision(provider: &str, model: &str) -> bool {
         // For OpenAI-compatible endpoints, only KNOWN vision-capable model
         // families get images. Unknown ones (DeepSeek, most local models) default
         // to text-only to avoid the 400 error.
-        "openai" | "azure" | "generic" => {
+        "openai" | "azure" | "generic" | "openai_responses" => {
             // Treat the whole GPT family + reasoning o-series as vision-capable so
             // future models qualify automatically. Known text-only OpenAI-compatible
             // models (DeepSeek etc.) don't contain "gpt"/"chatgpt" and are excluded.
@@ -140,6 +140,112 @@ pub(crate) fn split_system_on_cache_break(sys: &str, sentinel: &str) -> (String,
     }
 }
 
+/// Whether an explicit `temperature` may be sent for this model.
+///
+/// The reasoning models (gpt-5 family, o-series) reject the parameter outright —
+/// "Unsupported parameter: temperature" with a 400 — and those are exactly the
+/// models anyone turns the Responses API on FOR. `temperature` is a
+/// per-connection setting, so without this guard a connection that had it set
+/// for a chat model 400s the moment it is pointed at a reasoning model.
+///
+/// `gpt-5-chat` is the non-reasoning chat variant and does take temperature.
+pub(crate) fn model_accepts_temperature(model: &str) -> bool {
+    let m = model.to_lowercase();
+    let reasoning = (m.contains("gpt-5") && !m.contains("chat"))
+        || m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4")
+        || m.contains("-o1") || m.contains("-o3") || m.contains("-o4");
+    !reasoning
+}
+
+/// Build the Responses API `input` array from the same history the Chat
+/// Completions path gets.
+///
+/// The shapes differ in three places, and only three:
+///   • a tool CALL is a top-level `function_call` item, not a field on the
+///     assistant turn;
+///   • a tool RESULT is a top-level `function_call_output` item keyed by
+///     `call_id`, not a `role:"tool"` message keyed by `tool_call_id`;
+///   • image parts are `input_image` with a bare `image_url` string, not
+///     `image_url: {url}`.
+/// Plain turns keep the `{role, content}` shape, which Responses accepts as-is.
+///
+/// The system prompt is NOT an input item here — it goes in `instructions`.
+/// Pure; mirrors build_openai_messages so the two can be compared side by side.
+pub(crate) fn build_responses_input(
+    messages: Vec<LlmMessage>,
+    images: &Option<Vec<String>>,
+    vision_ok: bool,
+) -> Vec<serde_json::Value> {
+    let mut input = Vec::new();
+    let has_images = images.as_ref().map_or(false, |i| !i.is_empty());
+    let msg_len = messages.len();
+    for (i, m) in messages.into_iter().enumerate() {
+        if m.role == "assistant" && m.tool_calls.is_some() {
+            if !m.content.trim().is_empty() {
+                input.push(serde_json::json!({ "role": "assistant", "content": m.content }));
+            }
+            if let Some(arr) = m.tool_calls.as_ref().and_then(|v| v.as_array()) {
+                for tc in arr {
+                    let f = &tc["function"];
+                    // Arguments stay a STRING on both protocols, so no reparse.
+                    let args = f["arguments"].as_str().unwrap_or("{}").to_string();
+                    input.push(serde_json::json!({
+                        "type": "function_call",
+                        "call_id": tc["id"].as_str().unwrap_or("call_0"),
+                        "name": f["name"].as_str().unwrap_or(""),
+                        "arguments": args
+                    }));
+                }
+            }
+            continue;
+        }
+        if m.role == "tool" {
+            match m.tool_call_id {
+                Some(id) => input.push(serde_json::json!({
+                    "type": "function_call_output",
+                    "call_id": id,
+                    "output": m.content
+                })),
+                // No id to answer — sending it as a function_call_output would
+                // 400. Downgrade to user text, as the Chat path does.
+                None => input.push(serde_json::json!({
+                    "role": "user",
+                    "content": format!("[Tool result{}]\n{}",
+                        m.name.map(|n| format!(" — {}", n)).unwrap_or_default(), m.content)
+                })),
+            }
+            continue;
+        }
+
+        let is_last_user = m.role == "user" && i + 1 == msg_len;
+        if is_last_user && has_images && vision_ok {
+            let mut parts = vec![serde_json::json!({ "type": "input_text", "text": m.content })];
+            if let Some(imgs) = images {
+                for img in imgs {
+                    let (mime, data) = parse_image_data_url(img);
+                    parts.push(serde_json::json!({
+                        "type": "input_image",
+                        "image_url": format!("data:{};base64,{}", mime, data)
+                    }));
+                }
+            }
+            input.push(serde_json::json!({ "role": "user", "content": parts }));
+        } else if is_last_user && has_images && !vision_ok {
+            let n = images.as_ref().map(|v| v.len()).unwrap_or(0);
+            input.push(serde_json::json!({
+                "role": "user",
+                "content": format!(
+                    "{}\n\n[Note: {} image(s) were attached but the current model does not support image input, so they were omitted.]",
+                    m.content, n
+                )
+            }));
+        } else {
+            input.push(serde_json::json!({ "role": m.role, "content": m.content }));
+        }
+    }
+    input
+}
+
 // ── Tool-definition helpers (Structured Outputs / strict) ──────────────────
 
 /// Prepare OpenAI-format tools for the request body: strip the `_strict_ok`
@@ -185,6 +291,44 @@ pub(crate) fn clean_openai_tools(tools: &serde_json::Value, strict_supported: bo
         })
         .collect();
     serde_json::Value::Array(cleaned)
+}
+
+/// Convert Chat-Completions tool definitions to the Responses API shape.
+///
+/// Same JSON Schema, different envelope: Responses puts `name`, `description`,
+/// `parameters` and `strict` at the TOP level of the tool instead of nesting
+/// them under `function`. Runs `clean_openai_tools` first so the nameless-tool
+/// filter and the `_strict_ok` handling stay in one place.
+///
+/// `parameters` is required here (Chat tolerates its absence), so a tool without
+/// one gets an empty object rather than a 400.
+pub(crate) fn openai_tools_to_responses(
+    tools: &serde_json::Value,
+    strict_supported: bool,
+) -> serde_json::Value {
+    let cleaned = clean_openai_tools(tools, strict_supported);
+    let arr = match cleaned.as_array() {
+        Some(a) => a,
+        None => return serde_json::Value::Array(vec![]),
+    };
+    let out: Vec<serde_json::Value> = arr
+        .iter()
+        .map(|t| {
+            let f = &t["function"];
+            let params = f.get("parameters").cloned()
+                .unwrap_or_else(|| serde_json::json!({ "type": "object", "properties": {} }));
+            serde_json::json!({
+                "type": "function",
+                "name": f["name"].as_str().unwrap_or(""),
+                "description": f["description"].as_str().unwrap_or(""),
+                "parameters": params,
+                // clean_openai_tools only sets strict where the schema qualifies;
+                // claiming it elsewhere would 400 on the schema check.
+                "strict": f.get("strict").and_then(|v| v.as_bool()).unwrap_or(false)
+            })
+        })
+        .collect();
+    serde_json::Value::Array(out)
 }
 
 /// Convert OpenAI-format tools to Gemini `functionDeclarations`. Returns None
@@ -664,6 +808,67 @@ pub(crate) fn build_request_body(
             }
             body_obj
         }
+        // ── Responses API ────────────────────────────────────────────────
+        // Reached when an openai connection sets api_style "responses";
+        // llm_chat_native rewrites the dispatch key (see ai.rs).
+        "openai_responses" => {
+            let vision_ok = model_supports_vision(provider, model);
+            // The cache-break split is kept here deliberately. v1 does not use
+            // previous_response_id — it re-sends the whole history every turn —
+            // so OpenAI's automatic prefix cache works the same way it does on
+            // Chat Completions, and the same stable/volatile split is what makes
+            // it hit. The stable half becomes `instructions`; the volatile half
+            // is re-injected as the final user turn.
+            let (sys_stable, sys_volatile) = match system_prompt {
+                Some(s) => {
+                    let (stable, volatile) = split_system_on_cache_break(&s, SYS_CACHE_BREAK);
+                    (Some(stable), volatile)
+                }
+                None => (None, None),
+            };
+            let mut input = build_responses_input(messages, images, vision_ok);
+            if let Some(vol) = sys_volatile {
+                input.push(serde_json::json!({
+                    "role": "user",
+                    "content": format!(
+                        "[Current Task Context — treat as system-level instructions; auto-updated each step]\n{}",
+                        vol
+                    )
+                }));
+            }
+            let mut body_obj = serde_json::json!({
+                "model": model,
+                "input": input,
+                "stream": true,
+                // Nothing to keep server-side while the whole history is sent
+                // every turn. Flip this on with previous_response_id, not before.
+                "store": false
+            });
+            if let Some(obj) = body_obj.as_object_mut() {
+                if let Some(sys) = sys_stable {
+                    if !sys.trim().is_empty() {
+                        obj.insert("instructions".to_string(), serde_json::json!(sys));
+                    }
+                }
+                // Chat calls this max_tokens; Responses renamed it.
+                if let Some(mt) = resolved_max_tokens {
+                    obj.insert("max_output_tokens".to_string(), serde_json::json!(mt));
+                }
+                // Silently dropped for reasoning models rather than 400-ing the
+                // whole request over a setting the user made for another model.
+                if let Some(temp) = resolved_temperature {
+                    if model_accepts_temperature(model) {
+                        obj.insert("temperature".to_string(), serde_json::json!(temp));
+                    }
+                }
+                if let Some(tools) = tools {
+                    let converted = openai_tools_to_responses(tools, true);
+                    obj.insert("tools".to_string(), converted);
+                    obj.insert("tool_choice".to_string(), serde_json::json!("auto"));
+                }
+            }
+            body_obj
+        }
         "anthropic" => {
             let mut full_messages: Vec<serde_json::Value> = Vec::new();
             let msgs = messages;
@@ -997,3 +1202,249 @@ mod max_output_tests {
     }
 }
 
+
+#[cfg(test)]
+mod responses_api_tests {
+    use super::*;
+
+    fn msg(role: &str, content: &str) -> LlmMessage {
+        LlmMessage {
+            role: role.to_string(),
+            content: content.to_string(),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }
+    }
+
+    fn tools() -> serde_json::Value {
+        serde_json::json!([
+            {
+                "type": "function",
+                "_strict_ok": true,
+                "function": {
+                    "name": "read_file",
+                    "description": "Read a file",
+                    "parameters": {
+                        "type": "object",
+                        "properties": { "path": { "type": "string" } },
+                        "required": ["path"],
+                        "additionalProperties": false
+                    }
+                }
+            }
+        ])
+    }
+
+    // ── temperature guard ────────────────────────────────────────────────
+
+    #[test]
+    fn a_reasoning_model_is_not_sent_a_temperature() {
+        assert!(!model_accepts_temperature("gpt-5"));
+        assert!(!model_accepts_temperature("gpt-5-mini"));
+        assert!(!model_accepts_temperature("o1-preview"));
+        assert!(!model_accepts_temperature("o3"));
+        assert!(!model_accepts_temperature("o4-mini"));
+    }
+
+    #[test]
+    fn an_ordinary_model_still_gets_one() {
+        assert!(model_accepts_temperature("gpt-4o"));
+        assert!(model_accepts_temperature("gpt-4.1"));
+        // The chat variant of gpt-5 is NOT a reasoning model and does take it.
+        assert!(model_accepts_temperature("gpt-5-chat-latest"));
+    }
+
+    #[test]
+    fn the_guard_actually_removes_it_from_the_body() {
+        let body = build_request_body(
+            "openai_responses", "o3",
+            vec![msg("user", "hi")],
+            None, &None, &None, None, Some(0.2),
+        );
+        assert!(body.get("temperature").is_none());
+
+        let body = build_request_body(
+            "openai_responses", "gpt-4o",
+            vec![msg("user", "hi")],
+            None, &None, &None, None, Some(0.2),
+        );
+        // f32 → JSON widens (0.2f32 is 0.20000000298…), so compare as a number.
+        let sent = body["temperature"].as_f64().expect("temperature must be sent");
+        assert!((sent - 0.2).abs() < 1e-6, "got {}", sent);
+    }
+
+    // ── request body shape ───────────────────────────────────────────────
+
+    #[test]
+    fn the_body_uses_the_responses_field_names() {
+        let body = build_request_body(
+            "openai_responses", "gpt-5",
+            vec![msg("user", "hello")],
+            Some("be brief".to_string()),
+            &None, &None, Some(2048), None,
+        );
+        // Renamed / restructured fields.
+        assert_eq!(body["instructions"], serde_json::json!("be brief"));
+        assert_eq!(body["max_output_tokens"], serde_json::json!(2048));
+        assert!(body["input"].is_array());
+        assert_eq!(body["stream"], serde_json::json!(true));
+        assert_eq!(body["store"], serde_json::json!(false));
+        // Chat-only fields must NOT leak through.
+        assert!(body.get("messages").is_none());
+        assert!(body.get("max_tokens").is_none());
+        assert!(body.get("stream_options").is_none());
+        // The system prompt is instructions, not an input item.
+        assert_eq!(body["input"][0]["role"], serde_json::json!("user"));
+    }
+
+    #[test]
+    fn the_volatile_system_tail_becomes_the_last_input_turn() {
+        let sys = format!("STABLE PART{}VOLATILE PART", SYS_CACHE_BREAK);
+        let body = build_request_body(
+            "openai_responses", "gpt-4o",
+            vec![msg("user", "hello")],
+            Some(sys), &None, &None, None, None,
+        );
+        assert_eq!(body["instructions"], serde_json::json!("STABLE PART"));
+        let input = body["input"].as_array().unwrap();
+        let last = input.last().unwrap();
+        assert_eq!(last["role"], serde_json::json!("user"));
+        assert!(last["content"].as_str().unwrap().contains("VOLATILE PART"));
+    }
+
+    // ── history round trip ───────────────────────────────────────────────
+
+    #[test]
+    fn a_tool_call_turn_becomes_two_top_level_items() {
+        let mut assistant = msg("assistant", "looking");
+        assistant.tool_calls = Some(serde_json::json!([
+            { "id": "call_abc", "type": "function",
+              "function": { "name": "read_file", "arguments": "{\"path\":\"a.js\"}" } }
+        ]));
+        let mut result = msg("tool", "file contents");
+        result.tool_call_id = Some("call_abc".to_string());
+
+        let input = build_responses_input(vec![assistant, result], &None, false);
+        assert_eq!(input.len(), 3);
+        // The assistant's own text stays a message…
+        assert_eq!(input[0]["role"], serde_json::json!("assistant"));
+        // …the call is its own item, keyed by call_id (not tool_call_id)…
+        assert_eq!(input[1]["type"], serde_json::json!("function_call"));
+        assert_eq!(input[1]["call_id"], serde_json::json!("call_abc"));
+        assert_eq!(input[1]["name"], serde_json::json!("read_file"));
+        // arguments stay a STRING, as on the Chat protocol
+        assert!(input[1]["arguments"].is_string());
+        // …and so is the result, referencing the same call_id.
+        assert_eq!(input[2]["type"], serde_json::json!("function_call_output"));
+        assert_eq!(input[2]["call_id"], serde_json::json!("call_abc"));
+        assert_eq!(input[2]["output"], serde_json::json!("file contents"));
+    }
+
+    #[test]
+    fn an_assistant_call_turn_with_no_text_emits_only_the_call() {
+        let mut assistant = msg("assistant", "");
+        assistant.tool_calls = Some(serde_json::json!([
+            { "id": "call_1", "type": "function",
+              "function": { "name": "list_dir", "arguments": "{}" } }
+        ]));
+        let input = build_responses_input(vec![assistant], &None, false);
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["type"], serde_json::json!("function_call"));
+    }
+
+    /// A compacted history can lose the id. Sending that as a
+    /// function_call_output would 400, so it degrades to user text instead.
+    #[test]
+    fn a_tool_result_without_an_id_degrades_to_text() {
+        let mut orphan = msg("tool", "some output");
+        orphan.name = Some("read_file".to_string());
+        let input = build_responses_input(vec![orphan], &None, false);
+        assert_eq!(input[0]["role"], serde_json::json!("user"));
+        assert!(input[0].get("call_id").is_none());
+        assert!(input[0]["content"].as_str().unwrap().contains("some output"));
+    }
+
+    // ── images ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn an_image_uses_the_responses_part_shape() {
+        let imgs = Some(vec!["data:image/png;base64,AAAA".to_string()]);
+        let input = build_responses_input(vec![msg("user", "what is this")], &imgs, true);
+        let parts = input[0]["content"].as_array().unwrap();
+        assert_eq!(parts[0]["type"], serde_json::json!("input_text"));
+        assert_eq!(parts[1]["type"], serde_json::json!("input_image"));
+        // A bare string here, NOT the Chat {"url": ...} object.
+        assert_eq!(parts[1]["image_url"], serde_json::json!("data:image/png;base64,AAAA"));
+    }
+
+    #[test]
+    fn a_text_only_model_is_told_the_images_were_dropped() {
+        let imgs = Some(vec!["data:image/png;base64,AAAA".to_string()]);
+        let input = build_responses_input(vec![msg("user", "what is this")], &imgs, false);
+        let text = input[0]["content"].as_str().unwrap();
+        assert!(text.contains("does not support image input"));
+    }
+
+    // ── tools ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn tools_are_flattened_out_of_the_function_wrapper() {
+        let converted = openai_tools_to_responses(&tools(), true);
+        let t = &converted.as_array().unwrap()[0];
+        assert_eq!(t["type"], serde_json::json!("function"));
+        // Top level, not under "function".
+        assert_eq!(t["name"], serde_json::json!("read_file"));
+        assert!(t.get("function").is_none());
+        assert_eq!(t["parameters"]["type"], serde_json::json!("object"));
+        assert_eq!(t["strict"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn a_tool_that_cannot_be_strict_says_so_rather_than_omitting_it() {
+        let loose = serde_json::json!([
+            { "type": "function", "_strict_ok": false,
+              "function": { "name": "weird", "description": "d",
+                            "parameters": { "type": "object", "properties": {} } } }
+        ]);
+        let converted = openai_tools_to_responses(&loose, true);
+        assert_eq!(converted[0]["strict"], serde_json::json!(false));
+    }
+
+    /// parameters is required on Responses even when Chat tolerated its absence.
+    #[test]
+    fn a_tool_with_no_parameters_gets_an_empty_schema() {
+        let bare = serde_json::json!([
+            { "type": "function", "function": { "name": "ping", "description": "d" } }
+        ]);
+        let converted = openai_tools_to_responses(&bare, false);
+        assert_eq!(converted[0]["parameters"], serde_json::json!({ "type": "object", "properties": {} }));
+    }
+
+    #[test]
+    fn the_body_carries_converted_tools() {
+        let body = build_request_body(
+            "openai_responses", "gpt-4o",
+            vec![msg("user", "hi")],
+            None, &None, &Some(tools()), None, None,
+        );
+        assert_eq!(body["tools"][0]["name"], serde_json::json!("read_file"));
+        assert_eq!(body["tool_choice"], serde_json::json!("auto"));
+    }
+
+    /// The whole point of the api_style flag: the same connection must still
+    /// build a Chat body when it is not turned on.
+    #[test]
+    fn the_chat_dialect_is_untouched() {
+        let body = build_request_body(
+            "openai", "gpt-4o",
+            vec![msg("user", "hi")],
+            Some("sys".to_string()), &None, &None, Some(100), Some(0.2),
+        );
+        assert!(body["messages"].is_array());
+        assert_eq!(body["max_tokens"], serde_json::json!(100));
+        assert!(body.get("input").is_none());
+        assert!(body.get("max_output_tokens").is_none());
+        assert!(body.get("instructions").is_none());
+    }
+}

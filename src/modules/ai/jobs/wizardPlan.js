@@ -27,7 +27,12 @@
 //
 // See docs/design/autonomy-triggers.md.
 
-import { defaultValues, missingRequired } from '../triggers/recipes/recipeFormat.js';
+import { defaultValues, missingRequired, CATEGORIES } from '../triggers/recipes/recipeFormat.js';
+// The wizard's own words. Pure logic, but the strings it returns are read by a
+// person: the option it invents for "no watcher, just a clock" and the reasons
+// a step cannot be finished. Both were written straight into this file in
+// Japanese, so an English UI showed English chrome around Japanese sentences.
+import { t } from '../../../i18n/index.js';
 import { JOB_DEFAULTS } from './JobModel.js';
 
 /** The synthetic option for "on a timer, but not one of the presets". */
@@ -57,8 +62,8 @@ export function startOptions(recipes = []) {
             items: [{
                 id: CUSTOM_TIME,
                 driver: 'time',
-                name: 'スケジュールを決める',
-                description: '決まった時刻・間隔・毎月など。監視は使いません。',
+                name: t('wiz.opt.time'),
+                description: t('wiz.opt.time.desc'),
                 recipe: null,
             }],
         },
@@ -107,16 +112,74 @@ export function applyTemplate(state, recipe) {
             purpose: recipe.job?.purpose || state.job?.purpose || '',
             prompt: recipe.job?.prompt || state.job?.prompt || '',
             maxPerHour: recipe.job?.maxPerHour || state.job?.maxPerHour,
+            // What the template's prompt was written against. Replaced, not
+            // merged: a template's prompt that says "check Backlog" and a
+            // server list left over from the previous template is a job that
+            // cannot do what it says.
+            mcpServers: recipe.job?.mcpServers || recipe.requiresMcp || state.job?.mcpServers || [],
+            skills: recipe.job?.skills?.length ? [...recipe.job.skills] : (state.job?.skills || []),
         },
     };
 }
 
-/** Find an option by id across both groups. */
+/**
+ * The catalogue: what you might want done, grouped by what it saves you.
+ *
+ * The wizard's step 1 asks "what starts it", and that is the wrong first
+ * question — the trigger is the LAST thing a person knows. What they know is
+ * that some job is tedious. So the catalogue leads with the work, and the
+ * trigger comes along attached to it.
+ *
+ * Admission is `needsAI`: a template that only moves data does not get a card.
+ * That is not squeamishness — a health check that appends a line when a value
+ * changes is a twenty-line script, and putting "you don't need AI for this" on
+ * the screen someone meets FIRST invites them to conclude they don't need the
+ * app. Those templates stay in the watcher and recipe tabs, which is where
+ * people arrive already knowing what they want.
+ *
+ * @param {object[]} recipes
+ * @param {string[]} configuredMcp  server names present in settings
+ */
+export function catalogGroups(recipes = [], configuredMcp = []) {
+    const have = new Set((configuredMcp || []).map(s => String(s).toLowerCase()));
+    const cards = (recipes || [])
+        .filter(r => r.needsAI && r.job?.prompt)
+        .map(r => ({
+            id: r.id,
+            name: r.name,
+            description: r.description,
+            needsAI: r.needsAI,
+            category: r.category || 'organize',
+            driver: r.schedule ? 'time' : 'watch',
+            recipe: r,
+            // Which servers are missing — not merely whether any are. A card
+            // that says "needs MCP" and stops leaves the reader to guess what
+            // to install, which is the same blank page one level down.
+            missingMcp: (r.requiresMcp || []).filter(n => !have.has(n.toLowerCase())),
+        }));
+
+    return CATEGORIES
+        .map(category => ({ category, items: cards.filter(c => c.category === category) }))
+        .filter(g => g.items.length);
+}
+
+/**
+ * Find an option by id — from the trigger list OR the catalogue.
+ *
+ * A catalogue card IS an option: same recipe, same driver, entered by a
+ * different door. Making it one shape is what lets steps 2 and 3 stay exactly
+ * as they were.
+ */
 export function findOption(recipes, id) {
     for (const g of startOptions(recipes)) {
         const hit = g.items.find(i => i.id === id);
         if (hit) return hit;
     }
+    // A clock template has no card in `startOptions` (the clock group holds one
+    // generic entry), so look it up directly.
+    const r = (recipes || []).find(x => x.id === id);
+    if (r) return { id: r.id, driver: r.schedule ? 'time' : 'watch', name: r.name,
+                    description: r.description, recipe: r };
     return null;
 }
 
@@ -158,6 +221,8 @@ export function initialState(option) {
             agentModeId: null,
             maxPerHour: r?.job?.maxPerHour || JOB_DEFAULTS.maxPerHour,
             cooldownMs: r?.job?.cooldownMs || JOB_DEFAULTS.cooldownMs,
+            mcpServers: r?.job?.mcpServers || r?.requiresMcp || JOB_DEFAULTS.mcpServers,
+            skills: r?.job?.skills?.length ? [...r.job.skills] : [],
             budgetTokens: 0,
         },
     };
@@ -175,41 +240,41 @@ export function stepProblems(step, state, option, storedSecrets = new Set()) {
     const out = [];
     const s = state || {};
     if (step === 'start') {
-        if (!s.optionId) out.push('何をきっかけにするかを選んでください。');
+        if (!s.optionId) out.push(t('wiz.err.option'));
         return out;
     }
     if (step === 'setup') {
         if (s.driver === 'time') {
             const sc = s.schedule || {};
             if (sc.scheduleType === 'once') {
-                if (!sc.onceAt) out.push('日時を入れてください。');
+                if (!sc.onceAt) out.push(t('wiz.err.onceAt'));
                 return out;
             }
             if (sc.scheduleType === 'interval') {
-                if (!(Number(sc.intervalMinutes) > 0)) out.push('間隔（分）を入れてください。');
+                if (!(Number(sc.intervalMinutes) > 0)) out.push(t('wiz.err.interval'));
             } else if (!sc.time) {
-                out.push('時刻を入れてください。');
+                out.push(t('wiz.err.time'));
             }
             if (sc.scheduleType !== 'monthly' && !(sc.days || []).length) {
-                out.push('曜日を1つ以上選んでください。');
+                out.push(t('wiz.err.days'));
             }
             return out;
         }
-        if (!String(s.watcherName || '').trim()) out.push('監視の名前を入れてください。');
-        if (!String(s.eventName || '').trim()) out.push('イベント名を入れてください。');
+        if (!String(s.watcherName || '').trim()) out.push(t('wiz.err.watcherName'));
+        if (!String(s.eventName || '').trim()) out.push(t('wiz.err.eventName'));
         for (const f of missingRequired(option?.recipe, s.values, storedSecrets)) {
             if (s.secrets?.[f.key]) continue;        // typed now, stored on save
-            out.push(`${f.label} を入れてください。`);
+            out.push(t('wiz.err.field', { field: f.label }));
         }
         return out;
     }
     if (step === 'work') {
-        if (!String(s.job?.name || '').trim()) out.push('作業の名前を入れてください。');
-        if (!String(s.job?.prompt || '').trim()) out.push('やることを書いてください。');
+        if (!String(s.job?.name || '').trim()) out.push(t('wiz.err.jobName'));
+        if (!String(s.job?.prompt || '').trim()) out.push(t('wiz.err.prompt'));
         // Required for the same reason JobDetail requires it: the name says
         // what it is called, only this says why the person who finds it in six
         // months should keep it.
-        if (!String(s.job?.purpose || '').trim()) out.push('目的を1行書いてください。');
+        if (!String(s.job?.purpose || '').trim()) out.push(t('wiz.err.purpose'));
     }
     return out;
 }
@@ -249,6 +314,11 @@ export function buildPlan(state, option, now = Date.now()) {
         // Which option produced this, so the list can say where a job came from
         // and a preset can be improved without guessing who is using it.
         createdFrom: s.templateId || s.optionId || '',
+        // Explicit [] means "no MCP tools"; omitted means "every server". A
+        // template that names its servers must not silently widen to all of
+        // them, so the null-vs-[] distinction is carried, not flattened.
+        mcpServers: Array.isArray(s.job?.mcpServers) ? s.job.mcpServers : JOB_DEFAULTS.mcpServers,
+        skills: Array.isArray(s.job?.skills) ? [...s.job.skills] : [],
         triggers: [],
     };
 

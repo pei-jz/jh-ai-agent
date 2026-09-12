@@ -54,6 +54,17 @@ pub struct TaskInfo {
     /// `serde(default)` keeps pre-existing persisted history loadable.
     #[serde(default)]
     pub mcp_servers: Option<Vec<String>>,
+    /// The behavior block this task was created with — the agent mode's system
+    /// prompt and tool list, above all.
+    ///
+    /// Persisted because a CONTINUATION used to rebuild a behavior from nothing
+    /// but the MCP scope and the interaction: the mode was dropped, so the
+    /// follow-up ran without the system prompt the task was started under, and
+    /// with `enabled_tools` absent — which the agent loop reads as "the caller
+    /// did not say", cutting an external caller to three tools. A follow-up has
+    /// to run as the same task, not as a differently-configured one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behavior: Option<AgentBehavior>,
     /// Structured result summary emitted on completion: { summary, files:[{path,action,description}] }.
     /// Lets REST API consumers and the "Result" tab read the outcome without re-parsing logs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -168,6 +179,13 @@ pub struct AgentBehavior {
     /// INFERRED from the allowlist. Same failure as `interaction`, older.
     #[serde(default)]
     pub persona_tier: Option<String>,
+
+    /// Refuse any write that would change or remove an existing file — the
+    /// "No edits (new files OK)" mode. Like `interaction` and `persona_tier`
+    /// above, it must be a struct field: serde drops unknown keys silently, and
+    /// a create-only task that loses the flag here is a mode whose name lies.
+    #[serde(default)]
+    pub create_only: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -233,6 +251,11 @@ pub struct TestConnectionRequest {
     pub api_key: Option<String>,
     pub base_url: Option<String>,
     pub api_version: Option<String>,
+    /// Mirrors LlmInstance.api_style. The test MUST hit the same endpoint the
+    /// connection will really use: a green /chat/completions ping tells the user
+    /// nothing about a connection that runs on /responses.
+    #[serde(default)]
+    pub api_style: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -364,6 +387,7 @@ async fn create_task(
         caller: payload.caller.clone(),
         interaction: payload.behavior.as_ref().and_then(|b| b.interaction.clone()),
         mcp_servers: payload.behavior.as_ref().and_then(|b| b.mcp_servers.clone()),
+        behavior: payload.behavior.clone(),
         result_summary: None,
         modified_files: vec![],
         logs: vec![],
@@ -415,6 +439,9 @@ fn task_meta(t: &TaskInfo) -> TaskInfo {
         caller: t.caller.clone(),
         interaction: t.interaction.clone(),
         mcp_servers: t.mcp_servers.clone(),
+        // NOT the behavior: it carries the mode's whole system prompt, and this
+        // function exists to keep a list of fifty tasks from shipping that.
+        behavior: None,
         result_summary: t.result_summary.clone(),
         modified_files: t.modified_files.clone(),
         logs: Vec::new(),
@@ -751,72 +778,193 @@ async fn send_steering(
     Ok(Json(serde_json::json!({ "status": "steered" })))
 }
 
+/// How much of an earlier answer survives into a continuation's context: the
+/// most recent one nearly whole, older ones as a reminder that they happened.
+const CONT_ANSWER_LAST: usize = 8_000;
+const CONT_ANSWER_OLDER: usize = 2_000;
+/// Files named in the prior-work block. A longer list stops being read.
+const CONT_MAX_FILES: usize = 20;
+/// The carried plan is a reminder of the approach, not a transcript.
+const CONT_PLAN_MAX: usize = 1_500;
+
+/// The opening line of the prior-work block.
+///
+/// AgentController._prepareRun recognises this prefix and leaves the message
+/// alone; every OTHER user message in a continuation's context gets relabelled
+/// "[Completed request — already delivered, do NOT redo]", which would be a lie
+/// about a block that is state, not a request. The two must stay in step — see
+/// the `PRIOR_WORK_MARKER` note in AgentController.js.
+const PRIOR_WORK_MARKER: &str =
+    "[Prior work — state left by the completed run(s) of this task; context only, NOT a new request]";
+
+/// Clip to `max` characters, marking the cut so the model knows it is partial.
+fn clip_answer(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let cut: String = s.chars().take(max).collect();
+        format!("{}\u{2026}\n[answer truncated]", cut)
+    }
+}
+
+/// What a completed run left behind, as the continuation needs to see it.
+#[derive(Default)]
+struct PriorWork {
+    /// path -> (action, description), most recently touched first.
+    files: Vec<(String, String, String)>,
+    plan: String,
+}
+
+impl PriorWork {
+    /// The block to hand the agent, or None when the runs changed nothing and
+    /// approved no plan (a pure question, say — nothing to carry).
+    fn render(&self) -> Option<String> {
+        if self.files.is_empty() && self.plan.trim().is_empty() {
+            return None;
+        }
+        let mut out = String::from(PRIOR_WORK_MARKER);
+        if !self.plan.trim().is_empty() {
+            out.push_str("\n\nPlan followed in the earlier run:\n");
+            out.push_str(&clip_answer(self.plan.trim(), CONT_PLAN_MAX));
+        }
+        if !self.files.is_empty() {
+            out.push_str(
+                "\n\nFiles ALREADY changed in this task \
+                 (the edits are on disk — do not redo them; re-read a file only if you need its detail):\n",
+            );
+            for (path, action, desc) in self.files.iter().take(CONT_MAX_FILES) {
+                let verb = if action == "created" { "created" } else { "modified" };
+                if desc.trim().is_empty() {
+                    out.push_str(&format!("- {} ({})\n", path, verb));
+                } else {
+                    out.push_str(&format!("- {} ({}) \u{2014} {}\n", path, verb, desc.trim()));
+                }
+            }
+            if self.files.len() > CONT_MAX_FILES {
+                out.push_str(&format!(
+                    "- \u{2026} and {} more file(s)\n",
+                    self.files.len() - CONT_MAX_FILES
+                ));
+            }
+        }
+        Some(out)
+    }
+}
+
+/// The chat_context a continuation starts from.
+///
+/// Built from every `complete` log of the task, in order: each run contributes
+/// its own request and its final answer, so after several continues the agent
+/// still sees which requests are already delivered. On top of that — and this is
+/// what "continue" used to throw away — the LAST block carries the work itself:
+/// which files the earlier runs changed, and the plan they followed. Without it
+/// a continuation knew what it had SAID and nothing about what it had DONE, so
+/// it re-derived the state of the workspace from scratch every time.
+///
+/// Tool results and read files are deliberately NOT carried: they are large,
+/// mostly stale, and the file table plus the workspace itself say the same thing
+/// in a hundredth of the tokens.
+fn continuation_context(task_prompt: &str, logs: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    let completes: Vec<&serde_json::Value> = logs
+        .iter()
+        .filter(|l| l.get("event").and_then(|e| e.as_str()) == Some("complete"))
+        .collect();
+    let n = completes.len();
+
+    let mut ctx: Vec<serde_json::Value> = Vec::new();
+    let mut work = PriorWork::default();
+    // path -> position in `work.files`, so a file touched by several runs keeps
+    // ONE entry carrying the newest description.
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+    for (i, l) in completes.iter().enumerate() {
+        let data = l.get("data");
+        let summary = data.and_then(|d| d.get("resultSummary"));
+        // Per-run request: recorded in resultSummary.request; the very first
+        // run falls back to the task's original prompt.
+        let req = summary
+            .and_then(|r| r.get("request"))
+            .and_then(|m| m.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| if i == 0 { task_prompt.to_string() } else { String::new() });
+        let ans = data
+            .and_then(|d| d.get("message"))
+            .and_then(|m| m.as_str())
+            .unwrap_or("");
+        let is_last = i + 1 == n;
+        if !req.is_empty() {
+            ctx.push(serde_json::json!({ "role": "user", "content": req }));
+        }
+        if !ans.is_empty() {
+            ctx.push(serde_json::json!({
+                "role": "assistant",
+                "content": clip_answer(ans, if is_last { CONT_ANSWER_LAST } else { CONT_ANSWER_OLDER })
+            }));
+        }
+
+        // The work itself, accumulated newest-last then reversed below.
+        if let Some(plan) = summary.and_then(|r| r.get("plan")).and_then(|p| p.as_str()) {
+            if !plan.trim().is_empty() {
+                work.plan = plan.to_string();
+            }
+        }
+        if let Some(files) = summary.and_then(|r| r.get("files")).and_then(|f| f.as_array()) {
+            for f in files {
+                let path = f.get("path").and_then(|p| p.as_str()).unwrap_or("").trim();
+                if path.is_empty() {
+                    continue;
+                }
+                let action = f.get("action").and_then(|a| a.as_str()).unwrap_or("modified");
+                let desc = f.get("description").and_then(|d| d.as_str()).unwrap_or("");
+                match seen.get(path) {
+                    Some(&at) => {
+                        // A later run's description wins; "created" does not
+                        // become "modified" because a later run edited it again.
+                        let keep_created = work.files[at].1 == "created";
+                        work.files[at].1 =
+                            if keep_created { "created".to_string() } else { action.to_string() };
+                        if !desc.trim().is_empty() {
+                            work.files[at].2 = desc.to_string();
+                        }
+                    }
+                    None => {
+                        seen.insert(path.to_string(), work.files.len());
+                        work.files.push((path.to_string(), action.to_string(), desc.to_string()));
+                    }
+                }
+            }
+        }
+    }
+
+    // No completed run recorded (edge case) -> fall back to the original prompt.
+    if ctx.is_empty() {
+        ctx.push(serde_json::json!({ "role": "user", "content": task_prompt.to_string() }));
+    }
+    if let Some(block) = work.render() {
+        ctx.push(serde_json::json!({ "role": "user", "content": block }));
+    }
+    ctx
+}
+
 /// Continue a COMPLETED task with a new user message — re-runs the agent under
-/// the SAME task id so its results accumulate in one place. Reconstructs a minimal
-/// chat_context (original goal + the last final response) and re-emits run-task.
+/// the SAME task id so its results accumulate in one place. Rebuilds the
+/// chat_context (every run's request + answer, plus what the runs actually did)
+/// and re-emits run-task.
 async fn continue_task(
     Path(id): Path<String>,
     State(state): State<AppState>,
     Json(payload): Json<SteeringRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    // Gather context from the existing (completed) task. The chat_context is
-    // rebuilt from EVERY completed run of this task (request → answer pairs),
-    // not just the first prompt + last answer — so after several continues the
-    // agent still sees which requests were already completed, in order.
-    // AgentController labels these as "[Completed request]" and pins the NEW
-    // message as the current goal.
-    let (workspace, caller, chat_context, mcp_servers, interaction) = {
+    // Gather context from the existing (completed) task — see
+    // `continuation_context` for what is carried and what is deliberately not.
+    let (workspace, caller, chat_context, mcp_servers, interaction, prior) = {
         let tasks = state.tasks.lock().unwrap();
         let task = tasks.get(&id)
             .ok_or((StatusCode::NOT_FOUND, "task not found".to_string()))?;
-
-        // Bound context growth: older answers get clipped harder than the
-        // most recent one (the requests themselves are kept in full).
-        fn clip(s: &str, max: usize) -> String {
-            if s.chars().count() <= max { s.to_string() }
-            else {
-                let cut: String = s.chars().take(max).collect();
-                format!("{}…\n[answer truncated]", cut)
-            }
-        }
-
-        let completes: Vec<&serde_json::Value> = task.logs.iter()
-            .filter(|l| l.get("event").and_then(|e| e.as_str()) == Some("complete"))
-            .collect();
-        let n = completes.len();
-        let mut ctx: Vec<serde_json::Value> = Vec::new();
-        for (i, l) in completes.iter().enumerate() {
-            let data = l.get("data");
-            // Per-run request: recorded in resultSummary.request; the very first
-            // run falls back to the task's original prompt.
-            let req = data
-                .and_then(|d| d.get("resultSummary"))
-                .and_then(|r| r.get("request"))
-                .and_then(|m| m.as_str())
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| if i == 0 { task.prompt.clone() } else { String::new() });
-            let ans = data
-                .and_then(|d| d.get("message"))
-                .and_then(|m| m.as_str())
-                .unwrap_or("");
-            let is_last = i + 1 == n;
-            if !req.is_empty() {
-                ctx.push(serde_json::json!({ "role": "user", "content": req }));
-            }
-            if !ans.is_empty() {
-                ctx.push(serde_json::json!({
-                    "role": "assistant",
-                    "content": clip(ans, if is_last { 8000 } else { 2000 })
-                }));
-            }
-        }
-        // No completed run recorded (edge case) → fall back to the original prompt.
-        if ctx.is_empty() {
-            ctx.push(serde_json::json!({ "role": "user", "content": task.prompt.clone() }));
-        }
+        let ctx = continuation_context(&task.prompt, &task.logs);
         (task.workspace_path.clone(), task.caller.clone(), ctx,
-         task.mcp_servers.clone(), task.interaction.clone())
+         task.mcp_servers.clone(), task.interaction.clone(), task.behavior.clone())
     };
 
     // Re-open the task and create a fresh broadcast channel (the previous one was
@@ -839,18 +987,39 @@ async fn continue_task(
     // The interaction rides along for the same reason the MCP scope does: a
     // follow-up to a QUESTION is still a question, and re-opening it as work
     // would put a plan-first gate in front of the second sentence.
-    let behavior = Some(AgentBehavior {
-        mode: None,
-        system_prompt: None,
-        enabled_tools: None,
-        max_iterations: None,
-        response_format: None,
-        extra_instructions: None,
-        mcp_servers: mcp_servers.clone(),
-        mcp_context: None,
-        intent: None,
-        interaction: interaction.clone(),
-        persona_tier: None,
+    // The SAME behavior the task was created with — the agent mode included.
+    //
+    // This used to be built from nothing: mode, system prompt and tool list all
+    // None. A follow-up therefore ran under a different configuration from the
+    // task it belongs to — without the mode's system prompt, and with no
+    // `enabled_tools`, which the agent loop reads as "unspecified" and answers
+    // by cutting a non-interactive caller down to three tools. The MCP scope and
+    // the interaction are still taken from the task's own fields, which is where
+    // they were already kept for this reason.
+    let behavior = Some(match prior {
+        Some(b) => AgentBehavior {
+            mcp_servers: mcp_servers.clone(),
+            interaction: interaction.clone(),
+            // A continuation is its own turn: an intent (an external app's
+            // one-shot scope) and a create_only flag described the first run.
+            intent: None,
+            create_only: None,
+            ..b
+        },
+        None => AgentBehavior {
+            mode: None,
+            system_prompt: None,
+            enabled_tools: None,
+            max_iterations: None,
+            response_format: None,
+            extra_instructions: None,
+            mcp_servers: mcp_servers.clone(),
+            mcp_context: None,
+            intent: None,
+            interaction: interaction.clone(),
+            persona_tier: None,
+            create_only: None,
+        },
     });
 
     let run_payload = RunTaskPayload {
@@ -1098,6 +1267,7 @@ mod task_meta_tests {
             caller: Some("monitor".into()),
             interaction: None,
             mcp_servers: Some(vec!["backlog".into()]),
+            behavior: None,
             result_summary: Some(serde_json::json!({ "summary": "done" })),
             modified_files: vec![serde_json::json!({ "path": "a.js" })],
             logs: (0..n).map(|i| serde_json::json!({ "event": "status", "i": i })).collect(),
@@ -1338,6 +1508,145 @@ mod cost_tests {
 mod continue_behavior_tests {
     use super::*;
 
+    // ── what a continuation carries ──────────────────────────────────────
+    //
+    // The continuation is a NEW run: none of the earlier run's tool results,
+    // file reads or thinking survive. What it is handed instead is built by
+    // `continuation_context`, so these tests pin the two halves of that budget:
+    // the request/answer trail (which requests are already delivered) and the
+    // prior-work block (what the runs actually DID).
+
+    /// One completed run, as the `complete` log records it.
+    fn complete_log(request: &str, answer: &str, files: serde_json::Value, plan: &str) -> serde_json::Value {
+        serde_json::json!({
+            "event": "complete",
+            "data": {
+                "message": answer,
+                "resultSummary": { "request": request, "files": files, "plan": plan }
+            }
+        })
+    }
+
+    #[test]
+    fn every_completed_run_contributes_its_request_and_answer() {
+        let logs = vec![
+            complete_log("first request", "first answer", serde_json::json!([]), ""),
+            serde_json::json!({ "event": "status", "data": { "message": "working" } }),
+            complete_log("second request", "second answer", serde_json::json!([]), ""),
+        ];
+        let ctx = continuation_context("original prompt", &logs);
+        let roles: Vec<&str> = ctx.iter().map(|m| m["role"].as_str().unwrap()).collect();
+        assert_eq!(roles, vec!["user", "assistant", "user", "assistant"]);
+        assert_eq!(ctx[0]["content"], "first request");
+        assert_eq!(ctx[3]["content"], "second answer");
+    }
+
+    #[test]
+    fn the_first_run_falls_back_to_the_tasks_own_prompt() {
+        let logs = vec![serde_json::json!({
+            "event": "complete", "data": { "message": "done" }
+        })];
+        let ctx = continuation_context("the original prompt", &logs);
+        assert_eq!(ctx[0]["content"], "the original prompt");
+    }
+
+    #[test]
+    fn a_task_with_no_completed_run_still_carries_its_goal() {
+        let ctx = continuation_context("the original prompt", &[]);
+        assert_eq!(ctx.len(), 1);
+        assert_eq!(ctx[0]["content"], "the original prompt");
+    }
+
+    /// The regression this function exists for: a continuation used to be told
+    /// what the previous run SAID and nothing about what it CHANGED, so it
+    /// re-investigated the workspace from scratch.
+    #[test]
+    fn the_files_the_earlier_runs_changed_are_carried() {
+        let logs = vec![complete_log(
+            "add the parser",
+            "done",
+            serde_json::json!([
+                { "path": "src/parse.js", "action": "created", "description": "the parser" },
+                { "path": "src/app.js", "action": "modified", "description": "wired it in" }
+            ]),
+            "",
+        )];
+        let ctx = continuation_context("p", &logs);
+        let last = ctx.last().unwrap()["content"].as_str().unwrap();
+        assert!(last.starts_with(PRIOR_WORK_MARKER), "block must carry the marker: {last}");
+        assert!(last.contains("src/parse.js (created) \u{2014} the parser"));
+        assert!(last.contains("src/app.js (modified) \u{2014} wired it in"));
+    }
+
+    #[test]
+    fn the_plan_the_earlier_run_followed_is_carried() {
+        let logs = vec![complete_log("do it", "done", serde_json::json!([]), "1. split the parser\n2. wire it in")];
+        let ctx = continuation_context("p", &logs);
+        let last = ctx.last().unwrap()["content"].as_str().unwrap();
+        assert!(last.contains("split the parser"));
+    }
+
+    /// A file touched by two runs is ONE line carrying the newest description,
+    /// and a file created in run 1 and edited in run 2 is still "created" —
+    /// what matters to the next run is that it did not exist before this task.
+    #[test]
+    fn a_file_touched_twice_is_listed_once() {
+        let logs = vec![
+            complete_log("r1", "a", serde_json::json!([
+                { "path": "src/a.js", "action": "created", "description": "first cut" }
+            ]), ""),
+            complete_log("r2", "b", serde_json::json!([
+                { "path": "src/a.js", "action": "modified", "description": "tightened" }
+            ]), ""),
+        ];
+        let ctx = continuation_context("p", &logs);
+        let last = ctx.last().unwrap()["content"].as_str().unwrap();
+        assert_eq!(last.matches("src/a.js").count(), 1, "one line per file: {last}");
+        assert!(last.contains("src/a.js (created) \u{2014} tightened"));
+    }
+
+    /// A question-shaped task changed nothing and approved no plan. Appending an
+    /// empty "here is what was done" block would spend tokens saying nothing.
+    #[test]
+    fn nothing_changed_means_no_prior_work_block() {
+        let logs = vec![complete_log("what does this do?", "it parses", serde_json::json!([]), "")];
+        let ctx = continuation_context("p", &logs);
+        assert_eq!(ctx.len(), 2);
+        for m in &ctx {
+            assert!(!m["content"].as_str().unwrap().starts_with(PRIOR_WORK_MARKER));
+        }
+    }
+
+    /// Context growth is bounded in both directions: older answers clip harder
+    /// than the latest one, and the file list stops at CONT_MAX_FILES.
+    #[test]
+    fn older_answers_clip_harder_than_the_latest_one() {
+        let long = "x".repeat(20_000);
+        let logs = vec![
+            complete_log("r1", &long, serde_json::json!([]), ""),
+            complete_log("r2", &long, serde_json::json!([]), ""),
+        ];
+        let ctx = continuation_context("p", &logs);
+        let older = ctx[1]["content"].as_str().unwrap();
+        let latest = ctx[3]["content"].as_str().unwrap();
+        assert!(older.chars().count() < CONT_ANSWER_OLDER + 40);
+        assert!(latest.chars().count() > CONT_ANSWER_OLDER);
+        assert!(latest.chars().count() < CONT_ANSWER_LAST + 40);
+        assert!(older.contains("[answer truncated]"));
+    }
+
+    #[test]
+    fn the_file_list_is_bounded() {
+        let files: Vec<serde_json::Value> = (0..CONT_MAX_FILES + 5)
+            .map(|i| serde_json::json!({ "path": format!("src/f{i}.js"), "action": "modified", "description": "" }))
+            .collect();
+        let logs = vec![complete_log("r", "done", serde_json::json!(files), "")];
+        let ctx = continuation_context("p", &logs);
+        let last = ctx.last().unwrap()["content"].as_str().unwrap();
+        assert_eq!(last.matches("- src/f").count(), CONT_MAX_FILES);
+        assert!(last.contains("and 5 more file(s)"));
+    }
+
     /// The continuation must carry the task's original MCP scope verbatim,
     /// including an EXPLICIT empty list (the task UI sends [] when every MCP
     /// checkbox is unchecked). Omitting it would re-enable ALL servers on the
@@ -1357,6 +1666,7 @@ mod continue_behavior_tests {
             intent: None,
             interaction: None,
             persona_tier: None,
+            create_only: None,
         });
         let behavior = behavior.expect("an explicit [] must produce a Some behavior");
         assert_eq!(behavior.mcp_servers, Some(vec![]));
@@ -1380,6 +1690,7 @@ mod continue_behavior_tests {
             intent: None,
             interaction: None,
             persona_tier: None,
+            create_only: None,
         });
         let json = serde_json::to_value(behavior.unwrap()).unwrap();
         assert_eq!(json["mcp_servers"], serde_json::json!(["backlog"]));
@@ -1402,6 +1713,7 @@ mod continue_behavior_tests {
             caller: Some("NewTask".into()),
             interaction: None,
             mcp_servers: Some(vec![]),
+            behavior: None,
             result_summary: None,
             modified_files: vec![],
             logs: vec![],
@@ -1445,6 +1757,7 @@ mod continue_behavior_tests {
             caller: Some("NewTask".into()),
             interaction: None,
             mcp_servers: None,
+            behavior: None,
             result_summary: None,
             modified_files: vec![
                 serde_json::json!({"path": "C:/ws/a.js", "original": "old", "current": "new"})

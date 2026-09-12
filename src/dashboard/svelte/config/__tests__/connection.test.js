@@ -221,6 +221,42 @@ describe('ConnectionModal — saving', () => {
         expect(onSave.mock.calls[0][0].supports_vision).toBe(false);
     });
 
+    // OpenAI is the only provider with two protocols. The picker is per
+    // connection because the two differ in request shape, stream events and
+    // usage field names — a global switch would break every other connection.
+    it('offers the API style for openai and nothing else', () => {
+        expect(field(modal({ instance: inst({ provider: 'openai' }) }), 'modal-inst-style')).toBeTruthy();
+        cleanup();
+        expect(field(modal({ instance: inst({ provider: 'azure' }) }), 'modal-inst-style')).toBeNull();
+        cleanup();
+        expect(field(modal({ instance: inst({ provider: 'anthropic' }) }), 'modal-inst-style')).toBeNull();
+    });
+
+    it('defaults an existing connection to chat, so nothing changes on upgrade', () => {
+        const onSave = vi.fn();
+        const el = modal({ instance: inst(), onSave });
+        expect(field(el, 'modal-inst-style').value).toBe('chat');
+        el.querySelector('#btn-modal-save').click();
+        expect(onSave.mock.calls[0][0].api_style).toBe('chat');
+    });
+
+    it('saves the responses choice', () => {
+        const onSave = vi.fn();
+        const el = modal({ instance: inst({ api_style: 'responses' }), onSave });
+        expect(field(el, 'modal-inst-style').value).toBe('responses');
+        el.querySelector('#btn-modal-save').click();
+        expect(onSave.mock.calls[0][0].api_style).toBe('responses');
+    });
+
+    // A style on a provider that has no such choice is a setting the backend
+    // ignores and the next reader has to explain away.
+    it('writes no API style for a provider that has no choice', () => {
+        const onSave = vi.fn();
+        modal({ instance: inst({ provider: 'anthropic' }), onSave })
+            .querySelector('#btn-modal-save').click();
+        expect(onSave.mock.calls[0][0].api_style).toBeNull();
+    });
+
     it('turns a blank number into null — "provider default", not zero', () => {
         const onSave = vi.fn();
         modal({ instance: inst(), onSave }).querySelector('#btn-modal-save').click();

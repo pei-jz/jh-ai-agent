@@ -58,6 +58,22 @@ const pick = (el, value) => {
     el.dispatchEvent(new Event('change', { bubbles: true }));
 };
 
+/**
+ * The behaviour settings are buttons now, not dropdowns.
+ *
+ * `chosen` reads which segment is in force and `press` clicks one — the same
+ * two things the old tests did to a <select>, against the radio inputs that
+ * back the segmented control.
+ */
+const seg = (el, key) => [...el.querySelectorAll(`input[name="cfg-${key}"]`)];
+const chosen = (el, key) => seg(el, key).find(r => r.checked)?.value;
+const segValues = (el, key) => seg(el, key).map(r => r.value);
+const press = (el, key, value) => {
+    const radio = el.querySelector(`#cfg-${key}-${value}`);
+    radio.checked = true;
+    radio.dispatchEvent(new Event('change', { bubbles: true }));
+};
+
 describe('SettingsGeneral — the fields report normalized patches', () => {
     it('reports the output language', () => {
         const onChange = vi.fn();
@@ -90,9 +106,9 @@ describe('SettingsGeneral — the fields report normalized patches', () => {
     it('reports plan mode and sub-agent review', () => {
         const onChange = vi.fn();
         const el = general({ onChange });
-        pick(el.querySelector('#cfg-plan-mode'), 'always');
+        press(el, 'plan_mode', 'always');
         expect(onChange).toHaveBeenCalledWith({ plan_mode: 'always' });
-        pick(el.querySelector('#cfg-subagent-review'), 'on');
+        press(el, 'subagent_review', 'on');
         expect(onChange).toHaveBeenCalledWith({ subagent_review: 'on' });
     });
 
@@ -107,14 +123,13 @@ describe('SettingsGeneral — the fields report normalized patches', () => {
         // then, on a coin flip, does not get it, with no way to tell why.
         const onChange = vi.fn();
         const el = general({ onChange });
-        expect(el.querySelector('#cfg-memory-recall').value).toBe('on');
-        pick(el.querySelector('#cfg-memory-recall'), 'auto');
+        expect(chosen(el, 'memory_recall')).toBe('on');
+        press(el, 'memory_recall', 'auto');
         expect(onChange).toHaveBeenCalledWith({ memory_recall: 'auto' });
     });
 
     it('offers all three memory-recall arms, default first', () => {
-        const opts = [...general().querySelector('#cfg-memory-recall').options].map(o => o.value);
-        expect(opts).toEqual(['on', 'auto', 'off']);
+        expect(segValues(general(), 'memory_recall')).toEqual(['on', 'auto', 'off']);
     });
 
     it('exposes past-session injection, defaulting off', () => {
@@ -122,11 +137,10 @@ describe('SettingsGeneral — the fields report normalized patches', () => {
         // tests, so the heaviest memory layer could not be turned off by anyone.
         const onChange = vi.fn();
         const el = general({ onChange });
-        const sel = el.querySelector('#cfg-episode-injection');
-        expect(sel).toBeTruthy();
-        expect(sel.value).toBe('off');
-        expect([...sel.options].map(o => o.value)).toEqual(['off', 'on']);
-        pick(sel, 'on');
+        expect(seg(el, 'episode_injection')).toHaveLength(2);
+        expect(chosen(el, 'episode_injection')).toBe('off');
+        expect(segValues(el, 'episode_injection')).toEqual(['off', 'on']);
+        press(el, 'episode_injection', 'on');
         expect(onChange).toHaveBeenCalledWith({ episode_injection: 'on' });
     });
 
@@ -158,6 +172,76 @@ describe('SettingsGeneral — the fields report normalized patches', () => {
 
 // Phase routing — see modules/ai/agent/ModelPhaseRouter.js. The control is a
 // promise about cost, so the UI has to be honest about when it can keep it.
+describe('SettingsGeneral — the long explanations are on request', () => {
+    // They used to be on screen always: six lines of paragraph under a
+    // one-line control, for ~20 settings. That is most of why this tab ran to
+    // several screens, and it is text read once and then never again.
+    it('keeps the paragraph closed until the "?" is pressed', async () => {
+        const el = general();
+        expect(el.querySelector('#help-plan_mode')).toBeNull();
+
+        const btn = el.querySelector('[aria-controls="help-plan_mode"]');
+        expect(btn.getAttribute('aria-expanded')).toBe('false');
+        btn.click();
+        await tick();
+
+        const panel = el.querySelector('#help-plan_mode');
+        expect(panel).toBeTruthy();
+        expect(panel.textContent).toMatch(/investigate/i);
+        expect(btn.getAttribute('aria-expanded')).toBe('true');
+    });
+
+    it('opens one at a time, so the wall of text cannot come back', async () => {
+        const el = general();
+        el.querySelector('[aria-controls="help-plan_mode"]').click();
+        await tick();
+        el.querySelector('[aria-controls="help-memory_recall"]').click();
+        await tick();
+
+        expect(el.querySelector('#help-plan_mode')).toBeNull();
+        expect(el.querySelector('#help-memory_recall')).toBeTruthy();
+    });
+
+    it('closes on a second press', async () => {
+        const el = general();
+        const btn = el.querySelector('[aria-controls="help-plan_mode"]');
+        btn.click();
+        await tick();
+        btn.click();
+        await tick();
+        expect(el.querySelector('#help-plan_mode')).toBeNull();
+    });
+
+    it('gives every numeric limit one too', () => {
+        const el = general();
+        for (const key of ['max_steps', 'token_budget', 'history_compress_ratio']) {
+            expect(el.querySelector(`[aria-controls="help-${key}"]`)).toBeTruthy();
+        }
+    });
+});
+
+describe('SettingsGeneral — the description follows the choice', () => {
+    // The point of the buttons: what is on screen describes the option in
+    // force, instead of one paragraph describing all three at once.
+    it('describes the selected option, and changes when it changes', async () => {
+        const el = general({ config: cfg({ plan_mode: 'off' }) });
+        const line = () => el.querySelector('#lbl-plan_mode')
+            .closest('.input-group').querySelector('.cfg-choice-desc').textContent;
+        expect(line()).toMatch(/never asks for a plan/i);
+
+        press(el, 'plan_mode', 'always');
+        await tick();
+        // The component is controlled: the parent owns `config`, so the line
+        // moves only once the new value comes back down.
+        expect(line()).toMatch(/never asks for a plan/i);
+
+        cleanup();
+        const after = general({ config: cfg({ plan_mode: 'always' }) });
+        expect(after.querySelector('#lbl-plan_mode').closest('.input-group')
+            .querySelector('.cfg-choice-desc').textContent).toMatch(/approved plan first/i);
+    });
+});
+
 describe('SettingsGeneral — phase routing', () => {
     const TWO_TIERS = {
         fast_model_id: 'i1:flash', deep_model_id: 'i2:kimi',
@@ -169,13 +253,13 @@ describe('SettingsGeneral — phase routing', () => {
 
     it('is disabled until BOTH tiers are set — one tier makes every phase identical', () => {
         const el = general({ config: cfg({ fast_model_id: 'inst_1:gpt-4o', deep_model_id: '' }) });
-        expect(el.querySelector('#cfg-phase-routing').disabled).toBe(true);
+        expect(seg(el, 'phase-routing').every(r => r.disabled)).toBe(true);
         expect(el.textContent).toContain('Set BOTH a Fast and a Deep tier');
     });
 
     it('enables and names the two tiers once both are set', () => {
         const el = general({ config: cfg(TWO_TIERS) });
-        expect(el.querySelector('#cfg-phase-routing').disabled).toBe(false);
+        expect(seg(el, 'phase-routing').some(r => r.disabled)).toBe(false);
         expect(el.textContent).toContain('Plan & review');
         expect(el.textContent).toContain('Kimi (kimi)');
         expect(el.textContent).toContain('Flash (flash)');
@@ -200,12 +284,12 @@ describe('SettingsGeneral — phase routing', () => {
     it('reports the choice as a patch', () => {
         const onChange = vi.fn();
         const el = general({ config: cfg(TWO_TIERS), onChange, openSections: ALL_OPEN });
-        pick(el.querySelector('#cfg-phase-routing'), 'on');
+        press(el, 'phase-routing', 'on');
         expect(onChange).toHaveBeenCalledWith({ phase_routing: 'on' });
     });
 
     it('defaults to off', () => {
-        expect(general({ config: cfg(TWO_TIERS) }).querySelector('#cfg-phase-routing').value).toBe('off');
+        expect(chosen(general({ config: cfg(TWO_TIERS) }), 'phase-routing')).toBe('off');
     });
 
     it('renders all six safety limits from the shared field table', () => {
@@ -458,5 +542,63 @@ describe('where API keys are stored', () => {
     // An older backend has no such command; guessing would be worse than silence.
     it('says nothing when the backend did not report', () => {
         expect(general().querySelector('.cfg-secret-note')).toBeNull();
+    });
+});
+
+describe('the browser capability section', () => {
+    const open = { ...ALL_OPEN, browser: true };
+    const browser = (browserState, extra = {}) =>
+        general({ openSections: open, browserState, ...extra });
+
+    // "unknown" must not read as "working": the section exists because the app
+    // used to imply a capability it had no evidence for.
+    it('says it has not checked before anything has been tried', () => {
+        const c = browser({ state: 'unknown', reason: '', checkedAt: null });
+        expect(c.textContent).toContain('Not checked');
+        expect(c.textContent).not.toContain('Available');
+    });
+
+    it('shows the failure and the error that caused it', () => {
+        const c = browser({ state: 'unavailable', reason: 'Playwright is not installed', checkedAt: 1_700_000_000_000 });
+        expect(c.textContent).toContain('Unavailable');
+        expect(c.textContent).toContain('Playwright is not installed');
+        // The whole point of the section: the user can see how to fix it.
+        expect(c.textContent).toContain('npx playwright install chromium');
+    });
+
+    it('offers the re-check that is the only way back from a latched failure', async () => {
+        const onProbeBrowser = vi.fn();
+        const c = browser({ state: 'unavailable', reason: 'x', checkedAt: null }, { onProbeBrowser });
+
+        const btn = [...c.querySelectorAll('button')].find(b => b.textContent.includes('Re-check'));
+        expect(btn).toBeTruthy();
+        btn.click();
+        await tick();
+        expect(onProbeBrowser).toHaveBeenCalled();
+    });
+
+    it('disables the re-check while one is in flight', () => {
+        const c = browser({ state: 'unknown', reason: '', checkedAt: null }, { browserProbing: true });
+        const btn = [...c.querySelectorAll('button')].find(b => b.textContent.includes('Checking'));
+        expect(btn?.disabled).toBe(true);
+    });
+
+    // Needed where the probe itself cannot run (no Node on PATH), which the
+    // re-check button alone would never recover from.
+    it('offers a plain clear as well', async () => {
+        const onForgetBrowser = vi.fn();
+        const c = browser({ state: 'unavailable', reason: 'x', checkedAt: null }, { onForgetBrowser });
+
+        const btn = [...c.querySelectorAll('button')].find(b => b.textContent.includes('Forget'));
+        btn.click();
+        await tick();
+        expect(onForgetBrowser).toHaveBeenCalled();
+    });
+
+    it('reports the result of the last check', () => {
+        const c = browser({ state: 'ok', reason: '', checkedAt: 1_700_000_000_000 },
+            { browserNotice: 'Playwright found. The browser tools are enabled.' });
+        expect(c.textContent).toContain('Available');
+        expect(c.textContent).toContain('The browser tools are enabled');
     });
 });

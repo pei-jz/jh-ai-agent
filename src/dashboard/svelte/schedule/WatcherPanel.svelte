@@ -16,7 +16,7 @@
         from '../../../modules/ai/triggers/WatcherManager.js';
     import { payloadFieldsFor } from '../../../modules/ai/triggers/WatcherEngine.js';
     import { recipeRegistry } from '../../../modules/ai/triggers/RecipeRegistry.js';
-    import { defaultValues, missingRequired, recipeHosts, resolveConfig }
+    import { defaultValues, missingRequired, recipeHosts, resolveConfig, localized }
         from '../../../modules/ai/triggers/recipes/recipeFormat.js';
     import { scriptRefusal } from '../../../modules/ai/triggers/recipes/scriptContract.js';
 
@@ -407,7 +407,8 @@
             const r = recipes.find(x => x.id === w.recipeId);
             if (r?.payload?.length) return r.payload;
         }
-        return payloadFieldsFor(w.type);
+        // The engine's own list carries both languages, like a recipe's does.
+        return payloadFieldsFor(w.type).map(([name, desc]) => [name, localized(desc)]);
     }
 
     /**

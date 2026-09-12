@@ -5,10 +5,12 @@
 // `updateConfig` call. The payload is a pure function of the config now.
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
 import {
-    CONFIG_TABS, APPROVED_COMMANDS_KEY, AUTO_APPROVE_WS_KEY,
+    CONFIG_TABS, DEFAULT_CONFIG_TAB, APPROVED_COMMANDS_KEY, AUTO_APPROVE_WS_KEY,
     readList, writeList, addToList, removeFromList,
-    readOpenSections, writeOpenSection,
+    readOpenSections, writeOpenSection, openOnlySection, GENERAL_SECTIONS,
     limitValue, resolveActiveInstanceId, buildConfigPayload, applyConfigPatch,
     upsertInstance, removeInstance,
 } from '../configModel.js';
@@ -30,7 +32,14 @@ beforeEach(() => {
 describe('CONFIG_TABS', () => {
     it('lists the six reachable tabs, in order (memory and usage are destinations)', () => {
         expect(CONFIG_TABS.map(t => t.id))
-            .toEqual(['llm', 'mcp', 'general', 'templates', 'skills', 'rag']);
+            .toEqual(['general', 'llm', 'mcp', 'templates', 'skills', 'rag']);
+    });
+
+    // Settings opens on the top tab. Hard-coding 'llm' in three places meant
+    // moving General to the top left the page opening on the SECOND item.
+    it('opens on whatever tab is first', () => {
+        expect(DEFAULT_CONFIG_TAB).toBe(CONFIG_TABS[0].id);
+        expect(DEFAULT_CONFIG_TAB).toBe('general');
     });
 
     // API logs moved to Monitor (per-task raw payloads); the tab button was
@@ -77,6 +86,42 @@ describe('routing tiers on the wire', () => {
         const p = sent({ fast_model_id: '', deep_model_id: 'i2:kimi-k3' });
         expect(p.fast_model_id).toBe('');
         expect(p.deep_model_id).toBe('i2:kimi-k3');
+    });
+});
+
+describe('every setting the screen edits is saved', () => {
+    // The backend merges field by field and reads an ABSENT field as "leave it
+    // alone". So a field the screen can change but this payload omits saves
+    // with no error and reverts on reload — which is how タスク手順書 and
+    // 読み込みのまとめ指摘 both looked broken: switched on, saved, back to off.
+    //
+    // Checked against the SOURCE of the settings screens rather than a list in
+    // this test, because a list here is exactly the kind of second copy that
+    // drifted in the first place.
+    it('sends every field that a Settings screen patches', () => {
+        const dir = path.resolve(__dirname, '../../../svelte/config');
+        const patched = new Set();
+        for (const f of fs.readdirSync(dir).filter(n => n.endsWith('.svelte'))) {
+            const src = fs.readFileSync(path.join(dir, f), 'utf8');
+            for (const m of src.matchAll(/\bpatch\('([a-z_]+)'/g)) patched.add(m[1]);
+        }
+        expect(patched.size).toBeGreaterThan(10);      // the scan found the screens
+
+        const sent = new Set(Object.keys(buildConfigPayload(base(), {})));
+        expect([...patched].filter(k => !sent.has(k))).toEqual([]);
+    });
+
+    it('keeps the two that were missing when switched on', () => {
+        const p = buildConfigPayload(base({ playbook: 'on', read_batch_hint: 'on' }), {});
+        expect(p.playbook).toBe('on');
+        expect(p.read_batch_hint).toBe('on');
+    });
+
+    it('sends them as off, not absent, when never touched', () => {
+        // Absent would leave a stale 'on' in the stored file untouchable.
+        const p = buildConfigPayload(base(), {});
+        expect(p.playbook).toBe('off');
+        expect(p.read_batch_hint).toBe('off');
     });
 });
 
@@ -255,6 +300,59 @@ describe('localStorage-backed allowlists', () => {
     it('applies the refusal ONLY to the command list', () => {
         const dangerous = vi.fn(() => 'dangerous');
         expect(addToList(AUTO_APPROVE_WS_KEY, 'C:/anything', dangerous).ok).toBe(true);
+    });
+});
+
+describe('the General tab is an accordion', () => {
+    // Nine sections and around forty settings between them. They are not read
+    // against each other, so leaving four open is how the tab became a page you
+    // scroll through looking for a heading you have already gone past.
+    it('closes the others when one opens', () => {
+        const after = openOnlySection({ basic: true, paths: true }, 'safety', true);
+        expect(after.safety).toBe(true);
+        expect(after.basic).toBe(false);
+        expect(after.paths).toBe(false);
+    });
+
+    it('writes every section explicitly, not by leaving keys out', () => {
+        // An ABSENT key means "use the default", and `basic` defaults to open —
+        // so dropping keys would reopen it beside the section just opened.
+        const after = openOnlySection({}, 'safety', true);
+        for (const k of GENERAL_SECTIONS) expect(after).toHaveProperty(k);
+        expect(after.basic).toBe(false);
+    });
+
+    it('closing one touches only that one', () => {
+        const after = openOnlySection({ safety: true, logging: true }, 'safety', false);
+        expect(after.safety).toBe(false);
+        expect(after.logging).toBe(true);
+    });
+
+    // Closing the others is done by setting their `open` attribute, and each of
+    // those fires its own toggle event straight back into this function. When
+    // "closed" meant "close everything", the section that had just been opened
+    // was wiped by the echo of the ones it closed — one click collapsed the
+    // whole tab.
+    it('survives the toggle events its own closing sets off', () => {
+        let state = openOnlySection({ basic: true }, 'safety', true);
+        expect(state.safety).toBe(true);
+
+        for (const closed of GENERAL_SECTIONS.filter(k => k !== 'safety')) {
+            state = openOnlySection(state, closed, false);
+        }
+        expect(state.safety).toBe(true);
+        expect(state.basic).toBe(false);
+    });
+
+    it('persists, so the tab reopens where it was left', () => {
+        openOnlySection({}, 'logging', true);
+        expect(readOpenSections().logging).toBe(true);
+        expect(readOpenSections().basic).toBe(false);
+    });
+
+    it('leaves a stored section it does not know about alone', () => {
+        const after = openOnlySection({ somethingOlder: true }, 'safety', true);
+        expect(after.somethingOlder).toBe(true);
     });
 });
 

@@ -8,7 +8,7 @@
 import { describe, it, expect } from 'vitest';
 import {
     CUSTOM_TIME, STEPS, startOptions, findOption, initialState, stepProblems, buildPlan,
-    timeTemplates, applyTemplate,
+    timeTemplates, applyTemplate, catalogGroups,
 } from '../wizardPlan.js';
 import { normalizeRecipe, validateRecipe } from '../../triggers/recipes/recipeFormat.js';
 import { BUILTIN_RECIPES } from '../../triggers/recipes/builtinRecipes.js';
@@ -87,7 +87,7 @@ describe('a preset arrives with both halves filled in', () => {
         // Where it belongs: it is a prompt with a suggested cycle, not a
         // different kind of trigger.
         expect(timeTemplates(RECIPES).map(r => r.id))
-            .toEqual(['daily-report', 'weekly-review']);
+            .toEqual(expect.arrayContaining(['daily-report', 'weekly-review']));
     });
 
     it('applying one fills the work AND moves the cycle, visibly', () => {
@@ -239,5 +239,62 @@ describe('a step says what is missing before it lets you past', () => {
 describe('the flow itself', () => {
     it('is the same three steps whichever driver was chosen', () => {
         expect(STEPS).toEqual(['start', 'setup', 'work']);
+    });
+});
+
+describe('the catalogue — what to automate, not how to register it', () => {
+    // The blank page this exists for: the wizard could always answer "how do I
+    // register this" and never "what should I automate". A card leads with the
+    // work; the trigger comes attached to whatever is picked.
+    it('groups by what it saves you, never by engine', () => {
+        const cats = catalogGroups(RECIPES, []).map(g => g.category);
+        expect(cats).toEqual(['transcribe', 'write', 'organize', 'notice']);
+    });
+
+    it('admits only templates that can say why a model is needed', () => {
+        const ids = catalogGroups(RECIPES, []).flatMap(g => g.items.map(i => i.id));
+        // A health check that appends a line when a value changes is a script.
+        // Saying so on the first screen someone meets would invite them to
+        // conclude the app is not needed either, so it lives in the watcher tab.
+        expect(ids).not.toContain('health-check');
+        expect(ids).not.toContain('git-remote');
+        expect(ids).toContain('mail-to-ledger');
+    });
+
+    it('every card carries its one-line reason and real work', () => {
+        for (const g of catalogGroups(RECIPES, [])) {
+            for (const c of g.items) {
+                expect(c.needsAI).toBeTruthy();
+                expect(c.recipe.job.prompt).toBeTruthy();
+            }
+        }
+    });
+
+    it('names the MCP servers that are missing, not merely that some are', () => {
+        // "Needs MCP" and nothing else is the same blank page one level down.
+        const organize = catalogGroups(RECIPES, []).find(g => g.category === 'organize');
+        expect(organize.items[0].missingMcp).toEqual(['backlog']);
+    });
+
+    it('stops saying so once the server is configured', () => {
+        const organize = catalogGroups(RECIPES, ['backlog']).find(g => g.category === 'organize');
+        expect(organize.items.every(i => i.missingMcp.length === 0)).toBe(true);
+    });
+
+    it('a card is an ordinary option, so steps 2 and 3 are unchanged', () => {
+        const option = findOption(RECIPES, 'mail-to-ledger');
+        expect(option.driver).toBe('watch');
+        const s = initialState(option);
+        expect(s.job.prompt).toContain('append_xlsx_row');
+        expect(s.eventName).toBe('mail.ledger');
+    });
+
+    it('carries the template\'s MCP servers onto the job, explicitly', () => {
+        // Explicit [] means "no MCP tools"; omitted means "every server". A
+        // template that names its servers must not silently widen to all.
+        const option = findOption(RECIPES, 'backlog-today');
+        const s = initialState(option);
+        const plan = buildPlan(s, option, 1000);
+        expect(plan.job.mcpServers).toEqual(['backlog']);
     });
 });

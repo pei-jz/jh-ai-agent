@@ -9,7 +9,23 @@
 // Keeping the predicate here (rather than in main.js) lets the agent loop and
 // the notification gate share one definition instead of drifting apart.
 
-export const INTERACTIVE_CALLERS = ['DirectChat', 'Schedule', 'NewTask'];
+/**
+ * Every caller that is THIS APP asking for work.
+ *
+ * The list had three names and the app has six, so the three that were added
+ * later — the composer on the Work screen, a scheduled job, a watcher trigger —
+ * counted as EXTERNAL tools. That is not a labelling detail: an external caller
+ * with no explicit tool list is cut down to finish/present/ask (three tools,
+ * AgentController's allowlist step), because a tool that JHAI does not know the
+ * caller can drive is a tool it should not advertise.
+ *
+ * The visible result was a run from the composer's own box that could not read
+ * a file. Anything this app starts belongs here; the name of a new entry point
+ * has to be added on the day it is invented.
+ */
+export const INTERACTIVE_CALLERS = [
+    'DirectChat', 'Schedule', 'NewTask', 'Composer', 'Job', 'Trigger',
+];
 
 /**
  * True when `caller` names something OTHER than JHAI's own interactive UI —

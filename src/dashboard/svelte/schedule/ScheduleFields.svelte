@@ -25,12 +25,14 @@
     } = $props();
 
     /**
-     * Japanese single characters, because the picker is seven circles wide.
-     * `DAY_LABELS` in scheduleModel is the English list the old screen used;
-     * keeping both would be the same duplication this component is undoing, so
-     * this is the one place the short form is written.
+     * One or two characters, because the picker is seven circles wide.
+     *
+     * From the catalog rather than written here: they were seven Japanese
+     * characters in the source, which stayed Japanese in an English UI. The
+     * long `DAY_LABELS` in scheduleModel is a different thing — a list for
+     * prose — and duplicating either would be the drift this component undoes.
      */
-    const DAYS = [['日', 0], ['月', 1], ['火', 2], ['水', 3], ['木', 4], ['金', 5], ['土', 6]];
+    const DAYS = $derived([0, 1, 2, 3, 4, 5, 6].map(n => [t(`sch.day.${n}`), n]));
 
     const TYPES = [
         ['fixed', 'jobs.time.fixed'],

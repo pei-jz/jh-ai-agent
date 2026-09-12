@@ -7,11 +7,92 @@
 // than a few lines inside a form handler.
 
 import { describe, it, expect, vi } from 'vitest';
+import { ja } from '../../../../i18n/messages/ja.js';
+import { en } from '../../../../i18n/messages/en.js';
 import {
-    SAFETY_FIELDS, OUTPUT_LANGUAGES, MASKED,
+    SAFETY_FIELDS, BEHAVIOR_FIELDS, settingKey, OUTPUT_LANGUAGES, MASKED,
     normalizeInt, normalizeRatio, normalizeText, normalizeSecret,
     normalizeModelId, normalizePathList, normalizeHostList, approvedPatternRefusal, modelChoices,
 } from '../configForm.js';
+
+describe('BEHAVIOR_FIELDS', () => {
+    it('covers the settings that are a choice between fixed modes', () => {
+        expect(BEHAVIOR_FIELDS.map(f => f.key)).toEqual([
+            'plan_mode', 'subagent_review', 'memory_recall',
+            'playbook', 'read_batch_hint', 'episode_injection',
+        ]);
+    });
+
+    it('keeps every option list short enough to be buttons', () => {
+        // Four or more, or a list that grows with what the user has configured,
+        // belongs in a <select> — see SegmentedChoice.svelte.
+        for (const f of BEHAVIOR_FIELDS) {
+            expect(f.options.length).toBeGreaterThanOrEqual(2);
+            expect(f.options.length).toBeLessThanOrEqual(3);
+        }
+    });
+
+    it('names the default the app actually behaves as', () => {
+        // The control shows `config[key] ?? def`. If this drifts from the
+        // backend's own default, an untouched install shows one option selected
+        // while behaving as another — the worst kind of settings bug, because
+        // the screen is the only evidence anyone has.
+        const defaults = { plan_mode: 'auto', subagent_review: 'off', memory_recall: 'on',
+                           playbook: 'off', read_batch_hint: 'off', episode_injection: 'off' };
+        for (const f of BEHAVIOR_FIELDS) {
+            expect(f.def).toBe(defaults[f.key]);
+            expect(f.options).toContain(f.def);
+        }
+    });
+
+    // The controls show the caption and the one-liner and nothing else. A key
+    // that does not exist renders as empty space with no error — so the button
+    // would be blank, or the row would say nothing about what it does.
+    it.each([['ja', ja], ['en', en]])('%s has a caption and a one-liner for every option', (_name, cat) => {
+        const missing = [];
+        for (const f of BEHAVIOR_FIELDS) {
+            if (!cat[settingKey(f.key)]) missing.push(settingKey(f.key));
+            if (!cat[settingKey(f.key, null, 'hint')]) missing.push(settingKey(f.key, null, 'hint'));
+            for (const o of f.options) {
+                if (!cat[settingKey(f.key, o)]) missing.push(settingKey(f.key, o));
+                if (!cat[settingKey(f.key, o, 'desc')]) missing.push(settingKey(f.key, o, 'desc'));
+            }
+        }
+        expect(missing).toEqual([]);
+    });
+
+    it.each([['ja', ja], ['en', en]])('%s keeps the button captions short', (_name, cat) => {
+        // They sit side by side inside one control in a half-width column.
+        for (const f of BEHAVIOR_FIELDS) {
+            for (const o of f.options) {
+                expect(cat[settingKey(f.key, o)].length).toBeLessThanOrEqual(8);
+            }
+        }
+    });
+
+    it.each([['ja', ja], ['en', en]])('%s labels the unit of every numeric limit', (_name, cat) => {
+        // "0" in a box says nothing about whether it counts minutes or tokens.
+        for (const f of SAFETY_FIELDS) expect(cat[`settings.unit.${f.unit}`]).toBeTruthy();
+    });
+
+    it.each([['ja', ja], ['en', en]])('%s translates every safety limit', (_name, cat) => {
+        // escalate_at_step had neither, so a Japanese form showed the English
+        // fallback out of the field table in the middle of the section.
+        for (const f of SAFETY_FIELDS) {
+            expect(cat[`settings.safety.${f.key}.label`]).toBeTruthy();
+            expect(cat[`settings.safety.${f.key}.hint`]).toBeTruthy();
+        }
+    });
+});
+
+describe('settingKey', () => {
+    it('builds the catalogue key from the config key', () => {
+        expect(settingKey('read_batch_hint')).toBe('settings.readBatchHint');
+        expect(settingKey('plan_mode', 'auto')).toBe('settings.planMode.auto');
+        expect(settingKey('plan_mode', 'auto', 'desc')).toBe('settings.planMode.auto.desc');
+        expect(settingKey('plan_mode', null, 'hint')).toBe('settings.planMode.hint');
+    });
+});
 
 describe('SAFETY_FIELDS', () => {
     it('describes every agent-safety limit', () => {

@@ -587,7 +587,10 @@ body {
      second declaration on `body` silently disabled every texture before. A
      shorthand always wins over an earlier longhand. */
   background-image: var(--texture-chrome);
-  border-bottom: 1px solid var(--line);
+  /* No rule along the bottom. The bar is already a different material from the
+     ground below it (--surface-panel, and its own texture), so the line stated
+     a second time what the change of surface states once — and on the textured
+     themes it read as a seam across the top of every screen. */
   position: fixed;
   top: 0; left: 0; right: 0;
   z-index: 9999;
@@ -737,7 +740,16 @@ body {
 .sidebar-item-icon {
   font-size: var(--fs-xl);
   width: 32px;
-  text-align: center;
+  /* Centre the glyph INSIDE this box, not just its inline content. The box is
+     32px and the icon is a 20px `display:block` SVG, so `text-align: center`
+     could not reach it — a block child ignores it — and the icon sat flush
+     left, 6px off the rail's centre. The label below is centred by the column's
+     own align-items, so the two did not share an axis and the label read as
+     off-centre when it was the icon that had moved. Flex centring also covers a
+     bare text fallback, which is all text-align ever did here. */
+  display: flex;
+  align-items: center;
+  justify-content: center;
   flex-shrink: 0;
 }
 
@@ -2605,6 +2617,13 @@ tr:hover td {
 .trg-guards .sch-input { width: 88px; }
 .trg-prompt-box { min-height: 72px; }
 .trg-actions { display: flex; gap: 8px; margin-top: 14px; }
+
+/* "You cannot edit this / this needs something you have not set up yet" —
+   a standing condition, not an error. Two components say it. */
+.rec-lock {
+    margin: 0 0 10px; padding: 8px 12px; border-radius: var(--r-2);
+    background: var(--warning-surface); color: var(--warning); font-size: var(--fs-sm);
+}
 
 /* "When does this run" — the segmented type picker, the big time field and
    the seven day circles. Owned here because ScheduleFields, ScheduleDetail
