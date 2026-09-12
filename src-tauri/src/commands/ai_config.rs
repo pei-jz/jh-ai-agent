@@ -17,6 +17,14 @@ pub struct LlmInstance {
     pub base_url: Option<String>,
     pub model: String,
     pub api_version: Option<String>,
+    /// Which OpenAI wire protocol this connection speaks: `"chat"` (default —
+    /// `/chat/completions`) or `"responses"` (`/responses`). Only meaningful for
+    /// `provider == "openai"`; every other provider ignores it.
+    ///
+    /// None ⇒ `"chat"`, so a config written before this field existed keeps its
+    /// current behaviour untouched.
+    #[serde(default)]
+    pub api_style: Option<String>,
     /// Optional explicit context-window size (in tokens) for this connection.
     /// Used by the frontend's compaction logic. When set, it overrides the
     /// built-in per-model table — essential for models we don't recognize

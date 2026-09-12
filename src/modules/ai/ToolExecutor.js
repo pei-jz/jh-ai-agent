@@ -45,6 +45,12 @@ import { isPathInScope, WRITE_ENFORCED_TOOLS } from './agent/SubagentRoles.js';
 // Markers the response parser leaves when a tool call did not arrive whole.
 import { ARGS_TRUNCATED, ARGS_UNPARSEABLE } from './agent/ResponseParser.js';
 
+// How many files a continuation inherits from the run before it (adoptFileCache).
+// The cache holds whole file contents, so this is a memory bound as much as a
+// relevance one: past the few dozen files a run actually worked in, what is left
+// is drive-by reads that the next run has no reason to remember.
+const CARRIED_CACHE_MAX_FILES = 40;
+
 // ── Per-tool watchdog budgets (ms) ─────────────────────────────────────────
 // Only INVESTIGATION tools appear here: they cannot prompt the user and have a
 // bounded amount of honest work to do, so exceeding these means something is
@@ -225,6 +231,9 @@ export class ToolExecutor {
         this._taskProgressItems = [];   // [{ id, title, status, note }, ...]
         this._taskProgressLoaded = false;
         this._taskProgressCarriedOver = false; // incomplete items loaded from a prior session
+        // The file cache an EARLIER run of the same task left behind, waiting for
+        // startSession to install it. See adoptFileCache.
+        this._carriedFileCache = null;
 
         // ── Tool allowlist (per-session, set by behavior) ─────────────────
         // null  → all tools allowed (default)
@@ -267,6 +276,21 @@ export class ToolExecutor {
         // Set for sub-agents via behavior.write_scope — a HARD code boundary,
         // independent of the persona text.
         this._writeScope = null;
+        // Create-only (the "No edits (new files OK)" mode): file-mutating tools
+        // may only bring a NEW file into existence. A hard deny, checked
+        // against the file system, because tool membership cannot say it —
+        // write_file overwrites an existing path without complaint.
+        this._createOnly = false;
+    }
+
+    /** Refuse any write that would change or remove an existing file. */
+    setCreateOnly(on) {
+        this._createOnly = !!on;
+    }
+
+    /** Whether this session is create-only. Read by run_subtask to pass it on. */
+    get createOnly() {
+        return this._createOnly;
     }
 
     /** Attach/detach the run_subtask runner (AgentController per run). */
@@ -332,6 +356,19 @@ export class ToolExecutor {
             set.add('task_progress');
         }
         this._toolAllowlist = set;
+    }
+
+    /**
+     * The tools this session may invoke, or null when unrestricted.
+     *
+     * A copy, so a caller cannot widen the session's own allowlist by mutating
+     * what it gets back. Exists for run_subtask, which has to clamp a child to
+     * its parent's capabilities — see AgentController._runSubtask.
+     *
+     * @returns {Set<string>|null}
+     */
+    get toolAllowlist() {
+        return this._toolAllowlist ? new Set(this._toolAllowlist) : null;
     }
 
     /**
@@ -434,6 +471,7 @@ export class ToolExecutor {
         this._excludeExternalAppMcpTools = false; // reset; AgentController re-sets per run
         this._subtaskRunner = null;            // reset; AgentController re-injects per run
         this._writeScope = null;               // reset; caller re-sets after startSession
+        this._createOnly = false;              // reset; caller re-sets after startSession
         this.workspacePath = workspacePath || '.';
 
         // ── Write-allowed directories ──────────────────────────────────
@@ -488,7 +526,18 @@ export class ToolExecutor {
         // Schema: Map<normalizedPath, { content, readCount, editedAt, readAt }>
         //   editedAt  null if file was only read, Date.now() if written/replaced
         //   readCount increments each time read_file is called for this path
-        this._fileCache = new Map();
+        //
+        // A CONTINUATION of the same task starts from the cache the previous run
+        // left (adoptFileCache); those entries carry `carriedOver: true` until
+        // this run touches them, because their content is NOT in this run's
+        // conversation - see handleReadFile, which must not claim it is.
+        // CONSUMED, not kept: an inheritance belongs to the run it was handed
+        // for. Leaving it set would resurrect a stale map of the workspace if
+        // this executor ever started a second session.
+        this._fileCache = this._carriedFileCache
+            ? new Map(this._carriedFileCache)
+            : new Map();
+        this._carriedFileCache = null;
 
         // ── Consecutive multi_replace failure count per file ──────────
         // When a file racks up 3 failed multi_replace_file_content attempts
@@ -822,6 +871,57 @@ export class ToolExecutor {
      */
     getFileCache() {
         return this._fileCache || new Map();
+    }
+
+    /**
+     * Take on the file cache a previous run of the SAME task left behind.
+     *
+     * Continuing a completed task builds a NEW AgentController with a NEW
+     * ToolExecutor (TaskBridge.startAgentTask), so everything the earlier run
+     * learned about the files it touched was thrown away and re-read from disk.
+     * This hands it over, bounded to the files most recently touched.
+     *
+     * What is carried is CONTENT, not context: the entries are marked
+     * `carriedOver` so nothing tells the model it already has them in the
+     * conversation (it does not). What they buy is real all the same - compaction
+     * can re-inject a file the earlier run read, an edit-recovery re-read has a
+     * baseline to compare against, and the first read of an untouched file can
+     * say so instead of the model re-verifying its own earlier edit.
+     *
+     * Applied at startSession, or immediately when a session is already open.
+     *
+     * @param {Map} cache  a Map from ToolExecutor.getFileCache()
+     * @returns {number} entries adopted
+     */
+    adoptFileCache(cache, { maxFiles = CARRIED_CACHE_MAX_FILES } = {}) {
+        this._carriedFileCache = null;
+        if (!(cache instanceof Map) || cache.size === 0) return 0;
+        const touched = (e) => Math.max(e?.editedAt || 0, e?.readAt || 0);
+        const entries = [...cache.entries()]
+            .filter(([path, e]) => path && e && typeof e.content === 'string')
+            .sort(([, a], [, b]) => touched(b) - touched(a))
+            .slice(0, maxFiles)
+            .map(([path, e]) => [path, { ...e, carriedOver: true }]);
+        if (entries.length === 0) return 0;
+        this._carriedFileCache = new Map(entries);
+        if (this._sessionActive) this._fileCache = new Map(this._carriedFileCache);
+        return this._carriedFileCache.size;
+    }
+
+    /**
+     * The files carried in from an earlier run, newest first — what the agent is
+     * told it has already been through. `edited` distinguishes a file the earlier
+     * run CHANGED from one it only looked at.
+     *
+     * @returns {Array<{path: string, edited: boolean}>}
+     */
+    carriedFiles() {
+        if (!this._fileCache) return [];
+        const touched = (e) => Math.max(e?.editedAt || 0, e?.readAt || 0);
+        return [...this._fileCache.entries()]
+            .filter(([, e]) => e?.carriedOver)
+            .sort(([, a], [, b]) => touched(b) - touched(a))
+            .map(([path, e]) => ({ path, edited: !!e.editedAt }));
     }
 
     endSession() {
@@ -1507,6 +1607,32 @@ export class ToolExecutor {
                         `Do not try to work around this; if the task genuinely requires editing that file, ` +
                         `report it in your final summary so the orchestrator can handle it.`;
                 }
+            }
+        }
+
+        // ── Create-only enforcement ("No edits (new files OK)") ───────────
+        // The mode's name promises that nothing already on disk changes. Tool
+        // membership keeps the obvious editors out, but write_file (and
+        // write_xlsx / write_docx) replace an existing path without complaint,
+        // so the promise is kept here, against the file system.
+        if (this._createOnly && WRITE_ENFORCED_TOOLS.has(name)) {
+            // These act on a file that is already there by definition.
+            if (name === 'delete_file' || name === 'move_file' || name === 'update_xlsx'
+                || name === 'append_xlsx_row' || name === 'replace_lines'
+                || name === 'multi_replace_file_content' || name === 'apply_patch') {
+                return `Error: write blocked — this run may only create NEW files, and ${name} changes an existing one. ` +
+                    `Do not try to work around this; if the task genuinely needs it, say so in your report.`;
+            }
+            // Fail CLOSED: an unanswered check is treated as "it exists". A
+            // create-only guarantee that lapses whenever the check errors is
+            // not a guarantee.
+            let exists = true;
+            if (resolvedPath) {
+                try { exists = !!(await invoke('file_exists', { path: resolvedPath })); } catch (_) { exists = true; }
+            }
+            if (exists) {
+                return `Error: write blocked — "${resolvedPath || rawPath}" already exists, and this run may only create NEW files. ` +
+                    `Write the deliverable to a new path instead (for example, add a date suffix to the name).`;
             }
         }
 

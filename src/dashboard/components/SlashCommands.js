@@ -98,6 +98,11 @@ export class SlashCommands {
         if (item.type === 'template') {
             // Expand the template prompt as an editable starting point.
             this.ta.value = item.prompt;
+            // Told, not assumed. Setting `.value` fires nothing, so a Svelte
+            // `bind:value` kept the "/wiki" that was typed: create straight
+            // after picking a template and the task was sent the command
+            // name instead of the template.
+            this.ta.dispatchEvent(new Event('input', { bubbles: true }));
         } else {
             // Skill → attach a chip; strip the "/key" token, keep any text the
             // user typed after it. The body is injected at send (buildPrompt).
@@ -108,10 +113,28 @@ export class SlashCommands {
                 this.activeSkills.push({ name: item.key, title: item.label || item.key });
             }
             this.ta.value = remainder;
+            this.ta.dispatchEvent(new Event('input', { bubbles: true }));
             this._renderChips();
         }
         this.ta.style.height = 'auto';
         this.ta.focus();
+    }
+
+    /**
+     * Replace the attached skills from outside.
+     *
+     * For a form that opens with some already chosen — a job whose preset pins
+     * a skill, or one being edited. Goes through the same chip rendering and
+     * the same `onSkillsChange` as a pick from the popup, so the caller has one
+     * path to listen to, not two.
+     *
+     * @param {Array<{name: string, title?: string}>} list
+     */
+    setSkills(list = []) {
+        this.activeSkills = (list || [])
+            .filter(s => s && s.name)
+            .map(s => ({ name: s.name, title: s.title || s.name }));
+        this._renderChips();
     }
 
     /** Render removable chips for the attached skills. */

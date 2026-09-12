@@ -16,14 +16,16 @@
 -->
 <script>
     import { icon } from '../../utils/icons.js';
+    import SegmentedChoice from './SegmentedChoice.svelte';
     import {
-        SAFETY_FIELDS, OUTPUT_LANGUAGES, MASKED,
+        SAFETY_FIELDS, BEHAVIOR_FIELDS, settingKey, OUTPUT_LANGUAGES, MASKED,
         normalizeInt, normalizeRatio, normalizeText, normalizeSecret,
         normalizeModelId, normalizePathList, normalizeHostList, modelChoices,
     } from '../../views/config/configForm.js';
     import { describeLicense } from '../../../modules/license/licenseState.js';
     import { modelRates, estimateSavings } from '../../../modules/ai/agent/ModelPhaseRouter.js';
     import { t, UI_LOCALES } from '../../../i18n/index.js';
+    import { INSTALL_COMMAND as BROWSER_INSTALL_COMMAND } from '../../../modules/ai/browser/playwrightState.js';
 
     let {
         config = {},
@@ -59,6 +61,17 @@
         onAddAutoWorkspace = null,
         onRemoveAutoWorkspace = null,
         onRunSetup = null,
+        /**
+         * Optional browser stack, as a STATE rather than a setting:
+         * {state:'unknown'|'ok'|'unavailable', reason, checkedAt}. The parent owns
+         * it because the probe is an async call into the worker process.
+         */
+        browserState = { state: 'unknown', reason: '', checkedAt: null },
+        browserProbing = false,
+        /** Result of the last re-check, in the user's words. Cleared on the next one. */
+        browserNotice = '',
+        onProbeBrowser = null,
+        onForgetBrowser = null,
         /** This build's version, and whether it can verify signed updates. */
         appVersion = '',
         updatesConfigured = false,
@@ -82,6 +95,13 @@
     } = $props();
 
     const licenseView = $derived(describeLicense(license));
+
+    // 'question' for unknown, because the honest answer there is that we do not
+    // know — a tick would claim evidence this state is defined by not having.
+    const browserStateIcon = $derived(
+        browserState.state === 'ok' ? 'check' : browserState.state === 'unavailable' ? 'alert' : 'question');
+    const browserCheckedLabel = $derived(
+        browserState.checkedAt ? new Date(browserState.checkedAt).toLocaleString() : '');
     let licenseKeyInput = $state('');
 
     const patch = (key, value) => {
@@ -127,7 +147,52 @@
         onAddAutoWorkspace?.(v);
         newWorkspace = '';
     };
+
+    /**
+     * Which "?" is open — one at a time, by key.
+     *
+     * One open panel rather than a set: these are long paragraphs, and several
+     * open at once rebuilds the wall of text the panels exist to remove.
+     */
+    let openHelp = $state('');
+    const toggleHelp = (key) => { openHelp = openHelp === key ? '' : key; };
+
+    /** The option in force, falling back to the same default the control uses. */
+    const behaviorValue = (f) => config[f.key] ?? f.def;
+    /** Short captions for the segments; the explanation is the line below. */
+    const behaviorOptions = (f) =>
+        f.options.map(o => ({ value: o, label: t(settingKey(f.key, o)) }));
 </script>
+
+<!-- Esc closes the open panel, the way it closes every other transient thing. -->
+<svelte:window onkeydown={(e) => { if (e.key === 'Escape' && openHelp) openHelp = ''; }} />
+
+<!--
+  The long explanation, on request.
+
+  It used to be on screen always — six lines under a one-line control — which is
+  most of why this tab ran to several screens, and it is read once and then
+  never again. What stays visible is the one-line description of the CHOSEN
+  option; this is the "why", including the measurements and the reason a default
+  is what it is.
+
+  Two snippets rather than one because the button and the panel do not belong in
+  the same place: the button sits on the label row, the panel opens under the
+  whole field.
+-->
+{#snippet helpBtn(key)}
+    <button type="button" class="cfg-help-btn"
+        aria-expanded={openHelp === key} aria-controls={`help-${key}`}
+        title={t('settings.help')} onclick={() => toggleHelp(key)}>?</button>
+{/snippet}
+
+{#snippet helpPanel(key, body)}
+    {#if openHelp === key}
+        <!-- Inside the field's own cell, not spanning the row: with two
+             columns, a panel below both would not say which "?" opened it. -->
+        <div class="cfg-help-panel" id={`help-${key}`} role="region">{@html body}</div>
+    {/if}
+{/snippet}
 
 {#snippet section(key, def, titleIcon, title, body)}
     <details class="cfg-sec" data-sec={key} open={isOpen(key, def)}
@@ -179,21 +244,25 @@
                 value={config.proxy_url || ''} placeholder="http://127.0.0.1:7890"
                 oninput={(e) => patch('proxy_url', normalizeText(e.currentTarget.value))}>
         </div>
-        {#if secretStorage}
-            <div class="cfg-secret-note" class:is-fallback={!secretStorage.available}>
-                {#if secretStorage.available}
-                    {t('settings.secret.stored', { store: secretStorage.name })}
-                {:else}
-                    {t('settings.secret.fallback', { store: secretStorage.name })}
-                {/if}
-            </div>
-        {/if}
         <div class="input-group">
             <!-- A masked value must not be saved back over the real key. -->
             <label class="input-label" for="cfg-tavily-key">{t('settings.tavily')}</label>
             <input id="cfg-tavily-key" class="input" type="password"
                 value={config.tavily_api_key || ''} placeholder="tvly-..."
                 oninput={(e) => patch('tavily_api_key', normalizeSecret(e.currentTarget.value))}>
+            <!-- Where the key above is kept — INSIDE this field's group, under
+                 the box it is about. It used to be a banner between the proxy
+                 field and this one, which reads as a note about the field it
+                 sits under, and it sat under the wrong one. -->
+            {#if secretStorage}
+                <div class="cfg-secret-note" class:is-fallback={!secretStorage.available}>
+                    {#if secretStorage.available}
+                        {t('settings.secret.stored', { store: secretStorage.name })}
+                    {:else}
+                        {t('settings.secret.fallback', { store: secretStorage.name })}
+                    {/if}
+                </div>
+            {/if}
             <p class="input-hint">{t('settings.tavily.hint')}
                 <a href="https://tavily.com" target="_blank" rel="noreferrer" class="cfg-link">tavily.com</a>.</p>
         </div>
@@ -201,87 +270,40 @@
     {@render section('basic', true, 'gear', t('settings.sec.basic'), basicBody)}
 
     {#snippet behaviorBody()}
-        <div class="input-group cfg-group-gap">
-            <label class="input-label" for="cfg-plan-mode">{t('settings.planMode')}</label>
-            <select id="cfg-plan-mode" class="input" value={config.plan_mode ?? 'auto'}
-                onchange={(e) => patch('plan_mode', e.currentTarget.value)}>
-                <option value="off">{t('settings.planMode.off')}</option>
-                <option value="auto">{t('settings.planMode.auto')}</option>
-                <option value="always">{t('settings.planMode.always')}</option>
-            </select>
-            <p class="input-hint">{@html t('settings.planMode.hint')}</p>
-        </div>
+        <!-- One loop, not seven near-identical blocks. Each row is:
+             label + "?", the options as buttons, and one line saying what the
+             CHOSEN option does. The long paragraph is behind the "?".
 
-        <!-- Sub-agent review is an experimental quality gate, not a daily
-             control — hidden behind the advanced toggle. -->
-        {#if showAdvanced}
-            <div class="input-group cfg-group-gap">
-                <label class="input-label" for="cfg-subagent-review">{t('settings.subagentReview')}</label>
-                <select id="cfg-subagent-review" class="input" value={config.subagent_review ?? 'off'}
-                    onchange={(e) => patch('subagent_review', e.currentTarget.value)}>
-                    <option value="off">{t('settings.subagentReview.off')}</option>
-                    <option value="on">{t('settings.subagentReview.on')}</option>
-                </select>
-                <p class="input-hint">{@html t('settings.subagentReview.hint')}</p>
-            </div>
-        {/if}
+             Buttons rather than a dropdown because two or three fixed options
+             fit on screen: the choice, and the fact that there IS a choice, are
+             visible without opening anything. Lists that grow (models,
+             languages) stay <select>. -->
+        {#each BEHAVIOR_FIELDS as f (f.key)}
+            {#if !f.advanced || showAdvanced}
+                <div class="input-group cfg-setting">
+                    <div class="cfg-setting-head">
+                        <span class="input-label" id={`lbl-${f.key}`}>{t(settingKey(f.key))}</span>
+                        {@render helpBtn(f.key)}
+                    </div>
+                    <SegmentedChoice
+                        name={`cfg-${f.key}`}
+                        labelledBy={`lbl-${f.key}`}
+                        value={behaviorValue(f)}
+                        options={behaviorOptions(f)}
+                        onChange={(v) => patch(f.key, v)} />
+                    <p class="input-hint cfg-choice-desc">
+                        {@html t(settingKey(f.key, behaviorValue(f), 'desc'))}
+                    </p>
+                    {@render helpPanel(f.key, t(settingKey(f.key, null, 'hint')))}
+                </div>
+            {/if}
+        {/each}
 
-        <div class="input-group cfg-group-gap">
-            <label class="input-label" for="cfg-memory-recall">{t('settings.memoryRecall')}</label>
-            <select id="cfg-memory-recall" class="input" value={config.memory_recall ?? 'on'}
-                onchange={(e) => patch('memory_recall', e.currentTarget.value)}>
-                <!-- On leads because it is the default. Auto is the measurement
-                     arm and withholds memory from half of all runs, so it is
-                     opt-in rather than something a user is enrolled in. -->
-                <option value="on">{t('settings.memoryRecall.on')}</option>
-                <option value="auto">{t('settings.memoryRecall.auto')}</option>
-                <option value="off">{t('settings.memoryRecall.off')}</option>
-            </select>
-            <p class="input-hint">{@html t('settings.memoryRecall.hint')}</p>
-        </div>
 
         {#if showAdvanced}
-        <!-- Playbook (Step 6). Directly under memory recall because it is the
-             same mechanism at a larger grain, and because it is gated on that
-             mechanism being shown to work. See modules/ai/memory/Playbook.js. -->
-        <div class="input-group cfg-group-gap">
-            <label class="input-label" for="cfg-playbook">{t('settings.playbook')}</label>
-            <select id="cfg-playbook" class="input" value={config.playbook ?? 'off'}
-                onchange={(e) => patch('playbook', e.currentTarget.value)}>
-                <option value="off">{t('settings.playbook.off')}</option>
-                <option value="on">{t('settings.playbook.on')}</option>
-            </select>
-            <p class="input-hint">{@html t('settings.playbook.hint')}</p>
-        </div>
-
-        <!-- Read batching. Next to the playbook because both are off for the
-             same reason — not readiness, but an experiment in flight that a
-             fourth injected text would make unreadable. -->
-        <div class="input-group cfg-group-gap">
-            <label class="input-label" for="cfg-read-batch">{t('settings.readBatchHint')}</label>
-            <select id="cfg-read-batch" class="input" value={config.read_batch_hint ?? 'off'}
-                onchange={(e) => patch('read_batch_hint', e.currentTarget.value)}>
-                <option value="off">{t('settings.readBatchHint.off')}</option>
-                <option value="on">{t('settings.readBatchHint.on')}</option>
-            </select>
-            <p class="input-hint">{@html t('settings.readBatchHint.hint')}</p>
-        </div>
-
-        <!-- Episodic injection. The knob existed in ConversationMemory with no
-             caller outside tests, so the heaviest memory layer was not adjustable
-             by anyone. Default off per agent-memory-layers.md §7. -->
-        <div class="input-group cfg-group-gap">
-            <label class="input-label" for="cfg-episode-injection">{t('settings.episodeInjection')}</label>
-            <select id="cfg-episode-injection" class="input" value={config.episode_injection ?? 'off'}
-                onchange={(e) => patch('episode_injection', e.currentTarget.value)}>
-                <option value="off">{t('settings.episodeInjection.off')}</option>
-                <option value="on">{t('settings.episodeInjection.on')}</option>
-            </select>
-            <p class="input-hint">{@html t('settings.episodeInjection.hint')}</p>
-        </div>
-
         <!-- Both routing selects send "" rather than null to clear — see
-             normalizeModelId for why that distinction matters. -->
+             normalizeModelId for why that distinction matters.
+             These stay dropdowns: the list is whatever connections exist. -->
         <div class="input-group cfg-group-gap">
             <label class="input-label" for="cfg-fast-model">{t('settings.routing.fast')}</label>
             <select id="cfg-fast-model" class="input" value={config.fast_model_id || ''}
@@ -305,15 +327,25 @@
         <!-- Phase routing. Placed directly under the two tiers because it is the
              setting that makes them worth configuring: without it a run picks one
              tier and stays there. See modules/ai/agent/ModelPhaseRouter.js. -->
-        <div class="input-group cfg-group-gap">
-            <label class="input-label" for="cfg-phase-routing">{t('settings.phaseRouting')}</label>
-            <select id="cfg-phase-routing" class="input" value={config.phase_routing ?? 'off'}
+        <div class="input-group cfg-setting cfg-wide">
+            <div class="cfg-setting-head">
+                <span class="input-label" id="lbl-phase-routing">{t('settings.phaseRouting')}</span>
+                {@render helpBtn('phase_routing')}
+            </div>
+            <SegmentedChoice
+                name="cfg-phase-routing"
+                labelledBy="lbl-phase-routing"
                 disabled={!bothTiersSet}
-                onchange={(e) => patch('phase_routing', e.currentTarget.value)}>
-                <option value="off">{t('settings.phaseRouting.off')}</option>
-                <option value="on">{t('settings.phaseRouting.on')}</option>
-            </select>
-            <p class="input-hint">{@html t('settings.phaseRouting.hint')}</p>
+                value={config.phase_routing ?? 'off'}
+                options={[
+                    { value: 'off', label: t('settings.phaseRouting.off') },
+                    { value: 'on', label: t('settings.phaseRouting.on') },
+                ]}
+                onChange={(v) => patch('phase_routing', v)} />
+            <p class="input-hint cfg-choice-desc">
+                {@html t(`settings.phaseRouting.${config.phase_routing ?? 'off'}.desc`)}
+            </p>
+            {@render helpPanel('phase_routing', t('settings.phaseRouting.hint'))}
 
             {#if !bothTiersSet}
                 <p class="input-hint cfg-phase-warn">{@html t('settings.phaseRouting.needTiers')}</p>
@@ -346,27 +378,40 @@
              six copies of the same markup. The English label/hint in the table is
              passed as t()'s fallback, so a key missing from both catalogs still
              renders real text rather than a dotted id. -->
+        <!-- Label, then the box, on one line. A three-digit limit had a
+             full-width input under a full-width label, which reads as a field
+             for prose and made this section the tallest on the tab. The unit is
+             beside the box because "0" alone does not say whether it counts
+             minutes, steps or tokens. -->
         {#each SAFETY_FIELDS as f (f.key)}
-            <div class="input-group cfg-group-gap" class:cfg-half={f.half}>
-                <label class="input-label" for={`cfg-${f.key}`}
-                    >{t(`settings.safety.${f.key}.label`, null, f.label)}</label>
-                <input id={`cfg-${f.key}`} class="input" type="number"
-                    min={f.min} max={f.max} placeholder={f.placeholder}
-                    value={config[f.key] ?? f.fallback}
-                    oninput={(e) => patch(f.key, normalizeInt(e.currentTarget.value, f.fallback))}>
-                <p class="input-hint">{@html t(`settings.safety.${f.key}.hint`, null, f.hint)}</p>
+            <div class="input-group cfg-num">
+                <div class="cfg-num-row">
+                    <label class="input-label cfg-num-label" for={`cfg-${f.key}`}
+                        >{t(`settings.safety.${f.key}.label`, null, f.label)}</label>
+                    <input id={`cfg-${f.key}`} class="input cfg-num-input" type="number"
+                        min={f.min} max={f.max} placeholder={f.placeholder}
+                        value={config[f.key] ?? f.fallback}
+                        oninput={(e) => patch(f.key, normalizeInt(e.currentTarget.value, f.fallback))}>
+                    <span class="cfg-num-unit">{t(`settings.unit.${f.unit}`, null, '')}</span>
+                    {@render helpBtn(f.key)}
+                </div>
+                {@render helpPanel(f.key, t(`settings.safety.${f.key}.hint`, null, f.hint))}
             </div>
         {/each}
 
         <!-- A FLOAT in (0,1]; integer parsing would destroy it, which is why it
              never went through the shared numeric reader. -->
-        <div class="input-group cfg-group-gap">
-            <label class="input-label" for="cfg-compress-ratio">{t('settings.safety.compressRatio')}</label>
-            <input id="cfg-compress-ratio" class="input" type="number"
-                min="0.1" max="1" step="0.05" placeholder="0.5"
-                value={config.history_compress_ratio ?? 0.5}
-                oninput={(e) => patch('history_compress_ratio', normalizeRatio(e.currentTarget.value))}>
-            <p class="input-hint">{@html t('settings.safety.compressRatio.hint')}</p>
+        <div class="input-group cfg-num">
+            <div class="cfg-num-row">
+                <label class="input-label cfg-num-label" for="cfg-compress-ratio">{t('settings.safety.compressRatio')}</label>
+                <input id="cfg-compress-ratio" class="input cfg-num-input" type="number"
+                    min="0.1" max="1" step="0.05" placeholder="0.5"
+                    value={config.history_compress_ratio ?? 0.5}
+                    oninput={(e) => patch('history_compress_ratio', normalizeRatio(e.currentTarget.value))}>
+                <span class="cfg-num-unit"></span>
+                {@render helpBtn('history_compress_ratio')}
+            </div>
+            {@render helpPanel('history_compress_ratio', t('settings.safety.compressRatio.hint'))}
         </div>
     {/snippet}
     {#if showAdvanced}
@@ -375,13 +420,13 @@
 
     {#snippet pathsBody()}
         <p class="cfg-sec-hint">{@html t('settings.paths.hint')}</p>
-        <textarea id="cfg-write-allowed" class="input cfg-path-area" rows="4"
+        <textarea id="cfg-write-allowed" class="input cfg-path-area cfg-wide" rows="4"
             placeholder={'C:\\work\\reports\nC:\\data\\output'}
             value={(config.write_allowed_paths || []).join('\n')}
             oninput={(e) => patch('write_allowed_paths', normalizePathList(e.currentTarget.value))}
         ></textarea>
 
-        <div class="input-group">
+        <div class="input-group cfg-wide">
             <label class="input-label" for="cfg-fetch-hosts">{t('settings.fetchHosts')}</label>
             <textarea id="cfg-fetch-hosts" class="input cfg-path-area" rows="3"
                 placeholder={'localhost\nintranet.example.com'}
@@ -395,7 +440,7 @@
 
     {#snippet commandsBody()}
         <p class="cfg-sec-hint">{@html t('settings.commands.hint')}</p>
-        <div class="input-group">
+        <div class="input-group cfg-wide">
             <span class="input-label">{t('settings.commands.approved')}</span>
             <div id="cfg-approved-cmds" class="cfg-cmd-list">
                 {#if !approvedCommands.length}
@@ -418,7 +463,7 @@
                     onclick={addCommand}>{@html icon('plus', 12)} {t('settings.commands.add')}</button>
             </div>
         </div>
-        <div class="input-group cfg-group-top">
+        <div class="input-group cfg-group-top cfg-wide">
             <span class="input-label">{t('settings.autows')}</span>
             <p class="input-hint cfg-hint-tight">{t('settings.autows.hint')}</p>
             <div id="cfg-autows" class="cfg-cmd-list">
@@ -464,7 +509,7 @@
                     onclick={() => onSelectLogDir?.()}>{@html icon('folder', 13)} {t('settings.logging.select')}</button>
             </div>
         </div>
-        <div class="input-group cfg-group-top-sm">
+        <div class="input-group cfg-group-top-sm cfg-wide">
             <span class="input-label">{@html icon('memory', 13)} {t('settings.storage')}</span>
             <div id="cfg-storage-usage" class="cfg-storage">
                 {#if storageUsage}{@html storageUsage}
@@ -484,7 +529,7 @@
     {@render section('logging', false, 'template', t('settings.sec.logging'), loggingBody)}
 
     {#snippet connectionBody()}
-        <div class="input-group">
+        <div class="input-group cfg-wide">
             <label class="input-label" for="cfg-connection-token">{t('settings.token')}</label>
             <div class="cfg-row-inline">
                 <input id="cfg-connection-token" class="input cfg-grow cfg-token" type="text"
@@ -529,7 +574,7 @@
          verify a signature — offering a button that cannot work, or explaining why it
          cannot, is noise the user can do nothing about. -->
     {#snippet updateBody()}
-        <div class="input-group">
+        <div class="input-group cfg-wide">
             <p class="input-hint">{t('update.currentVersion', { version: appVersion || t('common.unknown') })}</p>
 
             {#if updatesConfigured}
@@ -540,6 +585,48 @@
             {/if}
         </div>
     {/snippet}
+    <!-- NOT a setting — a capability, which is why it took a while to find a home.
+         The browser tools need Playwright installed in the project, and the app had
+         nowhere to say so: a failed run hid the tools and told the user nothing, and
+         installing Playwright afterwards could not bring them back, because the flag
+         that hid them was only ever cleared by a SUCCESSFUL browser call — which a
+         hidden tool can no longer make. So this section is the state, the install
+         line, and the two ways back out of that. -->
+    {#snippet browserBody()}
+        <div class="input-group cfg-wide">
+            <p class="cfg-cap-state" class:is-ok={browserState.state === 'ok'}
+                class:is-bad={browserState.state === 'unavailable'}>
+                {@html icon(browserStateIcon, 13)} {t('browser.state.' + browserState.state)}
+            </p>
+            <p class="input-hint cfg-hint-tight">{@html t('browser.intro')}</p>
+            <p class="input-hint cfg-hint-tight">{@html t('browser.hint.' + browserState.state)}</p>
+
+            {#if browserState.reason}
+                <p class="input-hint cfg-hint-tight">{t('browser.reason', { reason: browserState.reason })}</p>
+            {/if}
+
+            <p class="input-hint cfg-hint-tight">{t('browser.install')}</p>
+            <code class="cfg-cap-cmd">{BROWSER_INSTALL_COMMAND}</code>
+
+            {#if browserCheckedLabel}
+                <p class="input-hint cfg-hint-tight">{t('browser.checked', { when: browserCheckedLabel })}</p>
+            {/if}
+            {#if browserNotice}
+                <p class="cfg-cap-note">{browserNotice}</p>
+            {/if}
+
+            <div class="cfg-row-inline">
+                <button class="btn btn-secondary cfg-nowrap" type="button" disabled={browserProbing}
+                    onclick={() => onProbeBrowser?.()}
+                    >{@html icon('search', 13)} {browserProbing ? t('browser.rechecking') : t('browser.recheck')}</button>
+                <button class="btn btn-secondary cfg-nowrap" type="button"
+                    onclick={() => onForgetBrowser?.()}>{t('browser.forget')}</button>
+            </div>
+            <p class="input-hint cfg-hint-tight">{t('browser.forget.hint')}</p>
+        </div>
+    {/snippet}
+    {@render section('browser', false, 'monitor', t('settings.sec.browser'), browserBody)}
+
     {@render section('updates', false, 'gear',
         updatesConfigured ? t('update.section') : t('about.section'), updateBody)}
 
@@ -548,7 +635,7 @@
          ("Community") would advertise a paywall that does not exist — enforcement is
          off entirely (editions.js ENFORCEMENT_ENABLED). -->
     {#snippet licenseBody()}
-        <div class="input-group">
+        <div class="input-group cfg-wide">
             <p class="cfg-lic-title" class:is-warn={licenseView.tone === 'warn'}
                 class:is-error={licenseView.tone === 'error'}>{licenseView.title}</p>
             <p class="input-hint cfg-hint-tight">{licenseView.detail}</p>
@@ -581,7 +668,9 @@
 
 <style>
     .cfg-secret-note {
-        margin-bottom: 12px;
+        /* Sits between the key box and its hint now, not as a banner of its
+           own between two unrelated fields. */
+        margin: 2px 0 0;
         padding: 8px 12px;
         border: 1px solid var(--line-soft);
         border-left: 3px solid var(--accent);
@@ -592,4 +681,29 @@
     }
     .cfg-secret-note.is-fallback { border-left-color: var(--error, #c0392b); }
     .cfg-secret-note code { font-family: var(--font-mono); font-size: 11px; }
+
+    /* A capability read-out, not a field: it states what IS, so it leads the
+       section rather than sitting under a label. */
+    .cfg-cap-state {
+        display: flex; align-items: center; gap: 6px;
+        margin: 0 0 2px; font-size: 13px; font-weight: 600;
+        color: var(--ink-soft);
+    }
+    .cfg-cap-state.is-ok { color: var(--success, #2d7d46); }
+    .cfg-cap-state.is-bad { color: var(--error, #c0392b); }
+    .cfg-cap-cmd {
+        display: block; margin: 2px 0 0; padding: 7px 10px;
+        border: 1px solid var(--line-soft); border-radius: var(--r-2);
+        background: var(--surface-sunken);
+        font-family: var(--font-mono); font-size: 11px;
+        color: var(--ink); user-select: all; overflow-x: auto; white-space: nowrap;
+    }
+    /* The outcome of the last re-check. Transient, so it reads as a reply to
+       the click rather than as another permanent line of status. */
+    .cfg-cap-note {
+        margin: 6px 0 0; padding: 8px 12px;
+        border: 1px solid var(--line-soft); border-left: 3px solid var(--accent);
+        border-radius: var(--r-2); background: var(--surface-sunken);
+        font-size: 11.5px; line-height: 1.55; color: var(--ink-soft);
+    }
 </style>

@@ -90,6 +90,21 @@ export const OUTPUT_TOOLS = ['write_xlsx', 'write_docx', 'update_xlsx', 'append_
 export const WEB_TOOLS = ['fetch_url', 'web_search'];
 
 /**
+ * Tools that bring a file into existence — and nothing that alters one.
+ *
+ * Overlaps EDIT_TOOLS (write_file) and OUTPUT_TOOLS (write_xlsx / write_docx)
+ * on purpose: this is the other cut through the same tools, the one the
+ * "No edits (new files OK)" mode is built from. `update_xlsx` and
+ * `append_xlsx_row` are absent because changing an existing workbook is
+ * exactly what that mode promises not to do.
+ *
+ * Membership alone does not keep a creator from overwriting — write_file will
+ * happily replace an existing path. The mode also sets `create_only`, which
+ * ToolExecutor enforces against the file system.
+ */
+export const CREATE_TOOLS = ['write_file', 'write_xlsx', 'write_docx'];
+
+/**
  * Loop control every preset needs.
  *
  * `open_question` is bookkeeping in the same sense `task_progress` is — it
@@ -128,7 +143,7 @@ export const BROWSER_TOOLS = [
  * is unreachable from every preset — which is how `run_subtask` went missing.
  */
 export const ALL_GROUPS = [
-    READ_ONLY_TOOLS, READ_TOOLS, EDIT_TOOLS, OUTPUT_TOOLS,
+    READ_ONLY_TOOLS, READ_TOOLS, EDIT_TOOLS, OUTPUT_TOOLS, CREATE_TOOLS,
     WEB_TOOLS, TASK_TOOLS, CONTROL_TOOLS, DELEGATION_TOOLS, VCS_WRITE_TOOLS,
     BROWSER_TOOLS,
 ];

@@ -106,9 +106,18 @@ export async function handleReadFile(ctx, args, onAgentStatus, resolvedPath) {
         const normPath = readPath.replace(/\\/g, '/');
         const existing = ctx._fileCache.get(normPath);
         if (existing && (existing.readAt || existing.editedAt) && existing.content === fileContent) {
-            reReadNote = `ℹ️ ${readPath} is UNCHANGED since you last accessed it this session — ` +
-                `you already have this content in context. Avoid re-reading whole files: use grep_search ` +
-                `to locate text, or offset+limit for a specific region.\n`;
+            // A CARRIED entry came from an EARLIER RUN of this task, so its
+            // content is not in this conversation — telling the agent it
+            // already has it would be a lie, and an expensive one: it would
+            // proceed without the content it just asked for. What IS true, and
+            // worth saying, is that nothing has moved since that run.
+            reReadNote = existing.carriedOver
+                ? `ℹ️ ${readPath} is UNCHANGED since the earlier run of this task` +
+                  `${existing.editedAt ? ' — this is the file that run edited, and its changes are in what follows' : ''}` +
+                  `. No need to re-verify it again later in this run.\n`
+                : `ℹ️ ${readPath} is UNCHANGED since you last accessed it this session — ` +
+                  `you already have this content in context. Avoid re-reading whole files: use grep_search ` +
+                  `to locate text, or offset+limit for a specific region.\n`;
         }
         ctx._fileCache.set(normPath, {
             content: fileContent,

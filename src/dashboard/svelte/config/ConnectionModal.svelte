@@ -50,6 +50,8 @@
         api_key: instance?.api_key || '',
         base_url: instance?.base_url || '',
         api_version: instance?.api_version || '',
+        // OpenAI speaks two protocols; every other provider has exactly one.
+        api_style: instance?.api_style || 'chat',
         context_window: instance?.context_window ?? '',
         max_output_tokens: instance?.max_output_tokens ?? '',
         temperature: instance?.temperature ?? '',
@@ -96,6 +98,9 @@
         api_key: form.api_key.trim(),
         base_url: form.base_url.trim(),
         api_version: form.api_version.trim(),
+        // Only openai has the choice — writing a style onto anything else would
+        // be a setting the backend ignores and the next reader has to explain.
+        api_style: form.provider === 'openai' ? (form.api_style || 'chat') : null,
         context_window: num(form.context_window),
         max_output_tokens: num(form.max_output_tokens),
         temperature: num(form.temperature),
@@ -183,6 +188,20 @@
                     <label class="input-label" for="modal-inst-version">{t('conn.apiVersion')}</label>
                     <input id="modal-inst-version" class="input" type="text"
                         bind:value={form.api_version} placeholder={t('conn.apiVersion.placeholder')}>
+                </div>
+            {/if}
+
+            <!-- OpenAI-only. The two protocols reach the same models but differ in
+                 request shape, stream events and usage field names, so the choice
+                 is per connection rather than global. -->
+            {#if form.provider === 'openai'}
+                <div class="input-group" id="modal-style-group">
+                    <label class="input-label" for="modal-inst-style">{t('conn.apiStyle')}</label>
+                    <select id="modal-inst-style" class="select" bind:value={form.api_style}>
+                        <option value="chat">{t('conn.apiStyle.chat')}</option>
+                        <option value="responses">{t('conn.apiStyle.responses')}</option>
+                    </select>
+                    <small class="cfg-hint">{t('conn.apiStyle.hint')}</small>
                 </div>
             {/if}
 

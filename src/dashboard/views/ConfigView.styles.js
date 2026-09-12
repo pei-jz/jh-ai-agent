@@ -26,8 +26,97 @@ export const CONFIG_SECTION_STYLES = `
                     .cfg-sec > summary:hover { background: var(--surface-sunken); border-radius: var(--r-3); }
                     .cfg-sec-chev { margin-left: auto; color: var(--ink-faint); transition: transform 0.15s; }
                     .cfg-sec:not([open]) .cfg-sec-chev { transform: rotate(-90deg); }
-                    .cfg-sec-body { padding: 4px 16px 14px; }
-                    .cfg-sec-hint { font-size: var(--fs-xs); color: var(--ink-faint); margin: 0 0 14px 0; line-height: 1.5; }
+                    /* TWO COLUMNS. Every setting is a label, a control and two
+                       lines of explanation, and stacking ~20 of them made the
+                       General tab several screens tall — so comparing two
+                       related settings meant scrolling between them, and a
+                       setting halfway down was found by hunting.
+
+                       A fixed 2 rather than auto-fit: auto-fit on a 1900px
+                       window gives five columns of narrow selects with long
+                       hints wrapping into slivers. One column below 900px,
+                       where two would be narrower than the hints need. */
+                    .cfg-sec-body {
+                        padding: 4px 16px 14px;
+                        display: grid;
+                        grid-template-columns: repeat(2, minmax(0, 1fr));
+                        gap: 14px 28px;
+                        align-items: start;
+                    }
+                    @media (max-width: 900px) {
+                        .cfg-sec-body { grid-template-columns: minmax(0, 1fr); }
+                    }
+                    /* Things that are not one short field: a section's own
+                       explanation, a textarea, a list, a boxed sub-panel. */
+                    .cfg-sec-body > .cfg-sec-hint,
+                    .cfg-sec-body > .cfg-secret-note,
+                    .cfg-sec-body > .cfg-wide { grid-column: 1 / -1; }
+                    /* The column-layout spacing helpers fight the grid gap and
+                       knock rows out of alignment; the gap is the spacing now. */
+                    .cfg-sec-body > .cfg-group-gap,
+                    .cfg-sec-body > .cfg-group-top,
+                    .cfg-sec-body > .cfg-group-top-sm { margin-top: 0; margin-bottom: 0; }
+                    .cfg-sec-hint { font-size: var(--fs-xs); color: var(--ink-faint); margin: 0; line-height: 1.5; }
+
+                    /* ── A setting: label + "?", the control, one line of what
+                       the chosen option does. The long "why" is behind the "?".
+                       ────────────────────────────────────────────────────── */
+                    .cfg-setting { gap: 8px; }
+                    .cfg-setting-head { display: flex; align-items: center; gap: 6px; }
+                    .cfg-choice-desc { margin: 0; line-height: 1.5; }
+                    .cfg-help-btn {
+                        flex-shrink: 0;
+                        width: 17px; height: 17px;
+                        display: inline-grid; place-items: center;
+                        padding: 0;
+                        border: 1px solid var(--line);
+                        border-radius: 50%;
+                        background: var(--surface-sunken);
+                        color: var(--ink-faint);
+                        font-family: inherit; font-size: 11px; font-weight: 700;
+                        line-height: 1; cursor: pointer;
+                        transition: color var(--transition-fast), border-color var(--transition-fast);
+                    }
+                    .cfg-help-btn:hover { color: var(--accent); border-color: var(--accent); }
+                    .cfg-help-btn[aria-expanded="true"] {
+                        color: var(--on-accent); background: var(--accent); border-color: var(--accent);
+                    }
+                    .cfg-help-panel {
+                        margin-top: 8px;
+                        padding: 9px 12px;
+                        border: 1px solid var(--line-soft);
+                        border-left: 3px solid var(--accent);
+                        border-radius: var(--r-2);
+                        background: var(--surface-sunken);
+                        font-size: var(--fs-xs); line-height: 1.6;
+                        color: var(--ink-soft);
+                    }
+                    .cfg-help-panel code { font-family: var(--font-mono); font-size: 11px; }
+
+                    /* ── A numeric limit: label, box, unit, "?" on one line.
+                       The label column is fixed so the boxes line up down the
+                       column instead of stepping in and out with the labels.
+                       ────────────────────────────────────────────────────── */
+                    .cfg-num-row {
+                        display: grid;
+                        /* A FIXED label column, and the columns packed to the
+                           left. A flexible one pushed the box to the far right
+                           of the panel, leaving a hand's width of empty paper
+                           between a label and the field it belongs to. */
+                        grid-template-columns: minmax(0, 15em) 84px 3.2em auto;
+                        justify-content: start;
+                        align-items: center;
+                        gap: 10px;
+                    }
+                    .cfg-num-label { margin: 0; }
+                    .cfg-num-input { text-align: right; }
+                    .cfg-num-unit { color: var(--ink-faint); font-size: var(--fs-xs); }
+                    @media (max-width: 1100px) {
+                        /* Narrow columns: the label takes its own line rather
+                           than being squeezed to three characters. */
+                        .cfg-num-row { grid-template-columns: 84px 3.2em auto; }
+                        .cfg-num-label { grid-column: 1 / -1; }
+                    }
                     .cfg-cmd-row {
                         display: flex; align-items: center; gap: 8px;
                         padding: 4px 10px; margin-bottom: 4px;
@@ -149,8 +238,12 @@ export const CONFIG_SECTION_STYLES = `
                     }
                     .cfg-empty { padding: 32px; text-align: center; color: var(--ink-soft); }
                     .cfg-empty-ic { font-size: var(--fs-display); display: block; margin-bottom: 12px; }
-                    .cfg-col-icon { width: 40px; text-align: center; }
-                    .cfg-col-acts { width: 160px; text-align: right; }
+                    /* Shrink-to-fit rather than a fixed 40px: the column holds a
+                       single emoji, but its HEADER is a word — and in Japanese
+                       "アイコン" wrapped one character per line inside 40px,
+                       turning the header row into a four-line tower. */
+                    .cfg-col-icon { width: 1%; white-space: nowrap; text-align: center; }
+                    .cfg-col-acts { width: 160px; white-space: nowrap; text-align: right; }
                     .cfg-emoji { font-size: var(--fs-lg); }
                     .cfg-cmd { font-family: var(--font-mono); color: var(--accent); }
                     .cfg-prompt-preview {

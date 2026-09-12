@@ -1,6 +1,6 @@
 [package]
 name = "jh-ai-agent"
-version = "0.2.0"
+version = "0.2.1"
 description = "J.H AI Agent — standalone Tauri-based AI agent server."
 authors = ["J.H AI Agent Contributors"]
 edition = "2021"
@@ -90,8 +90,13 @@ globset = "0.4"
 
 # Encoding detection and conversion for file I/O
 encoding_rs = "0.8"
-imap = "2.4"
-native-tls = "0.2.18"
+# 3.0 line, pinned EXACTLY because it is a pre-release: an alpha may change its
+# API on any bump. 2.4.1 is the newest stable, but it is locked to imap-proto
+# 0.10, whose macros trip a future-incompatibility lint (a trailing semicolon
+# in expression position) that a later Rust will turn into a hard error — the
+# build would simply stop compiling on a toolchain update. 3.0 uses imap-proto
+# 0.16, which is fixed. Default features = native-tls, same as before.
+imap = "=3.0.0-alpha.15"
 mailparse = "0.16.1"
 
 [dev-dependencies]

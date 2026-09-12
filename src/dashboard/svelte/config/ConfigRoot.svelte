@@ -29,6 +29,9 @@
     import { promptTemplateManager } from '../../../modules/ai/PromptTemplateManager.js';
     import { skillManager } from '../../../modules/ai/SkillManager.js';
     import { classifyCommand } from '../../../modules/ai/tools/commandPolicy.js';
+    import {
+        readBrowserState, markBrowserAvailable, markBrowserUnavailable, clearBrowserProbe,
+    } from '../../../modules/ai/browser/playwrightState.js';
     import { capFactText } from '../../../modules/ai/memory/FactStore.js';
     import {
         readWorkspaceMemory, writeFacts, writeEpisodes, writeCards,
@@ -39,7 +42,8 @@
         refreshLicense, licensingConfigured,
     } from '../../license.js';
     import {
-        CONFIG_TABS, APPROVED_COMMANDS_KEY, AUTO_APPROVE_WS_KEY,
+        CONFIG_TABS, DEFAULT_CONFIG_TAB, SAVEABLE_TABS, APPROVED_COMMANDS_KEY, AUTO_APPROVE_WS_KEY,
+        openOnlySection,
         readList, addToList, removeFromList, readOpenSections, writeOpenSection,
         buildConfigPayload, applyConfigPatch, upsertInstance, removeInstance,
     } from '../../views/config/configModel.js';
@@ -61,7 +65,7 @@
         toast = showNotification,
         pickFolder = () => invoke('select_folder'),
         onLocaleChange = () => window.dashboard?.render?.(),
-        initialTab = 'llm',
+        initialTab = DEFAULT_CONFIG_TAB,
     } = $props();
 
     const client = () => api ?? window.apiClient;
@@ -99,6 +103,13 @@
     let licensingOn = $state(false);
     let license = $state(licenseState());
     let uiLocale = $state(getLocale());
+
+    // Optional browser stack. Read from local state on mount (cheap, synchronous)
+    // and re-read after a probe; the probe itself spawns the worker, so it only
+    // runs when the user asks for it.
+    let browserState = $state(readBrowserState());
+    let browserProbing = $state(false);
+    let browserNotice = $state('');
 
     // Templates / Skills
     let editingTemplate = $state(null);
@@ -226,6 +237,10 @@
                 provider: inst.provider, model: inst.model,
                 api_key: inst.api_key || null, base_url: inst.base_url || null,
                 api_version: inst.api_version || null,
+                // Without this the audit pings /chat/completions while the
+                // connection really runs on /responses — a green tick that
+                // proves nothing about the endpoint actually in use.
+                api_style: inst.api_style || null,
             });
             connTestStatus = res.success
                 ? { state: 'ok', message: '✅ Success: Connection verified successfully!' }
@@ -347,7 +362,6 @@
                             <p class="subtitle">{t('conn.subtitle')}</p>
                         </div>
                         <div class="cfg-head-actions">
-                            <button class="btn btn-secondary" onclick={save}>{@html icon('save', 13)} Save Settings</button>
                             <button class="btn btn-primary" onclick={() => openInstanceModal()}>{@html icon('plus', 13)} Add Connection</button>
                         </div>
                     </div>
@@ -366,7 +380,6 @@
                             <h3>{@html icon('mcp', 15)} Model Context Protocol (MCP) Servers</h3>
                             <p class="subtitle">{t('cfg.sub.mcp')}</p>
                         </div>
-                        <button class="btn btn-primary" onclick={save}>{@html icon('save', 13)} Save Settings</button>
                     </div>
                     <SettingsMcp text={config.mcp_text || '{}'}
                         onChange={(text) => (config = { ...config, mcp_text: text.trim() })} />
@@ -378,7 +391,6 @@
                             <h3>{@html icon('gear', 15)} General Settings</h3>
                             <p class="subtitle">{t('cfg.sub.general')}</p>
                         </div>
-                        <button class="btn btn-primary" onclick={save}>{@html icon('save', 13)} Save Settings</button>
                     </div>
                     <SettingsGeneral
                         {config} {connection} {openSections} {approvedCommands}
@@ -387,7 +399,7 @@
                         licensingConfigured={licensingOn}
                         hasLicenseKey={hasStoredKey()}
                         onChange={patchConfig}
-                        onToggleSection={(k, open) => { openSections = writeOpenSection(k, open); }}
+                        onToggleSection={(k, open) => { openSections = openOnlySection(openSections, k, open); }}
                         onSelectLogDir={async () => {
                             try { const sel = await pickFolder(); if (sel) patchConfig({ log_dir: sel }); }
                             catch (e) { console.error('Failed to select folder:', e); }
@@ -409,6 +421,34 @@
                         onRemoveApprovedCommand={(v) => removeFrom(APPROVED_COMMANDS_KEY, v)}
                         onAddAutoWorkspace={(v) => addTo(AUTO_APPROVE_WS_KEY, v)}
                         onRemoveAutoWorkspace={(v) => removeFrom(AUTO_APPROVE_WS_KEY, v)}
+                        browserState={browserState}
+                        browserProbing={browserProbing}
+                        browserNotice={browserNotice}
+                        onProbeBrowser={async () => {
+                            if (browserProbing) return;
+                            browserProbing = true;
+                            browserNotice = '';
+                            try {
+                                const { browserBridge } = await import('../../../modules/ai/browser/BrowserBridge.js');
+                                const r = await browserBridge.probe();
+                                // Record it the same way a real call would, so the
+                                // gate the agent reads and the state shown here can
+                                // never disagree.
+                                if (r.ok) { markBrowserAvailable(); browserNotice = t('browser.result.ok'); }
+                                else { markBrowserUnavailable(r.reason); browserNotice = t('browser.result.fail', { reason: r.reason }); }
+                            } catch (e) {
+                                markBrowserUnavailable(e?.message || String(e));
+                                browserNotice = t('browser.result.fail', { reason: e?.message || String(e) });
+                            } finally {
+                                browserState = readBrowserState();
+                                browserProbing = false;
+                            }
+                        }}
+                        onForgetBrowser={() => {
+                            clearBrowserProbe();
+                            browserState = readBrowserState();
+                            browserNotice = '';
+                        }}
                         onRunSetup={async () => {
                             const { openOnboarding } = await import('../../onboarding.js');
                             await openOnboarding();
@@ -513,6 +553,22 @@
                     }}
                 />
             {/if}
+
+            <!-- Save follows you down the page.
+                 It used to live in each tab's header, which scrolls away: the
+                 General tab is several screens tall, so changing something near
+                 the bottom meant scrolling back to the top to keep it — and
+                 leaving the tab without doing that loses the change silently.
+                 One bar, not one per tab, so there is never a second Save
+                 button somewhere else on screen. The tabs that save nothing
+                 (Templates and Skills write on their own forms, RAG indexes)
+                 do not show it. -->
+            {#if SAVEABLE_TABS.has(activeTab)}
+                <div class="cfg-savebar">
+                    <span class="cfg-savebar-note">{t('cfg.save.hint')}</span>
+                    <button class="btn btn-primary" onclick={save}>{@html icon('save', 13)} Save Settings</button>
+                </div>
+            {/if}
         </div>
     </div>
 
@@ -538,6 +594,27 @@
         border-right: 1px solid var(--line); padding-right: 16px; flex-shrink: 0;
     }
     .settings-content-wrapper { flex: 1; min-width: 0; }
+
+    /* Sticks to the bottom of the scroll area (.main-content owns the
+       scrolling) for as long as the settings column is on screen, so Save is
+       reachable from anywhere in a long tab without hunting for it. */
+    .cfg-savebar {
+        position: sticky;
+        bottom: 0;
+        z-index: 5;
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 12px;
+        margin-top: 12px;
+        padding: 10px 14px;
+        border: 1px solid var(--line);
+        border-radius: var(--r-3);
+        /* Opaque: the form scrolls UNDER this bar. */
+        background: var(--surface-panel);
+        box-shadow: 0 -4px 14px rgba(0, 0, 0, 0.10);
+    }
+    .cfg-savebar-note { color: var(--ink-faint); font-size: var(--fs-sm); }
     .cfg-full { height: 100%; }
     .cfg-card-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
     .cfg-head-actions { display: flex; gap: 8px; }

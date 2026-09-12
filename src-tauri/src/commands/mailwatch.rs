@@ -72,15 +72,24 @@ pub fn build_search(q: &MailQuery) -> String {
     parts.join(" ")
 }
 
-/// Decode an RFC 2047 header into text.
+/// One header of a parsed message, decoded to text ("" when absent).
 ///
-/// Japanese senders and subjects arrive encoded far more often than not, and a
-/// prompt built from `=?utf-8?B?…?=` is a prompt the model cannot use.
-pub fn decode_header(raw: &str) -> String {
-    match mailparse::parse_header(format!("X: {}", raw).as_bytes()) {
-        Ok((h, _)) => h.get_value(),
-        Err(_) => raw.to_string(),
-    }
+/// Japanese senders and subjects arrive RFC 2047-encoded far more often than
+/// not, and a prompt built from `=?utf-8?B?…?=` is a prompt the model cannot
+/// use. `get_value()` does that decoding.
+///
+/// This used to be a separate `decode_header(raw)` that re-parsed a bare string
+/// — tested, but never called: the fetch loop read headers through its own
+/// closure. So the test proved a function nobody used, and the code that
+/// actually builds the prompt had no test at all. It is now the one path.
+/// Name matching is case-insensitive, as header names are.
+pub fn header(parsed: &mailparse::ParsedMail, name: &str) -> String {
+    parsed
+        .headers
+        .iter()
+        .find(|x| x.get_key().eq_ignore_ascii_case(name))
+        .map(|x| x.get_value())
+        .unwrap_or_default()
 }
 
 /// First text/plain part of a parsed message, capped.
@@ -123,10 +132,14 @@ pub async fn imap_check(query: MailQuery) -> Result<serde_json::Value, String> {
     let user = query.user.clone();
 
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, String> {
-        let tls = native_tls::TlsConnector::builder()
-            .build()
-            .map_err(|e| format!("TLS setup failed: {}", e))?;
-        let client = imap::connect((host.as_str(), port), host.as_str(), &tls)
+        // Direct TLS on whatever port was given, exactly as `imap::connect` did
+        // under imap 2.x. The 3.0 builder's own default (AutoTls) would switch
+        // to STARTTLS on any port but 993 — a behaviour change this upgrade was
+        // not meant to make. Native TLS, as before (it uses the OS trust store).
+        let client = imap::ClientBuilder::new(host.as_str(), port)
+            .mode(imap::ConnectionMode::Tls)
+            .tls_kind(imap::TlsKind::Native)
+            .connect()
             .map_err(|e| format!("could not reach {}:{} — {}", host, port, e))?;
         let mut session = client
             .login(&user, &password)
@@ -158,14 +171,7 @@ pub async fn imap_check(query: MailQuery) -> Result<serde_json::Value, String> {
             for msg in fetched.iter() {
                 let Some(raw) = msg.body() else { continue };
                 let Ok(parsed) = mailparse::parse_mail(raw) else { continue };
-                let h = |name: &str| {
-                    parsed
-                        .headers
-                        .iter()
-                        .find(|x| x.get_key().eq_ignore_ascii_case(name))
-                        .map(|x| x.get_value())
-                        .unwrap_or_default()
-                };
+                let h = |name: &str| header(&parsed, name);
                 let message_id = h("Message-ID");
                 out.push(MailMessage {
                     // Falling back to date+subject keeps dedupe working for the
@@ -280,10 +286,42 @@ mod tests {
         assert_eq!(build_search(&m), "UNSEEN SUBJECT \"say hello\"");
     }
 
+    // Through the same parse the fetch loop does, so this protects the code
+    // that actually builds the prompt.
+    fn parse(raw: &str) -> mailparse::ParsedMail<'_> {
+        mailparse::parse_mail(raw.as_bytes()).expect("test message must parse")
+    }
+
     #[test]
     fn encoded_headers_come_back_as_text() {
-        // "テスト" in RFC 2047 Base64.
-        assert_eq!(decode_header("=?utf-8?B?44OG44K544OI?="), "テスト");
-        assert_eq!(decode_header("plain subject"), "plain subject");
+        // "テスト" in RFC 2047 Base64 (B) and quoted-printable (Q).
+        let m = parse(
+            "From: =?utf-8?B?44OG44K544OI?= <t@example.com>\r\n\
+             Subject: =?utf-8?Q?=E3=83=86=E3=82=B9=E3=83=88?=\r\n\
+             \r\n\
+             body\r\n",
+        );
+        assert_eq!(header(&m, "Subject"), "テスト");
+        assert_eq!(header(&m, "From"), "テスト <t@example.com>");
+    }
+
+    #[test]
+    fn a_plain_header_is_untouched() {
+        let m = parse("Subject: plain subject\r\n\r\nbody\r\n");
+        assert_eq!(header(&m, "Subject"), "plain subject");
+    }
+
+    #[test]
+    fn header_names_match_regardless_of_case() {
+        let m = parse("message-id: <abc@example.com>\r\n\r\nbody\r\n");
+        assert_eq!(header(&m, "Message-ID"), "<abc@example.com>");
+    }
+
+    // A missing header is "", not a panic: the id falls back to Date|Subject
+    // when Message-ID is absent, and that fallback needs an empty string.
+    #[test]
+    fn a_missing_header_is_empty() {
+        let m = parse("Subject: x\r\n\r\nbody\r\n");
+        assert_eq!(header(&m, "Message-ID"), "");
     }
 }

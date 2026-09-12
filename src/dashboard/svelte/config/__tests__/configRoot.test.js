@@ -98,7 +98,10 @@ describe('the tab strip', () => {
     it('marks the active tab and switches on click', async () => {
         const { container } = mountRoot();
         await waitFor(() => expect(container.querySelector('.settings-tab-btn.active')).toBeTruthy());
-        expect(container.querySelector('.settings-tab-btn.active').textContent).toMatch(/LLM/);
+        // Opens on the TOP tab, which is General.
+        const first = container.querySelector('.settings-tab-btn');
+        expect(first.classList.contains('active')).toBe(true);
+        expect(first.textContent).toMatch(/General|一般/);
 
         const ragBtn = [...container.querySelectorAll('.settings-tab-btn')]
             .find(b => /RAG/.test(b.textContent));
@@ -116,13 +119,14 @@ describe('the tab strip', () => {
 });
 
 describe('connections', () => {
+    // Connections live on the LLM tab, which is no longer where Settings opens.
     it('lists the configured connections', async () => {
-        const { container } = mountRoot();
+        const { container } = mountRoot({ initialTab: 'llm' });
         await waitFor(() => expect(container.textContent).toMatch(/Flash/));
     });
 
     it('opens the add-connection modal, and closes it again', async () => {
-        const { container } = mountRoot();
+        const { container } = mountRoot({ initialTab: 'llm' });
         await waitFor(() => expect(container.querySelector('.btn-primary')).toBeTruthy());
         const add = [...container.querySelectorAll('button')].find(b => /Add Connection/.test(b.textContent));
         await fireEvent.click(add);
@@ -139,6 +143,27 @@ describe('connections', () => {
         // Reloaded so the masked keys the backend returns replace what was sent.
         await waitFor(() => expect(h.api.getConfig).toHaveBeenCalled());
         expect(h.toast).toHaveBeenCalled();
+    });
+
+    // The button used to sit in each tab's header, which scrolls out of sight on
+    // a tab several screens tall — so a change made at the bottom was kept only
+    // by scrolling back up first.
+    it('offers exactly one Save, in the bar that follows the page down', async () => {
+        const h = mountRoot();
+        await waitFor(() => expect(h.api.getConfig).toHaveBeenCalled());
+        const saves = [...h.container.querySelectorAll('button')]
+            .filter(b => /Save Settings/.test(b.textContent));
+        expect(saves).toHaveLength(1);
+        expect(saves[0].closest('.cfg-savebar')).toBeTruthy();
+    });
+
+    it('shows no Save on the tabs that save through their own forms', async () => {
+        for (const tab of ['templates', 'skills', 'rag']) {
+            const h = mountRoot({ initialTab: tab });
+            await waitFor(() => expect(h.api.getConfig).toHaveBeenCalled());
+            expect(h.container.querySelector('.cfg-savebar')).toBeNull();
+            cleanup();
+        }
     });
 
     it('reports a save failure rather than claiming success', async () => {

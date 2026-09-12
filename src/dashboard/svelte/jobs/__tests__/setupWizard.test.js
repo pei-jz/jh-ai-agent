@@ -45,10 +45,17 @@ function harness(recipes = [CLOCK, WATCH]) {
 const next = async () => fireEvent.click(screen.getByText('次へ'));
 /** Picking a card IS advancing — there is no Next button on step 1. */
 const pick = async (name) => fireEvent.click(await screen.findByText(name));
+/**
+ * The wizard opens on the CATALOGUE now. These fixtures declare no `needsAI`,
+ * so their catalogue is empty and every one of these tests is exercising the
+ * "I know what I want" door.
+ */
+const custom = async () => fireEvent.click(await screen.findByText('自分で作る'));
 
 describe('step 1 puts the clock and the watchers in one list', () => {
     it('shows both groups, with the free timer first', async () => {
         harness();
+        await custom();
         expect(await screen.findByText('監視して動かす')).toBeTruthy();
         const names = [...document.querySelectorAll('.wiz-opt-name')].map(e => e.textContent);
         expect(names[0]).toBe('スケジュールを決める');
@@ -57,6 +64,7 @@ describe('step 1 puts the clock and the watchers in one list', () => {
 
     it('asks the clock question once — the cycle is step 2, not a card', async () => {
         harness();
+        await custom();
         await screen.findByText('監視して動かす');
         const names = [...document.querySelectorAll('.wiz-opt-name')].map(e => e.textContent);
         expect(names.filter(n => n === 'スケジュールを決める')).toHaveLength(1);
@@ -65,6 +73,7 @@ describe('step 1 puts the clock and the watchers in one list', () => {
 
     it('choosing a card goes straight to step 2 — no second click', async () => {
         harness();
+        await custom();
         await pick('スケジュールを決める');
         expect(document.body.textContent).toContain('監視は作られません');
     });
@@ -73,6 +82,7 @@ describe('step 1 puts the clock and the watchers in one list', () => {
 describe('the time path never mentions a watcher', () => {
     it('shows the schedule control the schedule screen uses, and nothing else', async () => {
         harness();
+        await custom();
         await pick('スケジュールを決める');
 
         // The setup step for a timer is the schedule and nothing else: no
@@ -85,6 +95,7 @@ describe('the time path never mentions a watcher', () => {
 
     it('creates a job and no watcher', async () => {
         const h = harness();
+        await custom();
         await pick('スケジュールを決める');
         await next();
 
@@ -105,6 +116,7 @@ describe('the time path never mentions a watcher', () => {
 describe('a clock preset is ready-made WORK, offered on step 3', () => {
     it('fills the prompt and the purpose from the template', async () => {
         harness();
+        await custom();
         await pick('スケジュールを決める');
         await next();
         await fireEvent.change(document.querySelector('#wiz-tpl'), { target: { value: 'daily' } });
@@ -114,6 +126,7 @@ describe('a clock preset is ready-made WORK, offered on step 3', () => {
 
     it('says out loud that it moved the schedule too', async () => {
         harness();
+        await custom();
         await pick('スケジュールを決める');
         await next();
         await fireEvent.change(document.querySelector('#wiz-tpl'), { target: { value: 'daily' } });
@@ -124,6 +137,7 @@ describe('a clock preset is ready-made WORK, offered on step 3', () => {
 describe('a watch preset arrives with its work already written', () => {
     it('carries the prompt into step 3 rather than leaving a blank box', async () => {
         harness();
+        await custom();
         await pick('サービスの死活');
         await fireEvent.input(document.querySelector('#wiz-f-url'),
             { target: { value: 'https://example.com/healthz' } });
@@ -136,6 +150,7 @@ describe('a watch preset arrives with its work already written', () => {
 describe('the watch path creates both, and links them', () => {
     it('makes the watcher, approves it, then makes the job pointing at it', async () => {
         const h = harness();
+        await custom();
         await pick('サービスの死活');
 
         // The recipe IS the form: its one required field is what step 2 asks for.
@@ -157,6 +172,7 @@ describe('the watch path creates both, and links them', () => {
 
     it('shows where it will connect before it is created', async () => {
         harness();
+        await custom();
         await pick('サービスの死活');
         await fireEvent.input(document.querySelector('#wiz-f-url'),
             { target: { value: 'https://example.com/healthz' } });
@@ -171,6 +187,7 @@ describe('the form is compact', () => {
     // span it, and the recipe declares which.
     it('spans only the fields that declared themselves wide', async () => {
         harness();
+        await custom();
         await pick('サービスの死活');
         const url = document.querySelector('#wiz-f-url').closest('.sch-field');
         const every = document.querySelector('#wiz-every').closest('.sch-field');
@@ -180,6 +197,7 @@ describe('the form is compact', () => {
 
     it('keeps the card to a readable width instead of the whole window', async () => {
         harness();
+        await custom();
         await screen.findByText('監視して動かす');
         expect(document.querySelector('.wiz-shell')).toBeTruthy();
         expect(document.querySelector('.wiz')).toBeTruthy();

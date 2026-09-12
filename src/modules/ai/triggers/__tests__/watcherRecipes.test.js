@@ -5,7 +5,8 @@
 // matter are "where can a credential end up", "what runs", and "is it still the
 // file that was approved" — not whether the happy path substitutes a string.
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { __setLocaleForTest } from '../../../../i18n/index.js';
 import {
     normalizeRecipe, validateRecipe, resolveConfig, applySecrets, recipeHosts,
     missingRequired, secretFieldIn, defaultValues,
@@ -148,6 +149,96 @@ describe('filling a recipe in', () => {
     it('finds which field holds the mailbox password', () => {
         const mail = BUILTIN_RECIPES.find(r => r.id === 'mail');
         expect(secretFieldIn(normalizeRecipe(mail, 'mail'), 'password')).toBe('password');
+    });
+});
+
+describe('recipe text follows the app language', () => {
+    // The chrome was translated and the templates were not, so an English UI
+    // showed English buttons around Japanese cards — half a screen in each
+    // language. The text is DATA, so it carries both languages itself rather
+    // than living in the message catalogs: a recipe is a file someone can write
+    // and hand over, and a plain string has to stay valid.
+    const bilingual = {
+        name: { ja: '死活', en: 'Health' },
+        description: { ja: '見ます', en: 'Watches it' },
+        needsAI: { ja: '文で判断します', en: 'Judged in prose' },
+        engine: 'http',
+        fields: [{ key: 'url', label: { ja: 'ヘルス URL', en: 'Health URL' }, type: 'text',
+                   hint: { ja: '空でも動きます', en: 'Works when empty' } }],
+        config: { url: '{{url}}' },
+        payload: [['value', { ja: '今回の値', en: 'The value now' }]],
+        job: { name: { ja: '記録', en: 'Record it' }, purpose: { ja: '残す', en: 'Keep a record' },
+               prompt: { ja: '書いて', en: 'Write it down' } },
+        defaults: { eventName: 'service.changed' },
+    };
+
+    afterEach(() => __setLocaleForTest('ja'));
+
+    it('reads in Japanese under ja', () => {
+        __setLocaleForTest('ja');
+        const r = normalizeRecipe(bilingual, 'health');
+        expect(r.name).toBe('死活');
+        expect(r.fields[0].label).toBe('ヘルス URL');
+        expect(r.job.prompt).toBe('書いて');
+        expect(r.payload[0][1]).toBe('今回の値');
+    });
+
+    it('reads in English under en', () => {
+        __setLocaleForTest('en');
+        const r = normalizeRecipe(bilingual, 'health');
+        expect(r.name).toBe('Health');
+        expect(r.description).toBe('Watches it');
+        expect(r.needsAI).toBe('Judged in prose');
+        expect(r.fields[0].label).toBe('Health URL');
+        expect(r.fields[0].hint).toBe('Works when empty');
+        expect(r.job.name).toBe('Record it');
+        expect(r.job.prompt).toBe('Write it down');
+        expect(r.payload[0][1]).toBe('The value now');
+    });
+
+    it('leaves a plain string alone — that is what a user recipe has', () => {
+        __setLocaleForTest('en');
+        const r = normalizeRecipe({ ...bilingual, name: '自分で書いたやつ' }, 'mine');
+        expect(r.name).toBe('自分で書いたやつ');
+    });
+
+    it('falls back to Japanese when a language is missing', () => {
+        __setLocaleForTest('en');
+        const r = normalizeRecipe({ ...bilingual, name: { ja: '日本語だけ' } }, 'x');
+        expect(r.name).toBe('日本語だけ');
+    });
+
+    it.each([['ja'], ['en']])('every shipped recipe reads in %s', (loc) => {
+        __setLocaleForTest(loc);
+        for (const raw of BUILTIN_RECIPES) {
+            const r = normalizeRecipe(raw, raw.id);
+            // "[object Object]" is what an un-resolved pair renders as, and it
+            // renders without erroring — which is how it would ship unnoticed.
+            const texts = [r.name, r.description, r.needsAI,
+                           ...r.fields.map(f => f.label), ...r.fields.map(f => f.hint),
+                           ...(r.job ? [r.job.name, r.job.purpose, r.job.prompt] : []),
+                           ...r.payload.map(p => p[1]),
+                           ...r.fields.flatMap(f => (f.options || []).map(o => o[1]))];
+            for (const s of texts) expect(String(s), `${r.id} / ${loc}`).not.toContain('[object');
+        }
+    });
+
+    it('translates every shipped recipe, not just some', () => {
+        // A recipe that ships with only Japanese would read correctly in ja and
+        // appear untranslated in en, which is exactly the state being fixed.
+        const missing = [];
+        for (const raw of BUILTIN_RECIPES) {
+            const check = (v, what) => {
+                if (v && typeof v === 'object' && !Array.isArray(v) && !v.en) missing.push(`${raw.id}.${what}`);
+                if (typeof v === 'string' && /[ぁ-んァ-ン一-龯]/.test(v)) missing.push(`${raw.id}.${what}`);
+            };
+            check(raw.name, 'name');
+            check(raw.description, 'description');
+            check(raw.needsAI, 'needsAI');
+            for (const f of raw.fields || []) { check(f.label, `field.${f.key}.label`); check(f.hint, `field.${f.key}.hint`); }
+            if (raw.job) for (const k of ['name', 'purpose', 'prompt']) check(raw.job[k], `job.${k}`);
+        }
+        expect(missing).toEqual([]);
     });
 });
 

@@ -55,16 +55,11 @@ describe('READ_ONLY_TOOLS really is read-only', () => {
 describe('mode presets offer delegation', () => {
     // The regression this whole file exists for: the sub-agent engine must be
     // reachable from the DEFAULT mode, not only from `develop`.
-    it('general offers run_subtask', () => {
-        expect(AGENT_MODES.general.behavior.enabled_tools).toContain('run_subtask');
-    });
-
-    it('every preset that restricts tools still offers run_subtask', () => {
-        for (const [id, mode] of Object.entries(AGENT_MODES)) {
-            const list = mode.behavior.enabled_tools;
-            if (!list) continue;   // `develop` = no restriction = has everything
-            expect(list, `${id} cannot delegate`).toContain('run_subtask');
-        }
+    // `no_edit` is the mode a long investigation runs in, and splitting one
+    // across parallel children is what delegation was built for. `read_only`
+    // deliberately does NOT get it — see the test below.
+    it('no_edit offers run_subtask', () => {
+        expect(AGENT_MODES.no_edit.behavior.enabled_tools).toContain('run_subtask');
     });
 
     it('every preset can terminate, deliver and ask', () => {
@@ -77,11 +72,53 @@ describe('mode presets offer delegation', () => {
         }
     });
 
-    it('research still cannot edit source', () => {
-        const list = AGENT_MODES.research.behavior.enabled_tools;
-        for (const n of ['multi_replace_file_content', 'replace_lines', 'delete_file', 'move_file']) {
-            expect(list).not.toContain(n);
+    // ── The names have to be true ─────────────────────────────────────────
+    // These modes are named for what they CAN DO, so a tool leaking into one
+    // is not a tidiness problem — it makes the label on the button a lie.
+
+    it('no_edit holds nothing that changes an existing file, and no shell', () => {
+        const list = AGENT_MODES.no_edit.behavior.enabled_tools;
+        for (const n of ['multi_replace_file_content', 'replace_lines', 'apply_patch',
+                         'delete_file', 'move_file', 'run_command', 'git_commit',
+                         // The first cut used OUTPUT_TOOLS and so carried these —
+                         // a mode called "no edits" that could edit any workbook.
+                         'update_xlsx', 'append_xlsx_row']) {
+            expect(list, `no_edit must not offer ${n}`).not.toContain(n);
         }
+        // The creators stay: "(new files OK)" is the whole difference from read_only.
+        for (const n of ['write_file', 'write_xlsx', 'write_docx']) {
+            expect(list).toContain(n);
+        }
+    });
+
+    // Tool membership cannot say "new files only" — write_file overwrites. The
+    // flag is what ToolExecutor enforces, so losing it silently breaks the name.
+    it('no_edit is create-only, and the other modes are not', () => {
+        expect(AGENT_MODES.no_edit.behavior.create_only).toBe(true);
+        expect(AGENT_MODES.full.behavior.create_only).toBeUndefined();
+        expect(AGENT_MODES.read_only.behavior.create_only).toBeUndefined();
+    });
+
+    it('read_only can write nothing at all', () => {
+        const list = AGENT_MODES.read_only.behavior.enabled_tools;
+        for (const n of ['write_file', 'write_xlsx', 'write_docx', 'update_xlsx',
+                         'append_xlsx_row', 'multi_replace_file_content', 'replace_lines',
+                         'apply_patch', 'delete_file', 'move_file', 'run_command',
+                         'git_commit']) {
+            expect(list, `read_only must not offer ${n}`).not.toContain(n);
+        }
+    });
+
+    // run_subtask does not intersect the child's toolset with the parent's by
+    // itself — AgentController clamps it. Until that clamp is proven here too,
+    // the cheapest guarantee for the strictest mode is not to offer the tool:
+    // a read-only run that can spawn a coder is not read-only.
+    it('read_only cannot delegate its way out of being read-only', () => {
+        expect(AGENT_MODES.read_only.behavior.enabled_tools).not.toContain('run_subtask');
+    });
+
+    it('full is unrestricted — no allowlist at all', () => {
+        expect(AGENT_MODES.full.behavior.enabled_tools).toBeUndefined();
     });
 });
 

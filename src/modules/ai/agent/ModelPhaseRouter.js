@@ -68,22 +68,33 @@ export const DEEP_PHASE_TOKEN_SHARE = 0.25;
 /**
  * Where a run starts.
  *
- * A run only opens in `plan` when there is genuinely something to plan AND this
- * is the turn that would do the planning:
+ * A run only opens in `plan` when there is genuinely something to plan:
  *
- *   • `freshTurn` — a continuation turn (the user answering ask_user, a steering
- *     reply) arrives with the plan already made. Re-entering the plan phase there
- *     would put the deep model on what is really execution, which is the
+ *   • `resumedPlan` — this turn is resuming a plan that was ALREADY made and
+ *     approved (the user answering the plan-first approval card). Re-planning
+ *     there would put the deep model on what is really execution, which is the
  *     expensive mistake this module exists to avoid.
  *   • `planFirst` or `complex` — otherwise there is no plan step to pay for; a
  *     one-line fix should not touch the deep tier at all.
  *
- * @param {{enabled?: boolean, freshTurn?: boolean, planFirst?: boolean, complex?: boolean}} o
+ * `freshTurn` used to decide this on its own: ANY continuation opened in
+ * execute. That was right for the case it was written for (an approval reply)
+ * and wrong for the far more common one — a task that COMPLETED, and a user who
+ * then asks for something new under the same task id. That new request is a
+ * fresh piece of work with no plan behind it, and it was being handed to the
+ * fast model from step one while the identical request typed into a new task
+ * got the deep model. So the complexity of the CURRENT message decides, and
+ * `resumedPlan` carves out the approval turn it was protecting.
+ *
+ * @param {{enabled?: boolean, freshTurn?: boolean, resumedPlan?: boolean,
+ *          planFirst?: boolean, complex?: boolean}} o
  * @returns {'plan'|'execute'}
  */
-export function initialPhase({ enabled = false, freshTurn = true, planFirst = false, complex = false } = {}) {
+export function initialPhase({
+    enabled = false, freshTurn = true, resumedPlan = false, planFirst = false, complex = false,
+} = {}) {
     if (!enabled) return 'execute';
-    if (!freshTurn) return 'execute';
+    if (!freshTurn && resumedPlan) return 'execute';
     return (planFirst || complex) ? 'plan' : 'execute';
 }
 

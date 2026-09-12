@@ -241,9 +241,5 @@
 <style>
     .rec-json { font-family: var(--font-mono, ui-monospace, monospace); font-size: var(--fs-sm); min-height: 22rem; }
     .rec-json[readonly] { opacity: .85; }
-    .rec-lock {
-        margin: 0 0 10px; padding: 8px 12px; border-radius: var(--r-2);
-        background: var(--warning-surface); color: var(--warning); font-size: var(--fs-sm);
-    }
     .badge.k-event { background: var(--warning-surface); color: var(--warning); }
 </style>

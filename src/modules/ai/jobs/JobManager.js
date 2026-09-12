@@ -19,7 +19,7 @@ import { buildBehavior, DEFAULT_MODE_ID } from '../AgentModes.js';
 import { spendOf, rateLookup } from '../../../dashboard/views/overview/overviewModel.js';
 import { TriggerEngine, unresolvedPlaceholders, renderPrompt } from '../triggers/TriggerEngine.js';
 import {
-    JOB_DEFAULTS, RUN_HISTORY, migrate, timeTriggerDue, ranThisMinute,
+    JOB_DEFAULTS, RUN_HISTORY, migrate, timeTriggerDue, ranThisMinute, withSkills,
     overBudget, addSpend,
 } from './JobModel.js';
 
@@ -339,6 +339,36 @@ export class JobManager {
             return record;
         }
 
+        // Pinned skills, read NOW rather than when the job was saved, so an
+        // edit in the Skills tab reaches the next run. Checked after the
+        // placeholder test on purpose: a skill body is a static procedure, and
+        // one that documents `{{…}}` syntax must not be mistaken for a prompt
+        // the event failed to fill.
+        let prompt = why.prompt;
+        if (job.skills?.length) {
+            const loaded = [];
+            const missing = [];
+            for (const name of job.skills) {
+                try {
+                    const body = await this.invoke('read_skill_file', { name });
+                    if (body) loaded.push({ name, body }); else missing.push(name);
+                } catch (_) { missing.push(name); }
+            }
+            // Refused rather than run without it. The skill was pinned because
+            // the work depends on that procedure; a run that quietly goes ahead
+            // without it does SOMETHING, unattended, and the record would look
+            // like a normal run.
+            if (missing.length) {
+                record.status = 'failed';
+                record.error = `スキル ${missing.map(n => `「${n}」`).join('')} を読めませんでした。`
+                    + '削除または改名されていないか確認してください。';
+                this._finishRecord(job, record, 'missing-skill');
+                this.engine.noteFinished(`${job.id}#0`);
+                return record;
+            }
+            prompt = withSkills(prompt, loaded);
+        }
+
         try {
             const client = this.client;
             if (!client) throw new Error('API client not ready');
@@ -357,7 +387,7 @@ export class JobManager {
             const task = await client.request('/tasks', {
                 method: 'POST',
                 body: JSON.stringify({
-                    prompt: why.prompt,
+                    prompt,
                     workspace_path: job.workspacePath || null,
                     caller: 'Job',
                     behavior,

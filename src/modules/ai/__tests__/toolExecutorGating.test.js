@@ -21,6 +21,7 @@ vi.mock('../McpManager.js', () => ({
 }));
 
 const { ToolExecutor } = await import('../ToolExecutor.js');
+const { invoke } = await import('@tauri-apps/api/core');
 
 let ex;
 beforeEach(() => {
@@ -407,6 +408,73 @@ describe('write scope (sub-agent ownership)', () => {
             expect(out).toMatch(/outside your write scope/i);
         });
     }
+});
+
+// "No edits (new files OK)": the mode's name promises nothing on disk changes,
+// and write_file overwrites an existing path without complaint — so the promise
+// is kept here, against the file system, not by tool membership.
+describe('create-only (the "No edits (new files OK)" mode)', () => {
+    beforeEach(async () => {
+        await ex.startSession('C:/work/proj');
+        ex.setCreateOnly(true);
+    });
+    const existsIs = (v) => invoke.mockImplementation(async (cmd) => (cmd === 'file_exists' ? v : null));
+
+    for (const name of ['write_file', 'write_xlsx', 'write_docx']) {
+        it(`refuses ${name} onto a path that already exists`, async () => {
+            existsIs(true);
+            const out = await ex.executeTool(
+                { name, args: { path: 'reports/out.xlsx', content: 'x', sheets: [], markdown: '' } },
+                null, async () => true,
+            );
+            expect(out).toMatch(/already exists/);
+            // And it tells the model what to do instead of just refusing.
+            expect(out).toMatch(/new path/);
+        });
+    }
+
+    it('lets a NEW file through to the ordinary checks', async () => {
+        existsIs(false);
+        const out = await ex.executeTool(
+            { name: 'write_file', args: { path: 'reports/new.md', content: 'x' } },
+            null, async () => false,   // user declines → a different error than create-only
+        );
+        // Only OUR refusal counts. write_file's own read-before-overwrite guard
+        // also says "already exists" when the harness's probe answers, and that
+        // is a later, unrelated check — reaching it is the point.
+        expect(out).not.toMatch(/this run may only create NEW files/);
+    });
+
+    // These act on an existing file by definition, so there is nothing to look up.
+    for (const name of ['delete_file', 'move_file', 'update_xlsx', 'append_xlsx_row',
+                        'replace_lines', 'multi_replace_file_content', 'apply_patch']) {
+        it(`refuses ${name} outright`, async () => {
+            existsIs(false);
+            const out = await ex.executeTool(
+                { name, args: { path: 'a.txt', from: 'a.txt', to: 'b.txt', edits: [] } },
+                null, async () => true,
+            );
+            expect(out).toMatch(/may only create NEW files/);
+        });
+    }
+
+    // A guarantee that lapses whenever the check errors is not a guarantee.
+    it('fails CLOSED when the existence check itself errors', async () => {
+        invoke.mockImplementation(async (cmd) => {
+            if (cmd === 'file_exists') throw new Error('backend gone');
+            return null;
+        });
+        const out = await ex.executeTool(
+            { name: 'write_file', args: { path: 'reports/new.md', content: 'x' } },
+            null, async () => true,
+        );
+        expect(out).toMatch(/already exists/);
+    });
+
+    it('does not survive into the next session', async () => {
+        await ex.startSession('C:/work/proj');
+        expect(ex.createOnly).toBe(false);
+    });
 });
 
 describe('permission level — fail-closed default', () => {

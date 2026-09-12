@@ -6,7 +6,7 @@
 // the user understands the choice while selecting. Used by ChatView (agent mode
 // bar) and the Monitor new-task modal.
 
-import { AGENT_MODES, resolveModeId, DEFAULT_MODE_ID, modeName, MODE_ICON } from '../../modules/ai/AgentModes.js';
+import { AGENT_MODES, resolveModeId, DEFAULT_MODE_ID, modeName, modeDescription, MODE_ICON } from '../../modules/ai/AgentModes.js';
 import { icon } from '../utils/icons.js';
 
 
@@ -28,7 +28,7 @@ export class ModeDropdown {
                 <span class="mode-dd-ico">${icon(MODE_ICON[mo.id] || 'gear')}</span>
                 <span class="mode-dd-texts">
                     <span class="mode-dd-name">${modeName(mo)}</span>
-                    <span class="mode-dd-desc">${mo.description || ''}</span>
+                    <span class="mode-dd-desc">${modeDescription(mo)}</span>
                 </span>
             </div>`).join('');
 

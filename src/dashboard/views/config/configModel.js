@@ -9,11 +9,15 @@
 
 import { approvedPatternRefusal } from './configForm.js';
 
-/** The vertical tab strip, in order. */
+/**
+ * The vertical tab strip, in order. The FIRST entry is also where Settings
+ * opens (DEFAULT_CONFIG_TAB), so reordering this list cannot leave the page
+ * opening on a tab halfway down.
+ */
 export const CONFIG_TABS = [
+    { id: 'general', icon: 'gear', label: 'General Settings' },
     { id: 'llm', icon: 'llm', label: 'LLM Settings' },
     { id: 'mcp', icon: 'mcp', label: 'MCP Settings' },
-    { id: 'general', icon: 'gear', label: 'General Settings' },
     { id: 'templates', icon: 'template', label: 'Templates' },
     { id: 'skills', icon: 'bolt', label: 'Skills' },
     // API Logs moved to the Monitor view (per-task raw payloads).
@@ -24,6 +28,18 @@ export const CONFIG_TABS = [
     // at what the month cost — Settings is where you change how the app behaves
     // and then leave.
 ];
+
+/** Where Settings opens when no tab is asked for: the top of the strip. */
+export const DEFAULT_CONFIG_TAB = CONFIG_TABS[0].id;
+
+/**
+ * Tabs whose changes are kept by the Save button.
+ *
+ * The others write on their own: Templates and Skills save from their forms,
+ * RAG runs an index. Showing a Save bar there would invite the reading that
+ * nothing on those tabs is stored until you press it.
+ */
+export const SAVEABLE_TABS = new Set(['llm', 'mcp', 'general']);
 
 export const APPROVED_COMMANDS_KEY = 'jhai_approved_commands';
 export const AUTO_APPROVE_WS_KEY = 'jhai_autoapprove_workspaces';
@@ -77,6 +93,51 @@ export function writeOpenSection(key, open) {
     s[key] = !!open;
     try { localStorage.setItem(SECTIONS_KEY, JSON.stringify(s)); } catch (_) { /* private mode */ }
     return s;
+}
+
+/**
+ * The collapsible sections of the General tab, in the order they appear.
+ *
+ * Listed here rather than only in the markup because the accordion has to be
+ * able to say "every OTHER one is closed", and a list that misses a section
+ * leaves that one open next to the one just opened.
+ */
+export const GENERAL_SECTIONS = [
+    'basic', 'behavior', 'safety', 'paths',
+    'commands', 'logging', 'connection', 'updates', 'license',
+];
+
+/**
+ * Open one section and close the rest.
+ *
+ * An accordion rather than independent toggles: there are nine sections and
+ * around forty settings between them, and they are not read against each other
+ * — leaving four open is how the tab became a page you scroll through looking
+ * for a heading you have already passed.
+ *
+ * Closing writes `false` for every section EXPLICITLY, because an absent key
+ * means "use the default" and `basic` defaults to open — dropping keys would
+ * reopen it every time another section was opened.
+ */
+export function openOnlySection(sections, key, open) {
+    const next = { ...(sections || {}) };
+    if (open) {
+        // Closing the others EXPLICITLY, because an absent key means "use the
+        // default" and `basic` defaults to open — dropping keys would reopen it
+        // beside the section just opened.
+        for (const k of GENERAL_SECTIONS) next[k] = false;
+        next[key] = true;
+    } else {
+        // ONLY this one. Closing a section must not touch the others, and not
+        // only for tidiness: closing the rest is done by setting their `open`
+        // attribute, and each of those fires its own toggle event back into
+        // here. Treating "closed" as "close everything" therefore wiped the
+        // section that had just been opened — one click, and the whole tab
+        // collapsed.
+        next[key] = false;
+    }
+    try { localStorage.setItem(SECTIONS_KEY, JSON.stringify(next)); } catch (_) { /* private mode */ }
+    return next;
 }
 
 /**
@@ -158,6 +219,12 @@ export function buildConfigPayload(config, promptTemplates) {
         memory_recall: config.memory_recall || 'on',
         phase_routing: config.phase_routing || 'off',
         episode_injection: config.episode_injection || 'off',
+        // Both were on the Settings screen and read by the agent, but never
+        // SENT: the backend treats an absent field as "unchanged", so switching
+        // either on saved without error and came back as off. The test beside
+        // this file now fails for any field the screen edits and this omits.
+        playbook: config.playbook || 'off',
+        read_batch_hint: config.read_batch_hint || 'off',
         // `??`, NOT `||`. "(not set)" sends an EMPTY STRING as the explicit clear
         // sentinel — `||` collapsed it to null, which the backend's field-wise
         // merge reads as "the caller didn't mention this" and restores the

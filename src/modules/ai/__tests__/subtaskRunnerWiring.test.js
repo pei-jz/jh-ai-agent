@@ -48,6 +48,43 @@ describe('the run_subtask runner is actually callable', () => {
         await expect(h.subtaskRunner({ brief: '' }, () => {})).resolves.toMatch(/brief/);
     });
 
+    // ── Delegation must not widen what the run may do ─────────────────────
+    // The child's toolset comes from args.tools (chosen by the MODEL), else a
+    // role preset, else every built-in — none of which consulted the parent.
+    // So a run in a restricted mode could delegate its way out of the
+    // restriction: `run_subtask({ role: 'coder' })` handed the child EDIT_TOOLS
+    // and run_command even when the parent held neither.
+    //
+    // That is not only a capability leak, it makes the mode's NAME false, and
+    // the modes are named for what they can do.
+
+    it('refuses a sub-task whose tools the parent does not itself hold', async () => {
+        const h = makeHarness({ script: [finishStep('done')] });
+        await h.run('do the thing');
+        // A read-only parent.
+        h.toolExecutor.toolAllowlist = new Set(['read_file', 'finish_task']);
+
+        const out = await h.subtaskRunner(
+            { brief: 'rewrite the config', tools: ['write_file', 'delete_file', 'run_command'] },
+            () => {}
+        );
+        expect(out).toMatch(/does not allow the tools that role needs/);
+        // And it says what to do about it rather than just refusing.
+        expect(out).toMatch(/less restricted mode/);
+    });
+
+    it('leaves delegation alone when the parent is unrestricted', async () => {
+        const h = makeHarness({ script: [finishStep('done')] });
+        await h.run('do the thing');
+        // No allowlist at all = the `full` mode. Nothing to clamp against.
+        expect(h.toolExecutor.toolAllowlist).toBeUndefined();
+
+        const out = await h.subtaskRunner({ brief: '' }, () => {});
+        // Still the ordinary empty-brief complaint, not a capability refusal.
+        expect(out).toMatch(/requires a non-empty "brief"/);
+        expect(out).not.toMatch(/does not allow the tools/);
+    });
+
     // A sub-agent must not spawn sub-agents; the parent is the only place the
     // runner is attached.
     it('is not injected for a sub-agent run', async () => {

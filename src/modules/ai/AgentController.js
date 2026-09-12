@@ -1,4 +1,4 @@
-import { planApprovalQuestion, isPlanRevision } from './agent/PlanFirstApproval.js';
+import { planApprovalQuestion, isPlanRevision, isPlanApproval } from './agent/PlanFirstApproval.js';
 import llmService from './LLMService.js';
 import { skillManager } from './SkillManager.js';
 import { ToolExecutor } from './ToolExecutor.js';
@@ -20,6 +20,7 @@ import { looksComplex } from './agent/TaskComplexity.js';
 // "Am I being asked, or given a job?" — a SECOND axis, orthogonal to the agent
 // mode. See agent/InteractionMode.js and information-architecture.md §3.
 import { runShape } from './agent/InteractionMode.js';
+import { INTERACTIVE_CALLERS as INTERACTIVE_CALLER_NAMES } from './agent/taskCaller.js';
 // The run's mutable counters, named so the phases below can take one argument
 // instead of closing over twenty free variables — see agent/RunState.js.
 import { RunState } from './agent/RunState.js';
@@ -74,6 +75,15 @@ import { foldRead, batchHint } from './agent/ReadBatching.js';
 
 /** Step 4b: dependants listed after an edit. Bounded — a 40-name list is not read. */
 const IMPACT_MAX_FILES = 8;
+
+/**
+ * Files named in a continuation's "you have been here" note.
+ *
+ * The inherited cache carries up to CARRIED_CACHE_MAX_FILES (ToolExecutor); this
+ * is how many of them are worth spending prompt on. A list short enough to skim
+ * is useful, a list long enough to scroll is wallpaper.
+ */
+const CARRIED_FILES_LISTED = 15;
 
 // Tools blocked by the Plan-First gate until the user approves the plan —
 // anything that mutates the workspace or runs shell commands. Investigation
@@ -1558,6 +1568,9 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
             durationMs: Date.now() - taskStartMs,
             tokens: cumulativeTokens,
             presentedAnswer: this._extractEnvelopeAnswer(this._lastResultEnvelope),
+            // Recorded so a CONTINUATION of this task is told which plan the work
+            // follows. Empty on a run that never opened the plan-first gate.
+            approvedPlan: this._approvedPlanText || '',
         }, onAgentStatus);
 
         // Long-term memory: record this completed session to the durable journal +
@@ -1674,11 +1687,18 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
         // previous request/answer exchanges: label those requests as COMPLETED
         // so the model never mistakes an old (already delivered) request for the
         // active goal — the new message is the goal now.
+        //
+        // One message in a continuation's context is NOT a request: the block
+        // server/router.rs `continuation_context` appends, listing the files the
+        // earlier runs changed and the plan they followed. Relabelling that as a
+        // completed request would tell the model its own work-state is something
+        // it had been asked to do. "[Prior work" below is the same prefix that
+        // file writes — keep the two in step.
         let history = [];
         if (chatContext.length > 0) {
             history.push(...chatContext.map(m =>
                 (m.role === 'user' && typeof m.content === 'string'
-                    && !/^\[(Original Goal|Current Goal|Completed request)/.test(m.content))
+                    && !/^\[(Original Goal|Current Goal|Completed request|Prior work)/.test(m.content))
                     ? { ...m, content: `[Completed request — already delivered, do NOT redo] ${m.content}` }
                     : m
             ));
@@ -1714,6 +1734,10 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
         // SUBSTANTIVE answer (markdown/table/etc.), distinct from the finish_task
         // wrap-up thought. Preferred as the Result's headline content.
         this._lastResultEnvelope = null;
+        // The plan this run presented for approval, if it presented one. Ends up in
+        // `resultSummary.plan`, which is how a LATER continuation learns which plan
+        // the work it is joining follows.
+        this._approvedPlanText = '';
         // One-time soft nudge if finish_task is called with no deliverable (reset per run).
         this._deliverableNudged = false;
         // ── Investigation gate per-run state (see agent/InvestigationGate.js) ──
@@ -1810,7 +1834,11 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
         // for a run, and those runs are still interactive JHAI tasks that keep the
         // full built-in toolset. External callers are identified by their caller
         // name (REST API) or by behavior.intent (an external app's intent).
-        const INTERACTIVE_CALLERS = ['DirectChat', 'Schedule', 'NewTask'];
+        // From agent/taskCaller.js, NOT a copy. There was a copy here, and it
+        // was the one that decided: the shared module gained the composer, the
+        // job runner and the trigger runner, this list did not, and a run
+        // started from the app's own box was cut to three tools.
+        const INTERACTIVE_CALLERS = INTERACTIVE_CALLER_NAMES;
         // A SUB-AGENT is never external. It is JHAI's own work, one level down —
         // but it satisfied BOTH of the tests below (caller 'Subagent' is not in
         // the interactive list, and _runSubtask passes `intent: {tier}` for model
@@ -1925,6 +1953,13 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
             this._phase = initialPhase({
                 enabled: true,
                 freshTurn: isFreshTurn,
+                // A continuation that is just the user approving the plan is
+                // execution, not planning. EVERY OTHER continuation — the common
+                // case, a COMPLETED task the user asks something new in — is judged
+                // on its own request, exactly as a fresh task would be. It used to
+                // be pinned to the fast model from step one purely for arriving
+                // under an existing task id.
+                resumedPlan: !isFreshTurn && isPlanApproval(prompt),
                 planFirst: this._planFirstActive,
                 complex: this._looksComplex(prompt),
             });
@@ -2033,6 +2068,36 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
         // settings (server filter / context / relevance query), keeps the flag in
         // step with the session that is actually about to run.
         this.toolExecutor.setExcludeExternalAppMcpTools(!isExternalCaller);
+
+        // ── Where the earlier run of this task had already been ──────────
+        // A continuation inherits the previous run's file cache
+        // (TaskBridge.startAgentTask → ToolExecutor.adoptFileCache), and this
+        // turns that into one line the model can act on. PATHS ONLY: the content
+        // is not in this conversation and the note says so, because the failure
+        // this addresses is not "re-read a file" — it is re-deriving the whole
+        // map of the project on every follow-up.
+        const carried = this.toolExecutor.carriedFiles?.() || [];
+        if (carried.length > 0) {
+            const listed = carried.slice(0, CARRIED_FILES_LISTED)
+                .map(f => `- ${f.path}${f.edited ? ' (edited)' : ''}`)
+                .join('\n');
+            const more = carried.length > CARRIED_FILES_LISTED
+                ? `\n- … and ${carried.length - CARRIED_FILES_LISTED} more`
+                : '';
+            history.push({
+                role: 'user',
+                content: '[Prior work — where the earlier run(s) of this task worked; context only, NOT a new request]\n'
+                    + 'These files were read or edited earlier in this task. Their content is NOT in this '
+                    + 'conversation (read_file when you need it), but it is where the work already is — start '
+                    + 'from here instead of re-exploring the project:\n'
+                    + listed + more,
+            });
+            onAgentStatus?.({
+                event: 'status', status: 'running',
+                message: t('agent.continue.carried', { n: carried.length },
+                    `📎 前回の作業範囲を引き継ぎ (${carried.length} ファイル)`),
+            });
+        }
 
         // Failure trace for this session. Created after startSession because the
         // session id names the file. Disables itself when there is no workspace.
@@ -2157,6 +2222,17 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
                     || envelopeHasContent(incoming)
                     || !envelopeHasContent(this._lastResultEnvelope)) {
                     this._lastResultEnvelope = incoming;
+                }
+                // While the plan-first gate is still CLOSED, whatever the agent
+                // presents IS the plan — that is the thing the user is about to
+                // approve. Captured so `resultSummary.plan` carries it: the
+                // continuation that approves it is a fresh run, and without this
+                // the plan survived only inside the previous answer's text, and
+                // only until that answer was clipped. Re-injected by
+                // server/router.rs `continuation_context`.
+                if (this._planFirstActive && !this._planApproved && envelopeHasContent(incoming)) {
+                    this._approvedPlanText = this._extractEnvelopeAnswer(incoming)
+                        || this._approvedPlanText || '';
                 }
             }
             onAgentStatus?.({ event, ...data });
@@ -3354,6 +3430,25 @@ ${String(finalResponse || '').slice(0, 2000)}`;
             : (roleDef.tools ? roleDef.tools.slice()
                 : this.toolExecutor.toolDefinitions.map(t => t.name));
         tools = tools.filter(n => n !== 'run_subtask');
+
+        // ── Delegation must not widen what this run may do ────────────────
+        // The child's toolset came from args.tools (chosen by the MODEL), else a
+        // role preset, else every built-in — none of which consulted the parent.
+        // So a run in a restricted mode could delegate its way out of the
+        // restriction: `run_subtask({ role: 'coder' })` handed the child the edit
+        // tools and run_command even when the parent held neither. That is a
+        // capability leak, and it makes the mode's name false — the modes are
+        // named for what they can do.
+        const parentAllow = this.toolExecutor?.toolAllowlist || null;
+        if (parentAllow) {
+            const requested = tools.length;
+            tools = tools.filter(n => parentAllow.has(n));
+            if (tools.length === 0) {
+                return `Error: this run's mode does not allow the tools that role needs `
+                    + `(${requested} requested, none permitted). Do the work yourself, `
+                    + `or run the task in a less restricted mode.`;
+            }
+        }
 
         const maxSteps = Math.max(1, Math.min(SUBTASK_MAX_STEPS_CAP,
             Number(args?.max_steps) > 0 ? Number(args.max_steps) : roleDef.maxIterations));

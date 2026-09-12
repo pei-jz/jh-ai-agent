@@ -754,7 +754,7 @@ export const TOOL_DEFINITIONS = [
     {
         name: 'browser_screenshot',
         isSafe: true,
-        description: 'Capture a PNG screenshot of the current browser page and save it inside the workspace. Returns the saved path + byte size.',
+        description: 'Capture a PNG screenshot of the current browser page and save it inside the workspace. The image is ALSO shown to you on the next message, so use this to SEE a page whose layout or rendering matters (browser_content only gives you HTML). Needs a vision-capable model; a full-page shot of a long page may be too large to show and then only the file is written.',
         parameters: {
             type: 'object',
             properties: {

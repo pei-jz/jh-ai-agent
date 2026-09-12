@@ -16,6 +16,8 @@
 //
 // See docs/design/watcher-recipes.md.
 
+import { getLocale } from '../../../../i18n/index.js';
+
 /** Engines a recipe may drive. Each is an EXISTING watcher type. */
 export const ENGINES = ['http', 'folder', 'mail', 'command', 'script'];
 
@@ -52,6 +54,14 @@ export const SECRET_SLOTS = {
     script: ['env'],
     folder: [],
 };
+
+/**
+ * What a template saves you — the catalogue's grouping.
+ *
+ * Four, because a fifth would start describing mechanism again. Order is the
+ * order the catalogue shows them, most-often-useful first.
+ */
+export const CATEGORIES = ['transcribe', 'write', 'organize', 'notice'];
 
 /** Field types a recipe form may declare. */
 export const FIELD_TYPES = ['text', 'number', 'secret', 'path', 'boolean', 'select'];
@@ -128,6 +138,32 @@ function eachTemplate(config, fn, prefix = '') {
 }
 
 /**
+ * A recipe's human text, in the language the app is running in.
+ *
+ * Recipe text is DATA, not chrome, so it does not live in the i18n catalogs:
+ * a recipe is a file someone can write and hand to a colleague, and requiring
+ * them to edit two message catalogs to name it would end the format's whole
+ * point. A plain string is therefore always valid and is what a user-written
+ * recipe has.
+ *
+ * The ones that SHIP carry an object instead — `{ ja: '…', en: '…' }` — so the
+ * two languages sit next to each other in the file that defines the recipe,
+ * where they are hard to let drift. Anything missing falls back to Japanese,
+ * which is the language these were written in.
+ *
+ * Read at NORMALIZE time, and normalizing happens whenever the registry
+ * reloads — so switching the UI language and reopening the picker shows the
+ * other language rather than needing a restart.
+ */
+export function localized(value, loc = getLocale()) {
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+        const hit = value[loc] ?? value.ja ?? Object.values(value)[0];
+        return String(hit ?? '');
+    }
+    return String(value ?? '');
+}
+
+/**
  * Fill in what a recipe left out, and drop what it is not allowed to set.
  *
  * Never throws — a malformed recipe is reported by `validateRecipe`, so the UI
@@ -146,8 +182,8 @@ export function normalizeRecipe(raw, name = '') {
         // header would shadow another one on the next load, and the watchers
         // pointing at the old id would quietly start polling the new thing.
         id: String(name || r.id || '').trim(),
-        name: String(r.name || name || '').trim(),
-        description: String(r.description || '').trim(),
+        name: (localized(r.name) || String(name || '')).trim(),
+        description: localized(r.description).trim(),
         engine,
         builtin: !!r.builtin,
         // True for the four that ARE an engine rather than a use of one.
@@ -167,6 +203,22 @@ export function normalizeRecipe(raw, name = '') {
             intervalMinutes: Number(r.schedule.intervalMinutes) || 60,
             dayOfMonth: String(r.schedule.dayOfMonth ?? 1),
         } : null,
+        // Why this needs a model at all, in one line.
+        //
+        // Also the catalogue's admission criterion: no reason, no card. Some
+        // useful watchers genuinely do not need one — a health check that
+        // appends a line is a script — and the honest place to say so is the
+        // documentation, not a card on the screen someone meets first.
+        needsAI: localized(r.needsAI).trim(),
+        // What this saves you: transcribe / write / notice / organize.
+        // Deliberately NOT the engine — grouping by mechanism is what made the
+        // old picker unreadable.
+        category: CATEGORIES.includes(r.category) ? r.category : '',
+        // MCP servers the job cannot work without, by the name they are
+        // configured under. A card for something that will fail on its first
+        // run is worse than no card.
+        requiresMcp: (Array.isArray(r.requiresMcp) ? r.requiresMcp : [])
+            .map(s => String(s || '').trim()).filter(Boolean),
         // The work this preset is FOR.
         //
         // A watcher alone does nothing: it produces events that no job consumes.
@@ -174,19 +226,31 @@ export function normalizeRecipe(raw, name = '') {
         // other half themselves, in another tab, joined by an event name typed
         // twice — which is the gap the wizard closes.
         job: r.job && typeof r.job === 'object' ? {
-            name: String(r.job.name || ''),
-            purpose: String(r.job.purpose || ''),
-            prompt: String(r.job.prompt || ''),
+            name: localized(r.job.name),
+            purpose: localized(r.job.purpose),
+            prompt: localized(r.job.prompt),
             maxPerHour: Number(r.job.maxPerHour) || 0,
             cooldownMs: Number(r.job.cooldownMs) || 0,
+            // Explicit [] means "no MCP tools"; an OMITTED list means "every
+            // server", so a server that connects mid-run would hand this job
+            // tools it was never given. Same rule the jobs already use.
+            mcpServers: Array.isArray(r.job.mcpServers)
+                ? r.job.mcpServers.map(s => String(s || '').trim()).filter(Boolean)
+                : null,
+            // Skills the work is written around, pinned so they are loaded on
+            // every run. By NAME: the body is read when the job runs, so the
+            // recipe does not carry a copy that goes stale.
+            skills: Array.isArray(r.job.skills)
+                ? r.job.skills.map(s => String(s || '').trim()).filter(Boolean)
+                : [],
         } : null,
         fields: (Array.isArray(r.fields) ? r.fields : []).map(f => ({
             key: String(f?.key || ''),
-            label: String(f?.label || f?.key || ''),
+            label: localized(f?.label) || String(f?.key || ''),
             type: FIELD_TYPES.includes(f?.type) ? f.type : 'text',
             required: !!f?.required,
             placeholder: f?.placeholder != null ? String(f.placeholder) : '',
-            hint: f?.hint != null ? String(f.hint) : '',
+            hint: f?.hint != null ? localized(f.hint) : '',
             // Does this field need the full width of the form?
             //
             // The form is two columns; a host, a port or a folder name is happy
@@ -196,12 +260,15 @@ export function normalizeRecipe(raw, name = '') {
             // browse button rides beside it.
             wide: f?.wide !== undefined ? !!f.wide : f?.type === 'path',
             default: f?.default,
-            options: Array.isArray(f?.options) ? f.options : undefined,
+            // [value, label] pairs, and the LABEL is human text like any other.
+            options: Array.isArray(f?.options)
+                ? f.options.map(o => (Array.isArray(o) ? [o[0], localized(o[1])] : o))
+                : undefined,
         })),
         config,
         payload: (Array.isArray(r.payload) ? r.payload : [])
             .filter(p => Array.isArray(p) && p.length)
-            .map(([n, d]) => [String(n), String(d ?? '')]),
+            .map(([n, d]) => [String(n), localized(d)]),
         defaults: {
             everySeconds: Number(r.defaults?.everySeconds) || 300,
             eventName: String(r.defaults?.eventName || '').trim(),
@@ -227,6 +294,14 @@ export function validateRecipe(recipe) {
     const r = recipe || {};
     if (!NAME_RE.test(r.id || '')) problems.push(`名前 "${r.id}" が使えません（英数字と . _ - のみ）。`);
     if (!r.name) problems.push('name がありません。');
+    // A card without work behind it is the gap the `job` section closed;
+    // one without a reason is a card the catalogue must not show.
+    if (r.category && !r.needsAI) {
+        problems.push('category があるなら needsAI（AI が要る理由）も書いてください。');
+    }
+    if (r.needsAI && !r.job?.prompt) {
+        problems.push('needsAI があるなら job.prompt が必要です。');
+    }
     // A clock-driven recipe has no engine, and must not be asked for one.
     if (r.schedule) {
         if (r.engine) problems.push('schedule と engine は同時に指定できません。');

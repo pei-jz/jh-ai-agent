@@ -244,7 +244,7 @@ const BASE_STYLES = `
                     justify-content: center;
                     gap: var(--space-5);
                     overflow-y: auto;
-                    padding: var(--space-5) var(--space-4);
+                    padding: var(--space-5) var(--space-6);
                     min-height: 0;
                 }
                 .mcomp.mcomp-hero {
@@ -282,16 +282,17 @@ const BASE_STYLES = `
                     cursor: pointer;
                     text-align: left;
                 }
-                .mcomp-ctx:hover { color: var(--ink-soft); background: var(--surface-hover); }
-                .mcomp-ctx-ws {
-                    overflow: hidden;
-                    text-overflow: ellipsis;
-                    white-space: nowrap;
-                    max-width: 45%;
-                }
+                .mcomp-ctx { cursor: default; }
                 .mcomp-ctx-sep { opacity: 0.5; }
-                .mcomp-ctx-mode { white-space: nowrap; }
-                .mcomp-ctx-more { margin-left: auto; opacity: 0.7; }
+
+                .mcomp-ctx-more {
+                    margin-left: auto;
+                    padding: 2px 8px;
+                    border: none; border-radius: var(--r-1);
+                    background: none; color: inherit; font: inherit;
+                    opacity: 0.7; cursor: pointer;
+                }
+                .mcomp-ctx-more:hover { opacity: 1; background: var(--surface-hover); }
 
                 .mtask-filter {
                     display: flex;
