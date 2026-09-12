@@ -376,10 +376,29 @@ mod playwright_base_tests {
             std::fs::canonicalize(&proj).unwrap()
         );
 
-        // A sibling tree without node_modules/playwright yields None.
+        // A tree BESIDE it must not pick up the sibling's node_modules.
+        //
+        // Compared against what the walk finds ABOVE the whole fixture, not
+        // asserted to be None: the walk climbs to the filesystem root, so a
+        // bare `is_none()` was a claim about the MACHINE — that no ancestor of
+        // the temp directory has a playwright install anywhere. On a developer
+        // whose home directory has one (`C:\Users\…\node_modules\playwright`,
+        // and the temp dir lives under it) that claim is false while the
+        // function is behaving exactly as documented, so the release build
+        // failed on a passing implementation.
+        //
+        // What the function actually promises is directional: the answer comes
+        // from `start` or ABOVE it, never from beside it. That is what this
+        // compares, and it holds on a clean machine (both None) and on one with
+        // an ambient install (both the same ancestor).
         let other = base.join("other");
         std::fs::create_dir_all(&other).unwrap();
-        assert!(find_playwright_base_from(&other).is_none());
+        let ambient = find_playwright_base_from(base.parent().unwrap());
+        assert_eq!(find_playwright_base_from(&other), ambient);
+        assert_ne!(
+            find_playwright_base_from(&other).map(|p| std::fs::canonicalize(p).unwrap()),
+            Some(std::fs::canonicalize(&proj).unwrap())
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }
