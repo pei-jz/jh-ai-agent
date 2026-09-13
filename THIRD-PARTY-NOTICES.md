@@ -169,7 +169,7 @@ the binary, not with the repo.**
 
 ---
 
-_Sections 3 and 4 were generated 2026-09-12 from the dependency graphs._
+_Sections 3 and 4 were generated 2026-09-13 from the dependency graphs._
 
 ## 3. npm packages bundled into `dist/`
 

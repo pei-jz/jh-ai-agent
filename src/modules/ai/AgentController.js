@@ -12,7 +12,6 @@ import {
     extractThoughtFromMalformedText, cleanFinalResponse, stripReActPreamble
 } from './agent/ResponseParser.js';
 import { CompressionMetrics, fetchKey, factRetention } from './agent/CompressionMetrics.js';
-import { intentRegistry, resolveIntent } from './agent/IntentRegistry.js';
 import { normalizeSafetyLimits, resolveRecallArm } from './agent/SafetyLimits.js';
 // One definition of "is this multi-step change work" — see _looksComplex below
 // for why a second, laxer copy used to live in this file.
@@ -20,7 +19,8 @@ import { looksComplex } from './agent/TaskComplexity.js';
 // "Am I being asked, or given a job?" — a SECOND axis, orthogonal to the agent
 // mode. See agent/InteractionMode.js and information-architecture.md §3.
 import { runShape } from './agent/InteractionMode.js';
-import { INTERACTIVE_CALLERS as INTERACTIVE_CALLER_NAMES } from './agent/taskCaller.js';
+import { resolveLane, laneTools, usesProjectContext, laneLabel, ASK_MAX_STEPS } from './agent/RunLane.js';
+import { isContextLengthError, fitHistoryToBudget } from './agent/ContextOverflow.js';
 // The run's mutable counters, named so the phases below can take one argument
 // instead of closing over twenty free variables — see agent/RunState.js.
 import { RunState } from './agent/RunState.js';
@@ -160,6 +160,10 @@ export class AgentController {
         const isFreshTurn = prep.isFreshTurn;
         const IMAGE_ATTACH_MAX_STEPS = prep.IMAGE_ATTACH_MAX_STEPS;
         kisContext = prep.kisContext;
+        // The lane may have taken the workspace away. Everything after this —
+        // the prompt, playbook recall, memory — must see that, not the path the
+        // caller sent.
+        workspacePath = prep.workspacePath;
 
         // ── Run-scoped facts live on `st`; the loop's own counters do not ──
         //
@@ -338,7 +342,7 @@ export class AgentController {
             // be told apart from the rate at which the agent would have done it
             // unprompted. Scoring the same cards against a run that never saw
             // them is what supplies the "anyway" number.
-            if (iteration === 1) {
+            if (iteration === 1 && usesProjectContext(this._lane)) {
                 const shadow = !this._recallOn;
                 // The task prompt ranks WITHIN each kind's budget: an insight about
                 // the area being worked on beats a higher-scoring one from an
@@ -451,15 +455,25 @@ export class AgentController {
                     //   2. behavior.extra_instructions → appended to whatever we end up with
                     //   3. behavior.enabled_tools → handled in _generateWithHistory / tool exec
                     //   4. behavior.max_iterations → applied once, before loop (see below)
-                    if (this.behaviorOverrides && typeof this.behaviorOverrides.system_prompt === 'string'
-                        && this.behaviorOverrides.system_prompt.trim().length > 0) {
-                        systemPrompt = this.behaviorOverrides.system_prompt;
-                    } else {
+                    //
+                    // A caller's `system_prompt` used to REPLACE the built prompt,
+                    // and the built prompt is the only place `clientContext` is
+                    // rendered — so sending one silently discarded whatever
+                    // context came with it, along with the delivery rules. It is
+                    // now appended: the caller adds to the prompt, and cannot
+                    // remove the parts that make the run work.
+                    {
                         const editContext = clientContext?.editContext || null;
                         systemPrompt = await contextBuilder.getSystemPrompt(workspacePath, this.toolExecutor, clientContext, editContext, kisContext, prompt, this._modelOverride || llmService.getCurrentModel(),
                             // An explicit tier wins over inference: a general-purpose
                             // task can say so even when it happens to hold editing tools.
-                            this.behaviorOverrides?.persona_tier || null);
+                            this.behaviorOverrides?.persona_tier || null,
+                            { reach: this._lane?.reach || 'workspace', caller: this.caller });
+                        const callerPrompt = typeof this.behaviorOverrides?.system_prompt === 'string'
+                            ? this.behaviorOverrides.system_prompt.trim() : '';
+                        if (callerPrompt) {
+                            systemPrompt += `\n\n<caller_instructions>\n${callerPrompt}\n</caller_instructions>`;
+                        }
                     }
                     if (this.behaviorOverrides && this.behaviorOverrides.extra_instructions) {
                         systemPrompt += '\n\n' + this.behaviorOverrides.extra_instructions;
@@ -495,6 +509,15 @@ export class AgentController {
                             ];
                             compactedHistory = trimmed;
                             onAgentStatus?.({ event: 'status', status: 'running', message: `⚠️ Context near limit (${Math.round(totalEst / 1000)}k/${Math.round(modelLimit / 1000)}k tokens) — trimmed history to prevent API error.` });
+                        }
+                        // Dropping the middle cannot shrink a message that is itself too
+                        // big — and the one that overflows is usually the NEWEST, a tool
+                        // result the trim above deliberately keeps. Clip the largest
+                        // contents until the estimate fits.
+                        const histEst = (h) => tokenEstimator.estimateConversation(h, '').totalTokens;
+                        if (sysTokens + histEst(compactedHistory) > hardLimit) {
+                            compactedHistory = fitHistoryToBudget(compactedHistory, Math.max(0, hardLimit - sysTokens), histEst);
+                            onAgentStatus?.({ event: 'status', status: 'running', message: '⚠️ A single message was larger than the context budget — shortened it to fit.' });
                         }
                     } catch (_) { /* token estimation is non-critical */ }
 
@@ -571,6 +594,9 @@ export class AgentController {
                         });
                     }
 
+                    // Kept for the recovery step below, which handles an overflow
+                    // differently from every other failure.
+                    this._lastGenError = err;
                     if (abortSignal?.aborted || err.name === 'AbortError' || err.message?.includes('aborted')) {
                         onAgentStatus?.({ event: 'status', status: 'aborted', message: 'Process aborted by user.' });
                     } else {
@@ -586,6 +612,19 @@ export class AgentController {
                 // to self-correct with error context instead of breaking immediately
                 if (consecutiveErrorCount < 3) {
                     consecutiveErrorCount++;
+                    // A request that was simply too big fails identically on every
+                    // retry: "try a different approach" does not make it smaller.
+                    // Shrink what is actually in the history — to well under the
+                    // limit, because the estimate undercounts dense text (the run
+                    // that prompted this estimated 1.05M and sent 1.46M).
+                    if (isContextLengthError(this._lastGenError)) {
+                        const budget = Math.floor(llmService.getEffectiveModelLimit() * 0.6);
+                        const fitted = fitHistoryToBudget(history, budget,
+                            (h) => tokenEstimator.estimateConversation(h, '').totalTokens);
+                        history.splice(0, history.length, ...fitted);
+                        onAgentStatus?.({ event: 'status', status: 'running', message: "⚠️ The request exceeded the model's context window — shortened the largest tool results and retrying." });
+                    }
+                    this._lastGenError = null;
                     history.push({
                         role: 'user',
                         content: `[System] The previous AI generation call failed. Please try a different approach or simplify your response.`
@@ -1132,7 +1171,11 @@ export class AgentController {
                     const deliverableLen = Math.max(ftSummaryArg.length, richThought.length);
                     const hasDeliverable = !!this._lastResultEnvelope
                         || (this.toolExecutor.getModifiedFiles()?.length > 0)
-                        || deliverableLen >= DELIVERABLE_MIN_CHARS;
+                        || deliverableLen >= DELIVERABLE_MIN_CHARS
+                        // A conversation's reply has no minimum length. "こんにちは"
+                        // answered in one line is complete; pushing back on it cost
+                        // an extra step and then a synthesized report as the answer.
+                        || (this._lane?.shape === 'ask' && deliverableLen > 0);
                     if (!hasDeliverable && !this._deliverableNudged) {
                         this._deliverableNudged = true;
                         this.toolExecutor.resetTaskCompleted?.();
@@ -1487,7 +1530,7 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
         // verifiably worked. Derived from the trace, so nothing is written on the
         // strength of the model's own account of the session.
         try {
-            if (this._cards?.enabled && this._trace?.events.length) {
+            if (this._cards?.enabled && this._trace?.events.length && this._keepsMemory()) {
                 const failures = this._trace.summary();
                 const minted = this._cards.learn({
                     rows: failures,
@@ -1591,7 +1634,7 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
         // journal gets a line for something the user never asked for, and each
         // one costs an extra LLM summarisation call. The parent records the
         // session, and the child's work is inside it.
-        if (!this._isSubagent) {
+        if (!this._isSubagent && this._keepsMemory()) {
             conversationMemory.addEntry(prompt, finalResponse, sessionId, wsPath, onLog, this._auxModel())
                 .catch(e => console.warn('AgentController: LTM addEntry failed:', e));
         }
@@ -1651,7 +1694,30 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
         // Resolved FIRST: the plan-first gate, the tool allowlist, the phase
         // router and the step-1 planning injection all read it, and a shape
         // computed after any of them would leave that one on the build path.
-        this._shape = runShape(this.behaviorOverrides || {});
+        // The lane (agent/RunLane.js) decides what this run is and what it may
+        // touch. Everything below reads it rather than re-deriving its own answer
+        // from the caller name, the mode preset or the presence of a system prompt.
+        this._lane = resolveLane(this.behaviorOverrides || {}, {
+            caller: this.caller, isSubagent: !!this._isSubagent,
+        });
+        if (this._lane.error) throw new Error(this._lane.error);
+        if (usesProjectContext(this._lane)) {
+            if (!String(workspacePath || '').trim()) {
+                // The old fallback was the process's current directory, so a
+                // scheduled run with no folder configured edited wherever the app
+                // happened to be launched from.
+                throw new Error('This run needs a workspace folder, and none was given.');
+            }
+        } else {
+            // Not "an empty workspace" — no workspace. Whatever path the caller
+            // sent does not become a root the tools, the prompt or memory use.
+            workspacePath = null;
+        }
+        this._shape = runShape({
+            ...(this.behaviorOverrides || {}),
+            interaction: this._lane.shape === 'ask' ? 'ask' : 'build',
+        });
+        onAgentStatus?.({ event: 'status', status: 'running', message: `🧭 ${laneLabel(this._lane)}` });
         // A previous run must not leak its images into this one.
         this._pendingToolImages = [];
         this.toolExecutor.drainImages();
@@ -1838,7 +1904,6 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
         // was the one that decided: the shared module gained the composer, the
         // job runner and the trigger runner, this list did not, and a run
         // started from the app's own box was cut to three tools.
-        const INTERACTIVE_CALLERS = INTERACTIVE_CALLER_NAMES;
         // A SUB-AGENT is never external. It is JHAI's own work, one level down —
         // but it satisfied BOTH of the tests below (caller 'Subagent' is not in
         // the interactive list, and _runSubtask passes `intent: {tier}` for model
@@ -1851,9 +1916,7 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
         //     MCP tool with full schemas on every step. With a 58-tool server
         //     connected, delegating cost more context than doing the work inline
         //     — inverting the reason run_subtask exists.
-        const isExternalCaller = !this._isSubagent
-            && ((this.caller && !INTERACTIVE_CALLERS.includes(this.caller))
-                || !!(this.behaviorOverrides && this.behaviorOverrides.intent));
+        const isExternalCaller = this._lane.external;
         this._isExternalCaller = isExternalCaller;
 
         // JHAI's OWN tasks (NewTask / Schedule / DirectChat / sub-agents) must NOT
@@ -2023,7 +2086,7 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
         // ContextBuilder can inject relevant context into the system prompt. Cheap
         // and best-effort; getPromptContext degrades to '' if nothing is loaded.
         try {
-            await conversationMemory.loadMemory(workspacePath);
+            if (usesProjectContext(this._lane)) await conversationMemory.loadMemory(workspacePath);
         } catch (e) {
             console.warn('AgentController: loadMemory failed:', e);
         }
@@ -2031,6 +2094,12 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
         // Per-task override from behavior (e.g. REST API caller). 0 stays unlimited.
         if (this.behaviorOverrides && Number.isFinite(this.behaviorOverrides.max_iterations)) {
             this.baseMaxIterations = Math.max(0, this.behaviorOverrides.max_iterations);
+        } else if (this._lane.shape === 'ask') {
+            // A conversation that is still going after this many steps is
+            // searching, not answering. An explicit max_iterations still wins.
+            this.baseMaxIterations = this.baseMaxIterations > 0
+                ? Math.min(this.baseMaxIterations, ASK_MAX_STEPS)
+                : ASK_MAX_STEPS;
         }
         this.maxIterations = this.baseMaxIterations;
 
@@ -2148,22 +2217,21 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
         // mode's list with what a conversation may call — so `research + ask`
         // does not gain a tool by being asked rather than told, and no `ask` run
         // can reach an editing tool or a shell. See agent/InteractionMode.js.
-        let enabledTools = this._shape.isAsk
-            ? this._shape.enabledTools
-            : this.behaviorOverrides?.enabled_tools;
-
-        if (isExternalCaller && (enabledTools === null || enabledTools === undefined)) {
-            // External callers default to restricting native tools to only finish/meta tools,
-            // while bypassing allowlist checks for MCP tools (provided by the workspace side).
-            enabledTools = [];
-            this.toolExecutor._mcpBypassesAllowlist = true;
-        } else if (isExternalCaller && Array.isArray(enabledTools)) {
-            // An EXPLICIT enabled_tools list from an external caller scopes BOTH built-in
-            // AND MCP tools — otherwise workspace-side MCP tools (list_workspace_files,
-            // read_workspace_file, …) are all advertised and the LLM calls tools that are
-            // not actually enabled for the task. Only the unspecified case above bypasses.
-            this.toolExecutor._mcpBypassesAllowlist = false;
-        }
+        //
+        // All of it now comes from the lane (agent/RunLane.js laneTools). The
+        // branches this replaced keyed on the caller NAME: an external caller got
+        // no native tools but every MCP server's, unless it sent a list — in
+        // which case MCP tools were filtered BY NAME and the app's own tools,
+        // the only ones that honour the editor's privacy setting, disappeared
+        // while read_file stayed.
+        const laneCfg = laneTools(this._lane, {
+            askTools: this._shape.enabledTools,
+            modeTools: this.behaviorOverrides?.enabled_tools ?? null,
+            behavior: this.behaviorOverrides || {},
+            caller: this.caller,
+        });
+        const enabledTools = laneCfg.enabledTools;
+        this.toolExecutor._mcpBypassesAllowlist = laneCfg.mcpBypassesAllowlist;
 
         if (Array.isArray(enabledTools)) {
             // Add task_progress only for complex tasks; single-shot app intents
@@ -2180,12 +2248,8 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
         if (Array.isArray(this.behaviorOverrides?.write_scope) && this.behaviorOverrides.write_scope.length > 0) {
             this.toolExecutor.setWriteScope(this.behaviorOverrides.write_scope);
         }
-        // Apply MCP server filter (if any) — restricts which MCP servers contribute tools.
-        if (this.behaviorOverrides && Array.isArray(this.behaviorOverrides.mcp_servers)) {
-            this.toolExecutor.setMcpServerFilter(this.behaviorOverrides.mcp_servers);
-        } else {
-            this.toolExecutor.setMcpServerFilter(null);
-        }
+        // Which MCP servers contribute tools — also the lane's answer.
+        this.toolExecutor.setMcpServerFilter(laneCfg.mcpServerFilter);
 
         // Apply per-task MCP context (e.g. {app,windowId,documentId}) — injected
         // into tools/call _meta.jhai so app-hosted MCP servers resolve live state.
@@ -2287,6 +2351,8 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
         return {
             state, safety, isExternalCaller, tierModels, isFreshTurn,
             kisContext, IMAGE_ATTACH_MAX_STEPS,
+            // null for a run whose lane has no workspace — see the lane check above.
+            workspacePath,
         };
     }
 
@@ -2329,10 +2395,18 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
         // through every branch: the deliverable nudge does not fire once files
         // changed, and this check saw only a short finalResponse. The result view
         // then showed a synthesized "依頼/実施/結果" instead of the report itself.
-        const fileReport = (presented || fr.length >= DELIVERABLE_MIN_CHARS)
+        //
+        // In a conversation (`ask`) the reply IS the deliverable at any length.
+        // The 400-character bar exists to tell a report from "done" at the end of
+        // WORK; applied to a chat it turned a one-line greeting into a generated
+        // 依頼内容/実施内容/結果 process report — which the user then read as the
+        // answer — and paid an extra model call to do it.
+        const conversational = this._lane?.shape === 'ask';
+        const replyCounts = conversational ? fr.length > 0 : fr.length >= DELIVERABLE_MIN_CHARS;
+        const fileReport = (presented || replyCounts)
             ? ''
             : await this._readReportDeliverable(files);
-        const deliverable = presented || (fr.length >= DELIVERABLE_MIN_CHARS ? fr : '') || fileReport;
+        const deliverable = presented || (replyCounts ? fr : '') || fileReport;
 
         let answer, summary;
         if (deliverable) {
@@ -2340,7 +2414,7 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
             summary = deliverable;
         } else {
             const deterministic = this._composeDetailedReport(finalResponse, files, meta);
-            const llmReport = await this._generateLlmReport(finalResponse, files, meta, onLog);
+            const llmReport = conversational ? '' : await this._generateLlmReport(finalResponse, files, meta, onLog);
             answer = llmReport || fr || deterministic;
             summary = llmReport || deterministic;
         }
@@ -2690,6 +2764,12 @@ ${String(finalResponse || '').slice(0, 2000)}`;
                     // signal (which never fires again), so the fallback request
                     // would go out uncancellable after a stop.
                     if (abortSignal?.aborted || /AbortError/i.test(String(e?.message || ''))) throw e;
+                    // Too long is not "tool calling does not work". Falling back to
+                    // JSON mode here dropped the run's tools for good and resent the
+                    // same oversized history without them — so it failed twice, and
+                    // the second failure was reported as the cause. Let the loop's
+                    // recovery shrink the history instead.
+                    if (isContextLengthError(e)) throw e;
                     console.warn('Native tool use failed, falling back to JSON mode:', e);
                     // Make the degradation VISIBLE. A provider-side rejection of the
                     // tools payload (e.g. Azure 400 on a strict-schema violation)
@@ -3336,63 +3416,25 @@ ${String(finalResponse || '').slice(0, 2000)}`;
         if (n > 0) this._phaseTokens[this._phase] = (this._phaseTokens[this._phase] || 0) + n;
     }
 
+    /**
+     * The model tier a run asks for ('fast' | 'deep').
+     *
+     * `behavior.intent` used to be a named AI action an app declared — a system
+     * prompt, a tool list and a result kind, expanded here. Those are gone
+     * (Report_20260913 §6-6): an app's prompt now arrives as appended
+     * instructions and its tools through the lane, so an intent had nothing left
+     * to carry except this tier, which sub-agents still use for model routing.
+     */
     _applyIntent() {
-        const b = this.behaviorOverrides;
-        if (!b || !b.intent) return;
-        // A string is an id declared by the calling app when it connected; an
-        // object is an ad-hoc definition. Both expand the same way from here.
-        const { intent, source } = resolveIntent(b.intent, intentRegistry);
-        if (!intent) {
-            if (source === 'unknown') {
-                console.warn(`AI: behavior.intent "${b.intent}" is not registered — running without it.`);
-            }
-            return;
+        const tier = this.behaviorOverrides?.intent?.tier;
+        if (typeof tier === 'string' && tier.trim()) {
+            this._intentTier = tier.trim().toLowerCase();
         }
+    }
 
-        // tools → enabled_tools allowlist (don't clobber an explicit one).
-        if (Array.isArray(intent.tools) && !Array.isArray(b.enabled_tools)) {
-            b.enabled_tools = intent.tools.slice();
-        }
-
-        // tier ('fast' | 'deep') → model routing hint (resolved in run()).
-        if (typeof intent.tier === 'string') {
-            this._intentTier = intent.tier.trim().toLowerCase() || null;
-        }
-
-        // systemPrompt → replaces the default system prompt entirely
-        if (typeof intent.systemPrompt === 'string' && intent.systemPrompt.trim()) {
-            b.system_prompt = intent.systemPrompt.trim();
-        }
-
-        // resultKind → appended guidance via extra_instructions
-        // (which the loop already merges into the system prompt).
-        //
-        // This is intentionally forceful: weaker models (e.g. MiMo) otherwise
-        // narrate the answer as text / "CALL: present_result" and call
-        // finish_task WITHOUT ever invoking present_result, so the app receives
-        // nothing usable. Each rule below names a concrete failure mode.
-        const extra = [];
-        if (typeof intent.resultKind === 'string' && intent.resultKind.trim()) {
-            const k = intent.resultKind.trim();
-            extra.push(
-                `## Delivering the result (MANDATORY)\n` +
-                `The calling app receives your result ONLY through the present_result tool call. ` +
-                `Plain text in your reply, a fenced code block in your message, or writing "CALL: present_result" ` +
-                `do NOT deliver anything — that content is discarded and the user sees an empty result.\n` +
-                `1. Call \`present_result\` with kind="${k}". Put the COMPLETE deliverable ` +
-                `(full code / full answer, not a summary) in the \`markdown\` argument. ` +
-                `The parameter is literally named \`markdown\` — do NOT use \`content\`, \`text\`, or \`md\`.\n` +
-                `2. Call \`present_result\` FIRST, then call \`finish_task\` with a SHORT one-line summary. ` +
-                `Never skip present_result. Never put the actual result only in finish_task's summary.\n` +
-                `3. Your "OBSERVE / PLAN" reasoning is internal — it is NOT the result. ` +
-                `Never let that meta-text stand in for the deliverable.`
-            );
-        }
-        if (extra.length > 0) {
-            b.extra_instructions = [b.extra_instructions, ...extra]
-                .filter(s => typeof s === 'string' && s.trim())
-                .join('\n\n');
-        }
+    /** Does this run read and write project memory? */
+    _keepsMemory() {
+        return usesProjectContext(this._lane) && this.behaviorOverrides?.ephemeral !== true;
     }
 
     /**

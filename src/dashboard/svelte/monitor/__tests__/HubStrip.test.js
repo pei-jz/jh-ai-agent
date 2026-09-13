@@ -13,20 +13,23 @@ import HubStrip from '../HubStrip.svelte';
 
 afterEach(() => cleanup());
 
-const app = (over = {}) => ({ name: 'JHEditor', intents: [], resources: [], ...over });
+const app = (over = {}) => ({ name: 'JHEditor', resources: [], ...over });
 const mount = (props = {}) => render(HubStrip, { props: { apps: [], ...props } }).container;
 
 describe('HubStrip', () => {
-    const full = app({
-        intents: [{ id: 'impact_analysis', title: 'Impact analysis' }],
-        resources: [{ uri: 'doc://current', name: 'MonitorView.js' }],
-    });
+    const full = app({ resources: [{ uri: 'doc://current', name: 'MonitorView.js' }] });
 
-    it('renders a chip per intent and per resource, under the app name', () => {
+    it('renders a chip per resource, under the app name', () => {
         const el = mount({ apps: [full] });
         expect(el.querySelector('.hub-app-name').textContent).toContain('JHEditor');
-        expect(el.querySelector('.hub-intent').textContent).toContain('Impact analysis');
         expect(el.querySelector('.hub-res').textContent).toContain('MonitorView.js');
+    });
+
+    // Intents were removed (Report_20260913 §6-6).
+    it('draws no intent chips, even for a client that still sends intents', () => {
+        const el = mount({ apps: [{ ...full, intents: [{ id: 'impact', title: 'Impact' }] }] });
+        expect(el.querySelector('.hub-intent')).toBe(null);
+        expect(el.querySelector('[data-hub-kind="intent"]')).toBe(null);
     });
 
     it('renders NOTHING when no app offers anything — no empty chrome', () => {
@@ -43,32 +46,16 @@ describe('HubStrip', () => {
     });
 
     it('uses inline SVG icons, not emoji', () => {
-        // Emoji render in whatever emoji font the machine has and cannot take the
-        // theme colour — the reason a task looked different on another PC.
-        const el = mount({ apps: [full] });
-        expect(el.querySelector('.hub-intent svg')).not.toBe(null);
-        expect(el.querySelector('.hub-res svg')).not.toBe(null);
+        expect(mount({ apps: [full] }).querySelector('.hub-res svg')).not.toBe(null);
     });
 
     it('escapes hostile app and item names', () => {
         const el = mount({ apps: [app({
             name: '<img src=x>',
-            intents: [{ id: 'i', title: '<script>x</script>' }],
+            resources: [{ uri: 'u', name: '<script>x</script>' }],
         })] });
         expect(el.querySelector('img')).toBe(null);
         expect(el.querySelector('script')).toBe(null);
-    });
-
-    it('COMPOSES an intent request rather than dispatching it', () => {
-        // Nothing may be sent behind the user's back.
-        const onCompose = vi.fn();
-        mount({ apps: [full], onCompose }).querySelector('.hub-intent').click();
-        const text = onCompose.mock.calls[0][0];
-        expect(text).toContain('JHEditor');
-        expect(text).toContain('Impact analysis');
-        expect(text).toContain('impact_analysis');
-        // Left mid-sentence on purpose: the user finishes the instruction.
-        expect(text.endsWith(', then ')).toBe(true);
     });
 
     it('composes a resource read with the qualified reference read_resource needs', () => {
@@ -77,11 +64,12 @@ describe('HubStrip', () => {
         const text = onCompose.mock.calls[0][0];
         expect(text).toContain('JHEditor::doc://current');
         expect(text).toContain('read_resource');
+        // Left mid-sentence on purpose: the user finishes the instruction.
+        expect(text.endsWith(', then ')).toBe(true);
     });
 
     it('keeps the data attributes the strip is identified by', () => {
         const el = mount({ apps: [full] });
-        expect(el.querySelector('[data-hub-kind="intent"]').dataset.hubApp).toBe('JHEditor');
         expect(el.querySelector('[data-hub-kind="resource"]').dataset.hubUri).toBe('doc://current');
     });
 });

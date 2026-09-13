@@ -146,3 +146,53 @@ describe('a caller that already has the conversation hands it over', () => {
         expect(restA).toEqual(restB);
     });
 });
+
+/* Spotlight's Expand used to RUN the question again — with the answer it
+   already had attached as history, so the model produced a second one. Three
+   symptoms, one cause: a re-ask, a workspace invented so the run had somewhere
+   to be, and that run's eighteen read-only tools. A recorded exchange runs
+   nothing, so there is nothing to give a workspace or tools to. */
+describe('a recorded exchange', () => {
+    const exchange = [
+        { role: 'user', content: 'what is the GPT-6 price?' },
+        { role: 'assistant', content: '$10 in / $50 out per 1M tokens.' },
+    ];
+    const payload = () => taskPayload({
+        prompt: 'what is the GPT-6 price?',
+        workspace: 'C:/somewhere/the/search/was/near',
+        modeId: DEFAULT_MODE_ID,
+        selectedMcp: ['playwright'],
+        caller: 'Spotlight',
+        chatContext: exchange,
+        recorded: true,
+    });
+
+    it('runs nothing', () => {
+        expect(payload().behavior.mode).toBe('record');
+    });
+
+    it('carries the answer, so nothing has to be asked again', () => {
+        expect(payload().chat_context).toEqual(exchange);
+    });
+
+    // The workspace was only ever there because a RUN needs somewhere to run.
+    it('claims no workspace, whatever it was handed', () => {
+        expect(payload().workspace_path).toBe('');
+    });
+
+    it('selects no MCP server', () => {
+        expect(payload().behavior.mcp_servers).toEqual([]);
+    });
+
+    it('is still marked as the question it was', () => {
+        expect(payload().behavior.interaction).toBe('ask');
+    });
+
+    it('leaves a normal task alone', () => {
+        const p = taskPayload({
+            prompt: 'x', workspace: 'C:/w', modeId: DEFAULT_MODE_ID, selectedMcp: [],
+        });
+        expect(p.behavior.mode).toBe('iterative_agent');
+        expect(p.workspace_path).toBe('C:/w');
+    });
+});

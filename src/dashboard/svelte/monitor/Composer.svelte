@@ -33,7 +33,6 @@
     import { modeDescription } from '../../../modules/ai/AgentModes.js';
     import ContextPicker from './ContextPicker.svelte';
     import { ASK, BUILD } from '../../../modules/ai/agent/InteractionMode.js';
-    import { looksReadOnly } from '../../../modules/ai/agent/TaskComplexity.js';
     import { createTask } from '../../views/monitor/createTask.js';
 
     let {
@@ -166,25 +165,26 @@
 
     // ── The interaction axis: asked, or given a job? ────────────────────────
     //
-    // `looksReadOnly`, NOT `looksComplex`. The two answer different questions and
-    // this used the wrong one:
+    // The user's choice, and only the user's.
     //
-    //   looksComplex   — "does this need a PLAN?" Deliberately conservative, so
-    //                    "MCP の再接続を直して" is false: it is work, but it is
-    //                    not multi-step work.
-    //   looksReadOnly  — "is this about producing an ANSWER rather than a
-    //                    change?" Which is exactly this axis.
+    // This used to be GUESSED from the text as it was typed (`looksReadOnly`):
+    // a sentence that read like a question flipped 頼む to 聞く mid-draft, the
+    // chip moved while the user was writing, and every send reset an explicit
+    // pick back to the guess. A control that changes by itself is one the user
+    // has to re-check before every send — worse than choosing once.
     //
-    // With the wrong one, a short work request guessed `ask`, and an `ask` run
-    // gets read-only tools — so it would have been unable to do the job it was
-    // given. Both live in agent/TaskComplexity.js, so the chip and the plan-first
-    // gate still cannot drift apart.
-    //
-    // Always overridable: "short but do it" and "long but just asking" are both
-    // ordinary, and a guess the user cannot correct is worse than no guess.
-    let pickedInteraction = $state(null);
-    const guessed = $derived(looksReadOnly(prompt) ? ASK : BUILD);
-    const interaction = $derived(pickedInteraction ?? guessed);
+    // Remembered across sends and restarts. 頼む until the user picks otherwise,
+    // which is also what the box showed for an empty prompt before.
+    const INTERACTION_KEY = 'jhai_composer_interaction';
+    const loadInteraction = () => {
+        try { return localStorage.getItem(INTERACTION_KEY) === ASK ? ASK : BUILD; }
+        catch (_) { return BUILD; }
+    };
+    let interaction = $state(loadInteraction());
+    const pickInteraction = (value) => {
+        interaction = value === ASK ? ASK : BUILD;
+        try { localStorage.setItem(INTERACTION_KEY, interaction); } catch (_) { /* private mode */ }
+    };
 
     // Loaded here rather than pushed in as props, so the view does not have to
     // carry config it has no other use for — the same shape NewTaskModal uses.
@@ -317,7 +317,9 @@
             if (check.reason) notify(check.reason);
             // The workspace is no longer a field here — a missing one is fixed
             // in the modal that owns it, so that is where the user is sent.
-            if (check.field === 'workspace') onDetails?.({ prompt: prompt.trim(), ws: ws.trim(), interaction });
+            // Only a `build` run can fail this way (an `ask` needs no
+            // workspace), so the modal's build-only shape is never a surprise.
+            if (check.field === 'workspace') onDetails?.({ prompt: prompt.trim(), ws: ws.trim() });
             else taEl?.focus();
             return;
         }
@@ -336,7 +338,6 @@
                 caller: 'Composer',
             });
             setPrompt('');
-            pickedInteraction = null;
             queueMicrotask(grow);
             onCreated?.(id, { workspace: ws.trim(), modeId: activeMode });
         } catch (e) {
@@ -425,11 +426,11 @@
                 <button type="button" class="mcomp-int-btn is-ask"
                     aria-pressed={interaction === ASK}
                     title={t('composer.ask.title')}
-                    onclick={() => (pickedInteraction = ASK)}>聞く</button>
+                    onclick={() => pickInteraction(ASK)}>聞く</button>
                 <button type="button" class="mcomp-int-btn is-build"
                     aria-pressed={interaction === BUILD}
                     title={t('composer.build.title')}
-                    onclick={() => (pickedInteraction = BUILD)}>頼む</button>
+                    onclick={() => pickInteraction(BUILD)}>頼む</button>
             </span>
             <!-- "送信", not the mode's own word: the chip beside it already says
                  which kind of run this is, and labelling this one 聞く put the
@@ -467,7 +468,7 @@
                 onPick={(id) => (pickedMode = id)} />
 
             <button type="button" class="mcomp-ctx-more" title={t('composer.details')}
-                onclick={() => onDetails?.({ prompt: prompt.trim(), ws: ws.trim(), interaction })}>⋯</button>
+                onclick={() => onDetails?.({ prompt: prompt.trim(), ws: ws.trim() })}>⋯</button>
         </div>
 
     {/if}

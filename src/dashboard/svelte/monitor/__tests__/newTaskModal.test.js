@@ -248,3 +248,43 @@ describe('dismissal', () => {
         expect(h.onClose).toHaveBeenCalled();
     });
 });
+
+/* This dialog used to make the same `looksReadOnly(prompt) ? ASK : BUILD` guess
+   the composer makes, and carry its own 聞く/頼む pair. The guess reads the
+   TEXT, so opening "New Task" and typing a question-shaped sentence silently
+   flipped the whole dialog into 聞く — and it re-ran on every keystroke, so the
+   selection could move while the prompt was still being written. Opening this
+   dialog IS the decision to have something done. */
+describe('the dialog creates work, always', () => {
+    it('offers no 聞く/頼む choice', () => {
+        const h = mountModal();
+        expect(h.container.querySelector('.nt-int-btn')).toBeNull();
+        expect(h.container.textContent).not.toContain('この依頼の種類');
+    });
+
+    it('sends interaction: build for a question-shaped prompt', async () => {
+        const h = mountModal();
+        // The exact shape `looksReadOnly` used to catch.
+        await fillAndSend(h, { prompt: 'auth_middleware が何を通すか調べて教えて' });
+        expect(bodyOf(h.api).behavior.interaction).toBe('build');
+    });
+
+    it('sends interaction: build for an ordinary prompt too', async () => {
+        const h = mountModal();
+        await fillAndSend(h, { prompt: 'add a retry to the uploader' });
+        expect(bodyOf(h.api).behavior.interaction).toBe('build');
+    });
+
+    // The composer's chip used to ride along through `presetInteraction`. It no
+    // longer exists as a prop; an unknown prop must not resurrect the behaviour.
+    it('ignores an interaction handed in from outside', async () => {
+        const h = mountModal({ presetInteraction: 'ask' });
+        await fillAndSend(h, { prompt: 'what does this do?' });
+        expect(bodyOf(h.api).behavior.interaction).toBe('build');
+    });
+
+    it('says where 聞く lives instead of hiding the change', () => {
+        const h = mountModal();
+        expect(h.container.querySelector('.nt-foot-note').textContent).toContain('ホーム');
+    });
+});

@@ -1,5 +1,9 @@
-// Authentication module for the axum server.
-// Generates a random session token at startup and validates it on incoming requests.
+// auth — the gate in front of the axum server.
+//
+// Two checks, in this order: the request must NAME loopback (Host), and it
+// must CARRY a credential that reaches the route it asked for. The second is
+// server/tokens.rs's job — this module decides when to ask and what a refusal
+// means; minting, storing and scoping live there.
 
 use axum::{
     body::Body,
@@ -8,19 +12,6 @@ use axum::{
     middleware::Next,
     response::Response,
 };
-use rand::Rng;
-
-/// Generate a random 32-character hex token for session authentication.
-pub fn generate_token() -> String {
-    let mut rng = rand::thread_rng();
-    let bytes: Vec<u8> = (0..16).map(|_| rng.gen::<u8>()).collect();
-    hex_encode(&bytes)
-}
-
-/// Simple hex encoding without pulling in the `hex` crate.
-fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
-}
 
 /// Axum middleware layer that validates the `Authorization: Bearer <token>` header.
 /// Skips authentication for `GET /api/health` so monitoring tools can reach it.
@@ -96,14 +87,10 @@ pub async fn auth_middleware(
         return Ok(next.run(request).await);
     }
 
-    // Extract the expected token from the request extensions (set by the router layer)
-    let expected_token = request
-        .extensions()
-        .get::<AuthToken>()
-        .map(|t| t.0.clone());
-
-    let expected_token = match expected_token {
-        Some(t) => t,
+    // Every credential that can authenticate, and what each one may reach.
+    // Set by the router layer; see server/tokens.rs for the two classes.
+    let registry = match request.extensions().get::<Registry>() {
+        Some(r) => r.0.clone(),
         None => return Err(StatusCode::INTERNAL_SERVER_ERROR),
     };
 
@@ -113,44 +100,48 @@ pub async fn auth_middleware(
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok());
 
-    match auth_header {
-        Some(value) if value.starts_with("Bearer ") => {
-            let token = &value[7..];
-            if constant_time_eq(token.as_bytes(), expected_token.as_bytes()) {
-                Ok(next.run(request).await)
-            } else {
-                Err(StatusCode::UNAUTHORIZED)
-            }
-        }
-        _ => Err(StatusCode::UNAUTHORIZED),
+    let presented = match auth_header {
+        Some(value) if value.starts_with("Bearer ") => &value[7..],
+        _ => return Err(StatusCode::UNAUTHORIZED),
+    };
+
+    let grant = match registry.verify(presented) {
+        Some(g) => g,
+        None => return Err(StatusCode::UNAUTHORIZED),
+    };
+
+    // A real token for the wrong route is 403, not 401.
+    //
+    // 401 means "authenticate"; a git hook holding an event-only token would
+    // read that as "my token is wrong" and the user would reissue it, again and
+    // again, for a request that will never be allowed. 403 says the credential
+    // is fine and the route is not its business.
+    if !grant.scope.permits(request.method().as_str(), request.uri().path()) {
+        return Err(StatusCode::FORBIDDEN);
     }
+
+    Ok(next.run(request).await)
 }
 
-/// Compare two byte strings without leaking WHERE they differ.
+/// Host-only gate, for routes that have no credential to check.
 ///
-/// `a == b` on a slice returns as soon as a byte mismatches, so the time it
-/// takes reveals how many leading bytes were right — a guess can then be built
-/// one byte at a time. The server is on loopback, which makes this hard to
-/// exploit rather than impossible: a page in the user's browser can time
-/// requests to 127.0.0.1, and the token is a 32-character hex string.
-///
-/// Length is compared first and then folded into the result, so a wrong-length
-/// token takes the same path as a wrong-value one.
-/// Report_20260829.md B5.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    // Never short-circuit on length either: return AFTER accumulating.
-    let mut diff = (a.len() ^ b.len()) as u8;
-    let n = a.len().min(b.len());
-    for i in 0..n {
-        diff |= a[i] ^ b[i];
+/// The pairing routes are reachable before an app has a token, so
+/// `auth_middleware` cannot cover them — but the DNS-rebinding defence must
+/// still apply. Without it a page on the open internet, resolved to 127.0.0.1,
+/// could POST a pairing request and put a dialog in front of the user.
+pub async fn loopback_only(
+    request: Request<Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    if !request_host_is_loopback(&request) {
+        return Err(StatusCode::FORBIDDEN);
     }
-    // A length mismatch already set a bit above; the loop cannot clear it.
-    diff == 0 && a.len() == b.len()
+    Ok(next.run(request).await)
 }
 
-/// Wrapper type to store the auth token in request extensions.
-#[derive(Clone, Debug)]
-pub struct AuthToken(pub String);
+/// The credential registry, carried in request extensions by the router layer.
+#[derive(Clone)]
+pub struct Registry(pub std::sync::Arc<crate::server::tokens::TokenRegistry>);
 
 #[cfg(test)]
 mod tests {
@@ -170,45 +161,6 @@ mod tests {
                     "192.168.1.5", "10.0.0.1", ""] {
             assert!(!host_is_loopback(bad), "{bad} should be rejected");
         }
-    }
-
-    #[test]
-    fn constant_time_eq_matches_equality() {
-        assert!(constant_time_eq(b"abc", b"abc"));
-        assert!(!constant_time_eq(b"abc", b"abd"));
-        assert!(!constant_time_eq(b"abc", b"abcd"));
-        assert!(!constant_time_eq(b"abcd", b"abc"));
-        assert!(constant_time_eq(b"", b""));
-        assert!(!constant_time_eq(b"", b"a"));
-    }
-
-    #[test]
-    fn constant_time_eq_rejects_a_correct_prefix() {
-        // The shape a byte-at-a-time guess relies on.
-        let token = "0123456789abcdef0123456789abcdef";
-        assert!(!constant_time_eq(b"0", token.as_bytes()));
-        assert!(!constant_time_eq(b"0123456789abcdef", token.as_bytes()));
-        assert!(constant_time_eq(token.as_bytes(), token.as_bytes()));
-    }
-
-    #[test]
-    fn token_is_32_hex_chars() {
-        let t = generate_token();
-        assert_eq!(t.len(), 32, "token should be 16 bytes => 32 hex chars");
-        assert!(t.chars().all(|c| c.is_ascii_hexdigit()));
-    }
-
-    #[test]
-    fn tokens_are_unique() {
-        // Extremely unlikely to collide for a 128-bit random token.
-        let a = generate_token();
-        let b = generate_token();
-        assert_ne!(a, b);
-    }
-
-    #[test]
-    fn hex_encode_pads_each_byte() {
-        assert_eq!(hex_encode(&[0x00, 0x0f, 0xff]), "000fff");
     }
 
     // The WebSocket routes are not behind auth_middleware, so they call

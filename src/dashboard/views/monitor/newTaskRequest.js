@@ -61,6 +61,25 @@ export function taskBehavior(modeId, selectedMcp = [], interaction = BUILD) {
     };
 }
 
+/**
+ * The behavior for an exchange that already happened.
+ *
+ * Not a mode preset and not an interaction: `record` means NOTHING RUNS. There
+ * is no model to pick, no tools to allow and no MCP server to start, so this
+ * deliberately shares none of `taskBehavior`'s inputs — passing a modeId here
+ * would suggest the mode has an effect.
+ *
+ * `interaction: ASK` is still set because it is what the row WAS — a question —
+ * and the list view reads that field to draw the task.
+ */
+export function recordedBehavior() {
+    return {
+        mode: 'record',
+        mcp_servers: [],
+        interaction: ASK,
+    };
+}
+
 
 // Re-exported, not redefined. Composer and NewTaskModal reach for these from
 // here because this is the module they already use for the request shape; the
@@ -76,7 +95,20 @@ export { MODE_ICON, modeName } from '../../../modules/ai/AgentModes.js';
 export function taskPayload({
     prompt, workspace, modeId, selectedMcp = [], images = [],
     caller = 'NewTask', interaction = BUILD, chatContext = [],
+    recorded = false,
 }) {
+    // A recorded exchange runs nothing, so it has nowhere to run: sending a
+    // workspace would put a folder on a row that never touched one — and
+    // createTask would then add that folder to approved_projects.
+    if (recorded) {
+        return {
+            prompt,
+            workspace_path: '',
+            caller,
+            behavior: recordedBehavior(),
+            chat_context: chatContext.length > 0 ? chatContext : undefined,
+        };
+    }
     return {
         prompt,
         workspace_path: workspace,

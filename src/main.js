@@ -19,13 +19,13 @@ import { showNotification } from './dashboard/utils/notifications.js';
 import { DEFAULT_MODE_ID } from './modules/ai/AgentModes.js';
 import { ASK } from './modules/ai/agent/InteractionMode.js';
 import llmService from './modules/ai/LLMService.js';
-import { ToolExecutor } from './modules/ai/ToolExecutor.js';
 import { isExternalCaller } from './modules/ai/agent/taskCaller.js';
+import { spotlightTaskBody, followTask } from './dashboard/utils/spotlightRun.js';
+import { setPendingLaunch } from './dashboard/views/monitor/pendingLaunch.js';
 import { promptTemplateManager } from './modules/ai/PromptTemplateManager.js';
 import { skillManager } from './modules/ai/SkillManager.js';
 import { renderMarkdown, ensureResultViewStyles } from './dashboard/utils/resultView.js';
 import { formatMessageContent, escapeHtml, ensureChatMarkdownStyles } from './dashboard/views/chat/chatMarkdown.js';
-import { extractToolCall } from './dashboard/views/chat/chatRenderer.js';
 import { icon } from './dashboard/utils/icons.js';
 import { initLocale } from './i18n/index.js';
 import { normalizeTheme, themeList, themeLabel, themeAttr } from './dashboard/utils/theme.js';
@@ -556,10 +556,7 @@ function buildSearchOverlayHTML() {
                 </div>
             </div>
             <div id="search-ai-answer" style="display:none; padding: 18px; font-size: 13.5px; line-height: 1.6; max-height: 400px; overflow-y: auto;"></div>
-            
-            <div class="search-mcp-row" id="spotlight-mcp-list" style="display:none">
-                <!-- Checkboxes populated dynamically -->
-            </div>
+
 
             <div class="search-footer">
                 <span><kbd>↵</kbd> Send</span>
@@ -665,9 +662,6 @@ async function showSearch() {
         console.error('Failed to load Spotlight config/skills:', e);
     }
 
-    // Render MCP checkboxes
-    renderMcpCheckboxes();
-
     const input = document.getElementById('search-input');
     input.style.height = 'auto';   // reset multiline growth
     // Restore the previous Q&A so reopening doesn't lose the last answer. The text
@@ -690,33 +684,6 @@ function hideSlashPopup() {
     if (popup) popup.style.display = 'none';
     _spotlightSlashItems = [];
     _spotlightSlashIndex = 0;
-}
-
-async function renderMcpCheckboxes() {
-    const mcpList = document.getElementById('spotlight-mcp-list');
-    if (!mcpList) return;
-    
-    // Only show if there are running MCP clients
-    const clients = Array.from(mcpManager.clients.entries());
-    if (clients.length === 0) {
-        mcpList.style.display = 'none';
-        return;
-    }
-    
-    mcpList.style.display = 'flex';
-    mcpList.innerHTML = clients.map(([name, client]) => {
-        const toolCount = client.tools?.length || 0;
-        return `
-            <label>
-                <input type="checkbox" class="spotlight-mcp-checkbox" data-name="${escapeHtml(name)}" checked>
-                ${escapeHtml(name)}
-                <span style="font-size: 9px; background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); border-radius: var(--r-2); padding: 1px 4px;">${toolCount}t</span>
-            </label>
-        `;
-    }).join('');
-
-    // Allow toggling local active state (does not stop server, just skips sending to ToolExecutor)
-    // Actually, in ChatView, unchecking STOPS the server. Let's just track checked state locally for askAI filtering.
 }
 
 function hideSearch() {
@@ -775,44 +742,46 @@ async function onExpandApp() {
 }
 
 /**
- * Create the Work run for the question Spotlight just answered.
+ * Write the exchange Spotlight just had into Work.
+ *
+ * RECORDED, not re-run. This used to hand the question to `createTask` as a
+ * normal run with the previous answer attached as history — so the model was
+ * asked the same question a second time, knowing the first answer, and produced
+ * another: 22 seconds and 9.9k tokens to "open" text already on screen. See
+ * TaskBridge.recordExchange for the other two things that followed from running
+ * it (an invented workspace, and eighteen tools for a run with nowhere to use
+ * them).
+ *
+ * A workspace is therefore no longer required, which also fixes the case that
+ * lost the answer outright: with no approved project, this used to return null
+ * and Expand silently dropped the exchange on the floor.
+ *
  * @returns {Promise<string|null>} the hash to open, or null if there is nothing
- *   to promote (no exchange yet, no workspace, or the create failed).
+ *   to promote (no exchange yet, or the create failed).
  */
 async function promoteSpotlightRun() {
     const question = (_lastSpotlightQuery || '').trim();
-    if (!question || !window.apiClient) return null;
+    const answer = (_lastSpotlightAnswer || '').trim();
+    // With no answer there is no exchange — only a question the user typed and
+    // did not send. Opening the app is still right; recording an empty run is not.
+    if (!question || !answer || !window.apiClient) return null;
     try {
         const { createTask } = await import('./dashboard/views/monitor/createTask.js');
-        const cfg = await invoke('get_ai_config');
-        // The same default the composer uses. Without a workspace the server
-        // accepts the task and its first tool call fails, so promoting into
-        // nothing is worse than not promoting.
-        let ws = '';
-        try { ws = localStorage.getItem('jhai_last_ws') || ''; } catch (_) { /* private mode */ }
-        ws = ws || (Array.isArray(cfg?.approved_projects) ? cfg.approved_projects[0] : '') || '';
-        if (!ws) return null;
-
         const id = await createTask({
             prompt: question,
-            workspace: ws,
+            // No workspace, no mode, no MCP: nothing runs.
+            workspace: '',
             modeId: DEFAULT_MODE_ID,
             selectedMcp: [],
             interaction: ASK,
+            recorded: true,
             caller: 'Spotlight',
-            // The exchange Spotlight already had, handed over as history.
-            //
-            // Without it the run received only the question and answered it
-            // again from scratch — a second call, a second wait, and a second
-            // bill for something already on screen. Carrying it means the run
-            // opens where the conversation left off, which is what "open this
-            // in the app" is asking for.
-            chatContext: _lastSpotlightAnswer
-                ? [
-                    { role: 'user', content: question },
-                    { role: 'assistant', content: _lastSpotlightAnswer },
-                ]
-                : [],
+            // The exchange itself. TaskBridge reads the answer off the last
+            // assistant turn and completes the task with it.
+            chatContext: [
+                { role: 'user', content: question },
+                { role: 'assistant', content: answer },
+            ],
             client: window.apiClient,
         });
         return `#monitor?id=${id}`;
@@ -820,6 +789,64 @@ async function promoteSpotlightRun() {
         console.warn('Could not promote the Spotlight exchange:', e);
         return null;
     }
+}
+
+/**
+ * Show the approval prompt for apps asking to connect, one at a time.
+ *
+ * Queued rather than stacked: two dialogs on top of each other is how a person
+ * approves the one underneath by accident, and the whole point of this prompt
+ * is that it gets read. A request that expires while queued simply never shows
+ * — the server has already stopped accepting an answer for it.
+ */
+async function initPairPrompts() {
+    const { mountComponent, destroyComponent } = await import('./dashboard/svelte/mount.svelte.js');
+    const { default: PairRequestDialog } = await import('./dashboard/svelte/config/PairRequestDialog.svelte');
+
+    const queue = [];
+    let showing = false;
+    let host = null;
+
+    const close = () => {
+        if (host) { destroyComponent(host); host.remove(); host = null; }
+        showing = false;
+        next();
+    };
+
+    const answer = async (id, approved) => {
+        try { await invoke('answer_pair_request', { id, approved }); }
+        catch (e) { console.warn('Could not answer the pairing request:', e); }
+        close();
+    };
+
+    const next = () => {
+        if (showing || queue.length === 0) return;
+        const request = queue.shift();
+        showing = true;
+        host = document.createElement('div');
+        document.body.appendChild(host);
+        mountComponent(PairRequestDialog, host, { request, onAnswer: answer });
+    };
+
+    const enqueue = (request) => {
+        if (!request?.id) return;
+        // The same request can arrive twice — the event, and the catch-up list
+        // a window runs on open.
+        if (queue.some(r => r.id === request.id)) return;
+        queue.push(request);
+        // Nothing can be approved on a window the user cannot see.
+        invoke('open_main_window').catch(() => {});
+        next();
+    };
+
+    await listen('pair-request', (e) => enqueue(e.payload));
+
+    // Anything that arrived before this window was ready. Without it, an app
+    // that asked during startup waits out its two minutes against a prompt that
+    // was never drawn.
+    try {
+        for (const r of (await invoke('list_pair_requests')) || []) enqueue(r);
+    } catch (_) { /* dev/browser */ }
 }
 
 /** Auto-grow the multiline search textarea up to its CSS max-height. */
@@ -976,17 +1003,18 @@ let _lastSpotlightAnswerHtml = '';
 // The answer as TEXT, not markup. The rendered HTML restores the overlay;
 // only the text can be handed to a run as prior conversation.
 let _lastSpotlightAnswer = '';
-const _toolExecutor = new ToolExecutor();
-
+/**
+ * Answer a Spotlight question on lane L2 — ask × none, ephemeral.
+ *
+ * This used to be a private loop with its own ToolExecutor and JSON tool
+ * protocol, handing every connected app's MCP tools to the model. It is now a
+ * task like any other, served by the engine, that keeps nothing afterwards:
+ * see dashboard/utils/spotlightRun.js.
+ */
 async function askAI(query) {
     if (!query && _spotlightActiveSkills.length === 0) return;
     const answerEl = document.getElementById('search-ai-answer');
-    if (!answerEl) {
-        try { localStorage.setItem('jh_pending_chat_question', query); } catch (_) {}
-        hideSearch();
-        window.location.hash = '#chat';
-        return;
-    }
+    if (!answerEl) return;
 
     if (_aiAbort) { try { _aiAbort.abort(); } catch (_) {} }
     _aiAbort = new AbortController();
@@ -1013,13 +1041,10 @@ async function askAI(query) {
             skillPreamble = bodies.join('\n\n') + '\n\n---\n\n';
         }
     }
-    const processedText = skillPreamble + query;
+    const prompt = skillPreamble + query;
 
-    // Two-part body: `.search-ai-segs` holds FINISHED segments (previous loop
-    // turns / tool notes) and is never rewritten again; `.search-ai-cur` is the
-    // only node updated while streaming. Rewriting the whole body every chunk
-    // (the old behavior) redrew all earlier content each frame → the visible
-    // "the answer keeps refreshing" flicker.
+    // Two-part body: `.search-ai-segs` holds FINISHED notes (tool calls) and is
+    // never rewritten; `.search-ai-cur` is the only node updated while streaming.
     answerEl.innerHTML =
         `<div class="search-ai-q"><span>🧑</span><span>${escapeHtml(query || '(Skill Only)')}</span></div>` +
         `<div class="search-ai-body">` +
@@ -1028,169 +1053,64 @@ async function askAI(query) {
         `</div>`;
     const segsEl = answerEl.querySelector('.search-ai-segs');
     const curEl = answerEl.querySelector('.search-ai-cur');
-    answerEl.scrollTop = answerEl.scrollHeight;
 
-    const apiMessages = [{ role: 'user', content: processedText }];
+    let streamed = '';
+    let paintPending = false;
+    const paint = () => {
+        paintPending = false;
+        if (!curEl) return;
+        // Follow the stream only if the user hasn't scrolled up to read.
+        const nearBottom = answerEl.scrollHeight - answerEl.scrollTop - answerEl.clientHeight < 80;
+        curEl.innerHTML = streamed.trim()
+            ? `<div class="rv-summary chat-md">${formatMessageContent(streamed)}</div>`
+            : `<span class="search-ai-thinking">✨ Thinking…</span>`;
+        if (nearBottom) answerEl.scrollTop = answerEl.scrollHeight;
+    };
 
-    await _toolExecutor.startSession('.');
-    // NO agent-control tools — same rule as Simple Chat (ChatView). The quick
-    // search box is a conversation, not a task: offering finish_task made the
-    // model spend its turn "finishing" and the user got a tool trace instead of
-    // an answer. The reply itself IS the deliverable.
-    _toolExecutor.setToolAllowlist(['web_search', 'fetch_url'], { agentControl: false });
-    _toolExecutor._mcpBypassesAllowlist = true;
-    _toolExecutor.setMcpRelevanceQuery(processedText);
-    _toolExecutor.setMcpPruneOptions({ minScore: 0.12, top: 5 });
-
-    let outputLanguage = 'Japanese';
-    try { outputLanguage = (await invoke('get_ai_config'))?.output_language || 'Japanese'; } catch (_) {}
-
-    const toolDefs = _toolExecutor.getToolsForNativeAPI().map(t => {
-        return `<tool name="${t.function.name}">
-<description>${t.function.description}</description>
-<parameters>${JSON.stringify(t.function.parameters)}</parameters>
-</tool>`;
-    }).join('\n');
-
-    let systemPrompt = "You are a helpful AI assistant. Answer concisely and in the user's language.";
-    systemPrompt += `
-
-<available_tools>
-${toolDefs}
-</available_tools>
-
-<instructions>
-If you need to perform actions, query/modify files, run commands, or use any other tools, you MUST reply with a JSON object wrapped inside a markdown code block (\`\`\`json).
-The JSON object must contain a "thought" string and a "tool_calls" array.
-
-Example:
-\`\`\`json
-{
-  "thought": "Describe what you observed, what you plan to do, and why you are calling the tool.",
-  "tool_calls": [
-    {
-      "name": "list_files",
-      "args": { "path": "." }
-    }
-  ]
-}
-\`\`\`
-
-If no tool execution is needed, you can reply normally in plain text.
-Always write your thoughts and tool calls in the JSON structure if you use tools.
-This is a conversation, not a task: there is no \`finish_task\` to call, and a tool call is never a substitute for the answer itself.
-Your final responses and messages to the user MUST be in ${outputLanguage}.
-</instructions>
-`;
+    const client = window.apiClient;
+    let taskId = null;
+    // A superseded question is cancelled on the server too, not just ignored here.
+    myAbort.signal.addEventListener('abort', () => {
+        if (taskId && client) client.request(`/tasks/${taskId}`, { method: 'DELETE' }).catch(() => {});
+    }, { once: true });
 
     try {
-        let loopCount = 0;
-        const maxLoops = 10;
-        let keepRunning = true;
-        let fullAnswer = '';
-
-        while (keepRunning && loopCount < maxLoops) {
-            if (myAbort.signal.aborted) break;
-
-            let aiResponse = '';
-            let streamRafPending = false;
-
-            const renderStreamed = () => {
-                streamRafPending = false;
-                if (!curEl) return;
-
-                // Follow the stream only if the user hasn't scrolled up to read.
-                const nearBottom = answerEl.scrollHeight - answerEl.scrollTop - answerEl.clientHeight < 80;
-
-                const trimmed = aiResponse.trimStart();
-                const looksLikeToolCall = trimmed.startsWith('\`\`\`json') || trimmed.startsWith('{"thought"') || trimmed.startsWith('{ "thought"');
-                if (looksLikeToolCall) {
-                    // Update only if not already showing — avoids a per-chunk rewrite.
-                    if (!curEl.dataset.toolNote) {
-                        curEl.dataset.toolNote = '1';
-                        curEl.innerHTML = `<span style="font-size:13px;color:var(--ink-soft);">🤔 Thinking or using tools…</span>`;
-                    }
-                } else {
-                    delete curEl.dataset.toolNote;
-                    curEl.innerHTML = `<div class="rv-summary chat-md">${formatMessageContent(aiResponse)}</div>`;
-                }
-                if (nearBottom) answerEl.scrollTop = answerEl.scrollHeight;
-            };
-
-            await llmService.chat(
-                apiMessages,
-                systemPrompt,
-                (chunk) => {
-                    if (myAbort.signal.aborted) return;
-                    aiResponse += chunk;
-                    if (!streamRafPending) {
-                        streamRafPending = true;
-                        requestAnimationFrame(renderStreamed);
-                    }
-                },
-                myAbort.signal,
-                []
-            );
-            
-            if (myAbort.signal.aborted) break;
-            renderStreamed(); // Final flush
-
-            fullAnswer += aiResponse;
-
-            const toolCallObj = extractToolCall(aiResponse);
-            // Freeze this turn's visual into the segments area (never rewritten
-            // again) and reset the streaming node for the next turn — this keeps
-            // earlier turns stable on screen instead of re-rendering everything.
-            const freezeTurn = (noteHtml) => {
-                if (segsEl && noteHtml) segsEl.insertAdjacentHTML('beforeend', noteHtml);
-                if (curEl) {
-                    delete curEl.dataset.toolNote;
-                    curEl.innerHTML = `<span class="search-ai-thinking">✨ Thinking…</span>`;
-                }
-            };
-            if (toolCallObj && toolCallObj.tool_calls && toolCallObj.tool_calls.length > 0) {
-                apiMessages.push({ role: 'assistant', content: aiResponse });
-                const names = toolCallObj.tool_calls.map(c => c.name).filter(Boolean).join(', ');
-                freezeTurn(`<div class="search-ai-toolnote">⚙ ${escapeHtml(names)}</div>`);
-
-                const results = [];
-                for (const call of toolCallObj.tool_calls) {
-                    const resValue = await _toolExecutor.executeTool(call);
-                    results.push({ toolName: call.name, result: typeof resValue === 'string' ? resValue : JSON.stringify(resValue) });
-                }
-
-                for (const res of results) {
-                    apiMessages.push({
-                        role: 'user',
-                        content: `Tool result for ${res.toolName}:\n${res.result}`
-                    });
-                }
-                loopCount++;
-            } else if (toolCallObj && (!toolCallObj.tool_calls || toolCallObj.tool_calls.length === 0)) {
-                apiMessages.push({ role: 'assistant', content: aiResponse });
-                apiMessages.push({
-                    role: 'user',
-                    content: `You outputted a thought/planning JSON but no tool calls and no final answer. Please provide your final response to the user in plain text now.`
-                });
-                freezeTurn('');
-                loopCount++;
-            } else {
-                keepRunning = false;
-            }
-        }
-        
+        if (!client) throw new Error('The agent is not ready yet.');
+        const created = await client.request('/tasks', {
+            method: 'POST',
+            body: JSON.stringify(spotlightTaskBody(prompt)),
+        });
+        taskId = created.task_id;
         if (myAbort.signal.aborted) return;
 
-        if (fullAnswer.trim()) {
+        const answer = await followTask(created.ws_url, {
+            signal: myAbort.signal,
+            onStream: (chunk) => {
+                streamed += chunk;
+                if (!paintPending) { paintPending = true; requestAnimationFrame(paint); }
+            },
+            // The narration before a tool call is spent once the call happens:
+            // freeze a one-line note and start the next turn fresh.
+            onTool: (name) => {
+                segsEl?.insertAdjacentHTML('beforeend', `<div class="search-ai-toolnote">⚙ ${escapeHtml(name)}</div>`);
+                streamed = '';
+                paint();
+            },
+        });
+        if (myAbort.signal.aborted) return;
+
+        const text = String(answer || streamed || '').trim();
+        if (curEl) curEl.innerHTML = `<div class="rv-summary chat-md">${formatMessageContent(text)}</div>`;
+        if (text) {
             // Remember the rendered Q&A so reopening the spotlight restores it.
             _lastSpotlightQuery = query || '';
             _lastSpotlightAnswerHtml = answerEl.innerHTML;
-            _lastSpotlightAnswer = fullAnswer.trim();
+            _lastSpotlightAnswer = text;
         }
     } catch (e) {
         if (myAbort.signal.aborted) return;
         if (curEl) curEl.innerHTML =
-            `<span style="color:var(--error)">Error: ${(e?.message || String(e)).replace(/</g, '&lt;')}</span>`;
+            `<span style="color:var(--error)">Error: ${escapeHtml(e?.message || String(e))}</span>`;
     }
 }
 
@@ -1453,6 +1373,15 @@ window.addEventListener('DOMContentLoaded', async () => {
         // Initialize TaskBridge for background agent runs
         await taskBridge.init();
 
+        // Approval prompts for apps asking to connect (server/pairing.rs).
+        //
+        // Set up here rather than inside a view: a request can arrive while the
+        // user is on any screen, or while the window is hidden in the tray, and
+        // a prompt that only exists on the settings page is a prompt nobody
+        // sees. The window is brought forward for the same reason — an
+        // unanswered request expires in two minutes.
+        await initPairPrompts();
+
         // Activate the inbound MCP-over-WebSocket listener (Part A / T1) so apps
         // that dial JHAI's /mcp/ws (JHEditor/JHER/mock) register as MCP servers
         // and their tools (e.g. get_buffer) become available to agent tasks.
@@ -1510,6 +1439,17 @@ window.addEventListener('DOMContentLoaded', async () => {
             // is an empty content area. Route explicitly when nothing changed.
             if (window.location.hash === hash) handleRoute();
             else window.location.hash = hash;
+        });
+
+        // Another app handing over a request to be SENT FROM HERE (POST
+        // /api/ui/compose). Queued as a pending launch, which Work reads once on
+        // mount and puts in the composer — nothing runs until the user sends it.
+        await listen('compose-request', (e) => {
+            const { prompt = '', workspace = '' } = e.payload || {};
+            setPendingLaunch({ prompt, ws: workspace || '' });
+            hideSearch();
+            if (window.location.hash.startsWith('#monitor')) handleRoute();
+            else window.location.hash = '#monitor';
         });
 
         // Listen for routes

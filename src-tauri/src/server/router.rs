@@ -15,7 +15,7 @@ use uuid::Uuid;
 use tokio::sync::broadcast;
 use tauri::Emitter;
 use crate::commands::ai_config::AiConfig;
-use crate::server::auth::{auth_middleware, AuthToken};
+use crate::server::auth::{auth_middleware, loopback_only, Registry};
 use crate::server::ws::ws_handler;
 use crate::server::config_routes::{get_models, get_config, update_config, test_connection};
 
@@ -95,6 +95,10 @@ pub struct TokenUsage {
 #[derive(Clone)]
 pub struct AppState {
     pub auth_token: String,
+    /// Every credential that can authenticate, and what each may reach.
+    pub tokens: std::sync::Arc<crate::server::tokens::TokenRegistry>,
+    /// Pairing requests waiting for a person to answer them.
+    pub pairing: std::sync::Arc<crate::server::pairing::PairingState>,
     pub port: u16,
     pub tasks: Arc<Mutex<HashMap<String, TaskInfo>>>,
     pub task_senders: Arc<Mutex<HashMap<String, broadcast::Sender<String>>>>,
@@ -186,6 +190,25 @@ pub struct AgentBehavior {
     /// a create-only task that loses the flag here is a mode whose name lies.
     #[serde(default)]
     pub create_only: Option<bool>,
+
+    /// "transform" | "ask" | "build" — what the run DOES.
+    /// "none" | "app" | "workspace" — what it may TOUCH (`reach`).
+    ///
+    /// Resolved by src/modules/ai/agent/RunLane.js, which also reads the legacy
+    /// `mode` / `interaction` when these are absent. Struct fields for the reason
+    /// `interaction` gives above: serde drops an unknown key without a word, and
+    /// a reach that vanished here would leave the run on the default lane.
+    #[serde(default)]
+    pub shape: Option<String>,
+    #[serde(default)]
+    pub reach: Option<String>,
+
+    /// Keep nothing: not in the task list, not in history, not in memory, and
+    /// gone from the in-memory map a few minutes after it ends. Spotlight's
+    /// answers — "the layer you use without switching windows and that keeps
+    /// nothing" (docs/design/information-architecture.md §5).
+    #[serde(default)]
+    pub ephemeral: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -265,7 +288,7 @@ pub struct TestConnectionResponse {
 }
 
 pub fn create_router(state: AppState) -> Router {
-    let auth_token = state.auth_token.clone();
+    let registry = state.tokens.clone();
     
     // CORS, narrowed from `Any` on all three axes.
     //
@@ -314,12 +337,24 @@ pub fn create_router(state: AppState) -> Router {
         .route("/stats", get(get_stats))
         // Autonomy stage 2: the outside world pushing IN.
         .route("/events", post(post_event))
+        .route("/ui/compose", post(compose_in_app))
         .layer(axum::middleware::from_fn(auth_middleware))
-        .layer(Extension(AuthToken(auth_token.clone())));
+        .layer(Extension(Registry(registry)));
 
     // Public / Hybrid routes
     Router::new()
         .route("/api/health", get(health_check))
+        // Pairing is the one thing a caller does BEFORE it has a credential,
+        // so it cannot live behind the credential check. What protects it is
+        // the user answering a prompt (server/pairing.rs), the loopback Host
+        // rule below, and the rate limits in the handler.
+        .merge(
+            Router::new()
+                .route("/api/pair/request", post(crate::server::pairing::request_pairing))
+                .route("/api/pair/:id", get(crate::server::pairing::poll_pairing))
+                .layer(axum::middleware::from_fn(loopback_only))
+                .with_state(state.clone()),
+        )
         .nest("/api", api_routes)
         .route("/ws/tasks/:id", get(ws_handler))
         // Inbound MCP-over-WebSocket (Part A / T1): apps dial in and act as the
@@ -448,6 +483,47 @@ fn task_meta(t: &TaskInfo) -> TaskInfo {
     }
 }
 
+/// Was this task created to keep nothing? See `AgentBehavior::ephemeral`.
+pub fn task_is_ephemeral(t: &TaskInfo) -> bool {
+    t.behavior.as_ref().and_then(|b| b.ephemeral).unwrap_or(false)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ComposeRequest {
+    #[serde(default)]
+    pub prompt: String,
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+/// POST /api/ui/compose — open this app with a request typed in, NOT started.
+///
+/// For a connected app that wants the user to do real work here: JHEditor's
+/// task panel used to POST a `build` task straight from a text box, which ran
+/// without the plan approval, the workspace picker or the diff review that this
+/// app's own composer puts in front of work. Handing over the TEXT and letting
+/// the user send it keeps those in the path (Report_20260913 §6-3).
+async fn compose_in_app(
+    State(state): State<AppState>,
+    Json(body): Json<ComposeRequest>,
+) -> StatusCode {
+    use tauri::Manager;
+    let Some(main) = state.app_handle.get_webview_window("main") else {
+        return StatusCode::SERVICE_UNAVAILABLE;
+    };
+    let _ = main.show();
+    let _ = main.unminimize();
+    let _ = main.set_focus();
+    // Capped: this is a prompt box, and an unbounded body from another process
+    // should not become an unbounded string in the webview.
+    let prompt: String = body.prompt.chars().take(20_000).collect();
+    let _ = main.emit(
+        "compose-request",
+        serde_json::json!({ "prompt": prompt, "workspace": body.workspace }),
+    );
+    StatusCode::ACCEPTED
+}
+
 async fn list_tasks(State(state): State<AppState>) -> Json<Vec<TaskInfo>> {
     let tasks = state.tasks.lock().unwrap();
     // The list view needs METADATA only (id / status / prompt / tokens /
@@ -457,7 +533,11 @@ async fn list_tasks(State(state): State<AppState>) -> Json<Vec<TaskInfo>> {
     // heavy" (both call listTasks). The detail view loads logs on demand via
     // GET /tasks/:id. (`logs` has skip_serializing_if = Vec::is_empty, so an empty
     // vec is simply omitted from the JSON.)
-    let list: Vec<TaskInfo> = tasks.values().map(task_meta).collect();
+    // An ephemeral run is not a task anyone is meant to find again.
+    let list: Vec<TaskInfo> = tasks.values()
+        .filter(|t| !task_is_ephemeral(t))
+        .map(task_meta)
+        .collect();
     Json(list)
 }
 
@@ -1019,6 +1099,9 @@ async fn continue_task(
             interaction: interaction.clone(),
             persona_tier: None,
             create_only: None,
+            shape: None,
+            reach: None,
+            ephemeral: None,
         },
     });
 
@@ -1667,6 +1750,9 @@ mod continue_behavior_tests {
             interaction: None,
             persona_tier: None,
             create_only: None,
+            shape: None,
+            reach: None,
+            ephemeral: None,
         });
         let behavior = behavior.expect("an explicit [] must produce a Some behavior");
         assert_eq!(behavior.mcp_servers, Some(vec![]));
@@ -1691,6 +1777,9 @@ mod continue_behavior_tests {
             interaction: None,
             persona_tier: None,
             create_only: None,
+            shape: None,
+            reach: None,
+            ephemeral: None,
         });
         let json = serde_json::to_value(behavior.unwrap()).unwrap();
         assert_eq!(json["mcp_servers"], serde_json::json!(["backlog"]));

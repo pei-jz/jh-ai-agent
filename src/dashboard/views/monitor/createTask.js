@@ -58,6 +58,9 @@ export async function startSelectedMcp(selectedMcp = [], servers = {}, mcp = def
  * @param {string[]} [o.images]      data URLs
  * @param {string}   [o.caller]      shows in the task list
  * @param {string}   [o.interaction] 'ask' | 'build' — see agent/InteractionMode.js
+ * @param {boolean}  [o.recorded]    the exchange already happened — write it
+ *                                   down instead of running it (Spotlight's
+ *                                   Expand). No MCP, no workspace, no tools.
  * @param {object}   o.client        apiClient
  * @param {object}   [o.mcp]         injectable McpManager
  * @returns {Promise<string>} the new task id
@@ -65,10 +68,12 @@ export async function startSelectedMcp(selectedMcp = [], servers = {}, mcp = def
 export async function createTask({
     prompt, workspace, modeId, selectedMcp = [], mcpServers = {},
     images = [], caller = 'NewTask', interaction = 'build',
-    chatContext = [],
+    chatContext = [], recorded = false,
     client, mcp = defaultMcpManager,
 }) {
-    await startSelectedMcp(selectedMcp, mcpServers, mcp);
+    // Nothing will call a tool, so starting a server would be starting it for
+    // no one.
+    if (!recorded) await startSelectedMcp(selectedMcp, mcpServers, mcp);
 
     const res = await client.request('/tasks', {
         method: 'POST',
@@ -81,6 +86,7 @@ export async function createTask({
             caller,
             interaction,
             chatContext,
+            recorded,
         })),
     });
     // Remember the workspace we just ran in.
@@ -95,7 +101,12 @@ export async function createTask({
     //
     // Best-effort: the task is created either way, and failing to remember a
     // path must not fail the run.
-    rememberWorkspace(workspace, client).catch(() => {});
+    //
+    // "Running somewhere IS approving it" is the whole argument, so a recorded
+    // exchange — which runs nowhere — approves nothing. This is what filled the
+    // workspace picker with folders a Spotlight search had merely been sitting
+    // next to.
+    if (!recorded) rememberWorkspace(workspace, client).catch(() => {});
 
     return res.task_id;
 }

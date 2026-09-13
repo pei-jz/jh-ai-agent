@@ -335,6 +335,27 @@ async function grepZeroResultLadder(ctx, args, searchRoot, filesSearched) {
 }
 
 /** grep_search — regex search with a literal-string tolerant fallback. */
+/**
+ * The most a grep result may say.
+ *
+ * `max_results` bounds how many matches come back, not how big each one is, and
+ * a minified bundle is a handful of multi-megabyte lines: 200 matches inside
+ * public/lib/mermaid.min.js were 3.6M characters of one result. The Rust side
+ * now clips each line too; this is the ceiling on the whole answer, well below
+ * the generic tool-result cap, because a search that says this much has not
+ * found anything specific.
+ */
+export const MAX_GREP_OUTPUT_CHARS = 60_000;
+
+export function capGrepOutput(text) {
+    const s = String(text ?? '');
+    if (s.length <= MAX_GREP_OUTPUT_CHARS) return s;
+    return s.slice(0, MAX_GREP_OUTPUT_CHARS)
+        + `\n\n[grep output capped at ${MAX_GREP_OUTPUT_CHARS.toLocaleString()} of ${s.length.toLocaleString()} characters. `
+        + 'Narrow it: a more specific pattern, a path, or include_glob. Vendored and minified files '
+        + '(*.min.js, public/lib, dist) are rarely what you are looking for.]';
+}
+
 export async function handleGrepSearch(ctx, args, onAgentStatus) {
     const searchRoot = args.path ? ctx.resolvePath(args.path) : ctx.workspacePath;
     onAgentStatus?.(`Searching: /${args.pattern}/ in ${searchRoot}...`);
@@ -356,8 +377,8 @@ export async function handleGrepSearch(ctx, args, onAgentStatus) {
         const header = `Found ${matches.length} match(es)` +
             (truncated ? ' (truncated)' : '') +
             ` across ${files_searched} files for /${args.pattern}/:`;
-        return `${header}\n${lines.join('\n')}` +
-            (truncated ? `\n[Result truncated. Narrow the search with include_glob or a more specific pattern.]` : '');
+        return capGrepOutput(`${header}\n${lines.join('\n')}` +
+            (truncated ? `\n[Result truncated. Narrow the search with include_glob or a more specific pattern.]` : ''));
     } catch (e) {
         const emsg = String(e?.message || e || '');
         // Tolerant fallback: a malformed regex is the most common grep
@@ -382,7 +403,7 @@ export async function handleGrepSearch(ctx, args, onAgentStatus) {
                     return note + `No matches for "${args.pattern}" (literal) in ${searchRoot} (${files_searched} files).`;
                 }
                 const lines = matches.map(m => `${m.file}:${m.line}: ${m.text}`);
-                return note + `Found ${matches.length} match(es)${truncated ? ' (truncated)' : ''} across ${files_searched} files for "${args.pattern}" (literal):\n${lines.join('\n')}`;
+                return capGrepOutput(note + `Found ${matches.length} match(es)${truncated ? ' (truncated)' : ''} across ${files_searched} files for "${args.pattern}" (literal):\n${lines.join('\n')}`);
             } catch (_) { /* fall through to original error */ }
         }
         return `Error: grep_search failed — ${emsg}` +

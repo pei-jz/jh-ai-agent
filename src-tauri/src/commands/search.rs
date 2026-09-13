@@ -67,6 +67,14 @@ pub struct GrepResult {
 ///   max_results      - default 200. Hard cap 2000 to protect agent context.
 ///   context_lines    - number of lines of context to include above/below each match.
 ///                      Default 0. Hard cap 5.
+///
+/// Every returned line is clipped to MAX_LINE_CHARS around the match, and the
+/// whole result stops at MAX_TOTAL_CHARS. `max_results` bounds how MANY matches
+/// come back, not how big each is — and one line of a minified bundle is
+/// megabytes: 200 matches in public/lib/mermaid.min.js were 3.6M characters,
+/// enough to push the next model request past a 1M-token context window.
+/// `*.min.js` / `*.min.css` / `*.map` are skipped unless `include_glob` names
+/// them explicitly.
 #[tauri::command]
 pub async fn grep_search(
     pattern: String,
@@ -115,6 +123,9 @@ pub async fn grep_search(
     let mut matches: Vec<GrepMatch> = Vec::new();
     let mut files_searched: usize = 0;
     let mut truncated = false;
+    let mut total_chars: usize = 0;
+    // Asking for a minified file by name is the one case it is wanted.
+    let search_minified = include_glob.as_deref().map(|g| g.contains("min.") || g.contains(".map")).unwrap_or(false);
 
     // ignore::WalkBuilder honors .gitignore / .ignore / hidden by default.
     let walker = WalkBuilder::new(root_path)
@@ -147,6 +158,11 @@ pub async fn grep_search(
         if is_likely_binary_path(p) {
             continue;
         }
+        // Vendored, minified output: every match is a megabyte line of code
+        // nobody reads, and it is never the thing being looked for.
+        if !search_minified && is_minified_or_map(p) {
+            continue;
+        }
 
         // Read as bytes, then attempt UTF-8 — bail on non-UTF-8 (skip binaries).
         let bytes = match std::fs::read(p) {
@@ -166,28 +182,34 @@ pub async fn grep_search(
         files_searched += 1;
         let lines: Vec<&str> = text.lines().collect();
         for (i, line) in lines.iter().enumerate() {
-            if !re.is_match(line) {
+            let Some(found) = re.find(line) else {
                 continue;
-            }
-            // Build the match payload (optionally with surrounding context).
+            };
+            // Build the match payload (optionally with surrounding context),
+            // each line clipped to a window — around the match on its own line.
             let display = if context_lines == 0 {
-                (*line).to_string()
+                clip_line(line, found.start(), MAX_LINE_CHARS)
             } else {
                 let lo = i.saturating_sub(context_lines);
                 let hi = (i + context_lines + 1).min(lines.len());
                 lines[lo..hi]
                     .iter()
                     .enumerate()
-                    .map(|(off, l)| format!("{}: {}", lo + off + 1, l))
+                    .map(|(off, l)| {
+                        let idx = lo + off;
+                        let focus = if idx == i { found.start() } else { 0 };
+                        format!("{}: {}", idx + 1, clip_line(l, focus, MAX_LINE_CHARS))
+                    })
                     .collect::<Vec<_>>()
                     .join("\n")
             };
+            total_chars += display.len();
             matches.push(GrepMatch {
                 file: p.to_string_lossy().into_owned(),
                 line: i + 1,
                 text: display,
             });
-            if matches.len() >= max_results {
+            if matches.len() >= max_results || total_chars >= MAX_TOTAL_CHARS {
                 truncated = true;
                 break 'outer;
             }
@@ -202,6 +224,41 @@ pub async fn grep_search(
 }
 
 /// Cheap "this is probably binary" check based on common extensions and size.
+/// Longest a single line may be in a grep result, in characters.
+const MAX_LINE_CHARS: usize = 400;
+/// Total bytes of match text one search may return.
+const MAX_TOTAL_CHARS: usize = 200_000;
+
+/// `line`, clipped to `max_chars` characters around byte offset `focus`.
+///
+/// Char-boundary safe (the cut is counted in chars, not bytes), and it says how
+/// much was cut on each side, so a clipped line cannot be mistaken for the
+/// whole of it.
+fn clip_line(line: &str, focus: usize, max_chars: usize) -> String {
+    let total = line.chars().count();
+    if total <= max_chars {
+        return line.to_string();
+    }
+    let focus = focus.min(line.len());
+    let focus_char = line.get(..focus).map(|s| s.chars().count()).unwrap_or(0);
+    let start = focus_char.saturating_sub(max_chars / 2).min(total - max_chars);
+    let end = start + max_chars;
+    let window: String = line.chars().skip(start).take(max_chars).collect();
+    let pre = if start > 0 { format!("…[+{} chars] ", start) } else { String::new() };
+    let post = if end < total { format!(" …[+{} chars]", total - end) } else { String::new() };
+    format!("{}{}{}", pre, window, post)
+}
+
+/// Minified bundles and source maps.
+fn is_minified_or_map(p: &Path) -> bool {
+    let name = p
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    name.ends_with(".min.js") || name.ends_with(".min.mjs") || name.ends_with(".min.css") || name.ends_with(".map")
+}
+
 fn is_likely_binary_path(p: &Path) -> bool {
     const BIN_EXT: &[&str] = &[
         "png", "jpg", "jpeg", "gif", "bmp", "ico", "webp", "tiff",
@@ -386,6 +443,106 @@ mod tests {
         assert!(m.is_match("README.md"));
         assert!(m.is_match("App.svelte"));
         assert!(!m.is_match("index.py"));
+    }
+
+    // ── Output bounds (task 1a1fcea7: 3.75M characters from one search) ──
+
+    #[test]
+    fn a_short_line_is_returned_whole() {
+        assert_eq!(clip_line("const token = 1;", 6, 400), "const token = 1;");
+    }
+
+    #[test]
+    fn a_long_line_is_clipped_around_the_match() {
+        let line = format!("{}TOKEN_HERE{}", "a".repeat(5000), "b".repeat(5000));
+        let focus = line.find("TOKEN_HERE").unwrap();
+        let out = clip_line(&line, focus, 400);
+        assert!(out.contains("TOKEN_HERE"), "the match must stay visible");
+        assert!(out.starts_with("…[+"), "it says what was cut before: {}", &out[..20]);
+        assert!(out.ends_with("chars]"), "and after");
+        assert!(out.chars().count() < 460);
+    }
+
+    #[test]
+    fn clipping_never_splits_a_multibyte_character() {
+        let line = "接続確認".repeat(500);
+        let focus = line.char_indices().nth(1000).unwrap().0;
+        let out = clip_line(&line, focus, 100);
+        assert!(out.chars().count() < 140);
+        assert!(out.contains('接') || out.contains('続') || out.contains('確') || out.contains('認'));
+    }
+
+    #[test]
+    fn a_match_near_the_end_still_gets_a_full_window() {
+        let line = format!("{}END", "x".repeat(2000));
+        let out = clip_line(&line, line.len() - 3, 400);
+        assert!(out.ends_with("END"));
+        assert!(!out.ends_with("chars]"));
+    }
+
+    #[test]
+    fn minified_and_map_files_are_recognised() {
+        assert!(is_minified_or_map(Path::new("public/lib/mermaid.min.js")));
+        assert!(is_minified_or_map(Path::new("dist/app.MIN.CSS")));
+        assert!(is_minified_or_map(Path::new("dist/index.js.map")));
+        assert!(!is_minified_or_map(Path::new("src/minimal.js")));
+        assert!(!is_minified_or_map(Path::new("src/admin.js")));
+    }
+
+    fn scratch_dir(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("jhai_grep_{}_{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[tokio::test]
+    async fn a_minified_bundle_cannot_flood_the_result() {
+        let d = scratch_dir("flood");
+        // Minified-shaped: few lines, each enormous, "token" all over them.
+        let huge = "var a=\"token\";".repeat(80_000);
+        std::fs::write(d.join("bundle.js"), format!("{}\n{}\n{}", huge, huge, huge)).unwrap();
+        std::fs::write(d.join("vendor.min.js"), &huge).unwrap();
+
+        let res = grep_search("token".into(), Some(d.to_string_lossy().into_owned()), None, None, None, Some(2))
+            .await
+            .unwrap();
+        let total: usize = res.matches.iter().map(|m| m.text.len()).sum();
+        assert!(!res.matches.is_empty());
+        assert!(total <= MAX_TOTAL_CHARS + 3 * (MAX_LINE_CHARS * 4 + 64), "total {} is not bounded", total);
+        for m in &res.matches {
+            assert!(!m.file.ends_with("vendor.min.js"), "minified files are skipped by default");
+            for l in m.text.lines() {
+                assert!(l.chars().count() < MAX_LINE_CHARS + 64, "a line of {} chars came back", l.chars().count());
+            }
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[tokio::test]
+    async fn a_minified_file_is_searched_when_asked_for_by_name() {
+        let d = scratch_dir("named");
+        std::fs::write(d.join("vendor.min.js"), "var token=1;").unwrap();
+        let res = grep_search("token".into(), Some(d.to_string_lossy().into_owned()), Some("*.min.js".into()), None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(res.matches.len(), 1);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[tokio::test]
+    async fn the_total_budget_truncates_many_medium_matches() {
+        let d = scratch_dir("budget");
+        let line = format!("token {}", "y".repeat(390));
+        let body: String = (0..3000).map(|_| line.clone()).collect::<Vec<_>>().join("\n");
+        std::fs::write(d.join("big.txt"), body).unwrap();
+        let res = grep_search("token".into(), Some(d.to_string_lossy().into_owned()), None, None, Some(2000), None)
+            .await
+            .unwrap();
+        assert!(res.truncated);
+        let total: usize = res.matches.iter().map(|m| m.text.len()).sum();
+        assert!(total <= MAX_TOTAL_CHARS + MAX_LINE_CHARS * 4);
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
 

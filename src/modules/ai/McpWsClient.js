@@ -29,7 +29,6 @@ export class McpWsClient {
         this.pendingRequests = new Map();
         this.capabilities = null;
         this.tools = [];
-        this.intents = [];
         this.resources = [];
         this.onLog = null;
         this.onClosed = null;          // McpManager sets this to deregister
@@ -76,16 +75,6 @@ export class McpWsClient {
 
             const toolsResult = await this.request('tools/list', {});
             this.tools = toolsResult.tools || [];
-
-            // ── Intents (JHAI extension, optional) ────────────────────────
-            // T1 is the transport our own apps use, so this is where intents
-            // normally arrive. A server without them just errors — not fatal.
-            try {
-                const res = await this.request('jhai/intents/list', {}, 5000);
-                this.intents = Array.isArray(res?.intents) ? res.intents : [];
-            } catch (_) {
-                this.intents = [];
-            }
 
             // ── Resources (standard MCP, optional) ─────────────────────
             // Documents the server exposes for reading — T1 is the transport our own

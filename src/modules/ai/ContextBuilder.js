@@ -140,6 +140,89 @@ JSON FORMATTING RULES (critical — most failures come from these):
         return result.join('\n');
     }
 
+    /**
+     * Keys `gatherActiveContext` and `editContext` already render. Everything
+     * else a caller sends is shown by `clientContextBlock`.
+     */
+    static get RENDERED_CONTEXT_KEYS() {
+        return new Set(['editContext', 'currentFile', 'openFiles', 'terminalOutput', 'diagnostics', 'images']);
+    }
+
+    /**
+     * The caller's own context, as a block the model can read.
+     *
+     * JHEditor sends `{ selection, activeFile: {path, content} }`; this builder
+     * read `editContext / currentFile / openFiles / terminalOutput / diagnostics`
+     * and nothing else. The two never overlapped, so a selection sent with a
+     * chat message reached the run as metadata no layer rendered — not an
+     * error, just an answer about nothing. Known shapes are laid out; anything
+     * unrecognised is shown as JSON rather than dropped, because a key this file
+     * has not heard of is still something the caller meant the model to see.
+     *
+     * @param {object|null} clientContext
+     * @param {number} maxChars
+     * @returns {string}
+     */
+    static clientContextBlock(clientContext, maxChars = 40000) {
+        if (!clientContext || typeof clientContext !== 'object') return '';
+        const skip = ContextBuilder.RENDERED_CONTEXT_KEYS;
+        const cdata = (s) => String(s).replace(/]]>/g, ']]]]><![CDATA[>');
+        const parts = [];
+
+        if (typeof clientContext.selection === 'string' && clientContext.selection) {
+            parts.push(`<selection>\n<![CDATA[\n${cdata(clientContext.selection)}\n]]>\n</selection>`);
+        }
+        const af = clientContext.activeFile;
+        if (af && typeof af === 'object') {
+            const path = af.path ? ` path="${String(af.path).replace(/"/g, '&quot;')}"` : '';
+            if (typeof af.content === 'string' && af.content) {
+                parts.push(`<active_file${path}>\n<![CDATA[\n${cdata(af.content)}\n]]>\n</active_file>`);
+            } else if (path) {
+                parts.push(`<active_file${path} />`);
+            }
+        }
+
+        const rest = {};
+        for (const [k, v] of Object.entries(clientContext)) {
+            if (skip.has(k) || k === 'selection' || k === 'activeFile') continue;
+            if (v === null || v === undefined || v === '') continue;
+            rest[k] = v;
+        }
+        if (Object.keys(rest).length > 0) {
+            parts.push(`<other>\n<![CDATA[\n${cdata(JSON.stringify(rest, null, 2))}\n]]>\n</other>`);
+        }
+
+        if (parts.length === 0) return '';
+        let block = `<client_context>\n${parts.join('\n')}\n</client_context>`;
+        if (block.length > maxChars) {
+            block = block.slice(0, maxChars) + '\n…(truncated)\n</client_context>';
+        }
+        return block;
+    }
+
+    /**
+     * What a run without a workspace is told about itself.
+     *
+     * Without this, a model whose app tool is refused by the user's privacy
+     * setting does what models do with a refusal: asks again, or fills the gap
+     * with a plausible file it never saw. Both are worse than saying what is
+     * missing, so the prompt says that is the expected move.
+     */
+    static reachBlock(reach, caller = null) {
+        const app = caller ? String(caller) : 'the calling application';
+        const lines = ['<reach>'];
+        lines.push('This run has NO access to the file system and NO project context. Do not call or ask for file tools.');
+        if (reach === 'app') {
+            lines.push(`${app} provides its own tools for the user's live document. The user's privacy setting may REFUSE them; when one is refused, work from what you have and state plainly what was missing — do not ask for it again.`);
+        } else {
+            lines.push('Answer from your own knowledge, and the web tools when a fact needs checking.');
+        }
+        lines.push('Anything the user chose to share is in <client_context>. That is the material to work on.');
+        lines.push('Deliver the answer with present_result(kind="markdown", markdown=<the complete answer>), then finish_task with a one-line summary.');
+        lines.push('</reach>');
+        return lines.join('\n');
+    }
+
     gatherActiveContext(clientContext = null) {
         if (!clientContext) return '';
         const parts = [];
@@ -180,7 +263,22 @@ JSON FORMATTING RULES (critical — most failures come from these):
         return parts.length === 0 ? '' : `<active_context>\n${parts.join('\n')}\n</active_context>\n`;
     }
 
-    async getSystemPrompt(workspacePath, toolExecutor, clientContext = null, editContext = null, kisContext = '', currentQuery = '', effectiveModel = null, personaTierOverride = null) {
+    /**
+     * @param {object} [opts]
+     * @param {'none'|'app'|'workspace'} [opts.reach] what the run may touch
+     *        (agent/RunLane.js). Defaults to `workspace`, which is every caller
+     *        that existed before the lanes did.
+     * @param {string|null} [opts.caller] named in the reach block for `app`
+     */
+    async getSystemPrompt(workspacePath, toolExecutor, clientContext = null, editContext = null, kisContext = '', currentQuery = '', effectiveModel = null, personaTierOverride = null, opts = {}) {
+        const reach = opts.reach || 'workspace';
+        // Every layer below that describes a PROJECT — its summary, its rules,
+        // its persona file, its overview, what past sessions learned in it — is
+        // only true of a run that was given one. A run that was not used to
+        // receive them anyway: the summary from whichever workspace was scanned
+        // last, and memory recalled with no workspace at all. That is how a
+        // chat about a five-line selection arrived knowing another project.
+        const projectScoped = reach === 'workspace';
         const root = workspacePath || '.';
 
         const currentModel = llmService.getCurrentModel() || '';
@@ -206,8 +304,9 @@ JSON FORMATTING RULES (critical — most failures come from these):
             : '';
         const systemBudget = Math.floor(modelLimit * 0.4);
 
-        // Project Info (in-memory, cheap)
-        let projectInfo = projectContext.getPromptContext();
+        // Project Info (in-memory, cheap). The root is passed so a summary scanned
+        // for a DIFFERENT workspace is not handed to this one.
+        let projectInfo = projectScoped ? projectContext.getPromptContext(workspacePath) : '';
         const projectTokens = tokenEstimator.estimateTokens(projectInfo);
         if (projectTokens > Math.floor(systemBudget * 0.25)) {
             projectInfo = tokenEstimator.trimToFit(projectInfo, Math.floor(systemBudget * 0.25));
@@ -228,9 +327,11 @@ JSON FORMATTING RULES (critical — most failures come from these):
         // Memory + Workflow (in-memory)
         // Pass currentQuery so relevant past sessions are ranked first.
         let memoryContext = '';
-        try {
-            memoryContext = conversationMemory.getPromptContext(currentQuery);
-        } catch (e) { }
+        if (projectScoped) {
+            try {
+                memoryContext = conversationMemory.getPromptContext(currentQuery);
+            } catch (e) { }
+        }
 
         // The per-step artifact directory scan lived here: it read every .md in
         // the session dir, pulled task_plan.md out for its own prompt block and
@@ -272,25 +373,29 @@ JSON FORMATTING RULES (critical — most failures come from these):
         // so editing .agent/instructions.md or .agent/agents/default.md takes
         // effect on the next step instead of surviving as a stale cached prefix
         // until the app restarts.
-        const projectInstructions = projectContext.getProjectInstructions();
+        const projectInstructions = projectScoped ? projectContext.getProjectInstructions() : '';
         // Read for EVERY tier. This used to be editing-mode only, which meant a user
         // who wrote a persona file for their general-purpose tasks got no effect from
         // it and no indication why.
         let personaOverride = '';
-        try {
-            personaOverride = await invoke('read_file', { path: `${root}/.agent/agents/default.md` }) || '';
-        } catch (_) { /* no persona file — use the built-in one */ }
+        if (projectScoped) {
+            try {
+                personaOverride = await invoke('read_file', { path: `${root}/.agent/agents/default.md` }) || '';
+            } catch (_) { /* no persona file — use the built-in one */ }
+        }
         // The generated orientation note (Study → overview). Standing context, so
         // it joins the cache key: regenerating it must take effect on the next
         // step rather than after a restart.
         let overview = { text: '', generatedAt: '' };
-        try { overview = await readOverview(root, invoke); } catch (_) { /* none yet */ }
+        if (projectScoped) {
+            try { overview = await readOverview(root, invoke); } catch (_) { /* none yet */ }
+        }
         // The developer's OWN cross-workspace memory (P5). App-wide, not
         // workspace-scoped; joined into the cache key so an entry added mid-run
         // takes effect immediately. `get_app_config_dir` is resolved once per
         // process (it cannot change) and cached.
         let localMemoryEntries = [];
-        try {
+        if (projectScoped) try {
             const configDir = await this._getConfigDir(invoke);
             if (configDir) {
                 const stored = await readLocalMemory(configDir, invoke);
@@ -299,7 +404,7 @@ JSON FORMATTING RULES (critical — most failures come from these):
         } catch (_) { /* no local memory backend — inject nothing */ }
         const filesHash = hashText(personaOverride, projectInstructions, overview.text, JSON.stringify(localMemoryEntries));
 
-        const cacheKey = `${root}|${currentModel}|${outputLanguage}|${isNative}|${tier}|${subagentsEnabled ? 'sub' : 'nosub'}|${filesHash}`;
+        const cacheKey = `${root}|${reach}|${currentModel}|${outputLanguage}|${isNative}|${tier}|${subagentsEnabled ? 'sub' : 'nosub'}|${filesHash}`;
 
         let staticPrefix;
         if (this._staticCache?.key === cacheKey) {
@@ -490,14 +595,18 @@ user's request and your own knowledge of the code; discard out-of-scope opinions
         // ── Semi-Static (changes per session, not per request) ──
         stablePart += `
 <environment>
-<project_root>${root}</project_root>
-<model_limit_tokens>${modelLimit.toLocaleString()}</model_limit_tokens>
+${projectScoped ? `<project_root>${root}</project_root>\n` : ''}<model_limit_tokens>${modelLimit.toLocaleString()}</model_limit_tokens>
 ${replyLimitBlock}</environment>
-
+`;
+        if (projectScoped) {
+            stablePart += `
 <project_summary>
 ${projectInfo}
 </project_summary>
 `;
+        } else {
+            stablePart += `\n${ContextBuilder.reachBlock(reach, opts.caller)}\n`;
+        }
 
         // ── Project rules (.agent/instructions.md) ────────────────────────
         // The user's OWN ruleset. Emitted as its own high-authority block AFTER
@@ -542,6 +651,14 @@ ${projectInfo}
 
         if (editContext) {
             stablePart += `\n<user_selected_context>\n<![CDATA[\n${editContext}\n]]>\n</user_selected_context>\n`;
+        }
+
+        // What the caller chose to share, in the keys callers actually send.
+        // Budgeted like the active context: a whole file pasted as `activeFile`
+        // must not crowd out the instructions that tell the model what to do.
+        const shared = ContextBuilder.clientContextBlock(clientContext, Math.floor(systemBudget * 0.3) * 4);
+        if (shared) {
+            stablePart += `\n${shared}\n`;
         }
 
         if (activeContext) {

@@ -10,6 +10,12 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, cleanup, fireEvent, screen } from '@testing-library/svelte';
 
+// The Tauri bridge, for the event-token commands. Without a mock these throw
+// outside Tauri and the panel quietly shows no tokens — which is right in
+// production and useless for pinning the behaviour.
+const invoke = vi.fn(async () => null);
+vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a) => invoke(...a) }));
+
 vi.mock('../../../../modules/ai/triggers/WatcherManager.js', () => ({
     watcherManager: { watchers: [] },
     secretIdFor: (id) => `watcher:${id}`,
@@ -291,5 +297,80 @@ describe('the test button says what happened', () => {
         await fireEvent.click(screen.getByText('CI failed'));
         await fireEvent.click(screen.getByText('テスト送信'));
         expect(screen.getByText(/どのトリガーにも一致しませんでした/)).toBeTruthy();
+    });
+});
+
+/* The snippet used to print `window.apiClient.token` — the app's OWN key, the
+   one that can start a task, run a shell command through it and rewrite the
+   config. It exists to be pasted into a git hook or a scheduled batch file, so
+   that is where it ended up: full API access, in a file, on disk, forever.
+   An event token reaches POST /api/events and nothing else. */
+describe('the webhook snippet carries an event token, not the app key', () => {
+    const showSnippet = async (manager = fakeManager([CI])) => {
+        const h = mount(manager);
+        await fireEvent.click(screen.getByText('CI failed'));
+        return h;
+    };
+
+    it('never prints the app token', async () => {
+        globalThis.window.apiClient = { token: 'APPKEY-FULL-ACCESS', baseUrl: 'http://localhost:1425/api' };
+        await showSnippet();
+        const curl = document.querySelector('.trg-curl').textContent;
+        expect(curl).not.toContain('APPKEY-FULL-ACCESS');
+        delete globalThis.window.apiClient;
+    });
+
+    it('shows a placeholder until one is issued', async () => {
+        invoke.mockResolvedValue([]);
+        await showSnippet();
+        expect(document.querySelector('.trg-curl').textContent).toContain('<イベントトークン>');
+    });
+
+    it('puts the issued secret into the snippet, once', async () => {
+        invoke.mockImplementation(async (cmd, args) => {
+            if (cmd === 'issue_event_token') {
+                expect(args.label).toBe('git hook');
+                return { token: 'EVT-SECRET', id: 'evt_1', label: 'git hook', created_at: new Date().toISOString() };
+            }
+            if (cmd === 'list_event_tokens') return [{ id: 'evt_1', label: 'git hook', created_at: new Date().toISOString() }];
+            return null;
+        });
+        await showSnippet();
+        await fireEvent.input(document.querySelector('.trg-token-new .input'), { target: { value: 'git hook' } });
+        await fireEvent.click(screen.getByText('トークンを発行'));
+        await new Promise(r => setTimeout(r, 0));
+
+        expect(document.querySelector('.trg-curl').textContent).toContain('EVT-SECRET');
+        // The user gets one chance to copy it, so it has to SAY so.
+        expect(document.querySelector('.trg-token-once')).toBeTruthy();
+    });
+
+    it('lists what exists so an old token can be revoked', async () => {
+        invoke.mockImplementation(async (cmd) => (
+            cmd === 'list_event_tokens'
+                ? [{ id: 'evt_1', label: 'old laptop', created_at: '2026-01-02T00:00:00.000Z' }]
+                : null
+        ));
+        await showSnippet();
+        await new Promise(r => setTimeout(r, 0));
+        expect(document.querySelector('.trg-token-label').textContent).toBe('old laptop');
+    });
+
+    it('drops the visible secret on revoke — a dead token on screen is worse than none', async () => {
+        let listed = [{ id: 'evt_1', label: 'git hook', created_at: new Date().toISOString() }];
+        invoke.mockImplementation(async (cmd) => {
+            if (cmd === 'issue_event_token') return { token: 'EVT-SECRET', id: 'evt_1', label: 'git hook', created_at: new Date().toISOString() };
+            if (cmd === 'list_event_tokens') return listed;
+            if (cmd === 'revoke_event_token') { listed = []; return null; }
+            return null;
+        });
+        await showSnippet();
+        await fireEvent.click(screen.getByText('トークンを発行'));
+        await new Promise(r => setTimeout(r, 0));
+        expect(document.querySelector('.trg-curl').textContent).toContain('EVT-SECRET');
+
+        await fireEvent.click(screen.getByText('失効'));
+        await new Promise(r => setTimeout(r, 0));
+        expect(document.querySelector('.trg-curl').textContent).not.toContain('EVT-SECRET');
     });
 });

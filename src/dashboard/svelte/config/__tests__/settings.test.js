@@ -417,8 +417,6 @@ describe('SettingsGeneral — the allowlists', () => {
 describe('SettingsGeneral — actions', () => {
     it.each([
         ['btn-select-log-dir', 'onSelectLogDir'],
-        ['btn-copy-connection-token', 'onCopyToken'],
-        ['btn-export-connection', 'onExportConnection'],
         ['btn-storage-refresh', 'onRefreshStorage'],
         ['btn-purge-apilogs', 'onPurgeApiLogs'],
         ['btn-clear-commlog', 'onClearCommLog'],
@@ -428,12 +426,47 @@ describe('SettingsGeneral — actions', () => {
         expect(cb).toHaveBeenCalled();
     });
 
-    it('shows the connection token read-only, with the port', () => {
+    /* The token field and the "Export Connection" button both existed to get a
+       FULL-ACCESS credential out of this window and into another app: one to
+       copy by hand, one to write to %APPDATA%/JH/ai-connection.json where
+       anything running as the user could read it. Apps pair now, so what
+       belongs here is who is connected and how to disconnect them. */
+    it('no longer shows or exports the token', () => {
         const el = general({ connection: { token: 'tok-123', port: '14300' } });
-        const input = el.querySelector('#cfg-connection-token');
-        expect(input.value).toBe('tok-123');
-        expect(input.readOnly).toBe(true);
+        expect(el.querySelector('#cfg-connection-token')).toBeNull();
+        expect(el.querySelector('#btn-export-connection')).toBeNull();
+        expect(el.textContent).not.toContain('tok-123');
+        // The PORT is not a secret and is still worth stating.
         expect(el.textContent).toContain('14300');
+    });
+
+    it('says plainly when nothing is connected', () => {
+        expect(general({ pairedApps: [] }).textContent).toMatch(/接続しているアプリはありません|No app is connected/);
+    });
+
+    it('lists a connected app by its executable, not only by its claimed name', () => {
+        const el = general({ pairedApps: [
+            { id: 'p1', app: 'JHEditor', exe: 'C:/Program Files/JHEditor/jheditor.exe', pid: 4242 },
+        ] });
+        expect(el.querySelector('.cfg-paired-app').textContent).toBe('JHEditor');
+        expect(el.querySelector('.cfg-paired-exe').textContent).toContain('jheditor.exe');
+        expect(el.textContent).toContain('4242');
+    });
+
+    // Unidentified is information, not something to hide behind the claim.
+    it('says so when the executable could not be read', () => {
+        const el = general({ pairedApps: [{ id: 'p1', app: 'JHEditor', exe: null, pid: 7 }] });
+        expect(el.querySelector('.cfg-paired-exe').textContent).toMatch(/特定できません|could not be identified/);
+    });
+
+    it('revoking names the app it revokes', () => {
+        const cb = vi.fn();
+        const el = general({
+            pairedApps: [{ id: 'p1', app: 'JHEditor', exe: null, pid: 7 }],
+            onRevokePaired: cb,
+        });
+        el.querySelector('.cfg-paired-list button').click();
+        expect(cb).toHaveBeenCalledWith('p1');
     });
 
     it('prompts for a storage refresh until one has run', () => {
@@ -443,10 +476,6 @@ describe('SettingsGeneral — actions', () => {
             .toContain('42 MB');
     });
 
-    it('shows the export status when there is one', () => {
-        expect(general({ exportStatus: 'Wrote: x.json' }).querySelector('#export-connection-status').textContent)
-            .toContain('Wrote: x.json');
-    });
 });
 
 describe('SettingsMcp', () => {
@@ -600,5 +629,41 @@ describe('the browser capability section', () => {
             { browserNotice: 'Playwright found. The browser tools are enabled.' });
         expect(c.textContent).toContain('Available');
         expect(c.textContent).toContain('The browser tools are enabled');
+    });
+});
+
+/* Event tokens moved here from the trigger panel, which the Jobs screen no
+   longer mounts — a token for a git hook had no reachable place to be issued. */
+describe('SettingsGeneral — event tokens', () => {
+    it('issues with the typed label', async () => {
+        const onIssueEventToken = vi.fn();
+        const el = general({ onIssueEventToken });
+        const input = el.querySelector('#cfg-evtok-label');
+        input.value = 'git hook';
+        input.dispatchEvent(new Event('input'));
+        await Promise.resolve();
+        el.querySelector('#btn-issue-evtok').click();
+        expect(onIssueEventToken).toHaveBeenCalledWith('git hook');
+    });
+
+    it('shows the issued secret, and says it will not be shown again', () => {
+        const el = general({ issuedEventToken: 'EVT-SECRET' });
+        expect(el.querySelector('.cfg-evtok-secret').textContent).toBe('EVT-SECRET');
+        expect(el.querySelector('.cfg-evtok-once')).toBeTruthy();
+    });
+
+    it('lists tokens without secrets and revokes by id', () => {
+        const onRevokeEventToken = vi.fn();
+        const el = general({
+            eventTokens: [{ id: 'evt_1', label: 'CI poller', created_at: '2026-09-13T00:00:00Z' }],
+            onRevokeEventToken,
+        });
+        expect(el.querySelector('.cfg-evtok-list').textContent).toContain('CI poller');
+        el.querySelector('.cfg-evtok-list button').click();
+        expect(onRevokeEventToken).toHaveBeenCalledWith('evt_1');
+    });
+
+    it('names the endpoint the token is for', () => {
+        expect(general({ connection: { port: '14300' } }).textContent).toContain('/api/events');
     });
 });

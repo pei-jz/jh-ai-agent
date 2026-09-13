@@ -27,7 +27,6 @@ export class McpClient {
         this.pendingRequests = new Map();
         this.capabilities = null;
         this.tools = [];
-        this.intents = [];
         this.resources = [];
         this.onLog = null;
         this._lineBuffer = '';
@@ -146,17 +145,6 @@ export class McpClient {
             // Discover tools
             const toolsResult = await this.request('tools/list', {});
             this.tools = toolsResult.tools || [];
-
-            // ── Intents (JHAI extension, optional) ────────────────────────
-            // Named actions the app wants to expose ("影響調査", "ログ集計"…).
-            // Apps that don't implement this simply error, which is not a
-            // connection failure — plain MCP servers have no intents.
-            try {
-                const res = await this.request('jhai/intents/list', {}, 5000);
-                this.intents = Array.isArray(res?.intents) ? res.intents : [];
-            } catch (_) {
-                this.intents = [];
-            }
 
             // ── Resources (standard MCP, optional) ─────────────────────
             // Documents the server exposes for reading — stdio servers commonly
