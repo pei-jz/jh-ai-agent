@@ -344,3 +344,118 @@ describe('file cache hand-off between runs of one task', () => {
         expect([...last.keys()]).toEqual(expect.arrayContaining(['C:/w/one.js', 'C:/w/two.js']));
     });
 });
+
+/* Spotlight's Expand used to hand the question to a normal run with the answer
+   it already had attached as history — so the model was asked the same question
+   a second time and produced a second answer. `record` writes the exchange down
+   instead: no LLM call, no agent loop, nothing to give a workspace or tools to. */
+describe('record mode', () => {
+    const eventsFor = (taskId) => emitted
+        .filter(e => e.name === 'task-event-bridge' && e.payload.taskId === taskId)
+        .map(e => e.payload);
+
+    const exchange = [
+        { role: 'user', content: 'what is the GPT-6 price?' },
+        { role: 'assistant', content: '$10 in / $50 out per 1M tokens.' },
+    ];
+
+    it('calls no model and runs no loop', async () => {
+        await runTask({ taskId: 'r1', prompt: 'what is the GPT-6 price?', behavior: { mode: 'record' }, chatContext: exchange });
+        expect(singleShotCalls).toHaveLength(0);
+        expect(agentRuns).toHaveLength(0);
+    });
+
+    it('completes immediately with the answer it was given', async () => {
+        await runTask({ taskId: 'r2', prompt: 'q', behavior: { mode: 'record' }, chatContext: exchange });
+        const done = eventsFor('r2').filter(e => e.event === 'complete');
+        expect(done).toHaveLength(1);
+        expect(done[0].data.message).toBe('$10 in / $50 out per 1M tokens.');
+        expect(done[0].data.resultSummary.summary).toBe('$10 in / $50 out per 1M tokens.');
+        expect(done[0].data.modifiedFiles).toEqual([]);
+    });
+
+    // The cost was paid by whoever produced the answer. Reporting it again here
+    // would double it in the dashboard.
+    it('reports no token usage of its own', async () => {
+        await runTask({ taskId: 'r3', prompt: 'q', behavior: { mode: 'record' }, chatContext: exchange });
+        expect(eventsFor('r3').filter(e => e.event === 'token_usage')).toHaveLength(0);
+    });
+
+    it('takes the LAST assistant turn when several are carried', async () => {
+        await runTask({
+            taskId: 'r4', prompt: 'q', behavior: { mode: 'record' },
+            chatContext: [
+                { role: 'user', content: 'first' },
+                { role: 'assistant', content: 'older answer' },
+                { role: 'user', content: 'second' },
+                { role: 'assistant', content: 'newest answer' },
+            ],
+        });
+        expect(eventsFor('r4').find(e => e.event === 'complete').data.message).toBe('newest answer');
+    });
+
+    // An empty completed task looks like the answer was LOST rather than never
+    // sent, which is the worse of the two things to show.
+    it('errors rather than recording an empty exchange', async () => {
+        for (const [id, ctx] of [['r5', []], ['r6', undefined], ['r7', [{ role: 'user', content: 'only a question' }]]]) {
+            await runTask({ taskId: id, prompt: 'q', behavior: { mode: 'record' }, chatContext: ctx });
+            const evs = eventsFor(id);
+            expect(evs.filter(e => e.event === 'complete')).toHaveLength(0);
+            const err = evs.filter(e => e.event === 'error');
+            expect(err).toHaveLength(1);
+            expect(err[0].data.terminal).toBe(true);
+        }
+    });
+});
+
+/* The lane decides the engine (src/modules/ai/agent/RunLane.js). The bridge
+   enforces the parts that matter before an agent exists: a transform never
+   reaches the loop, an impossible lane is refused, and a run without a
+   workspace lane is not handed the path its caller sent. */
+describe('lane dispatch', () => {
+    const eventsFor = (taskId) => emitted
+        .filter(e => e.name === 'task-event-bridge' && e.payload.taskId === taskId)
+        .map(e => e.payload);
+
+    it('a transform goes to the one-shot path, whatever mode says', async () => {
+        await runTask({ taskId: 'ln1', prompt: 'x', caller: 'JHEditor', behavior: { shape: 'transform' } });
+        expect(singleShotCalls).toHaveLength(1);
+        expect(agentRuns).toHaveLength(0);
+    });
+
+    it('refuses build without a workspace lane before any engine runs', async () => {
+        await runTask({ taskId: 'ln2', prompt: 'x', caller: 'JHEditor', workspacePath: 'C:/w', behavior: { shape: 'build', reach: 'app' } });
+        expect(agentRuns).toHaveLength(0);
+        expect(singleShotCalls).toHaveLength(0);
+        const err = eventsFor('ln2').find(e => e.event === 'error');
+        expect(err.data.terminal).toBe(true);
+        expect(err.data.error).toMatch(/workspace/);
+    });
+
+    // The report's P0: the chat sent its workspace and got the file system.
+    it('an external app that says nothing does not get the workspace it sent', async () => {
+        await runTask({ taskId: 'ln3', prompt: 'x', caller: 'JHEditor', workspacePath: 'C:/cusor_workspace/jh-editor', behavior: { mode: 'iterative_agent' } });
+        expect(agentRuns).toHaveLength(1);
+        expect(agentRuns[0].workspacePath).toBeNull();
+    });
+
+    it('a workspace run keeps its path', async () => {
+        await runTask({ taskId: 'ln4', prompt: 'x', caller: 'NewTask', workspacePath: 'C:/proj', behavior: { mode: 'iterative_agent' } });
+        expect(agentRuns[0].workspacePath).toBe('C:/proj');
+    });
+
+    // `message` is finish_task's summary; a client that showed it showed a
+    // sentence about the answer instead of the answer.
+    it('complete carries the answer next to the summary', async () => {
+        await runTask({ taskId: 'ln5', prompt: 'x', caller: 'NewTask', workspacePath: 'C:/w' });
+        const done = eventsFor('ln5').find(e => e.event === 'complete');
+        expect(done.data.answer).toBe('agent answer');
+        expect(done.data.message).toBe('agent answer');
+    });
+
+    it('a one-shot complete carries the answer too', async () => {
+        await runTask({ taskId: 'ln6', prompt: 'x', behavior: { mode: 'single_shot' } });
+        const done = eventsFor('ln6').find(e => e.event === 'complete');
+        expect(done.data.answer).toBe('single shot answer');
+    });
+});

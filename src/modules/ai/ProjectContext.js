@@ -1,5 +1,10 @@
 import { invoke } from '@tauri-apps/api/core';
 
+/** Windows paths differ by separator, case and a trailing slash far too often. */
+function normRoot(p) {
+    return String(p || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+}
+
 class ProjectContext {
     constructor() {
         this.fileList = [];
@@ -25,6 +30,10 @@ class ProjectContext {
             const files = await invoke('read_dir', { path: workspacePath });
             this.fileList = files;
             this.projectSummary = this.generateSummary(files, workspacePath);
+            // Which workspace this summary describes. The scanner is a process-wide
+            // singleton, so without it the prompt for workspace B carried the
+            // structure of workspace A whenever A was the last one scanned.
+            this.rootPath = workspacePath;
             
             // Load custom skills from .agent/skills.json
             await this.loadSkills(workspacePath);
@@ -131,7 +140,13 @@ ${importantFiles.length > 0 ? importantFiles.map(p => `  - ${p}`).join('\n') : '
     /**
      * Returns a context string suitable for injection into AI system prompt
      */
-    getPromptContext() {
+    /**
+     * @param {string} [root] the workspace the prompt is for. When given and it
+     *        is not the one last scanned, nothing is returned — a stale summary of
+     *        another project is worse than none.
+     */
+    getPromptContext(root) {
+        if (root && this.rootPath && normRoot(root) !== normRoot(this.rootPath)) return '';
         let context = '';
         if (this.projectSummary) {
             context += `\n[Project Structure Overview]\n${this.projectSummary}\n`;

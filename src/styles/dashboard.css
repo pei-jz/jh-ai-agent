@@ -2718,6 +2718,28 @@ tr:hover td {
 .trg-runs li { display: flex; gap: 10px; padding: 3px 0; border-bottom: 1px solid var(--line); }
 .trg-runs .err { color: var(--error); }
 
+/* ── Event tokens ────────────────────────────────────────────────────────
+   The credential a git hook or a scheduled script carries. Kept next to the
+   curl snippet because that is the only place it is used. */
+.trg-token { display: flex; flex-direction: column; gap: 8px; }
+.trg-token-new { display: flex; gap: 6px; }
+.trg-token-new .input { flex: 1; }
+/* The one line the user has to act on before it is gone. */
+.trg-token-once {
+    margin: 0; padding: 7px 10px; border-radius: var(--r-2);
+    background: var(--warning-surface);
+    border-left: 3px solid var(--warning);
+    font-size: var(--fs-sm);
+}
+.trg-token-err { color: var(--error); }
+.trg-token-list { list-style: none; margin: 0; padding: 0; font-size: var(--fs-sm); }
+.trg-token-list li {
+    display: flex; align-items: center; gap: 10px;
+    padding: 3px 0; border-bottom: 1px solid var(--line);
+}
+.trg-token-label { flex: 1; }
+.trg-token-date { color: var(--ink-soft); font-variant-numeric: tabular-nums; }
+
 /* ── Tab strip and split layout ──────────────────────────────────────────
    Used by ScheduleRoot, JobsRoot and JobTimeline. Global because a Svelte
    <style> is scoped to the component that wrote it, so the second and third
@@ -2755,3 +2777,11 @@ tr:hover td {
   color: var(--ink-soft);
   padding: 0 6px;
 }
+
+/* Event tokens in Settings — the one-time secret is the part that needs attention. */
+.cfg-evtok { display: flex; flex-direction: column; gap: 6px; margin-top: 14px; }
+.cfg-evtok-once {
+    padding: 7px 10px; border-radius: var(--r-2);
+    background: var(--warning-surface); border-left: 3px solid var(--warning);
+}
+.cfg-evtok-secret { font-size: var(--fs-sm); word-break: break-all; user-select: all; }

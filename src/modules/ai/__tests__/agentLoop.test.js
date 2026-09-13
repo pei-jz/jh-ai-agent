@@ -342,7 +342,8 @@ describe('agent loop — external-app (WS) MCP tool exclusion', () => {
         });
         const agent = await h.build();
         agent.behaviorOverrides = { mcp_servers: ['backlog'] };
-        await agent.run('do the thing');
+        // A build needs a workspace now (RunLane); the test is about MCP scope.
+        await agent.run('do the thing', 'C:/w');
         const calls = h.toolExecutor.setExcludeExternalAppMcpTools.mock.calls;
         // JHAI-owned task → exclusion ON (the winning last call must be true).
         expect(calls[calls.length - 1][0]).toBe(true);
@@ -355,33 +356,14 @@ describe('agent loop — external-app (WS) MCP tool exclusion', () => {
         expect(h.toolCalls.map(c => c.name)).toContain('finish_task');
     });
 
-    it('keeps the external-caller markers: intent (an app intent) still counts as external', async () => {
-        // behavior.intent comes from an EXTERNAL app (JHEditor/JHProjectManager
-        // via the REST API). It must remain an external-caller marker.
-        const h = makeHarness({
-            caller: 'JHEditor',
-            script: [finishStep('done')],
-        });
+    // behavior.intent used to force the external path. Intents are gone; the
+    // caller name, through the lane, is the only thing that decides.
+    it('an intent no longer makes a run external', async () => {
+        const h = makeHarness({ caller: 'NewTask', script: [finishStep('done')] });
         const agent = await h.build();
-        agent.behaviorOverrides = { intent: { tools: ['read_file'] }, mcp_servers: ['backlog'] };
-        await agent.run('do the thing');
-        const calls = h.toolExecutor.setExcludeExternalAppMcpTools.mock.calls;
-        // External caller → WS-app tools stay ADVERTISED (last call = false).
-        expect(calls[calls.length - 1][0]).toBe(false);
-    });
-
-    it('behavior.intent forces the external path even with an interactive caller name', async () => {
-        // intent is set by an EXTERNAL app; it stays a hard external marker.
-        // The caller NAME alone is not enough to override it.
-        const h = makeHarness({
-            caller: 'DirectChat',
-            script: [finishStep('done')],
-        });
-        const agent = await h.build();
-        agent.behaviorOverrides = { intent: { tools: ['read_file'] } };
-        await agent.run('do the thing');
-        const calls = h.toolExecutor.setExcludeExternalAppMcpTools.mock.calls;
-        expect(calls[calls.length - 1][0]).toBe(false);
+        agent.behaviorOverrides = { intent: { tier: 'fast' } };
+        await agent.run('do the thing', 'C:/w');
+        expect(agent._isExternalCaller).toBe(false);
     });
 });
 
@@ -617,62 +599,85 @@ describe('images produced by a tool', () => {
     });
 });
 
-describe('intent by id (AI-Hub)', () => {
-    // An app declares its named actions once on connect; a task then references
-    // one by id. Before the registry existed, a string id was silently dropped
-    // and the task ran with default prompt/tools.
-    async function withRegisteredIntent(intent, behaviorIntent, script) {
-        const h = makeHarness({ script });
-        // build() resets the module graph, so the registry must be populated
-        // AFTER it — otherwise we'd be filling a discarded singleton.
+// Report_20260913 §5 — shape × reach. These go through the REAL loop, because
+// the failure being fixed was in how its pieces combined, not in any one of them.
+describe('agent loop — the lane decides what a run may touch', () => {
+    const answer = '答え'.padEnd(500, '。');
+
+    it('refuses a build with no workspace instead of using the process cwd', async () => {
+        const h = makeHarness({ caller: 'NewTask', script: [finishStep()] });
         const agent = await h.build();
-        const { intentRegistry } = await import('../agent/IntentRegistry.js');
-        intentRegistry.setForApp('jheditor', [intent]);
-        agent.behaviorOverrides = { intent: behaviorIntent };
-        return { h, agent, intentRegistry };
-    }
-
-    it('expands a REGISTERED id into prompt and tool allowlist', async () => {
-        const { h, agent } = await withRegisteredIntent(
-            { id: 'impact', systemPrompt: 'INTENT-PROMPT-MARKER', tools: ['read_file', 'grep_search'] },
-            'impact',
-            [finishStep('結論: '.padEnd(500, '詳細'))],
-        );
-        agent._applyIntent();
-        expect(agent.behaviorOverrides.system_prompt).toBe('INTENT-PROMPT-MARKER');
-        expect(agent.behaviorOverrides.enabled_tools).toEqual(['read_file', 'grep_search']);
-        expect(h).toBeTruthy();
+        await expect(agent.run('do the thing', null, () => {}, () => {})).rejects.toThrow(/workspace/);
+        expect(h.toolExecutor.startSession).not.toHaveBeenCalled();
     });
 
-    it('still accepts an inline object (unchanged behaviour)', async () => {
-        const { agent } = await withRegisteredIntent(
-            { id: 'unused' },
-            { systemPrompt: 'INLINE-MARKER', tools: ['glob'] },
-            [finishStep()],
-        );
-        agent._applyIntent();
-        expect(agent.behaviorOverrides.system_prompt).toBe('INLINE-MARKER');
-        expect(agent.behaviorOverrides.enabled_tools).toEqual(['glob']);
+    it('an external app that says nothing gets web tools and its own server — and no workspace, even when it sends one', async () => {
+        const h = makeHarness({ caller: 'JHEditor', script: [finishStep(answer)] });
+        const agent = await h.build();
+        agent.behaviorOverrides = { mode: 'iterative_agent' };
+        await agent.run('review this', 'C:/cusor_workspace/jh-editor', () => {}, () => {});
+        expect(h.toolExecutor.setToolAllowlist.mock.calls.at(-1)[0]).toEqual(['fetch_url', 'web_search']);
+        expect(h.toolExecutor.setMcpServerFilter.mock.calls.at(-1)[0]).toEqual(['jheditor']);
+        expect(h.toolExecutor.startSession.mock.calls.at(-1)[0]).toBeNull();
+        // No project memory is read or written for a run with no project.
+        expect(h.conversationMemory.loadMemory).not.toHaveBeenCalled();
+        expect(h.conversationMemory.addEntry).not.toHaveBeenCalled();
     });
 
-    it('an unknown id runs with defaults instead of failing the task', async () => {
-        const { agent } = await withRegisteredIntent(
-            { id: 'known' },
-            'never-declared',
-            [finishStep()],
-        );
-        expect(() => agent._applyIntent()).not.toThrow();
+    it('an explicit build × app is refused', async () => {
+        const h = makeHarness({ caller: 'JHEditor', script: [finishStep()] });
+        const agent = await h.build();
+        agent.behaviorOverrides = { shape: 'build', reach: 'app' };
+        await expect(agent.run('do it', 'C:/w', () => {}, () => {})).rejects.toThrow(/workspace/);
+    });
+
+    // The P0: a caller system_prompt REPLACED the built prompt, and the built
+    // prompt is the only place client context is rendered.
+    it('appends a caller system_prompt instead of replacing the built prompt', async () => {
+        const h = makeHarness({ caller: 'Composer', script: [finishStep(answer)] });
+        const agent = await h.build();
+        agent.behaviorOverrides = { interaction: 'ask', system_prompt: 'EDITOR-RULES-MARKER' };
+        await agent.run('explain', 'C:/w', () => {}, () => {});
+        const prompt = h.state.prompts[0];
+        expect(prompt).toContain('SYSTEM PROMPT');
+        expect(prompt).toContain('<caller_instructions>');
+        expect(prompt).toContain('EDITOR-RULES-MARKER');
+    });
+
+    it('caps an ask run, unless the caller set its own ceiling', async () => {
+        const { ASK_MAX_STEPS } = await import('../agent/RunLane.js');
+        const h = makeHarness({ caller: 'Composer', config: { safety: { maxSteps: 0 } }, script: [finishStep(answer)] });
+        const agent = await h.build();
+        agent.behaviorOverrides = { interaction: 'ask' };
+        await agent.run('explain', 'C:/w', () => {}, () => {});
+        expect(agent.baseMaxIterations).toBe(ASK_MAX_STEPS);
+
+        const h2 = makeHarness({ caller: 'Composer', script: [finishStep(answer)] });
+        const agent2 = await h2.build();
+        agent2.behaviorOverrides = { interaction: 'ask', max_iterations: 40 };
+        await agent2.run('explain', 'C:/w', () => {}, () => {});
+        expect(agent2.baseMaxIterations).toBe(40);
+    });
+
+    it('an ephemeral run writes no long-term memory', async () => {
+        const h = makeHarness({ caller: 'Composer', script: [finishStep(answer)] });
+        const agent = await h.build();
+        agent.behaviorOverrides = { interaction: 'ask', ephemeral: true };
+        await agent.run('explain', 'C:/w', () => {}, () => {});
+        expect(h.conversationMemory.addEntry).not.toHaveBeenCalled();
+    });
+});
+
+describe('behavior.intent carries only a model tier now', () => {
+    it('reads the tier and nothing else', async () => {
+        const h = makeHarness();
+        const agent = await h.build();
+        agent.behaviorOverrides = { intent: { tier: 'Deep', systemPrompt: 'X', tools: ['glob'], resultKind: 'markdown' } };
+        agent._applyIntent();
+        expect(agent._intentTier).toBe('deep');
         expect(agent.behaviorOverrides.system_prompt).toBeUndefined();
-    });
-
-    it('a registered resultKind adds the present_result guidance', async () => {
-        const { agent } = await withRegisteredIntent(
-            { id: 'report', resultKind: 'markdown' },
-            'report',
-            [finishStep()],
-        );
-        agent._applyIntent();
-        expect(agent.behaviorOverrides.extra_instructions || '').toContain('present_result');
+        expect(agent.behaviorOverrides.enabled_tools).toBeUndefined();
+        expect(agent.behaviorOverrides.extra_instructions).toBeUndefined();
     });
 });
 
@@ -806,5 +811,71 @@ describe('agent loop — sub-agent review gate (Step-1 review)', () => {
         expect(bounced).toBeTruthy();
         // The task ultimately completed (retry passed review).
         expect(h.toolCalls.filter(c => c.name === 'finish_task').length).toBeGreaterThanOrEqual(2);
+    });
+});
+
+/* Task 1a1fcea7: a 400 "maximum context length" was treated as native tool
+   calling failing — the run fell back to JSON mode, lost its tools for good,
+   and resent the same oversized history. An overflow is recovered by shrinking
+   the history, with tool calling left on. */
+describe('agent loop — a context overflow is not a tool-calling failure', () => {
+    it('keeps native tools, shrinks, and carries on', async () => {
+        const h = makeHarness({ caller: 'NewTask', script: [finishStep('結論: '.padEnd(500, '詳細'))] });
+        const agent = await h.build();
+        // The native path is skipped when no tools are registered, and the
+        // harness registers none by default — without one, this would test
+        // the JSON path and prove nothing about the fallback.
+        h.toolExecutor.getToolsForNativeAPI = () => [{
+            type: 'function',
+            function: { name: 'finish_task', description: 'finish', parameters: { type: 'object', properties: {} } },
+        }];
+        const original = h.llmService.chatWithTools.getMockImplementation();
+        let failed = false;
+        h.llmService.chatWithTools.mockImplementation(async (...args) => {
+            if (!failed) {
+                failed = true;
+                throw new Error("API Error (openai): Status: 400 Response: This model's maximum context length is 1048576 tokens. However, you requested 1460042 tokens");
+            }
+            return original(...args);
+        });
+        const events = [];
+        await agent.run('find it', 'C:/w', () => {}, (e) => events.push(e));
+        const messages = events.map(e => e.message || e.error || '').join('\n');
+        expect(messages).not.toMatch(/JSONモードにフォールバック/);
+        expect(messages).toMatch(/context window/);
+        expect(h.llmService.chat).not.toHaveBeenCalled();
+    });
+});
+
+/* A short conversational reply is the answer. JHEditor's "こんにちは" was pushed
+   back as "成果物が未提示" (an extra step) and then answered with a synthesized
+   依頼内容/実施内容/結果 report, because both checks wanted 400+ characters. */
+describe('agent loop — an ask reply has no minimum length', () => {
+    const greeting = 'こんにちは！何をお手伝いしましょうか？';
+
+    it('accepts a one-line reply without a deliverable nudge', async () => {
+        const h = makeHarness({ caller: 'Composer', script: [finishStep(greeting), finishStep('should not be needed')] });
+        const agent = await h.build();
+        agent.behaviorOverrides = { interaction: 'ask' };
+        const events = [];
+        await agent.run('こんにちは', 'C:/w', () => {}, (e) => events.push(e));
+        expect(h.toolCalls.filter(c => c.name === 'finish_task')).toHaveLength(1);
+        expect(events.some(e => /成果物が未提示/.test(e.message || ''))).toBe(false);
+    });
+
+    it('returns the reply itself as the answer, with no generated report', async () => {
+        const h = makeHarness({ caller: 'Composer', script: [finishStep(greeting)] });
+        const agent = await h.build();
+        agent.behaviorOverrides = { interaction: 'ask' };
+        const res = await agent.run('こんにちは', 'C:/w', () => {}, () => {});
+        expect(res.resultSummary.answer).toBe(greeting);
+        expect(res.resultSummary.answer).not.toMatch(/依頼内容|実施内容/);
+        expect(h.llmService.generate).not.toHaveBeenCalled();
+    });
+
+    it('still nudges a WORK run that only announces completion', async () => {
+        const h = makeHarness({ caller: 'NewTask', script: [finishStep('done'), finishStep('done again')] });
+        await h.run('do the thing');
+        expect(h.toolCalls.filter(c => c.name === 'finish_task')).toHaveLength(2);
     });
 });

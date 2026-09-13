@@ -28,6 +28,10 @@ import { AGENT_MODES, modeName } from '../../../../modules/ai/AgentModes.js';
 
 const CONFIG = { approved_projects: ['C:/proj', 'C:/other'], mcp_servers: {} };
 
+// The 聞く/頼む pick is remembered in localStorage; one test's pick must not
+// become the next test's starting state.
+beforeEach(() => { try { localStorage.removeItem('jhai_composer_interaction'); } catch (_) { /* none */ } });
+
 function mount(props = {}) {
     const onCreated = vi.fn();
     const onDetails = vi.fn();
@@ -207,6 +211,8 @@ describe('Composer — starting a task', () => {
         const { container, request } = mount();
         await open(container);
         await fireEvent.input(ta(container), { target: { value: 'java LSP はどこでダウンロードできますか' } });
+        // Chosen, not guessed — see "the mode is chosen, not guessed".
+        await fireEvent.click(container.querySelector('.mcomp-int-btn.is-ask'));
         await fireEvent.click(send(container));
 
         await waitFor(() => expect(request).toHaveBeenCalled());
@@ -459,61 +465,75 @@ describe('the controls stay put while you use them', () => {
     });
 });
 
-// ── Which mode gets guessed ──────────────────────────────────────────────────
-// This used `looksComplex` ("does it need a PLAN?") when the question is
-// `looksReadOnly` ("is it an ANSWER or a CHANGE?"). The two are different, and
-// with the wrong one a short work request guessed 聞く — which runs with
-// READ-ONLY tools, so it could not have done the job it was given.
-describe('the mode guess', () => {
-    const chip = (c, kind) => [...c.querySelectorAll('.mcomp-int-btn')]
-        .find(b => b.classList.contains(`is-${kind}`));
-    const guessed = (c) => (chip(c, 'ask').getAttribute('aria-pressed') === 'true' ? 'ask' : 'build');
+// ── The mode is chosen, never guessed ────────────────────────────────────────
+// It used to be guessed from the text (`looksReadOnly`): the chip flipped while
+// the user typed a question-shaped sentence, and a send reset an explicit pick
+// back to the guess. What the user picks is what is sent, until they pick again.
+describe('the mode is chosen, not guessed', () => {
+    const chip = (c, kind) => c.querySelector(`.mcomp-int-btn.is-${kind}`);
+    const current = (c) => (chip(c, 'ask').getAttribute('aria-pressed') === 'true' ? 'ask' : 'build');
 
     const type = async (container, text) => {
         await open(container);
         await fireEvent.input(ta(container), { target: { value: text } });
     };
 
-    it.each([
-        ['auth_middleware は何を素通しにしてる？', 'ask'],
-        ['java LSP はどこかでダウンロードできますか', 'ask'],   // ますか, no question mark
-        ['今日の天気を教えてください', 'ask'],
-        ['この設計を調べて説明して', 'ask'],
-        ['what does auth_middleware let through', 'ask'],
-    ])('guesses 聞く for %s', async (text, want) => {
+    it('starts on 頼む', async () => {
         const { container } = mount({ workspace: 'C:/proj' });
-        await type(container, text);
-        await waitFor(() => expect(guessed(container)).toBe(want));
+        await open(container);
+        expect(current(container)).toBe('build');
     });
 
     it.each([
-        // Work, but NOT multi-step work — the case looksComplex gets wrong.
-        ['MCP の WS 再接続が落ちる件を直して', 'build'],
-        ['認証まわりをリファクタして', 'build'],
-        // A polite question that is still an instruction.
-        ['実装してもらえますか', 'build'],
-        ['調べて修正して', 'build'],
-    ])('guesses 頼む for %s', async (text, want) => {
+        'auth_middleware は何を素通しにしてる？',
+        'java LSP はどこかでダウンロードできますか',
+        '今日の天気を教えてください',
+        'what does auth_middleware let through',
+    ])('does not switch to 聞く because "%s" reads like a question', async (text) => {
         const { container } = mount({ workspace: 'C:/proj' });
         await type(container, text);
-        await waitFor(() => expect(guessed(container)).toBe(want));
+        await new Promise(r => setTimeout(r, 0));
+        expect(current(container)).toBe('build');
+    });
+
+    it('does not switch back to 頼む when the user picked 聞く and types work', async () => {
+        const { container } = mount({ workspace: 'C:/proj' });
+        await open(container);
+        await fireEvent.click(chip(container, 'ask'));
+        await fireEvent.input(ta(container), { target: { value: 'MCP の WS 再接続が落ちる件を直して' } });
+        await new Promise(r => setTimeout(r, 0));
+        expect(current(container)).toBe('ask');
     });
 
     it('sends what the chip shows', async () => {
         const { container, request } = mount({ workspace: 'C:/proj' });
-        await type(container, 'MCP の WS 再接続が落ちる件を直して');
+        await type(container, '今日の天気を教えてください');
         await fireEvent.click(send(container));
         await waitFor(() => expect(request).toHaveBeenCalled());
         expect(body(request).behavior.interaction).toBe('build');
     });
 
-    it('sends the OVERRIDE when the user picks one', async () => {
+    // A send used to reset the pick to the guess.
+    it('keeps the pick after a send', async () => {
         const { container, request } = mount({ workspace: 'C:/proj' });
-        await type(container, 'MCP の WS 再接続が落ちる件を直して');
+        await open(container);
         await fireEvent.click(chip(container, 'ask'));
+        await fireEvent.input(ta(container), { target: { value: 'first question' } });
         await fireEvent.click(send(container));
         await waitFor(() => expect(request).toHaveBeenCalled());
         expect(body(request).behavior.interaction).toBe('ask');
+        expect(current(container)).toBe('ask');
+    });
+
+    it('remembers the pick the next time the box is opened', async () => {
+        const first = mount({ workspace: 'C:/proj' });
+        await open(first.container);
+        await fireEvent.click(chip(first.container, 'ask'));
+        cleanup();
+
+        const second = mount({ workspace: 'C:/proj' });
+        await open(second.container);
+        expect(current(second.container)).toBe('ask');
     });
 });
 

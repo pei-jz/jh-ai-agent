@@ -303,3 +303,69 @@ describe('the reply-size ceiling', () => {
         expect(prompt).not.toContain('reply_limit_tokens');
     });
 });
+
+/* Reach (src/modules/ai/agent/RunLane.js). Every layer describing a PROJECT is
+   only true of a run that was given one. The failure: a chat about a selection
+   arrived carrying another project's summary and past-session memory, while
+   the selection itself was rendered nowhere. */
+describe('reach', () => {
+    const buildWith = (reach, clientContext = null) => contextBuilder.getSystemPrompt(
+        'C:/work/proj',
+        fakeExecutor(['fetch_url', 'web_search', 'present_result', 'finish_task']),
+        clientContext, null, '', 'q', null, null,
+        { reach, caller: 'JHEditor' },
+    );
+
+    it('a workspace run carries the project layers and no reach block', async () => {
+        projectInstructions = 'RULE-MARKER';
+        const p = await buildWith('workspace');
+        expect(p).toContain('<project_summary>');
+        expect(p).toContain('RULE-MARKER');
+        expect(p).toContain('<project_root>');
+        expect(p).not.toContain('<reach>');
+    });
+
+    it('an app run carries none of them, and is told why', async () => {
+        projectInstructions = 'RULE-MARKER';
+        const p = await buildWith('app');
+        expect(p).not.toContain('<project_summary>');
+        expect(p).not.toContain('RULE-MARKER');
+        expect(p).not.toContain('<project_root>');
+        expect(p).toContain('<reach>');
+        expect(p).toContain('JHEditor');
+        expect(p).toMatch(/REFUSE/);
+    });
+
+    it('does not read the workspace persona file for a run with no project', async () => {
+        await buildWith('none');
+        const personaRead = invoke.mock.calls.some(([cmd, args]) =>
+            cmd === 'read_file' && String(args?.path || '').includes('.agent/agents'));
+        expect(personaRead).toBe(false);
+    });
+
+    it('renders the selection and active file a client sends', async () => {
+        const p = await buildWith('app', { selection: 'SEL-MARKER', activeFile: { path: 'a.js', content: 'FILE-MARKER' } });
+        expect(p).toContain('<client_context>');
+        expect(p).toContain('<selection>');
+        expect(p).toContain('SEL-MARKER');
+        expect(p).toContain('path="a.js"');
+        expect(p).toContain('FILE-MARKER');
+    });
+
+    it('shows a key it does not know rather than dropping it', async () => {
+        const p = await buildWith('app', { schema: { tables: ['users_MARKER'] } });
+        expect(p).toContain('users_MARKER');
+    });
+
+    it('cannot have its CDATA closed by the content', async () => {
+        const p = await buildWith('app', { selection: 'a ]]> b' });
+        expect(p).not.toMatch(/<!\[CDATA\[\na \]\]> b/);
+    });
+
+    it('a workspace run and an app run never share a cached prefix', async () => {
+        const a = await buildWith('workspace');
+        const b = await buildWith('app');
+        expect(a).not.toEqual(b);
+        expect(b).not.toContain('<project_summary>');
+    });
+});

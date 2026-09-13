@@ -97,7 +97,9 @@
     let approvedCommands = $state(readList(APPROVED_COMMANDS_KEY));
     let autoApproveWorkspaces = $state(readList(AUTO_APPROVE_WS_KEY));
     let storageUsage = $state('');
-    let exportStatus = $state('');
+    let pairedApps = $state([]);
+    let eventTokens = $state([]);
+    let issuedEventToken = $state('');
     let appVersion = $state('');
     let updatesConfigured = $state(false);
     let licensingOn = $state(false);
@@ -272,18 +274,39 @@
         storageUsage = storageUsageHtml(server);
     }
 
-    async function exportConnection() {
-        const c = client();
-        if (!c) { exportStatus = '<span class="cfg-err">API client not ready.</span>'; return; }
-        exportStatus = '<span class="cfg-muted">Exporting…</span>';
+    /// The apps holding a live token right now. The backend sweeps dead
+    /// processes before answering, so a closed editor is not listed as connected.
+    async function refreshPairedApps() {
+        try { pairedApps = (await invoke('list_paired_apps')) || []; }
+        catch (_) { /* dev/browser */ }
+    }
+
+    async function revokePairedApp(id) {
+        try { await invoke('revoke_paired_app', { id }); }
+        catch (e) { console.warn('Revoke failed:', e); }
+        await refreshPairedApps();
+    }
+
+    async function refreshEventTokens() {
+        try { eventTokens = (await invoke('list_event_tokens')) || []; }
+        catch (_) { /* dev/browser */ }
+    }
+
+    async function issueEventToken(label) {
         try {
-            const written = await invoke('export_connection_config', {
-                port: Number(c.port) || 14300, token: c.token || '',
-            });
-            exportStatus = `<span class="cfg-ok">Wrote: <code>${String(written)}</code></span>`;
-        } catch (e) {
-            exportStatus = `<span class="cfg-err">Export failed: ${String(e.message || e)}</span>`;
-        }
+            const res = await invoke('issue_event_token', { label: label || 'webhook' });
+            issuedEventToken = res?.token || '';
+        } catch (e) { console.warn('Issue failed:', e); }
+        await refreshEventTokens();
+    }
+
+    async function revokeEventToken(id) {
+        try { await invoke('revoke_event_token', { id }); }
+        catch (e) { console.warn('Revoke failed:', e); }
+        // The visible secret may be the one just revoked; a dead token on screen
+        // is worse than none.
+        issuedEventToken = '';
+        await refreshEventTokens();
     }
 
     // ── Lifecycle ─────────────────────────────────────────────────────────
@@ -292,6 +315,9 @@
         let cancelled = false;
         (async () => {
             await loadConfig();
+            if (cancelled) return;
+            await refreshPairedApps();
+            await refreshEventTokens();
             if (cancelled) return;
             try {
                 secretStorage = await invoke('get_secret_storage_info');
@@ -394,7 +420,7 @@
                     </div>
                     <SettingsGeneral
                         {config} {connection} {openSections} {approvedCommands}
-                        {autoApproveWorkspaces} {storageUsage} {exportStatus} {secretStorage}
+                        {autoApproveWorkspaces} {storageUsage} {pairedApps} {eventTokens} {issuedEventToken} {secretStorage}
                         {appVersion} {updatesConfigured} {uiLocale} {license}
                         licensingConfigured={licensingOn}
                         hasLicenseKey={hasStoredKey()}
@@ -404,8 +430,9 @@
                             try { const sel = await pickFolder(); if (sel) patchConfig({ log_dir: sel }); }
                             catch (e) { console.error('Failed to select folder:', e); }
                         }}
-                        onCopyToken={() => { if (connection.token) navigator.clipboard.writeText(connection.token); }}
-                        onExportConnection={exportConnection}
+                        onRevokePaired={revokePairedApp}
+                        onIssueEventToken={issueEventToken}
+                        onRevokeEventToken={revokeEventToken}
                         onRefreshStorage={refreshStorage}
                         onPurgeApiLogs={() => {
                             if (!confirmAction('Delete the old API logs (localStorage jh_api_logs)? This does not affect Monitor per-task logs.')) return;

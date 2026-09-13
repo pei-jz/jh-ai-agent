@@ -1,6 +1,6 @@
 [package]
 name = "jh-ai-agent"
-version = "0.2.1"
+version = "0.3.0"
 description = "J.H AI Agent — standalone Tauri-based AI agent server."
 authors = ["J.H AI Agent Contributors"]
 edition = "2021"
@@ -98,6 +98,19 @@ encoding_rs = "0.8"
 # 0.16, which is fixed. Default features = native-tls, same as before.
 imap = "=3.0.0-alpha.15"
 mailparse = "0.16.1"
+
+# Identifying the process on the other end of a loopback connection, so the
+# pairing prompt can name an EXECUTABLE rather than the name the caller typed
+# into its own request. See server/peer.rs — that file carries the reasoning.
+# Already in the tree as a transitive dependency of tauri; named here because
+# this crate calls it directly.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Networking_WinSock",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

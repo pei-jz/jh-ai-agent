@@ -68,7 +68,9 @@ export function planFirstGate({
     const planBypass = /計画(は)?(不要|いらない|なし)|そのまま実装|プラン不要|no\s*plan|skip\s*plan|just\s*implement/i.test(String(prompt || ''));
     // Only callers with a HUMAN watching in real time can approve a plan.
     // 'Schedule' runs unattended, so it must NOT plan-gate.
-    const PLAN_FIRST_CALLERS = new Set(['DirectChat', 'NewTask']);
+    // Composer's 頼む is the same human-watched build as NewTask (Report_20260913
+    // §6-5). DirectChat is gone: the Chat screen that sent it was removed.
+    const PLAN_FIRST_CALLERS = new Set(['NewTask', 'Composer']);
     // A plan-revision turn ALWAYS re-opens the gate regardless of complexity.
     const revisionText = isPlanRevisionTurn
         ? stripPlanRevisionMarker(String(prompt || ''))

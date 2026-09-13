@@ -37,7 +37,11 @@
         approvedCommands = [],
         autoApproveWorkspaces = [],
         storageUsage = '',
-        exportStatus = '',
+        pairedApps = [],
+        /** Event-only tokens (no secrets): [{ id, label, created_at }]. */
+        eventTokens = [],
+        /** The secret just issued — shown once, then gone. */
+        issuedEventToken = '',
         /**
          * Where API keys are actually kept: {kind: 'keychain'|'file', name, available}.
          *
@@ -51,8 +55,11 @@
         onChange = null,
         onToggleSection = null,
         onSelectLogDir = null,
-        onCopyToken = null,
-        onExportConnection = null,
+        onRevokePaired = null,
+        /** (label) => void */
+        onIssueEventToken = null,
+        /** (id) => void */
+        onRevokeEventToken = null,
         onRefreshStorage = null,
         onPurgeApiLogs = null,
         onClearCommLog = null,
@@ -93,6 +100,7 @@
          */
         showAdvanced = false,
     } = $props();
+    let evtokLabel = $state('');
 
     const licenseView = $derived(describeLicense(license));
 
@@ -530,26 +538,70 @@
 
     {#snippet connectionBody()}
         <div class="input-group cfg-wide">
-            <label class="input-label" for="cfg-connection-token">{t('settings.token')}</label>
-            <div class="cfg-row-inline">
-                <input id="cfg-connection-token" class="input cfg-grow cfg-token" type="text"
-                    value={connection.token || ''} readonly>
-                <button class="btn btn-secondary cfg-btn-pick" id="btn-copy-connection-token" type="button"
-                    onclick={() => onCopyToken?.()}>{@html icon('clipboard', 13)} {t('common.copy')}</button>
-            </div>
-            <p class="input-hint">{@html t('settings.token.hint', { port: connection.port || '14300' })}</p>
+            <!-- There is no token field and no export button any more.
+                 Both existed to get a full-access credential out of this window
+                 and into another app: one to copy by hand, one to write to
+                 %APPDATA%/JH/ai-connection.json where anything running as the
+                 user could read it. Apps now ask, the user answers, and the
+                 token lives in memory on both sides (src-tauri/src/server/
+                 pairing.rs). What belongs here instead is the list of who is
+                 currently connected, and the means to disconnect them. -->
+            <strong class="cfg-export-title">{@html icon('link', 13)} {t('settings.paired.title')}</strong>
+            <p class="input-hint cfg-hint-tight">{@html t('settings.paired.hint', { port: connection.port || '14300' })}</p>
 
-            <!-- Export so other JH apps auto-discover this agent. -->
-            <div class="cfg-export-box">
-                <div class="cfg-export-head">
-                    <div>
-                        <strong class="cfg-export-title">{@html icon('save', 13)} {t('settings.export.title')}</strong>
-                        <p class="input-hint cfg-hint-tight">{@html t('settings.export.hint')}</p>
-                    </div>
-                    <button class="btn btn-secondary cfg-nowrap" id="btn-export-connection" type="button"
-                        onclick={() => onExportConnection?.()}>{@html icon('save', 13)} {t('settings.export')}</button>
+            {#if pairedApps.length === 0}
+                <p class="input-hint cfg-paired-empty">{t('settings.paired.empty')}</p>
+            {:else}
+                <ul class="cfg-paired-list">
+                    {#each pairedApps as p (p.id)}
+                        <li>
+                            <div class="cfg-paired-main">
+                                <span class="cfg-paired-app">{p.app}</span>
+                                <!-- The path is what the OS says; the name above
+                                     is what the app said about itself. -->
+                                <span class="cfg-paired-exe" title={p.exe || ''}>{p.exe || t('settings.paired.unknownExe')}</span>
+                            </div>
+                            <span class="cfg-paired-meta">PID {p.pid}</span>
+                            <button class="btn btn-link" type="button"
+                                onclick={() => onRevokePaired?.(p.id)}>{t('settings.paired.revoke')}</button>
+                        </li>
+                    {/each}
+                </ul>
+            {/if}
+
+            <!-- Event tokens live here, beside the apps that pair, because they are
+                 the other half of "who can reach this agent". They used to be in
+                 the trigger panel, which the Jobs screen no longer mounts — so the
+                 only way to get a token for a git hook was unreachable. -->
+            <div class="cfg-evtok">
+                <strong class="cfg-export-title">{@html icon('bolt', 13)} {t('settings.evtok.title')}</strong>
+                <p class="input-hint cfg-hint-tight">{@html t('settings.evtok.hint', { url: `http://127.0.0.1:${connection.port || '14300'}/api/events` })}</p>
+                <div class="cfg-row-inline">
+                    <input class="input cfg-grow" type="text" id="cfg-evtok-label"
+                        bind:value={evtokLabel} placeholder={t('settings.evtok.labelPh')}>
+                    <button class="btn btn-secondary cfg-nowrap" type="button" id="btn-issue-evtok"
+                        onclick={() => { onIssueEventToken?.(evtokLabel.trim()); evtokLabel = ''; }}>{t('settings.evtok.issue')}</button>
                 </div>
-                <div id="export-connection-status" class="cfg-export-status">{exportStatus}</div>
+                {#if issuedEventToken}
+                    <div class="cfg-evtok-once">
+                        <p class="input-hint cfg-hint-tight">{t('settings.evtok.once')}</p>
+                        <code class="cfg-evtok-secret">{issuedEventToken}</code>
+                    </div>
+                {/if}
+                {#if eventTokens.length > 0}
+                    <ul class="cfg-paired-list cfg-evtok-list">
+                        {#each eventTokens as tk (tk.id)}
+                            <li>
+                                <div class="cfg-paired-main">
+                                    <span class="cfg-paired-app">{tk.label}</span>
+                                    <span class="cfg-paired-exe">{new Date(tk.created_at).toLocaleDateString()}</span>
+                                </div>
+                                <button class="btn btn-link" type="button"
+                                    onclick={() => onRevokeEventToken?.(tk.id)}>{t('settings.evtok.revoke')}</button>
+                            </li>
+                        {/each}
+                    </ul>
+                {/if}
             </div>
 
             <!-- The first-run wizard, on demand. It only appears by itself when there

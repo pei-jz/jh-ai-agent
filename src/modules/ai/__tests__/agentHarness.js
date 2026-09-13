@@ -72,7 +72,10 @@ export function makeHarness(opts = {}) {
         toolResults = {},
         permissions = {},
         config = {},
-        caller = 'Test',
+        // This app's own unattended caller: build × workspace, no plan-first.
+        // 'Test' used to be the default, which is not on the interactive list and
+        // so was quietly an EXTERNAL caller — now the narrow ask × app lane.
+        caller = 'Job',
         nativeTools = true,
         vision = false,
         /** cmd → value | (args) => value, for the loop's own Tauri calls. */

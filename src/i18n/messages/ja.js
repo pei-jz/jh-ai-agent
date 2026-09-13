@@ -269,11 +269,17 @@ export const ja = {
     'settings.storage.clearComm': '通信ログファイルをクリア',
     'settings.storage.hint': 'LLM呼び出しの調査とタスク履歴（検索・絞り込み・削除）は <strong>Monitor</strong> に集約されています。',
 
-    'settings.token': 'J.H AI Agent 接続トークン（APIキー）',
-    'settings.token.hint': 'JHEditor などの外部ツールからは、このトークンとポート <strong>{port}</strong> で接続します。',
-    'settings.export.title': '標準パスへエクスポート',
-    'settings.export.hint': 'このホスト／ポート／トークンを <code>%APPDATA%/JH/ai-connection.json</code>（Windows）に保存します。他のJHアプリ（JHEditor、JHER、JH Task Manager など）が認証情報を再入力せずに自動接続できます。',
-    'settings.export': 'エクスポート',
+    'settings.paired.title': '接続中のアプリ',
+    'settings.paired.hint': 'JHEditor などのアプリはポート <strong>{port}</strong> に接続を要求し、ここで承認するとトークンが発行されます。トークンは<strong>保存されません</strong> — このアプリを閉じるとすべて無効になります。',
+    'settings.paired.empty': '現在、接続しているアプリはありません。',
+    'settings.paired.unknownExe': '（実行ファイルを特定できませんでした）',
+    'settings.paired.revoke': '切断',
+    'settings.evtok.title': 'イベントトークン（Webhook 用）',
+    'settings.evtok.hint': 'git フックや CI スクリプトが <code>{url}</code> にイベントを送るためのトークンです。<strong>このエンドポイントにしか届きません</strong> — タスクの作成も設定の変更もできません。用途ごとに分けて発行してください。',
+    'settings.evtok.labelPh': '用途（例: git hook）',
+    'settings.evtok.issue': '発行',
+    'settings.evtok.once': 'このトークンが表示されるのは今だけです。コピーしてフックやスクリプトに設定してください。',
+    'settings.evtok.revoke': '失効',
 
     // ── 設定 → Memory ──
     'memory.title': 'エージェントのメモリ',

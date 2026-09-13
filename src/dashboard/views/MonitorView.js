@@ -395,7 +395,11 @@ export class MonitorView {
             },
             // "Details" hands what is typed to the modal rather than discarding
             // it — the modal is a superset of this box, not a different one.
-            onDetails: ({ prompt, ws, interaction }) => this._openNewTaskModal(ws || null, prompt || '', interaction || null),
+            //
+            // The interaction chip is NOT handed over: the modal creates work,
+            // full stop. 聞く is the composer's, because that is the surface
+            // where changing your mind costs one click. See NewTaskModal.svelte.
+            onDetails: ({ prompt, ws }) => this._openNewTaskModal(ws || null, prompt || ''),
         };
     }
 
@@ -2790,8 +2794,11 @@ export class MonitorView {
      *        Filled in here rather than re-collected: this modal owns workspace
      *        validation, the mode picker, MCP selection, "/" templates and
      *        attachments, so it stays the single task-creation path.
+     *
+     * There is no interaction parameter. Everything created here is a `build`
+     * run — see NewTaskModal.svelte for why the guess was removed.
      */
-    _openNewTaskModal(presetWs = null, presetPrompt = '', presetInteraction = null) {
+    _openNewTaskModal(presetWs = null, presetPrompt = '') {
         // MIGRATED: svelte/monitor/NewTaskModal.svelte. This was 315 lines that
         // injected a <style> into document.head on first open, built the dialog
         // as one innerHTML string with every rule inline, appended it to
@@ -2800,7 +2807,6 @@ export class MonitorView {
         this._openOverlay('mnt-new-task-host', NewTaskModal, (close) => ({
             presetWs,
             presetPrompt,
-            presetInteraction,
             lastWs: this._lastNewTaskWs || '',
             lastMode: this._lastNewTaskMode || '',
             onClose: close,

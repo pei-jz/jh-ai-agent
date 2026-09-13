@@ -28,8 +28,12 @@ pub async fn ws_handler(
     if !crate::server::auth::request_host_is_loopback(&request) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    if auth.token != state.auth_token {
-        return StatusCode::UNAUTHORIZED.into_response();
+    // Full scope only. An event-only token rings a bell; it does not get to
+    // read the live transcript of whatever that bell started.
+    match state.tokens.verify(&auth.token) {
+        Some(g) if g.scope == crate::server::tokens::Scope::Full => {}
+        Some(_) => return StatusCode::FORBIDDEN.into_response(),
+        None => return StatusCode::UNAUTHORIZED.into_response(),
     }
 
     let exists = {

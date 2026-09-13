@@ -65,7 +65,6 @@ pub struct LlmInstance {
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct AiConfig {
-    pub connection_token: Option<String>,
     pub openai_key: Option<String>,
     pub anthropic_key: Option<String>,
     pub gemini_key: Option<String>,
@@ -388,7 +387,6 @@ pub async fn get_ai_config<R: tauri::Runtime>(
     
     if !config_path.exists() {
         return Ok(AiConfig {
-            connection_token: None,
             openai_key: None, anthropic_key: None, gemini_key: None, azure_key: None,
             azure_endpoint: None, azure_deployment: None, tavily_api_key: None,
             proxy_url: None, logging_enabled: None, log_dir: None,
@@ -571,7 +569,6 @@ pub async fn set_rag_approval<R: tauri::Runtime>(
         serde_json::from_str::<AiConfig>(&json).map_err(|e| e.to_string())?
     } else {
         AiConfig {
-            connection_token: None,
             openai_key: None,
             anthropic_key: None,
             gemini_key: None,
@@ -626,64 +623,6 @@ pub async fn set_rag_approval<R: tauri::Runtime>(
     std::fs::write(config_path, json).map_err(|e| e.to_string())?;
 
     Ok(())
-}
-
-/// Export the JH AI Agent connection settings (host / port / token) to a
-/// standard path that all "JH-family" client apps look up automatically.
-///
-/// Platform-specific path used:
-///   Windows : %APPDATA%/JH/ai-connection.json
-///   macOS   : $HOME/Library/Application Support/JH/ai-connection.json
-///   Linux   : $HOME/.config/JH/ai-connection.json
-///
-/// Once written, any JH client app using `@jh/ai-client` (or the equivalent
-/// hand-rolled connection logic) can connect without any user-side setup.
-///
-/// `port` and `token` are passed in by the JS UI from the live Tauri state.
-#[tauri::command]
-pub async fn export_connection_config(
-    port: u16,
-    token: String,
-) -> Result<String, String> {
-    let base_dir = if cfg!(target_os = "windows") {
-        std::env::var("APPDATA")
-            .map(std::path::PathBuf::from)
-            .map_err(|_| "APPDATA environment variable not set".to_string())?
-    } else if cfg!(target_os = "macos") {
-        let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
-        std::path::PathBuf::from(home).join("Library/Application Support")
-    } else {
-        // Linux / others: XDG_CONFIG_HOME or ~/.config
-        std::env::var("XDG_CONFIG_HOME")
-            .map(std::path::PathBuf::from)
-            .or_else(|_| {
-                std::env::var("HOME")
-                    .map(|h| std::path::PathBuf::from(h).join(".config"))
-            })
-            .map_err(|_| "Neither XDG_CONFIG_HOME nor HOME is set".to_string())?
-    };
-
-    let jh_dir = base_dir.join("JH");
-    if !jh_dir.exists() {
-        std::fs::create_dir_all(&jh_dir).map_err(|e| format!("Failed to create dir: {}", e))?;
-    }
-    let conn_path = jh_dir.join("ai-connection.json");
-
-    let payload = serde_json::json!({
-        "host": "127.0.0.1",
-        "port": port,
-        "token": token,
-        "exported_at": chrono::Local::now().to_rfc3339(),
-        "endpoint_base": format!("http://127.0.0.1:{}/api", port),
-        "ws_base": format!("ws://127.0.0.1:{}/ws", port),
-    });
-
-    let json = serde_json::to_string_pretty(&payload)
-        .map_err(|e| format!("Failed to serialize: {}", e))?;
-    std::fs::write(&conn_path, json)
-        .map_err(|e| format!("Failed to write to {}: {}", conn_path.display(), e))?;
-
-    Ok(conn_path.to_string_lossy().to_string())
 }
 
 /// Return the app config directory path (used by JS to read/write skill .md files).
@@ -1315,10 +1254,6 @@ mod secret_field_coverage {
     use super::*;
 
     /// Does this config field name look like it holds a credential?
-    ///
-    /// `connection_token` is deliberately NOT matched: it is the local server's
-    /// auth token, read and written before anything else at startup, and it
-    /// stays in the file on purpose.
     fn looks_like_a_credential(name: &str) -> bool {
         name.ends_with("_key") || name.ends_with("api_key")
     }
@@ -1364,11 +1299,23 @@ mod secret_field_coverage {
         }
     }
 
-    // The local server's token is not an LLM credential and stays in the file.
+    /// The local server's token is not a FIELD any more.
+    ///
+    /// It used to live here in plaintext: a full-access key to an API that runs
+    /// shell commands, in a file that travels with a roaming profile, a backup
+    /// or a screen share — the exact exposure secrets.rs moved the LLM keys out
+    /// of. It is now generated per run and held in memory (lib.rs), and
+    /// `purge_stored_connection_token` deletes the one older builds left behind.
+    ///
+    /// Pinned as an ABSENCE because re-adding the field is the way the plaintext
+    /// would come back: serde would start writing it again on the next save.
     #[test]
-    fn the_connection_token_is_not_treated_as_one() {
-        assert!(!looks_like_a_credential("connection_token"));
-        assert!(!secrets::SECRET_FIELDS.contains(&"connection_token"));
+    fn the_connection_token_is_no_longer_stored() {
+        let json = serde_json::to_value(AiConfig::default()).unwrap();
+        assert!(
+            !json.as_object().unwrap().contains_key("connection_token"),
+            "the server token must not be a persisted config field"
+        );
     }
 
     // ── partial patches must not delete anything ─────────────────────────

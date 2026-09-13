@@ -22,8 +22,7 @@
     import { invoke } from '@tauri-apps/api/core';
     import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
     import { AGENT_MODES, DEFAULT_MODE_ID, modeDescription } from '../../../modules/ai/AgentModes.js';
-    import { ASK, BUILD } from '../../../modules/ai/agent/InteractionMode.js';
-    import { looksReadOnly } from '../../../modules/ai/agent/TaskComplexity.js';
+    import { BUILD } from '../../../modules/ai/agent/InteractionMode.js';
     import { mcpManager } from '../../../modules/ai/McpManager.js';
     import { promptTemplateManager } from '../../../modules/ai/PromptTemplateManager.js';
     import { skillManager } from '../../../modules/ai/SkillManager.js';
@@ -39,8 +38,6 @@
         /** An explicit workspace — the "＋" on a workspace group header wins over the default. */
         presetWs = null,
         presetPrompt = '',
-        /** 'ask' | 'build' carried in from the composer's chip, or null. */
-        presetInteraction = null,
         /** Remembered from the last create, so the next one starts where you left off. */
         lastWs = '',
         lastMode = '',
@@ -66,13 +63,25 @@
     // (The dialog is mounted fresh on every open, so "once" is once per open.)
     let modeId = $state(untrack(() => lastMode || DEFAULT_MODE_ID));
 
-    // The interaction axis, same rules as the composer: inferred from the text
-    // with `looksReadOnly`, always overridable. It has to be HERE too, not only
-    // in the composer — "Details" is a superset of that box, and a run created
-    // through it would otherwise always be `build`, silently ignoring the chip
-    // the user had just set.
-    let pickedInteraction = $state(untrack(() => (presetInteraction || null)));
-    const interaction = $derived(pickedInteraction ?? (looksReadOnly(prompt) ? ASK : BUILD));
+    // This dialog always creates a JOB.
+    //
+    // It used to carry the same `looksReadOnly(prompt) ? ASK : BUILD` guess the
+    // composer makes, plus its own 聞く/頼む pair. Two problems followed. The
+    // guess reads the TEXT, so opening "New Task" and typing a question-shaped
+    // sentence — 「…を調べて」「…を教えて」 — silently flipped the whole dialog
+    // into 聞く, and the user found out when the run answered instead of doing
+    // the work. And the guess re-ran on every keystroke, so the selection could
+    // move while the prompt was still being written.
+    //
+    // The deeper reason is that a guess belongs where it costs nothing to be
+    // wrong. In the composer it is one visible chip on a one-line box, changed
+    // with a click before sending. Here it sat below the fold among workspace,
+    // mode, MCP and attachments — the settings of something the user has already
+    // decided to have DONE. Opening this dialog IS the decision.
+    //
+    // So 聞く now lives in one place: the composer on Home. See
+    // docs/design/information-architecture.md §3.
+    const interaction = BUILD;
     let prompt = $state(untrack(() => presetPrompt || ''));
     let attachments = $state([]);
     let creating = $state(false);
@@ -254,22 +263,6 @@
             </div>
 
             <div>
-                <span class="input-label nt-label">この依頼の種類</span>
-                <div class="nt-mode-group">
-                    <button type="button" class="nt-int-btn" class:sel={interaction === ASK}
-                        title="読み取り専用・計画なし・すぐ答える。ワークスペースは任意"
-                        onclick={() => (pickedInteraction = ASK)}>
-                        <span class="nt-mode-name">聞く</span>
-                    </button>
-                    <button type="button" class="nt-int-btn" class:sel={interaction === BUILD}
-                        title="計画を先に・フルツール。ワークスペースが要る"
-                        onclick={() => (pickedInteraction = BUILD)}>
-                        <span class="nt-mode-name">頼む</span>
-                    </button>
-                </div>
-            </div>
-
-            <div>
                 <span class="input-label nt-label">Agent mode</span>
                 <div class="nt-mode-group">
                     {#each modes as mo (mo.id)}
@@ -343,6 +336,10 @@
         </div>
 
         <div class="nt-foot">
+            <!-- Said once, where the decision is made, rather than offered as a
+                 control: this dialog creates work. A question goes in the box on
+                 Home, which is one line and one click away from being changed. -->
+            <span class="nt-foot-note">「頼む」で作成します — 聞くだけならホームの入力欄から</span>
             <button class="btn btn-secondary nt-cancel" type="button" onclick={() => onClose?.()}>Cancel</button>
             <button class="btn btn-primary nt-send" type="button" disabled={creating} onclick={create}>
                 {creating ? 'Creating…' : 'Create & Run ▶'}
@@ -392,7 +389,6 @@
     .nt-browse { padding: 0 12px; display: flex; align-items: center; }
 
     .nt-mode-group { display: flex; flex-wrap: wrap; gap: 6px; }
-    .nt-int-btn,
     .nt-mode-btn {
         display: inline-flex; align-items: center; gap: 6px;
         padding: 5px 12px; border-radius: var(--r-2); cursor: pointer;
@@ -400,9 +396,7 @@
         color: var(--ink-soft); font-size: 12px; user-select: none;
         transition: border-color .12s, background .12s, color .12s;
     }
-    .nt-int-btn:hover,
     .nt-mode-btn:hover { border-color: var(--line-focus); color: var(--ink); }
-    .nt-int-btn.sel,
     .nt-mode-btn.sel { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
     .nt-mode-ico { display: inline-flex; }
     .nt-mode-desc { margin-top: 6px; font-size: 11.5px; color: var(--ink-soft); line-height: 1.5; }
@@ -455,6 +449,11 @@
     .nt-foot {
         padding: 10px 16px; flex-shrink: 0;
         border-top: 1px solid var(--line);
-        display: flex; justify-content: flex-end; gap: 8px;
+        display: flex; align-items: center; justify-content: flex-end; gap: 8px;
+    }
+    /* Pushes the buttons right and keeps the note on the left of the same row. */
+    .nt-foot-note {
+        margin-right: auto;
+        font-size: 11px; color: var(--ink-soft); opacity: 0.85;
     }
 </style>

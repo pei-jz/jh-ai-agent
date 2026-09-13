@@ -160,3 +160,62 @@ describe('prior conversation reaches the server', () => {
         expect(calls[0].chat_context[1].content).toBe('a');
     });
 });
+
+/* A recorded exchange (Spotlight's Expand) runs nothing. Everything createTask
+   does BECAUSE something is about to run therefore must not happen: no MCP
+   server is started for a turn that will never call a tool, and no workspace is
+   approved by a task that never ran in one. The second was what quietly filled
+   the workspace picker with folders a search had merely been sitting next to. */
+describe('createTask for a recorded exchange', () => {
+    const recordingClient = () => ({
+        request: vi.fn(async () => ({ task_id: 'rec-1' })),
+        getConfig: vi.fn(async () => ({ approved_projects: [] })),
+        updateConfig: vi.fn(async () => ({})),
+    });
+    const args = (client, mcp) => ({
+        prompt: 'what is the GPT-6 price?',
+        workspace: 'C:/somewhere/the/search/was/near',
+        modeId: 'general',
+        selectedMcp: ['playwright'],
+        mcpServers: { playwright: {} },
+        chatContext: [
+            { role: 'user', content: 'what is the GPT-6 price?' },
+            { role: 'assistant', content: '$10 in / $50 out.' },
+        ],
+        recorded: true,
+        caller: 'Spotlight',
+        client, mcp,
+    });
+
+    it('starts no MCP server', async () => {
+        const mcp = mkMcp();
+        await createTask(args(recordingClient(), mcp));
+        expect(mcp.startClient).not.toHaveBeenCalled();
+    });
+
+    it('approves no workspace', async () => {
+        const c = recordingClient();
+        await createTask(args(c, mkMcp()));
+        // Give the best-effort remember a tick to have run, if it were going to.
+        await Promise.resolve();
+        expect(c.updateConfig).not.toHaveBeenCalled();
+        expect(c.getConfig).not.toHaveBeenCalled();
+    });
+
+    it('posts a record task with the exchange and no workspace', async () => {
+        const c = recordingClient();
+        await createTask(args(c, mkMcp()));
+        const sent = body(c);
+        expect(sent.behavior.mode).toBe('record');
+        expect(sent.workspace_path).toBe('');
+        expect(sent.chat_context).toHaveLength(2);
+        expect(sent.caller).toBe('Spotlight');
+    });
+
+    it('still remembers the workspace for a task that actually runs', async () => {
+        const c = recordingClient();
+        await createTask({ ...args(c, mkMcp()), recorded: false });
+        await Promise.resolve();
+        expect(c.getConfig).toHaveBeenCalled();
+    });
+});

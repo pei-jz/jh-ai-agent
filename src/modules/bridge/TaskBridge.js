@@ -2,6 +2,7 @@ import { listen, emit } from '@tauri-apps/api/event';
 import { AgentController } from '../ai/AgentController.js';
 import { projectContext } from '../ai/ProjectContext.js';
 import llmService from '../ai/LLMService.js';
+import { resolveLane, usesProjectContext } from '../ai/agent/RunLane.js';
 
 // How many finished tasks keep their file cache for a possible continuation.
 // Continuations happen within minutes of a task finishing, so a handful covers
@@ -33,6 +34,8 @@ class TaskBridge {
         // behavior dispatches the execution mode:
         //   - undefined / "iterative_agent" → full AgentController loop (existing path)
         //   - "single_shot"                  → one LLM call, no tools, no iteration
+        //   - "record"                       → NO call at all; an exchange that
+        //                                      already happened, written down
         await listen('run-task', async (event) => {
             const payload = event.payload;
             console.log("TaskBridge: Received run-task event:", payload);
@@ -50,14 +53,23 @@ class TaskBridge {
             } = payload;
 
             const mode = behavior?.mode || 'iterative_agent';
+            // The lane decides the engine (agent/RunLane.js). A transform is the
+            // one-shot path; ask and build are the agent loop.
+            const lane = resolveLane(behavior || {}, { caller });
 
-            if (mode === 'single_shot') {
+            if (mode === 'record') {
+                this.recordExchange(taskId, chatContext);
+            } else if (lane.error) {
+                this.emitTaskEvent(taskId, 'error', { error: lane.error, terminal: true });
+            } else if (lane.shape === 'transform') {
                 await this.runSingleShot(taskId, prompt, behavior, context);
             } else {
-                // Existing path. behavior (if any) is forwarded so AgentController
-                // can honor system_prompt / enabled_tools / max_iterations overrides.
+                // A run without a workspace lane does not get the path the caller
+                // sent — not even to scan. AgentController enforces the same thing;
+                // doing it here too keeps the project scanner from indexing a
+                // folder the run may not read.
                 await this.startAgentTask(
-                    taskId, prompt, workspacePath,
+                    taskId, prompt, usesProjectContext(lane) ? workspacePath : null,
                     clientContext || context, chatContext, behavior, images || [], caller
                 );
             }
@@ -141,6 +153,65 @@ class TaskBridge {
     }
 
     /**
+     * Write down an exchange that ALREADY HAPPENED. No LLM call.
+     *
+     * Spotlight answers in its own window, off its own loop, and keeps nothing
+     * (docs/design/information-architecture.md §5). "Expand" is how an answer
+     * crosses into Work — and it used to cross by handing the question to
+     * `createTask`, which RAN IT AGAIN: a second call, a second wait and a
+     * second bill for text already on the user's screen. `chatContext` was
+     * passed along, so the run knew the previous answer and dutifully produced
+     * another one; the measured cost of expanding one search was 22 seconds and
+     * 9.9k tokens.
+     *
+     * Two more symptoms came from the same decision. Running needs somewhere to
+     * run, so the promote invented a workspace out of `jhai_last_ws` — which
+     * `rememberWorkspace` then added to approved_projects, filling the picker
+     * with folders the search had nothing to do with. And running as
+     * `interaction: 'ask'` handed the turn eighteen read-only tools to work a
+     * workspace the user never chose.
+     *
+     * Recording removes all three: nothing runs, so there is nothing to give a
+     * workspace or tools to. What lands in Work is the exchange itself, already
+     * complete, and `/tasks/:id/continue` is there for when the user does want
+     * it to become work — at which point they pick the workspace themselves.
+     *
+     * The answer arrives in `chatContext` rather than in a new behavior field on
+     * purpose: `chat_context` is already carried end to end (CreateTaskRequest →
+     * RunTaskPayload → here) as an untyped array, whereas serde silently DROPS
+     * a behavior key that has no matching struct field in router.rs — the exact
+     * failure the `interaction` field's own comment records.
+     *
+     * @param {string} taskId
+     * @param {Array}  chatContext [{role, content}, …] — the last assistant
+     *                             message is the answer being recorded.
+     */
+    recordExchange(taskId, chatContext) {
+        const turns = Array.isArray(chatContext) ? chatContext : [];
+        const answer = [...turns].reverse()
+            .find(m => m && m.role === 'assistant' && typeof m.content === 'string' && m.content);
+
+        if (!answer) {
+            // Nothing to write down. An empty completed task would be worse than
+            // an error: it looks like the answer was lost rather than never sent.
+            this.emitTaskEvent(taskId, 'error', {
+                error: 'Nothing to record: the exchange carried no answer.',
+                terminal: true,
+            });
+            return;
+        }
+
+        // No token_usage event. The cost was paid by whoever produced the
+        // answer, and reporting it again here would double it in the dashboard.
+        this.emitTaskEvent(taskId, 'complete', {
+            message: answer.content,
+            answer: answer.content,
+            modifiedFiles: [],
+            resultSummary: { summary: answer.content, answer: answer.content, files: [] },
+        });
+    }
+
+    /**
      * Single-shot execution: one LLM call, no tools, no iteration.
      *
      * For lightweight callers like JHER ("generate this SQL", "suggest these FKs")
@@ -214,10 +285,15 @@ class TaskBridge {
                 });
             }
 
+            // The text as it streamed — or, from a provider that returned it whole
+            // without streaming, as it came back. Streamed chunks alone left such a
+            // run "complete" with an empty answer.
+            const text = fullResponse || String(genResult?.content || '');
             this.emitTaskEvent(taskId, 'complete', {
-                message: fullResponse,
+                message: text,
+                answer: text,
                 modifiedFiles: [],
-                resultSummary: { summary: fullResponse, files: [] }
+                resultSummary: { summary: text, answer: text, files: [] }
             });
         } catch (err) {
             console.error('TaskBridge: single_shot error:', err);
@@ -311,6 +387,11 @@ class TaskBridge {
             // Emit completion
             this.emitTaskEvent(taskId, 'complete', {
                 message: result.response,
+                // The deliverable — what present_result carried, or the long
+                // answer. `message` is finish_task's one-line summary, and a
+                // client that showed it (the JHEditor chat did) showed a summary
+                // of an answer the user never got to read.
+                answer: result.resultSummary?.answer || result.response || '',
                 modifiedFiles: result.modifiedFiles,
                 resultSummary: result.resultSummary,
                 // Set when a safety limit cut the run short instead of the agent

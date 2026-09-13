@@ -43,8 +43,13 @@ pub async fn mcp_ws_handler(
     if !crate::server::auth::request_host_is_loopback(&request) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    if q.token != state.auth_token {
-        return StatusCode::UNAUTHORIZED.into_response();
+    // Full scope only: dialing in here REGISTERS AN MCP SERVER whose tools
+    // every later agent task can call. That is the opposite end of the trust
+    // scale from posting an event.
+    match state.tokens.verify(&q.token) {
+        Some(g) if g.scope == crate::server::tokens::Scope::Full => {}
+        Some(_) => return StatusCode::FORBIDDEN.into_response(),
+        None => return StatusCode::UNAUTHORIZED.into_response(),
     }
     ws.on_upgrade(move |socket| handle_socket(socket, q.app, state))
 }

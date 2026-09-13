@@ -3,7 +3,6 @@ import { listen } from '@tauri-apps/api/event';
 import { McpClient } from './McpClient.js';
 import { McpWsClient } from './McpWsClient.js';
 import { McpHttpClient } from './McpHttpClient.js';
-import { intentRegistry } from './agent/IntentRegistry.js';
 import { resourceRegistry, resolveResource, contentsToText } from './agent/ResourceRegistry.js';
 
 export class McpManager {
@@ -85,7 +84,6 @@ export class McpManager {
             // Only drop if this exact connection is still the registered one.
             if (this.clients.get(name) === client) {
                 this.clients.delete(name);
-                intentRegistry.clearApp(name);
                 resourceRegistry.clearApp(name);
                 this._notify();
             }
@@ -93,9 +91,6 @@ export class McpManager {
         const success = await client.start();
         if (success) {
             this.clients.set(name, client);
-            // Named actions this app exposes — referenced later by id from
-            // behavior.intent. Re-registering replaces the previous set.
-            intentRegistry.setForApp(name, client.intents || []);
             resourceRegistry.setForApp(name, client.resources || []);
             this.startErrors.delete(name);
             this._notify();
@@ -171,7 +166,6 @@ export class McpManager {
             this.clients.set(name, client);
             // stdio/HTTP servers can declare these too — the clients ask for
             // both during the handshake, so publish whatever came back.
-            intentRegistry.setForApp(name, client.intents || []);
             resourceRegistry.setForApp(name, client.resources || []);
             this.startErrors.delete(name);
             this._notify();
@@ -191,7 +185,6 @@ export class McpManager {
             await client.stop();
             // A stopped server can no longer answer resources/read, so its
             // entries must go too — otherwise the agent sees phantom documents.
-            intentRegistry.clearApp(client.name);
             resourceRegistry.clearApp(client.name);
         }
         this.clients.clear();
@@ -285,7 +278,6 @@ export class McpManager {
             await this.saveConfig();
         }
         this.startErrors.delete(name);
-        intentRegistry.clearApp(name);
         resourceRegistry.clearApp(name);
         this._notify();
         const client = this.clients.get(name);

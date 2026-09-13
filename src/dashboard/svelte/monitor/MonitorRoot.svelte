@@ -299,7 +299,10 @@
                 onclick={(e) => onPanelClick?.(e)}>
                 <!-- The surface a terminal-scoped agent cannot have, and it used
                      to be invisible. -->
-                {#if hub?.apps?.some(a => a.intents.length || a.resources.length)}
+                <!-- Resources only: intents were removed (Report_20260913 §6-6), and
+                     reading `a.intents.length` on an app without them threw for
+                     every task the moment any app was connected. -->
+                {#if hub?.apps?.some(a => a.resources?.length)}
                     <div class="hub-strip"><HubStrip {...hub} /></div>
                 {/if}
 

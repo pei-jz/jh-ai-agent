@@ -2,6 +2,9 @@
 // Provides REST API endpoints and WebSocket support for task management.
 
 pub mod auth;
+pub mod tokens;
+pub mod peer;
+pub mod pairing;
 pub mod router;
 pub mod config_routes;
 pub mod ws;

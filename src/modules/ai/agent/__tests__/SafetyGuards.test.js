@@ -33,8 +33,8 @@ describe('classifyToolCalls', () => {
 });
 
 describe('planFirstGate', () => {
-    it('activates for DirectChat with a complex prompt (auto)', () => {
-        const gate = planFirstGate({ prompt: 'please implement a multi step feature in these files: a.js b.js c.js', caller: 'DirectChat', isFreshTurn: true });
+    it('activates for NewTask with a complex prompt (auto)', () => {
+        const gate = planFirstGate({ prompt: 'please implement a multi step feature in these files: a.js b.js c.js', caller: 'NewTask', isFreshTurn: true });
         expect(gate.active).toBe(true);
         expect(gate.approved).toBe(false);
     });
@@ -42,24 +42,24 @@ describe('planFirstGate', () => {
     it('does not activate for Schedule or external callers', () => {
         expect(planFirstGate({ prompt: 'complex task', caller: 'Schedule', isFreshTurn: true }).active).toBe(false);
         expect(planFirstGate({ prompt: 'complex task', caller: 'External', isFreshTurn: true }).active).toBe(false);
-        expect(planFirstGate({ prompt: 'complex task', caller: 'DirectChat', isSubagent: true, isFreshTurn: true }).active).toBe(false);
+        expect(planFirstGate({ prompt: 'complex task', caller: 'NewTask', isSubagent: true, isFreshTurn: true }).active).toBe(false);
     });
 
     it('respects planMode off and bypass phrases', () => {
-        expect(planFirstGate({ prompt: 'complex', caller: 'DirectChat', planMode: 'off', isFreshTurn: true }).active).toBe(false);
-        expect(planFirstGate({ prompt: 'そのまま実装してください', caller: 'DirectChat', isFreshTurn: true }).active).toBe(false);
-        expect(planFirstGate({ prompt: 'no plan needed', caller: 'DirectChat', isFreshTurn: true }).active).toBe(false);
+        expect(planFirstGate({ prompt: 'complex', caller: 'NewTask', planMode: 'off', isFreshTurn: true }).active).toBe(false);
+        expect(planFirstGate({ prompt: 'そのまま実装してください', caller: 'NewTask', isFreshTurn: true }).active).toBe(false);
+        expect(planFirstGate({ prompt: 'no plan needed', caller: 'NewTask', isFreshTurn: true }).active).toBe(false);
     });
 
     it('always gates in always mode', () => {
-        const gate = planFirstGate({ prompt: 'quick', caller: 'DirectChat', planMode: 'always', isFreshTurn: true });
+        const gate = planFirstGate({ prompt: 'quick', caller: 'NewTask', planMode: 'always', isFreshTurn: true });
         expect(gate.active).toBe(true);
     });
 
     it('re-opens on a plan-revision turn and extracts revision text', () => {
         const gate = planFirstGate({
             // The ✏️ marker line is stripped; the user's own words follow it.
-            prompt: '✏️ Request changes\nmake it faster', caller: 'DirectChat',
+            prompt: '✏️ Request changes\nmake it faster', caller: 'NewTask',
             isFreshTurn: false, isPlanRevisionTurn: true,
         });
         expect(gate.active).toBe(true);

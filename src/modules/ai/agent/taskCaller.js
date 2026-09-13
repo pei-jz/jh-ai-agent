@@ -24,7 +24,7 @@
  * has to be added on the day it is invented.
  */
 export const INTERACTIVE_CALLERS = [
-    'DirectChat', 'Schedule', 'NewTask', 'Composer', 'Job', 'Trigger',
+    'Schedule', 'NewTask', 'Composer', 'Job', 'Trigger',
 ];
 
 /**

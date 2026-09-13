@@ -62,11 +62,69 @@
         draft && draft.id === editingId ? draft : (triggers.find(x => x.id === editingId) || null)
     );
 
-    // Shown so the snippet can be copied straight into a CI config. The token is
-    // the app's own; it is already in the user's config file and every other
-    // call in this window carries it.
+    // ── The token in the snippet ──────────────────────────────────────────
+    //
+    // This used to print `window.apiClient.token` — the app's OWN token, the one
+    // that can start a task, run a shell command through it and rewrite the
+    // config. The snippet exists to be pasted into a git hook or a Task
+    // Scheduler batch file, so that is where it ended up: full API access, in a
+    // file in a repo, on disk, forever.
+    //
+    // An event token reaches `POST /api/events` and nothing else (server/
+    // tokens.rs). Posting an event cannot start anything on its own — the
+    // trigger the user created and enabled decides that — so this is a
+    // credential for ringing a bell, which is all a hook needs.
+    //
+    // The secret is readable ONCE, at issue. After that only the label and the
+    // date remain, because storing it a second time to be able to show it again
+    // would undo the point.
+    let eventTokens = $state([]);
+    let issuedSecret = $state('');      // the last issue, until the panel closes
+    let issuing = $state(false);
+    let tokenError = $state('');
+
+    async function loadEventTokens() {
+        try { eventTokens = (await invoke('list_event_tokens')) || []; }
+        catch (_) { /* not under Tauri */ }
+    }
+    $effect(() => { loadEventTokens(); });
+
+    async function issueEventToken() {
+        if (issuing) return;
+        issuing = true;
+        tokenError = '';
+        try {
+            const res = await invoke('issue_event_token', { label: newTokenLabel.trim() || 'webhook' });
+            issuedSecret = res.token;
+            newTokenLabel = '';
+            await loadEventTokens();
+        } catch (e) {
+            tokenError = String(e?.message || e);
+        } finally {
+            issuing = false;
+        }
+    }
+
+    async function revokeEventToken(id) {
+        if (!confirmDelete(t('trig.token.revokeConfirm', null, 'このトークンを失効しますか？ 使用中のフックは動かなくなります。'))) return;
+        try {
+            await invoke('revoke_event_token', { id });
+            // The visible secret may be the one just revoked. There is no way to
+            // tell from here (the listing carries no secret, by design), so it
+            // goes: showing a dead token is worse than showing none.
+            issuedSecret = '';
+            await loadEventTokens();
+        } catch (e) {
+            tokenError = String(e?.message || e);
+        }
+    }
+
+    let newTokenLabel = $state('');
+
     const url = $derived(endpoint ?? `${globalThis.window?.apiClient?.baseUrl || 'http://localhost:PORT/api'}/events`);
-    const token = $derived(globalThis.window?.apiClient?.token || 'YOUR_TOKEN');
+    // A placeholder, never the app's token: a snippet that works by pasting the
+    // full-access key is exactly what this change removes.
+    const token = $derived(issuedSecret || '<イベントトークン>');
     const curl = $derived(
         `curl -X POST ${url} \\\n`
         + `  -H "Authorization: Bearer ${token}" \\\n`
@@ -429,6 +487,44 @@
 
                     <h4>{t('trig.send')}</h4>
                     <p class="sch-note">{t('trig.send.hint')}</p>
+
+                    <div class="trg-token">
+                        <p class="sch-note">
+                            イベントトークンは <code>POST /api/events</code> にだけ通ります。
+                            タスクの作成も設定の変更もできません。
+                        </p>
+                        <div class="trg-token-new">
+                            <input class="input" type="text" bind:value={newTokenLabel}
+                                placeholder="用途（例: git hook）" />
+                            <button class="btn" disabled={issuing} onclick={issueEventToken}>
+                                {issuing ? '発行中…' : 'トークンを発行'}
+                            </button>
+                        </div>
+
+                        {#if issuedSecret}
+                            <!-- Said plainly, because it is true and because the
+                                 user has one chance to act on it. -->
+                            <p class="trg-token-once">
+                                このトークンが表示されるのは今だけです。下の curl をコピーしてください。
+                            </p>
+                        {/if}
+                        {#if tokenError}
+                            <p class="sch-note trg-token-err">{tokenError}</p>
+                        {/if}
+
+                        {#if eventTokens.length > 0}
+                            <ul class="trg-token-list">
+                                {#each eventTokens as tk (tk.id)}
+                                    <li>
+                                        <span class="trg-token-label">{tk.label}</span>
+                                        <span class="trg-token-date">{new Date(tk.created_at).toLocaleDateString()}</span>
+                                        <button class="btn btn-link" onclick={() => revokeEventToken(tk.id)}>失効</button>
+                                    </li>
+                                {/each}
+                            </ul>
+                        {/if}
+                    </div>
+
                     <pre class="trg-curl">{curl}</pre>
 
                     <div class="trg-actions">

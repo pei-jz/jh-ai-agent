@@ -1,13 +1,20 @@
 // jhai-adapter — client SDK for the JHAI "AI Hub" (Part B).
 //
-// An app (JHEditor/JHER/JHWBSManager) imports this, declares its TOOLS / INTENTS
-// / CONTEXT / RESULT renderers, and calls start(). The SDK:
+// An app (JHEditor/JHER/JHWBSManager) imports this, declares its TOOLS /
+// RESOURCES / CONTEXT / RESULT renderers, and calls start(). The SDK:
 //   • dials JHAI's `ws://<jhai>/mcp/ws?app=<name>&token=…` (outbound; connection
 //     = dynamic registration) and acts as the MCP SERVER over it — answering
 //     initialize / tools/list / tools/call from registered handlers.
-//   • runIntent()/chat() create a task (POST /api/tasks) scoped to this app and
-//     subscribe to the task WS, dispatching the final `result` envelope to the
-//     registered renderer (and exposing apply-actions).
+//   • chat()/chatTask() create an `ask × app` task (POST /api/tasks): the run can
+//     use THIS app's tools and the web, and nothing else — no file system, no
+//     project context (src/modules/ai/agent/RunLane.js). They subscribe to the
+//     task WS and dispatch the final `result` envelope to the registered
+//     renderer (and expose apply-actions).
+//
+//   Named intents (registerIntent / runIntent) were removed
+//   (docs/scratch/Report_20260913.md §6-6). What an intent carried maps onto
+//   chatTask: its system prompt is `instructions`, and its tool list is simply
+//   this app's registered tools.
 //
 // Transport is hidden (Part A / T1 outbound WS). Dependency-free: uses standard
 // WebSocket + fetch (injectable for tests). MCP semantics throughout.
@@ -44,7 +51,6 @@ class JhaiAdapter {
         this.protocolVersion = '2024-11-05';
 
         this.tools = new Map();          // name → { def, handler }
-        this.intents = new Map();        // id → intent object
         this.resources = new Map();      // uri → { def, read }
         this.contextProvider = null;
         this.resultRenderers = new Map();// kind → fn(payload, actions, envelope)
@@ -65,13 +71,6 @@ class JhaiAdapter {
         }
         const schema = inputSchema || { type: 'object', properties: {}, required: [], additionalProperties: false };
         this.tools.set(name, { def: { name, description, inputSchema: schema }, handler });
-        return this;
-    }
-
-    /** Register a named AI action. { id, title?, systemPrompt?, tools?[], resultKind? }. */
-    registerIntent(intent) {
-        if (!intent || !intent.id) throw new Error('registerIntent requires { id }');
-        this.intents.set(intent.id, intent);
         return this;
     }
 
@@ -191,11 +190,6 @@ class JhaiAdapter {
             }
             case 'tools/list':
                 return { tools: [...this.tools.values()].map(t => t.def) };
-            // JHAI extension: the named actions registered with registerIntent().
-            // JHAI asks for these once, right after the handshake, and thereafter
-            // a task can reference one by id instead of resending the definition.
-            case 'jhai/intents/list':
-                return { intents: [...this.intents.values()] };
             case 'resources/list':
                 return { resources: [...this.resources.values()].map(r => r.def) };
             case 'resources/read': {
@@ -226,50 +220,34 @@ class JhaiAdapter {
         return { content: [{ type: 'text', text }] };
     }
 
-    // ── Running tasks (intent / freeform) + result handling ──────────────────
+    // ── Running tasks + result handling ──────────────────────────────────────
 
-    /** Run a registered intent. Returns a promise that resolves with the result envelope (or null). */
-    async runIntent(intentId, { prompt, context, images } = {}) {
-        return this.runIntentTask(intentId, { prompt, context, images }).completed;
-    }
-
-    /** Freeform chat (no intent), still scoped to this app's tools + context. */
-    async chat(prompt, { context, images } = {}) {
-        return this.chatTask(prompt, { context, images }).completed;
+    /** A conversation scoped to this app's tools + context. Resolves with the result envelope. */
+    async chat(prompt, { context, images, instructions } = {}) {
+        return this.chatTask(prompt, { context, images, instructions }).completed;
     }
 
     /**
-     * Run a registered intent as a streaming task handle.
+     * Start an `ask × app` task and return a streaming handle.
      * @returns {{ taskId: Promise<string>, completed: Promise<object|null>, abort: function }}
-     *   - taskId   resolves with the server task id once created
+     *   - taskId    resolves with the server task id once created
      *   - completed resolves with the final result envelope (or null)
-     *   - abort()  cancels the task (DELETE /api/tasks/:id) + closes the WS
+     *   - abort()   cancels the task (DELETE /api/tasks/:id) + closes the WS
      *   onEvent(event, data) (if provided) receives EVERY task event
      *   (status / thought / tool_call / stream / result / complete / error).
+     * `instructions` are APPENDED to the agent's prompt — they cannot remove the
+     * rules that make the run deliver a result.
      */
-    runIntentTask(intentId, { prompt, context, images, onEvent } = {}) {
-        const intent = this.intents.get(intentId);
-        if (!intent) throw new Error(`Unknown intent: ${intentId}`);
-        const inline = {
-            systemPrompt: intent.systemPrompt,
-            tools: intent.tools,
-            resultKind: intent.resultKind,
-            tier: intent.tier,
-        };
-        return this._runTask(prompt || intent.title || intentId, { intent: inline, context, images, onEvent });
+    chatTask(prompt, { context, images, onEvent, instructions } = {}) {
+        return this._runTask(prompt, { context, images, onEvent, instructions });
     }
 
-    /** Freeform task handle (no intent). Same shape as runIntentTask. */
-    chatTask(prompt, { context, images, onEvent } = {}) {
-        return this._runTask(prompt, { context, images, onEvent });
-    }
-
-    _runTask(prompt, { intent = null, context, images, onEvent } = {}) {
+    _runTask(prompt, { instructions = '', context, images, onEvent } = {}) {
         let abortFn = () => {};
         let resolveTid;
         const taskId = new Promise((r) => { resolveTid = r; });
         const completed = (async () => {
-            const tid = await this._createTask(prompt, { intent, context, images });
+            const tid = await this._createTask(prompt, { instructions, context, images });
             resolveTid(tid);
             const handle = this._subscribeTaskHandle(tid, onEvent);
             abortFn = handle.abort;
@@ -280,18 +258,28 @@ class JhaiAdapter {
         return { taskId, completed, abort: () => abortFn() };
     }
 
-    async _createTask(prompt, { intent = null, context, images } = {}) {
+    async _createTask(prompt, { instructions = '', context, images } = {}) {
         if (!this._fetch) throw new Error('No fetch implementation available');
         const mcpContext = context || (this.contextProvider ? this.contextProvider() : null);
-        const behavior = { mcp_servers: [this.app] };
-        if (intent) behavior.intent = intent;
+        // The lane is stated, not left to the server's default: an app asking
+        // about its own document is `ask × app` (src/modules/ai/agent/RunLane.js).
+        const behavior = {
+            mode: 'iterative_agent',
+            shape: 'ask',
+            reach: 'app',
+            mcp_servers: [this.app],
+        };
+        if (instructions) behavior.extra_instructions = String(instructions);
         if (mcpContext) behavior.mcp_context = mcpContext;
 
         // First-class image channel. Images MUST be base64 data URLs
         // ("data:image/png;base64,…"); they're forwarded to the agent's LLM call
         // (re-attached for the first several steps). Sent at the top level — the
         // server reads `images` first, then falls back to behavior.mcp_context.images.
+        // `context` as well as `mcp_context`: the latter rides on tool calls, the
+        // former is what the model reads (ContextBuilder.clientContextBlock).
         const reqBody = { prompt, caller: this.app, behavior };
+        if (mcpContext) reqBody.context = mcpContext;
         if (Array.isArray(images) && images.length) reqBody.images = images;
 
         const res = await this._fetch(`${this.baseUrl}/api/tasks`, {

@@ -112,38 +112,35 @@ describe('jhai-adapter — MCP server role over WS', () => {
     });
 });
 
-describe('jhai-adapter — runIntent / result handling', () => {
+describe('jhai-adapter — chat / result handling', () => {
     beforeEach(() => MockWS.reset());
 
-    it('creates a task with app-scoped behavior + inline intent + context, and renders the result', async () => {
+    it('creates an ask × app task scoped to the app, with context and instructions, and renders the result', async () => {
         let postedBody = null;
         const fetchImpl = async (url, opts) => {
             postedBody = JSON.parse(opts.body);
             return { ok: true, status: 200, json: async () => ({ task_id: 't1' }) };
         };
         const ai = makeAdapter(fetchImpl);
-        ai.registerIntent({
-            id: 'summarize_logs', title: 'ログ集計',
-            systemPrompt: 'SP', tools: ['get_buffer'], resultKind: 'markdown',
-        });
         ai.setContextProvider(() => ({ app: 'jheditor', documentId: 'doc-1' }));
 
         let rendered = null;
         ai.onResult('markdown', (payload, actions) => { rendered = { payload, actions }; });
 
         await ai.start();
-        const promise = ai.runIntent('summarize_logs', { prompt: 'go' });
-        await tick();   // let fetch + task WS open
+        const promise = ai.chat('go', { instructions: 'Summarize the log as a table.' });
+        await tick();
 
-        // Verify the POST body.
         expect(postedBody.caller).toBe('jheditor');
-        expect(postedBody.behavior.mcp_servers).toEqual(['jheditor']);
-        expect(postedBody.behavior.intent).toEqual({ systemPrompt: 'SP', tools: ['get_buffer'], resultKind: 'markdown' });
+        expect(postedBody.behavior).toMatchObject({ shape: 'ask', reach: 'app', mcp_servers: ['jheditor'] });
+        expect(postedBody.behavior.extra_instructions).toBe('Summarize the log as a table.');
+        // Instructions are appended, never a replacement prompt.
+        expect(postedBody.behavior.system_prompt).toBeUndefined();
+        expect(postedBody.behavior.intent).toBeUndefined();
         expect(postedBody.behavior.mcp_context).toEqual({ app: 'jheditor', documentId: 'doc-1' });
+        expect(postedBody.context).toEqual({ app: 'jheditor', documentId: 'doc-1' });
 
-        // Drive the task WS: result envelope then complete.
         const taskWs = MockWS.byUrl('/ws/tasks/t1');
-        expect(taskWs).toBeTruthy();
         taskWs.recv({ event: 'result', data: { envelope: { kind: 'markdown', payload: { md: '# Sum' }, actions: [{ label: 'Insert', apply: { type: 'insertMarkdown', text: '# Sum' } }], summary: 's' } } });
         taskWs.recv({ event: 'complete', data: {} });
 
@@ -161,13 +158,14 @@ describe('jhai-adapter — runIntent / result handling', () => {
         expect(inserted).toBe('hello');
     });
 
-    it('throws for an unknown intent', async () => {
-        const ai = makeAdapter(async () => ({ ok: true, json: async () => ({ task_id: 't' }) }));
-        await ai.start();
-        await expect(ai.runIntent('nope', {})).rejects.toThrow(/Unknown intent/);
+    it('no longer offers named intents', () => {
+        const ai = makeAdapter();
+        expect(ai.registerIntent).toBeUndefined();
+        expect(ai.runIntent).toBeUndefined();
+        expect(ai.runIntentTask).toBeUndefined();
     });
 
-    it('chat() posts freeform behavior (no intent) scoped to the app', async () => {
+    it('chat() without context sends no context', async () => {
         let body = null;
         const ai = makeAdapter(async (url, opts) => {
             body = JSON.parse(opts.body);
@@ -177,8 +175,8 @@ describe('jhai-adapter — runIntent / result handling', () => {
         const p = ai.chat('hello');
         await tick();
         expect(body.behavior.mcp_servers).toEqual(['jheditor']);
-        expect(body.behavior.intent).toBeUndefined();
-        expect(body.behavior.mcp_context).toBeUndefined(); // no context provider set
+        expect(body.behavior.mcp_context).toBeUndefined();
+        expect(body.context).toBeUndefined();
         const taskWs = MockWS.byUrl('/ws/tasks/tc');
         taskWs.recv({ event: 'complete', data: {} });
         await p;
@@ -284,27 +282,6 @@ describe('jhai-adapter — task API', () => {
         expect(env.summary === 'ok' || env.payload.md === 'ok').toBe(true);
     });
 
-    it('runIntentTask: applies the intent and dispatches result to the renderer', async () => {
-        const ai = makeAdapter(fetchMock('T3'));
-        ai.registerIntent({ id: 'summarize', title: 'Summarize', systemPrompt: 'sum', resultKind: 'markdown' });
-        let rendered = null;
-        ai.onResult('markdown', (payload) => { rendered = payload; });
-        const handle = ai.runIntentTask('summarize', { prompt: 'do it' });
-        await handle.taskId;
-        await tick();
-        const ws = MockWS.byUrl('/ws/tasks/T3');
-        ws.recv({ event: 'result', data: { envelope: { kind: 'markdown', payload: { md: 'R' } } } });
-        ws.recv({ event: 'complete', data: {} });
-        await handle.completed;
-        expect(rendered).toEqual({ md: 'R' });
-    });
-
-    it('runIntent()/runIntentTask throw on an unknown intent', async () => {
-        const ai = makeAdapter(fetchMock());
-        expect(() => ai.runIntentTask('nope', {})).toThrow(/Unknown intent/);
-        await expect(ai.runIntent('nope', {})).rejects.toThrow(/Unknown intent/);
-    });
-
     it('an error event rejects completed', async () => {
         const ai = makeAdapter(fetchMock('T4'));
         const handle = ai.chatTask('x');
@@ -339,30 +316,18 @@ describe('jhai-adapter — task API', () => {
     });
 });
 
-describe('jhai-adapter — intent declaration', () => {
+describe('jhai-adapter — intents are gone', () => {
     beforeEach(() => MockWS.reset());
 
-    it('answers jhai/intents/list with what the app registered', async () => {
-        const ai = makeAdapter();
-        ai.registerIntent({ id: 'impact_analysis', title: '影響調査', resultKind: 'file-list' });
-        ai.registerIntent({ id: 'log_summary', title: 'ログ集計' });
-        await ai.start();
-        const ws = MockWS.byUrl('/mcp/ws');
-        ws.recv({ jsonrpc: '2.0', id: 9, method: 'jhai/intents/list', params: {} });
-        await tick();
-        const resp = MockWS.lastSent(ws);
-        expect(resp.id).toBe(9);
-        expect(resp.result.intents).toHaveLength(2);
-        expect(resp.result.intents.map(i => i.id).sort()).toEqual(['impact_analysis', 'log_summary']);
-    });
-
-    it('returns an empty list when the app declared none', async () => {
+    // An agent that still asks gets "method not found", the same answer any
+    // plain MCP server gives — not an empty list that looks like a real reply.
+    it('answers jhai/intents/list with method-not-found', async () => {
         const ai = makeAdapter();
         await ai.start();
         const ws = MockWS.byUrl('/mcp/ws');
         ws.recv({ jsonrpc: '2.0', id: 10, method: 'jhai/intents/list', params: {} });
         await tick();
-        expect(MockWS.lastSent(ws).result.intents).toEqual([]);
+        expect(MockWS.lastSent(ws).error).toBeTruthy();
     });
 });
 

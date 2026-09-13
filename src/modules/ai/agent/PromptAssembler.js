@@ -8,6 +8,7 @@
 // standards-aligned history writers (native + JSON-mode tool turns).
 
 import { hashContent } from './CompressionMetrics.js';
+import { clipText, MAX_TOOL_RESULT_CHARS } from './ContextOverflow.js';
 
 /**
  * Fold `[{path, description}]` from the description generator onto the result's
@@ -199,21 +200,32 @@ export function pushAssistantToolTurn(history, response, toolCall, genResult, ca
  * message (byte-identical to the previous format).
  */
 export function pushToolResultsTurn(history, results, native, tailText) {
+    // One cap for every tool. A tool's own limits (grep's max_results, a
+    // read's line window) bound how MANY things come back, not how big each is:
+    // one match inside a minified bundle was a multi-megabyte "line", and the
+    // result that carried it pushed the next request past the model's context
+    // window. See agent/ContextOverflow.js.
+    const text = (r) => clipText(
+        typeof r.result === 'string' ? r.result : JSON.stringify(r.result ?? ''),
+        MAX_TOOL_RESULT_CHARS,
+    );
     if (native) {
         for (const r of results) {
             history.push({
                 role: 'tool',
                 tool_call_id: r.id || 'call_unknown',
                 name: r.tool_call_name,
-                content: typeof r.result === 'string' ? r.result : JSON.stringify(r.result ?? ''),
+                content: text(r),
             });
         }
         const tail = (tailText || '').trim();
         if (tail) history.push({ role: 'user', content: tail });
     } else {
+        const capped = results.map(r => (typeof r?.result === 'string' && r.result.length > MAX_TOOL_RESULT_CHARS
+            ? { ...r, result: text(r) } : r));
         history.push({
             role: 'user',
-            content: `Tool Execution Results:\n${JSON.stringify(results, null, 2)}${tailText || ''}`,
+            content: `Tool Execution Results:\n${JSON.stringify(capped, null, 2)}${tailText || ''}`,
         });
     }
 }

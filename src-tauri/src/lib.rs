@@ -16,7 +16,7 @@ mod commands;
 mod path_guard;
 
 use crate::server::router::{create_router, AppState, TaskInfo};
-use crate::server::auth::generate_token;
+use crate::server::tokens::{generate_token, TokenRegistry};
 use crate::commands::indexer::IndexerState;
 use crate::commands::mcp::{McpState, McpWsState};
 use crate::path_guard::PathGuard;
@@ -25,6 +25,10 @@ use crate::path_guard::PathGuard;
 pub struct ServerConfig {
     pub token: String,
     pub port: u16,
+    /// Every credential that can authenticate — see server/tokens.rs.
+    pub tokens: std::sync::Arc<TokenRegistry>,
+    /// Pairing requests waiting for a person to answer them.
+    pub pairing: std::sync::Arc<crate::server::pairing::PairingState>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -46,6 +50,166 @@ fn get_api_token(config: tauri::State<'_, ServerConfig>) -> String {
 #[tauri::command]
 fn get_server_port(config: tauri::State<'_, ServerConfig>) -> u16 {
     config.port
+}
+
+/// Delete `connection_token` from ai_config.json if an older build left one.
+///
+/// Best-effort and silent: this runs on every start, and a config that cannot
+/// be rewritten (read-only, locked by another copy) must not stop the app. The
+/// token it removes is no longer accepted by anything, so failing to remove it
+/// leaves a dead string rather than a live key — but leaving dead credentials
+/// in config files is how they get copied into the next one.
+fn purge_stored_connection_token(config_path: &std::path::Path) {
+    let Ok(json) = std::fs::read_to_string(config_path) else { return };
+    let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&json) else { return };
+    let Some(obj) = val.as_object_mut() else { return };
+    if obj.remove("connection_token").is_none() {
+        return;
+    }
+    if let Ok(updated) = serde_json::to_string_pretty(&val) {
+        // Write through a temp file: a truncating write that dies halfway
+        // leaves the user with no configuration at all.
+        let tmp = config_path.with_extension("json.tmp");
+        if std::fs::write(&tmp, updated).is_ok() {
+            let _ = std::fs::rename(&tmp, config_path);
+        }
+    }
+}
+
+/// The apps that have paired this run, with no tokens in the answer.
+#[tauri::command]
+fn list_paired_apps(
+    config: tauri::State<'_, ServerConfig>,
+) -> Vec<crate::server::tokens::PairedInfo> {
+    // Drop anything whose process is gone before answering: a list that names a
+    // closed editor as "connected" is a list nobody can act on.
+    config.tokens.sweep_paired(process_is_alive);
+    config.tokens.list_paired()
+}
+
+#[tauri::command]
+fn revoke_paired_app(
+    id: String,
+    config: tauri::State<'_, ServerConfig>,
+) -> Result<(), String> {
+    config.tokens.revoke_paired(&id)
+}
+
+/// The pairing requests waiting for an answer, for a window that just opened
+/// and missed the `pair-request` event.
+#[tauri::command]
+fn list_pair_requests(
+    config: tauri::State<'_, ServerConfig>,
+) -> Vec<serde_json::Value> {
+    config
+        .pairing
+        .list_pending()
+        .into_iter()
+        .map(|r| {
+            serde_json::json!({
+                "id": r.id,
+                "app": r.app,
+                "code": r.code,
+                "pid": r.peer.as_ref().map(|p| p.pid),
+                "exe": r.peer.as_ref().and_then(|p| p.exe.clone()),
+            })
+        })
+        .collect()
+}
+
+/// Answer a pairing request. `approved` mints a token bound to the asking PID.
+///
+/// The token is returned to the CLIENT through its poll, never to the caller of
+/// this command: the approving window has no use for another app's credential,
+/// and handing it to the frontend would put it somewhere a devtools console can
+/// read it.
+#[tauri::command]
+fn answer_pair_request(
+    id: String,
+    approved: bool,
+    config: tauri::State<'_, ServerConfig>,
+) -> Result<bool, String> {
+    let pending = config.pairing.list_pending();
+    let Some(req) = pending.into_iter().find(|r| r.id == id) else {
+        // Already answered, or expired while the dialog was up. Not an error —
+        // but the caller is told so the dialog can say what happened instead of
+        // closing as though it worked.
+        return Ok(false);
+    };
+
+    let token = if approved {
+        let pid = req.peer.as_ref().map(|p| p.pid).unwrap_or(0);
+        let exe = req.peer.as_ref().and_then(|p| p.exe.clone());
+        Some(config.tokens.add_paired(&req.app, exe, pid)?)
+    } else {
+        None
+    };
+    Ok(config.pairing.answer(&id, approved, token))
+}
+
+/// Is this PID still running?
+///
+/// Used to drop paired tokens whose app has exited. On Windows the process's
+/// image path is readable only while it exists, so the lookup that identifies a
+/// peer answers this too; elsewhere there is no lookup yet, and reporting
+/// "alive" leaves the idle TTL as the only bound — which is the honest
+/// behaviour, not a silent one (see server/peer.rs).
+fn process_is_alive(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        if pid == 0 {
+            return false;
+        }
+        return crate::server::peer::exe_path_of(pid).is_some();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = pid;
+        true
+    }
+}
+
+/// Mint an event-only token and return the SECRET.
+///
+/// The only time the secret is readable. It exists to be pasted into a place
+/// this app cannot reach — a `.git/hooks/post-commit`, a Task Scheduler batch
+/// file — so there is no version of this that does not hand it over once.
+///
+/// What makes that acceptable is what the token can do: `POST /api/events` and
+/// nothing else, and posting an event only starts something if the user has
+/// already created and enabled a trigger that matches it. See
+/// server/tokens.rs for the full argument.
+#[tauri::command]
+fn issue_event_token(
+    label: String,
+    config: tauri::State<'_, ServerConfig>,
+) -> Result<serde_json::Value, String> {
+    let (secret, info) = config.tokens.issue_event_token(&label)?;
+    Ok(serde_json::json!({
+        "token": secret,
+        "id": info.id,
+        "label": info.label,
+        "created_at": info.created_at,
+    }))
+}
+
+/// The event tokens that exist, WITHOUT their secrets.
+///
+/// A credential that outlives a restart has to be visible, or "revoke the one I
+/// put on the old laptop" is not a thing the user can do.
+#[tauri::command]
+fn list_event_tokens(
+    config: tauri::State<'_, ServerConfig>,
+) -> Vec<crate::server::tokens::EventTokenInfo> {
+    config.tokens.list_event_tokens()
+}
+
+#[tauri::command]
+fn revoke_event_token(
+    id: String,
+    config: tauri::State<'_, ServerConfig>,
+) -> Result<(), String> {
+    config.tokens.revoke_event_token(&id)
 }
 
 #[derive(serde::Serialize)]
@@ -768,31 +932,24 @@ pub fn run() {
                 guard.add_root(std::env::temp_dir());
             }
 
-            // Load or generate auth token
-            let mut auth_token = String::new();
-            if config_path.exists() {
-                if let Ok(json) = std::fs::read_to_string(&config_path) {
-                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&json) {
-                        if let Some(t) = val.get("connection_token").and_then(|t| t.as_str()) {
-                            if !t.is_empty() {
-                                auth_token = t.to_string();
-                            }
-                        }
-                    }
-                }
-            }
-            
-            if auth_token.is_empty() {
-                auth_token = generate_token();
-                // Save it back to ai_config.json to persist it
-                let json_str = std::fs::read_to_string(&config_path).unwrap_or_else(|_| "{}".to_string());
-                if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&json_str) {
-                    val["connection_token"] = serde_json::Value::String(auth_token.clone());
-                    if let Ok(updated_json) = serde_json::to_string_pretty(&val) {
-                        let _ = std::fs::write(&config_path, updated_json);
-                    }
-                }
-            }
+            // The app's own token — generated per run, never written down.
+            //
+            // It used to be read from, and saved back to, `connection_token` in
+            // ai_config.json: a full-access credential in plaintext, in a file
+            // that travels with a roaming profile, a backup or a screen share.
+            // That is the exact exposure commands/secrets.rs moved the API keys
+            // out of, and the one credential that could START things was the one
+            // left behind.
+            //
+            // Nothing needs it to persist. The frontend receives it over Tauri
+            // IPC (`get_api_token`), which no other process can call; sibling
+            // apps now pair instead of reading a file (server/pairing.rs). So
+            // the token lives in this process and dies with it.
+            let auth_token = generate_token();
+            // Remove the stored one on the way past. Leaving it would keep a
+            // working full-access key on disk for every install that ever ran an
+            // older build — the weaker door, still open, with nothing using it.
+            purge_stored_connection_token(&config_path);
             
             // Find an open port, fallback to 14300
             let port = get_free_port().unwrap_or(14300);
@@ -841,8 +998,15 @@ pub fn run() {
                 }
             }
 
+            // One registry, shared by the HTTP middleware, both WebSocket
+            // routes and the Tauri commands that issue and revoke.
+            let token_registry = std::sync::Arc::new(TokenRegistry::new(auth_token.clone()));
+            let pairing_state = std::sync::Arc::new(crate::server::pairing::PairingState::default());
+
             let app_state = AppState {
                 auth_token: auth_token.clone(),
+                tokens: token_registry.clone(),
+                pairing: pairing_state.clone(),
                 port,
                 tasks: tasks.clone(),
                 task_senders: task_senders.clone(),
@@ -855,18 +1019,26 @@ pub fn run() {
             app.manage(ServerConfig {
                 token: auth_token.clone(),
                 port,
+                tokens: token_registry.clone(),
+                pairing: pairing_state.clone(),
             });
 
             // Start Axum server in a background thread
             let router = create_router(app_state);
             let addr = format!("127.0.0.1:{}", port);
             
-            let server_token = auth_token.clone();
             tauri::async_runtime::spawn(async move {
                 let listener = TcpListener::bind(&addr).await.expect("Failed to bind port");
                 println!("J.H AI Agent server running on http://{}", addr);
-                println!("J.H AI Agent token: {}", server_token);
-                axum::serve(listener, router).await.unwrap();
+                // `into_make_service_with_connect_info` is what makes the
+                // peer's address reachable from a handler — server/pairing.rs
+                // needs the client's ephemeral port to find its PID.
+                axum::serve(
+                    listener,
+                    router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                )
+                .await
+                .unwrap();
             });
 
             // Listen for events from tauri Webview and bridge them to WebSocket client
@@ -913,6 +1085,9 @@ pub fn run() {
                             _ => { seen.insert(task_id.clone(), now); true }
                         }
                     };
+                    // Set when an ephemeral run ends: its entry is dropped from the
+                    // map shortly after, instead of living for the whole session.
+                    let mut drop_ephemeral = false;
                     let task_snapshot_for_history = {
                         let mut tasks = tasks_bridge.lock().unwrap();
                         let mut snapshot = None;
@@ -997,8 +1172,13 @@ pub fn run() {
                             if event_type != "stream" {
                                 task.logs.push(ws_packet.clone());
                             }
-                            if is_terminal || aborted || due_for_checkpoint {
+                            let ephemeral = crate::server::router::task_is_ephemeral(task);
+                            // An ephemeral run (Spotlight) is never written to history.
+                            if (is_terminal || aborted || due_for_checkpoint) && !ephemeral {
                                 snapshot = Some(task.clone());
+                            }
+                            if is_terminal && ephemeral {
+                                drop_ephemeral = true;
                             }
                         }
                         snapshot
@@ -1026,6 +1206,17 @@ pub fn run() {
                         // Drop the checkpoint clock too, or the map grows for the life
                         // of the process.
                         checkpoints_bridge.lock().unwrap().remove(&task_id);
+                    }
+                    // Not immediately: a client that subscribed a moment late still
+                    // needs to read how the run ended. Five minutes is far longer
+                    // than that and far shorter than a session of questions.
+                    if drop_ephemeral {
+                        let tasks_later = tasks_bridge.clone();
+                        let id_later = task_id.clone();
+                        std::thread::spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_secs(300));
+                            tasks_later.lock().unwrap().remove(&id_later);
+                        });
                     }
                 }
             });
@@ -1168,6 +1359,13 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_api_token,
+            issue_event_token,
+            list_paired_apps,
+            revoke_paired_app,
+            list_pair_requests,
+            answer_pair_request,
+            list_event_tokens,
+            revoke_event_token,
             get_server_port,
             open_main_window,
             spotlight_navigate,
@@ -1181,7 +1379,6 @@ pub fn run() {
             commands::ai_config::get_ai_config,
             commands::ai_config::save_ai_config,
             commands::ai_config::set_rag_approval,
-            commands::ai_config::export_connection_config,
             // RAG / Indexer
             commands::indexer::init_indexer,
             commands::indexer::query_workspace,

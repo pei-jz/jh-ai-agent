@@ -58,7 +58,14 @@ export default defineConfig({
     // `scripts/` is included for the release-config rules: docs/RELEASING.md
     // documents a combination that produces no error anywhere, so the check that
     // catches it has to be covered like anything else load-bearing.
-    include: ['src/**/*.test.js', 'test/**/*.test.js', 'sdk/**/*.test.js', 'scripts/**/*.test.js'],
+    // `packages/` holds @jh/ai-client, which the sibling apps consume by
+    // path — its pairing and 401-recovery rules are the connection contract
+    // between two applications, so they are covered here rather than only in
+    // whichever app happens to exercise them.
+    include: [
+      'src/**/*.test.js', 'test/**/*.test.js', 'sdk/**/*.test.js',
+      'scripts/**/*.test.js', 'packages/**/*.test.js',
+    ],
     globals: true,
     coverage: {
       provider: 'v8',

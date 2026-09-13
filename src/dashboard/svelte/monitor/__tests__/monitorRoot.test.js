@@ -81,3 +81,20 @@ describe('the inspector column', () => {
         expect(el.querySelector('.mtl-insp')).toBeNull();
     });
 });
+
+/* Intents were removed from what hubApps returns (Report_20260913 §6-6), but
+   this view still read `a.intents.length` — so with ANY app connected, every
+   task view threw and rendered blank. */
+describe('the hub strip', () => {
+    it('does not throw for a connected app that has no intents', () => {
+        expect(() => mount({ header, hub: { apps: [{ name: 'jheditor', resources: [] }] } })).not.toThrow();
+    });
+
+    it('shows the strip for an app with open documents, and not for one without', () => {
+        const withDocs = mount({ header, hub: { apps: [{ name: 'jheditor', resources: [{ uri: 'doc://a', name: 'a.md' }] }] } });
+        expect(withDocs.querySelector('.hub-strip')).toBeTruthy();
+        cleanup();
+        const without = mount({ header, hub: { apps: [{ name: 'jheditor', resources: [] }] } });
+        expect(without.querySelector('.hub-strip')).toBeNull();
+    });
+});

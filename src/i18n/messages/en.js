@@ -260,11 +260,17 @@ export const en = {
     'settings.storage.clearComm': 'Clear communication log file',
     'settings.storage.hint': 'LLM-call inspection and task history (search, filter, delete) are consolidated in <strong>Monitor</strong>.',
 
-    'settings.token': 'J.H AI Agent connection token (API key)',
-    'settings.token.hint': 'Use this token and port <strong>{port}</strong> to connect from external tools such as JHEditor.',
-    'settings.export.title': 'Export to the standard path',
-    'settings.export.hint': 'Saves this host / port / token to <code>%APPDATA%/JH/ai-connection.json</code> (Windows) so other JH apps (JHEditor, JHER, JH Task Manager…) can auto-connect without re-entering credentials.',
-    'settings.export': 'Export',
+    'settings.paired.title': 'Connected apps',
+    'settings.paired.hint': 'Apps such as JHEditor ask to connect on port <strong>{port}</strong>; approving here issues a token. Tokens are <strong>never saved</strong> — closing this app revokes every one of them.',
+    'settings.paired.empty': 'No app is connected right now.',
+    'settings.paired.unknownExe': '(the executable could not be identified)',
+    'settings.paired.revoke': 'Disconnect',
+    'settings.evtok.title': 'Event tokens (webhooks)',
+    'settings.evtok.hint': 'For a git hook or CI script to post events to <code>{url}</code>. <strong>They reach that endpoint only</strong> — they cannot start a task or change settings. Issue one per use.',
+    'settings.evtok.labelPh': 'What it is for (e.g. git hook)',
+    'settings.evtok.issue': 'Issue',
+    'settings.evtok.once': 'This token is shown only now. Copy it into the hook or script.',
+    'settings.evtok.revoke': 'Revoke',
 
     // ── Settings → Memory ──
     'memory.title': 'Agent memory',
