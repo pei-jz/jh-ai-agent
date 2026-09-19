@@ -117,6 +117,13 @@ describe('every setting the screen edits is saved', () => {
         expect(p.read_batch_hint).toBe('on');
     });
 
+    it('sends the sub-agent step cap', () => {
+        // The SAFETY_FIELDS loop patches by a computed key, so the scan above
+        // cannot see this one — and an unsent field is a setting that silently
+        // does nothing, which is what this whole suite exists to catch.
+        expect(buildConfigPayload(base({ subtask_max_steps: 40 }), {}).subtask_max_steps).toBe(40);
+    });
+
     it('sends them as off, not absent, when never touched', () => {
         // Absent would leave a stale 'on' in the stored file untouchable.
         const p = buildConfigPayload(base(), {});

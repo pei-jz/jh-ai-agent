@@ -18,7 +18,9 @@
     import {
         allProviders, providerInfo, defaultBaseUrl, validateInstance, suggestForProvider,
     } from '../../views/config/providers.js';
-    import { inferVisionSupport, instanceSupportsVision } from '../../../modules/ai/modelCapabilities.js';
+    import {
+        inferVisionSupport, instanceSupportsVision, inferReasoningModel, reasoningEffortsFor,
+    } from '../../../modules/ai/modelCapabilities.js';
 
     let {
         /** null = adding; otherwise the instance being edited. */
@@ -55,6 +57,8 @@
         context_window: instance?.context_window ?? '',
         max_output_tokens: instance?.max_output_tokens ?? '',
         temperature: instance?.temperature ?? '',
+        // '' = don't send one, and let the API's own default (medium) stand.
+        reasoning_effort: instance?.reasoning_effort ?? '',
         cost_per_1m_input: instance?.cost_per_1m_input ?? '',
         cost_per_1m_cache_read: instance?.cost_per_1m_cache_read ?? '',
         cost_per_1m_output: instance?.cost_per_1m_output ?? '',
@@ -66,6 +70,15 @@
     const info = $derived(providerInfo(form.provider));
     /** What the name-based rule would say for the form as it stands right now. */
     const inferredVision = $derived(inferVisionSupport(form.provider, form.model));
+    /**
+     * Reasoning models take a depth and reject a temperature; everything else is
+     * the other way round. So the two fields take turns rather than sitting side
+     * by side — offering both would mean offering one the model will 400 on.
+     * Both values are still SAVED either way, so re-pointing a connection at the
+     * other kind of model brings its old setting back rather than losing it.
+     */
+    const isReasoning = $derived(inferReasoningModel(form.provider, form.model));
+    const effortChoices = $derived(reasoningEffortsFor(form.model));
     let showKey = $state(false);
     let errors = $state([]);
 
@@ -104,6 +117,9 @@
         context_window: num(form.context_window),
         max_output_tokens: num(form.max_output_tokens),
         temperature: num(form.temperature),
+        // A blank means "no opinion" — the model's own default decides, and the
+        // request carries no such field at all.
+        reasoning_effort: String(form.reasoning_effort || '').trim() || null,
         cost_per_1m_input: num(form.cost_per_1m_input),
         cost_per_1m_cache_read: num(form.cost_per_1m_cache_read),
         cost_per_1m_output: num(form.cost_per_1m_output),
@@ -241,13 +257,27 @@
                 </small>
             </div>
 
-            <div class="input-group">
-                <label class="input-label" for="modal-inst-temp">{t('conn.temp.label')}</label>
-                <input id="modal-inst-temp" class="input" type="number" min="0" max="2" step="0.1"
-                    bind:value={form.temperature}
-                    placeholder={t('conn.temp.placeholder')}>
-                <small class="cfg-hint">{t('conn.temp.hint')}</small>
-            </div>
+            <!-- Whichever of the two this model actually accepts. See `isReasoning`. -->
+            {#if isReasoning}
+                <div class="input-group" id="modal-effort-group">
+                    <label class="input-label" for="modal-inst-effort">{t('conn.effort.label')}</label>
+                    <select id="modal-inst-effort" class="select" bind:value={form.reasoning_effort}>
+                        <option value="">{t('conn.effort.unset')}</option>
+                        {#each effortChoices as e (e)}
+                            <option value={e}>{t(`conn.effort.${e}`)}</option>
+                        {/each}
+                    </select>
+                    <small class="cfg-hint">{t('conn.effort.hint')}</small>
+                </div>
+            {:else}
+                <div class="input-group">
+                    <label class="input-label" for="modal-inst-temp">{t('conn.temp.label')}</label>
+                    <input id="modal-inst-temp" class="input" type="number" min="0" max="2" step="0.1"
+                        bind:value={form.temperature}
+                        placeholder={t('conn.temp.placeholder')}>
+                    <small class="cfg-hint">{t('conn.temp.hint')}</small>
+                </div>
+            {/if}
 
             <div class="input-group">
                 <span class="input-label">{t('conn.pricing.label')}</span>

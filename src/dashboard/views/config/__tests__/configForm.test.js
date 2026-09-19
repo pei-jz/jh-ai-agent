@@ -98,6 +98,10 @@ describe('SAFETY_FIELDS', () => {
     it('describes every agent-safety limit', () => {
         expect(SAFETY_FIELDS.map(f => f.key)).toEqual([
             'max_steps', 'token_budget', 'wall_clock_minutes',
+            // The sub-agent cap. It was a source constant (20) that nobody could
+            // reach, while the notice a capped sub-agent produced told the user
+            // to raise "Max Agent Steps" — a different setting entirely.
+            'subtask_max_steps',
             'no_progress_window', 'identical_call_threshold',
             // Tier promotion by step count. Off by default: it used to fire at
             // step 15 on every run — a stale field name, not a setting.
@@ -122,6 +126,9 @@ describe('SAFETY_FIELDS', () => {
         expect(by.no_progress_window).toBe(15);
         expect(by.identical_call_threshold).toBe(5);
         expect(by.cycle_detection_min_repeats).toBe(3);
+        // Not 0: blank means "the default 20" for this one, and a 0 fallback
+        // would write a cap of zero steps into the form.
+        expect(by.subtask_max_steps).toBe(20);
     });
 });
 

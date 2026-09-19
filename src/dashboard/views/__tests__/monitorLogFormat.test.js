@@ -3,7 +3,7 @@
 // ACTUAL words (why it passed / what to fix), not just the verdict.
 
 import { describe, it, expect } from 'vitest';
-import { fmtReview, fmtEfficiency, isChatLog } from '../monitorLogFormat.js';
+import { fmtReview, fmtEfficiency, fmtLimit, isChatLog } from '../monitorLogFormat.js';
 
 describe('fmtReview', () => {
     it('shows the verdict with the reason', () => {
@@ -71,10 +71,45 @@ describe('fmtEfficiency', () => {
 });
 
 describe('isChatLog', () => {
-    it('classifies typed cards (TOOL / METRICS / REVIEW) as non-chat', () => {
+    it('classifies typed cards (TOOL / METRICS / REVIEW / LIMIT) as non-chat', () => {
         expect(isChatLog({ method: 'TOOL' })).toBe(false);
         expect(isChatLog({ method: 'METRICS' })).toBe(false);
         expect(isChatLog({ method: 'REVIEW' })).toBe(false);
+        // A limit stop is not an LLM call: as CHAT it would be folded into the
+        // step-header token button and the reason would disappear.
+        expect(isChatLog({ method: 'LIMIT' })).toBe(false);
         expect(isChatLog({ method: 'POST' })).toBe(true);
+    });
+});
+
+describe('fmtLimit', () => {
+    // Until this card existed, a limit was only ever a live status line: gone on
+    // reload, and for a sub-agent never forwarded to the parent at all.
+    it('states which limit fired, how far the run got, and where to change it', () => {
+        const html = fmtLimit({
+            method: 'LIMIT',
+            response: {
+                kind: 'step_limit', limit: 20, used: 20, scope: 'run',
+                setting: 'Settings -> General -> Agent Safety Limits -> Max Agent Steps',
+                message: 'Step limit (20) reached - stopping.',
+            },
+        });
+        expect(html).toContain('Stopped by limit');
+        expect(html).toContain('step limit');
+        expect(html).toContain('20 / 20');
+        expect(html).toContain('Max Agent Steps');
+    });
+
+    it('says when it was a SUB-agent that stopped', () => {
+        const html = fmtLimit({
+            method: 'LIMIT',
+            response: { kind: 'step_limit', limit: 4, used: 4, scope: 'subagent' },
+        });
+        expect(html).toContain('sub-agent');
+    });
+
+    it('survives an entry with nothing in it', () => {
+        expect(fmtLimit({})).toContain('Stopped by limit');
+        expect(fmtLimit({ method: 'LIMIT', response: { kind: 'wall_clock' } })).toContain('? / ?');
     });
 });

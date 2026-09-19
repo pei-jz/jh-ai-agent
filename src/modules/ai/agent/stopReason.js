@@ -43,6 +43,29 @@ const SETTING_FALLBACK = {
 };
 
 /**
+ * A SUB-AGENT's step limit is a different setting from the run's.
+ *
+ * The child's cap is `subtask_max_steps`, and pointing its stop notice at "Max
+ * Agent Steps" was simply false: raising that field changed nothing about the
+ * child, which is the field someone would go and raise after reading this.
+ *
+ * Only `step_limit` differs. A child inherits a SLICE of the parent's token
+ * budget and runs inside the parent's wall clock, so for those two the parent's
+ * setting is genuinely the one to change.
+ */
+const SUB_SETTING_KEY = { step_limit: 'stop.setting.subSteps' };
+const SUB_SETTING_FALLBACK = {
+    step_limit: 'Settings → General → Agent Safety Limits → Max Sub-agent Steps',
+};
+
+/** Where this stop's limit is changed, given who stopped. */
+function settingText(kind, subagent) {
+    const key = (subagent && SUB_SETTING_KEY[kind]) || SETTING_KEY[kind];
+    const fallback = (subagent && SUB_SETTING_FALLBACK[kind]) || SETTING_FALLBACK[kind];
+    return key ? t(key, null, fallback) : '';
+}
+
+/**
  * Build a stop reason.
  *
  * @param {StopKind} kind
@@ -75,16 +98,29 @@ export function stopStatusMessage(reason) {
  * failed: the work so far is intact and sending another message continues it. Without
  * that sentence the honest reading of "停止しました" is "start over".
  */
-export function stopNotice(reason) {
+export function stopNotice(reason, opts = {}) {
     if (!reason) return '';
+    const subagent = !!opts.subagent;
     const limit = reason.limit == null ? '' : Number(reason.limit).toLocaleString();
-    const resume = t('stop.resume', null, 'このタスクにメッセージを送ると、ここから続行できます。');
-    const settingKey = SETTING_KEY[reason.kind];
-    const setting = settingKey ? t(settingKey, null, SETTING_FALLBACK[reason.kind]) : '';
+    // "Send this task a message to continue" is the parent's escape hatch. A
+    // sub-agent has no task to message — it is one tool call inside its parent's
+    // run — so telling the parent to message it describes a door that is not
+    // there. What the parent CAN do is re-delegate with a narrower brief.
+    const resume = subagent
+        ? t('stop.resume.sub', null,
+            'この報告は途中経過です。続きが必要なら、範囲を絞って再度サブタスクに出してください。')
+        : t('stop.resume', null, 'このタスクにメッセージを送ると、ここから続行できます。');
+    const setting = settingText(reason.kind, subagent);
     const where = setting ? t('stop.where', { setting }, `上限は ${setting} で変更できます。`) : '';
 
     switch (reason.kind) {
         case 'step_limit':
+            if (subagent) {
+                return '\n\n' + t('stop.notice.steps.sub', { limit, resume, where },
+                    `⚠️ **サブエージェントは finish_task に到達しないまま停止しました。** `
+                    + `ステップ数がサブエージェントの上限 ${limit} に達したためです`
+                    + `（失敗ではありません）。${resume}${where}`);
+            }
             return '\n\n' + t('stop.notice.steps', { limit, resume, where },
                 `⚠️ **未完了のまま停止しました。** 実行ステップ数が上限 ${limit} に到達したためです`
                 + `（タスクが失敗したわけではありません）。${resume}${where}`);
@@ -104,4 +140,38 @@ export function stopNotice(reason) {
 /** True when the run was cut short rather than finishing on its own terms. */
 export function wasInterrupted(reason) {
     return !!reason && !!SETTING_KEY[reason.kind];
+}
+
+/**
+ * The Raw Log entry for a limit stop.
+ *
+ * A limit was, until now, only ever a `status` line in the live feed — which is
+ * exactly the surface that does NOT survive. The Raw Log is rebuilt from stored
+ * telemetry, and a sub-agent's status lines are not forwarded to its parent at
+ * all, so the one place a user goes to find out why a run stopped was the one
+ * place that never said. This is a first-class entry so the answer is on record:
+ * which limit, what the value was, how far the run got, and where to change it.
+ *
+ * `method: 'LIMIT'` — its own kind, not CHAT (which the log renders as a
+ * step-header button covering token usage) and not an error (nothing failed).
+ *
+ * @param {{kind:string, limit:any, used:any}} reason
+ * @param {{subagent?:boolean, iterations?:number, label?:string}} [opts]
+ */
+export function stopLogEntry(reason, opts = {}) {
+    if (!reason) return null;
+    const subagent = !!opts.subagent;
+    return {
+        method: 'LIMIT',
+        status: 200,
+        stepLabel: t('stop.log.label', null, '⚠️ 上限到達で停止'),
+        response: {
+            kind: reason.kind,
+            limit: reason.limit,
+            used: reason.used ?? opts.iterations ?? null,
+            scope: subagent ? 'subagent' : 'run',
+            message: stopStatusMessage(reason),
+            setting: settingText(reason.kind, subagent),
+        },
+    };
 }

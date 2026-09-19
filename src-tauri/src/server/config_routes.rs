@@ -10,6 +10,7 @@ use axum::{Json, extract::State, http::StatusCode};
 
 use super::router::{AppState, TestConnectionRequest, TestConnectionResponse, load_config};
 use crate::commands::ai_config::AiConfig;
+use crate::commands::ai_providers::is_reasoning_model;
 
 /// GET /api/models — list configured models (dynamic instances, then legacy keys).
 pub(crate) async fn get_models(
@@ -232,11 +233,16 @@ pub(crate) async fn test_connection(
             let mut h = reqwest::header::HeaderMap::new();
             h.insert("Authorization", format!("Bearer {}", final_api_key).parse().map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid API Key header format: {}", e)))?);
             h.insert("Content-Type", "application/json".parse().unwrap());
-            let body = serde_json::json!({
+            // A reasoning model 400s on `max_tokens` ("Use 'max_completion_tokens'
+            // instead") — so the audit reported a broken connection for every
+            // gpt-5 / o-series model, on a credential that was perfectly fine.
+            // 16 rather than 5 because the budget covers reasoning tokens too.
+            let mut body = serde_json::json!({
                 "model": model,
-                "messages": [{"role": "user", "content": "ping"}],
-                "max_tokens": 5
+                "messages": [{"role": "user", "content": "ping"}]
             });
+            let cap = if is_reasoning_model(model) { "max_completion_tokens" } else { "max_tokens" };
+            body[cap] = serde_json::json!(16);
             (url, h, body)
         }
         "anthropic" => {

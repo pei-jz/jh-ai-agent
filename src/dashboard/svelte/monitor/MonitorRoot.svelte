@@ -192,6 +192,30 @@
      and monitor/timelineStyles.js), so the widths are written there rather than as
      an inline `width` — which looks right until the next render and then snaps back. -->
 <div class="monitor-layout" class:is-ask={!!ask} style={`${LEFT_VAR}:${leftWidth}px;${INSP_VAR}:${inspWidth}px`}>
+    <!--
+      The way back.
+
+      A control that hides something has to stay visible while it is hidden, and
+      the one for this list did not: it lived in the tab bar, which is part of
+      the TASK view. Collapse the list, then open the app with nothing selected —
+      which is where it opens — and the list, "New" and "Home" were all behind a
+      button that was no longer on screen. The state persists in localStorage, so
+      it did not come back on a restart either.
+
+      So the list is opened and closed from its own edge, in exactly one place per
+      state: this rail while it is hidden, the ◧ in its header while it is shown.
+    -->
+    {#if listCollapsed}
+        <div class="mpanel-rail">
+            <button class="mrail-btn" type="button" title={t('list.show')}
+                aria-label={t('list.show')} aria-expanded="false"
+                onclick={() => onToggleList?.()}>▸</button>
+            <!-- How many tasks are behind it — the one thing the hidden column
+                 was still telling you. -->
+            {#if taskCount}<span class="mrail-count">{taskCount}</span>{/if}
+        </div>
+    {/if}
+
     <div class="mpanel-left" class:pane-hidden={listCollapsed}>
         <div class="mpanel-left-header">
             <span>{t('list.title')}<span class="mpl-count">{taskCount}</span></span>
@@ -208,6 +232,11 @@
                 {/if}
                 <button class="btn btn-primary mpl-new" type="button" title={t('list.newDetailed')}
                     onclick={() => onNewTask?.()}>{@html icon('plus', 12)} New</button>
+                <!-- Closing the list belongs to the list, not to the tab bar of
+                     the view beside it — see the rail above. -->
+                <button class="mpanel-toggle mpl-hide" type="button" title={t('list.hide')}
+                    aria-label={t('list.hide')} aria-expanded="true"
+                    onclick={() => onToggleList?.()}>◧</button>
             </span>
         </div>
         <!--
@@ -226,8 +255,10 @@
         {#if taskList}<TaskList {...taskList} />{/if}
     </div>
 
-    <!-- The 12px flex gap is the hit area; the divider itself is invisible. -->
-    <div class="mpane-divider" title={t('list.resize')}
+    <!-- The 12px flex gap is the hit area; the divider itself is invisible.
+         Gone with the list: a resize handle for a column that is not on screen
+         does nothing, and the rail is the edge in that state. -->
+    <div class="mpane-divider" class:pane-hidden={listCollapsed} title={t('list.resize')}
         role="separator" aria-orientation="vertical"
         onpointerdown={startDrag('left')}></div>
 
@@ -268,11 +299,15 @@
                     <button class="mfold-all" type="button" title={foldAll.title}
                         onclick={() => onFoldAll?.()}>{foldAll.label}</button>
                 {/if}
-                <button class="mpanel-toggle mfilter-spacer" class:active={!listCollapsed}
-                    type="button" title={t('list.toggle')}
-                    onclick={() => onToggleList?.()}>◧</button>
-                <button class="mpanel-toggle" class:active={inspectorOpen} type="button"
-                    title={t('insp.toggle')}
+                <!-- The list's toggle used to sit here too. It is at the list's
+                     own edge now (the rail / its header), because this bar only
+                     exists while a task is open and the list does not.
+                     The inspector keeps its toggle here, and that is not an
+                     inconsistency: the inspector exists ONLY in the task view, so
+                     it cannot be stranded by the bar going away. It is pushed to
+                     the far right — the edge of the column it opens. -->
+                <button class="mpanel-toggle mfilter-spacer" class:active={inspectorOpen} type="button"
+                    title={t('insp.toggle')} aria-expanded={inspectorOpen}
                     onclick={() => onToggleInspector?.()}>◨</button>
             </div>
 

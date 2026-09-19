@@ -3,8 +3,14 @@
 // READ stays in AgentController; this module just sanitizes the raw object so it
 // can be unit-tested without a backend.
 
+import { SUBTASK_MAX_STEPS_CAP, SUBTASK_MAX_STEPS_CEILING } from './SubagentRoles.js';
+
 export const SAFETY_DEFAULTS = {
     maxSteps: 0,                 // 0 / invalid ⇒ unlimited
+    // Step cap for ONE sub-agent (run_subtask). Unlike every other number here,
+    // 0 does NOT mean unlimited — an unsupervised child with no cap is the thing
+    // the cap exists to prevent — so 0/blank/invalid means "the default", 20.
+    subtaskMaxSteps: SUBTASK_MAX_STEPS_CAP,
     tokenBudget: 0,
     wallClockMinutes: 0,
     noProgressWindow: 15,
@@ -165,8 +171,17 @@ export function normalizeSafetyLimits(cfg = {}) {
     const planMode = PLAN_MODES.has(cfg.plan_mode) ? cfg.plan_mode : d.planMode;
     const subagentReview = SUBAGENT_REVIEW_MODES.has(cfg.subagent_review) ? cfg.subagent_review : d.subagentReview;
 
+    // 0 is not "unlimited" here, so it cannot go through `num` (which treats 0
+    // as a legitimate value meaning disabled). Out of range in either direction
+    // ⇒ the default, and the configured value is clamped to the ceiling.
+    const subtaskRaw = parseInt(cfg.subtask_max_steps, 10);
+    const subtaskMaxSteps = (Number.isFinite(subtaskRaw) && subtaskRaw > 0)
+        ? Math.min(subtaskRaw, SUBTASK_MAX_STEPS_CEILING)
+        : d.subtaskMaxSteps;
+
     return {
         maxSteps:                 num(cfg.max_steps,                   d.maxSteps),
+        subtaskMaxSteps,
         tokenBudget:              num(cfg.token_budget,                d.tokenBudget),
         wallClockMinutes:         num(cfg.wall_clock_minutes,          d.wallClockMinutes),
         noProgressWindow:         num(cfg.no_progress_window,          d.noProgressWindow),

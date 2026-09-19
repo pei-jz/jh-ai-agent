@@ -13,8 +13,26 @@ export const SUBTASK_MAX_PARALLEL = 3;
 export const SUBTASK_MAX_PER_RUN = 8;
 /** Max characters of a child's report returned to the parent. */
 export const SUBTASK_REPORT_MAX_CHARS = 8000;
-/** Hard cap on a child's max_steps regardless of args/preset. */
+/**
+ * DEFAULT cap on a child's max_steps when Settings does not say otherwise.
+ *
+ * It used to be the hard cap, full stop — a source constant with no way to
+ * change it, while the stop notice a capped child produced told the user to go
+ * and raise "Max Agent Steps", a setting that does not touch a sub-agent. So the
+ * one number that decides whether a delegated investigation can finish was both
+ * unreachable and misdescribed. It is now the default for
+ * `subtask_max_steps` (Settings -> General -> Agent Safety Limits), and
+ * SUBTASK_MAX_STEPS_CEILING is what a configured value is clamped to.
+ */
 export const SUBTASK_MAX_STEPS_CAP = 20;
+/**
+ * Sanity ceiling for the CONFIGURED value.
+ *
+ * Not a second opinion about the user's number — it is the point past which a
+ * "sub-agent" is really a second run with no supervision, no UI of its own and
+ * a budget slice sized for a helper. Someone who wants that should start a task.
+ */
+export const SUBTASK_MAX_STEPS_CEILING = 200;
 
 // Shared with AgentModes — see tools/toolSets.js for why they live in one place.
 import { READ_TOOLS, READ_ONLY_TOOLS, EDIT_TOOLS, OUTPUT_TOOLS, WEB_TOOLS } from '../tools/toolSets.js';

@@ -68,6 +68,12 @@ pub struct LlmRequest {
     /// Sampling temperature. None ⇒ provider default. Sent to all providers when present.
     #[serde(default)]
     pub temperature: Option<f32>,
+    /// Reasoning depth for a reasoning model ("minimal"|"low"|"medium"|"high").
+    /// None ⇒ fall back to the connection's own setting, then to not sending it
+    /// at all. Per-request because the depth worth paying for is a property of
+    /// the STEP (plan deeply, edit cheaply), not only of the connection.
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
 }
 
 /// Token usage parsed from a provider's streaming response. Emitted on the final
@@ -236,6 +242,7 @@ pub async fn llm_chat_native<R: Runtime>(
     // per-connection instance config. None ⇒ provider default.
     let mut resolved_max_tokens = payload.max_tokens;
     let mut resolved_temperature = payload.temperature;
+    let mut resolved_reasoning_effort = payload.reasoning_effort.clone();
 
     if let Some(instances) = &config.llm_instances {
         if let Some(inst) = instances.iter().find(|i| i.id == payload.provider) {
@@ -252,6 +259,9 @@ pub async fn llm_chat_native<R: Runtime>(
             }
             if resolved_temperature.is_none() {
                 resolved_temperature = inst.temperature;
+            }
+            if resolved_reasoning_effort.is_none() {
+                resolved_reasoning_effort = inst.reasoning_effort.clone();
             }
             // ── Wire dialect ──────────────────────────────────────────────
             // OpenAI exposes two protocols for the same models. A connection
@@ -376,6 +386,7 @@ pub async fn llm_chat_native<R: Runtime>(
         &payload.tools,
         resolved_max_tokens,
         resolved_temperature,
+        resolved_reasoning_effort.as_deref(),
     );
 
     // ── Surface the EXACT assembled request body to the frontend ──────────

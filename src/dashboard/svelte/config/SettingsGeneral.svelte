@@ -99,6 +99,9 @@
          * like any Svelte 5 prop, so the toggle just flips it.
          */
         showAdvanced = false,
+        /** Side-menu auto-hide. Owned by the parent (persisted in localStorage). */
+        sidebarAutoHide = true,
+        onChangeSidebarAutoHide = null,
     } = $props();
     let evtokLabel = $state('');
 
@@ -223,6 +226,17 @@
     </div>
 
     {#snippet basicBody()}
+        <div class="input-group">
+            <!-- The side menu's auto-hide. A localStorage preference (not part of
+                 the backend config), so it flips live without a Save. -->
+            <div class="toggle-wrap" role="button" tabindex="0"
+                onclick={() => onChangeSidebarAutoHide?.(!sidebarAutoHide)}
+                onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onChangeSidebarAutoHide?.(!sidebarAutoHide); } }}>
+                <div class="toggle" class:active={sidebarAutoHide}></div>
+                <span class="toggle-label">{t('settings.sidebarAutoHide')}</span>
+            </div>
+            <p class="input-hint">{t('settings.sidebarAutoHide.hint')}</p>
+        </div>
         <div class="input-group">
             <!-- The app's own language. Kept next to, but distinct from, the agent's
                  output language below — see i18n/index.js for why they are separate. -->

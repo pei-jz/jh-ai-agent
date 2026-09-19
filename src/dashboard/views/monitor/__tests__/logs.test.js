@@ -94,6 +94,17 @@ describe('buildLogSteps', () => {
         expect(totalSteps).toBe(0);
         expect(requestStepIndexes).toEqual([]);
     });
+
+    it.each([
+        ['an object', { text: 'working' }],
+        ['null', null],
+        ['undefined', undefined],
+    ])('does not throw when a status message is %s', (_name, message) => {
+        // A status event whose `message` is not a string used to crash
+        // buildLogSteps on `.startsWith` and take the whole raw-log view down.
+        const logs = [{ event: 'status', data: { message } }];
+        expect(() => buildLogSteps(logs, fmt)).not.toThrow();
+    });
 });
 
 describe('chatButtonHtml', () => {

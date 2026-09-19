@@ -42,7 +42,8 @@ import {
     SUBTASK_MAX_PARALLEL, SUBTASK_MAX_PER_RUN, SUBTASK_REPORT_MAX_CHARS, SUBTASK_MAX_STEPS_CAP,
     summarizeReview
 } from './agent/SubagentRoles.js';
-import { stopReason, stopNotice, stopStatusMessage } from './agent/stopReason.js';
+import { stopReason, stopNotice, stopStatusMessage, stopLogEntry } from './agent/stopReason.js';
+import { noteThought, noteTools, composePartialReport } from './agent/PartialReport.js';
 // P3 monolith split: pure prompt/history assembly, safety guards, tool
 // dispatch and LLM-turn formatting live in their own modules; this file
 // keeps the run loop, state and orchestration.
@@ -225,9 +226,15 @@ export class AgentController {
                     pctWarned: wallClockWarned,
                 });
                 if (wallClock.stop) {
+                    // The notice is NOT appended here (nor at the token-budget
+                    // stop below). All three limits end in `_finishRun`, which
+                    // composes the notice once — together with the partial
+                    // report that has to come with it when the run never got as
+                    // far as writing one. Appending here would put the notice
+                    // ahead of that and duplicate the wording besides.
                     stoppedBy = stopReason('wall_clock', { limit: safety.wallClockMinutes });
                     onAgentStatus?.({ event: 'status', status: 'running', message: stopStatusMessage(stoppedBy) });
-                    finalResponse = (finalResponse || '') + stopNotice(stoppedBy);
+                    onLog?.(stopLogEntry(stoppedBy, { subagent: this._isSubagent, iterations: iteration }));
                     break;
                 }
                 if (wallClock.warn) {
@@ -279,7 +286,7 @@ export class AgentController {
                 if (budget.stop) {
                     stoppedBy = stopReason('token_budget', { limit: safety.tokenBudget, used: spent });
                     onAgentStatus?.({ event: 'status', status: 'running', message: stopStatusMessage(stoppedBy) });
-                    finalResponse = (finalResponse || '') + stopNotice(stoppedBy);
+                    onLog?.(stopLogEntry(stoppedBy, { subagent: this._isSubagent, iterations: iteration }));
                     break;
                 }
                 if (budget.warn) {
@@ -766,6 +773,9 @@ export class AgentController {
 
                 onAgentStatus?.({ event: 'status', status: 'running', message: `${taskName} (step ${iteration})` });
                 onAgentStatus?.({ event: 'thought', text: thoughtText });
+                // The model's own account of the step — the only thing resembling
+                // a finding that exists before finish_task is called.
+                noteThought(this._stepTrail, { step: iteration, text: thoughtText });
             }
 
             if (toolCall && toolCall.tool_calls && toolCall.tool_calls.length > 0) {
@@ -924,6 +934,7 @@ export class AgentController {
                     // Recorded, but flagged: a user refusal is not a defect to learn
                     // a fix for. Step 1 excludes `denied` rows from card minting.
                     this._trace?.record({ iteration, tool: call.name, args: call.args, result: errorMsg, isError: true, ms: 0, denied: true });
+                    this._noteToolInTrail(iteration, call, errorMsg, true);
                     onAgentStatus?.({ event: 'tool_call', name: call.name, args: call.args, status: 'denied' });
                     // Telemetry too, and not only for symmetry: `tool_call` is a
                     // LIVE-only event — the Story is rebuilt from stored logs on
@@ -973,6 +984,7 @@ export class AgentController {
                         if (isError) hasErrors = true;
                         this._trackReadEfficiency(call, result, isError);
                         this._trace?.record({ iteration, tool: call.name, args: call.args, result, isError, ms: duration });
+                        this._noteToolInTrail(iteration, call, result, isError);
                         if (onLog) this._logToolTelemetry(onLog, iteration, call, result, duration, isError);
                         results.push({ tool_call_name: call.name, result: await this._recallMemory(call, result, onAgentStatus, iteration), id: callIdOf.get(call) });
                     }
@@ -991,6 +1003,7 @@ export class AgentController {
 
                     this._trackReadEfficiency(call, result, isError);
                     this._trace?.record({ iteration, tool: call.name, args: call.args, result, isError, ms: toolDuration });
+                    this._noteToolInTrail(iteration, call, result, isError);
                     if (onLog) this._logToolTelemetry(onLog, iteration, call, result, toolDuration, isError);
                     results.push({ tool_call_name: call.name, result: await this._recallMemory(call, result, onAgentStatus, iteration), id: callIdOf.get(call) });
 
@@ -1514,7 +1527,31 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
             // silently — no status event at all — so the run simply appeared to halt.
             stoppedBy = stopReason('step_limit', { limit: this.maxIterations, used: iteration });
             onAgentStatus?.({ event: 'status', status: 'running', message: stopStatusMessage(stoppedBy) });
-            finalResponse = (finalResponse || '') + stopNotice(stoppedBy);
+            onLog?.(stopLogEntry(stoppedBy, { subagent: this._isSubagent, iterations: iteration }));
+        }
+
+        // ── What a stopped run has to show for itself ────────────────────
+        //
+        // A limit does not stop the run at a tidy moment: it stops it mid-step,
+        // before `finish_task`, so `finalResponse` is usually empty. The caller
+        // then gets the stop notice and nothing else — and for a SUB-AGENT the
+        // caller is the parent model, which has no other window into what the
+        // child did. Four read-only researchers once spent seventeen minutes on
+        // this workspace and returned four copies of "stopped", with every
+        // finding they had made still sitting in a trail nobody read.
+        //
+        // So when the run was cut short and produced no deliverable, the trail is
+        // folded into a partial report. It is assembled, never generated: the
+        // model's own per-step notes and the calls it actually made.
+        if (stoppedBy) {
+            const wrote = String(finalResponse || '').trim();
+            const alreadyReported = wrote.length >= DELIVERABLE_MIN_CHARS
+                || envelopeHasContent(this._lastResultEnvelope);
+            const partial = alreadyReported
+                ? ''
+                : composePartialReport(this._stepTrail, { subagent: !!this._isSubagent });
+            finalResponse = [wrote, stopNotice(stoppedBy, { subagent: !!this._isSubagent }).trim(), partial]
+                .filter(Boolean).join('\n\n');
         }
 
         // Flush the failure trace. Best-effort by construction (flush never
@@ -1827,6 +1864,13 @@ Please output ONLY valid JSON matching the required tool call format. Do not add
         // Write-ownership registry (Step 3): label → active write claim
         // (scope array). Children whose claims overlap are SERIALIZED.
         this._writeClaims = new Map();
+
+        // ── Step trail (agent/PartialReport.js) ──────────────────────────
+        // What the run said and did, step by step. Its ONLY consumer is the
+        // partial report built when a limit ends the run before the model wrote
+        // one — which, for a sub-agent, is the difference between its parent
+        // receiving its findings and receiving the word "stopped".
+        this._stepTrail = [];
 
         // ── Efficiency instrumentation (step-reduction measurement) ───────
         // Continuously measure the two dominant token sinks so a regression in
@@ -3045,6 +3089,28 @@ ${String(finalResponse || '').slice(0, 2000)}`;
     // existing this._method(...) call sites working.
     _toolArgHint(name, args) { return toolArgHint(name, args); }
 
+    /**
+     * Record one completed tool call in the step trail.
+     *
+     * Beside `_trace.record` rather than inside it: the trace keeps a failure
+     * SIGNATURE (tool, kind, target) for the memory layer and deliberately drops
+     * the text, while a partial report needs the human-readable call — the path
+     * that was read, the query that was searched, the message an error carried.
+     */
+    _noteToolInTrail(iteration, call, result, isError) {
+        try {
+            noteTools(this._stepTrail, {
+                step: iteration,
+                tools: [{
+                    name: call?.name,
+                    hint: this._toolArgHint(call?.name, call?.args),
+                    ok: !isError,
+                    error: isError ? String(result ?? '') : '',
+                }],
+            });
+        } catch (_) { /* the trail is diagnostics — never fail a run for it */ }
+    }
+
     /** Total character weight of a history array (cheap proxy for token size). */
     _historyChars(history) { return historyChars(history); }
 
@@ -3492,7 +3558,15 @@ ${String(finalResponse || '').slice(0, 2000)}`;
             }
         }
 
-        const maxSteps = Math.max(1, Math.min(SUBTASK_MAX_STEPS_CAP,
+        // The ceiling is the CONFIGURED one (Settings → General → Agent Safety
+        // Limits → Max Sub-agent Steps), not a source constant. It was 20, fixed,
+        // and the orchestrating model asks for the maximum it is offered — so
+        // every delegated investigation of any size was cut off at the same
+        // twenty steps, and the notice it produced pointed at a different
+        // setting entirely. `safety` falls back to the default when a caller
+        // (a test, an older path) did not pass limits.
+        const stepCeiling = safety?.subtaskMaxSteps || SUBTASK_MAX_STEPS_CAP;
+        const maxSteps = Math.max(1, Math.min(stepCeiling,
             Number(args?.max_steps) > 0 ? Number(args.max_steps) : roleDef.maxIterations));
         // Tier: an explicit args.model wins, then the role preset. EXCEPT the
         // reviewer under phase routing — the independent review IS the review

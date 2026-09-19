@@ -292,12 +292,21 @@ describe('SettingsGeneral — phase routing', () => {
         expect(chosen(general({ config: cfg(TWO_TIERS) }), 'phase-routing')).toBe('off');
     });
 
-    it('renders all six safety limits from the shared field table', () => {
+    it('renders every safety limit from the shared field table', () => {
         const el = general();
         for (const key of ['max_steps', 'token_budget', 'wall_clock_minutes',
+            // The sub-agent cap: a source constant until it turned out to be the
+            // number that decided whether a delegated investigation could finish.
+            'subtask_max_steps',
             'no_progress_window', 'identical_call_threshold', 'cycle_detection_min_repeats']) {
             expect(el.querySelector(`#cfg-${key}`), key).not.toBe(null);
         }
+    });
+
+    it('shows the sub-agent cap as 20 when the config does not set it', () => {
+        // Blank means "the default" for this field, so an empty box would state
+        // a cap that is not the one in force.
+        expect(general().querySelector('#cfg-subtask_max_steps').value).toBe('20');
     });
 
     it('reports 0 when a limit is CLEARED — that is how you disable it', () => {

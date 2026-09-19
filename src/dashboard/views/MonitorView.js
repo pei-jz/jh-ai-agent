@@ -33,7 +33,7 @@ import { interactionOf, ASK } from '../../modules/ai/agent/InteractionMode.js';
 import { takePendingLaunch } from './monitor/pendingLaunch.js';
 import { toolTarget, toolLineText } from './monitor/toolLine.js';
 import { MONITOR_STYLES } from './MonitorView.styles.js';
-import { extractThoughtSummary, fmtThought, formatThoughtDetail, fmtTool, fmtFile, fmtStatus, isChatLog, fmtEfficiency, fmtReview, fmtTelemetry } from './monitorLogFormat.js';
+import { extractThoughtSummary, fmtThought, formatThoughtDetail, fmtTool, fmtFile, fmtStatus, isChatLog, fmtEfficiency, fmtReview, fmtLimit, fmtTelemetry } from './monitorLogFormat.js';
 // P4 monolith split: approval-card markup, token-usage aggregation and the
 // All-Logs step-grouping loop live in monitor/ pure modules; this file keeps
 // the view orchestration (DOM + WS + Svelte mounts).
@@ -100,6 +100,24 @@ let _inspPaneWidth = readWidth(INSP_KEY, INSP_DEFAULT);
 
 /** How many log entries the Task view fetches on open (newest first). */
 const LOG_PAGE_SIZE = 400;
+
+/**
+ * Shortest gap between two Raw Log rebuilds while a run is streaming.
+ *
+ * The Raw Log is derived from the WHOLE log list: one packet arrives, the panel
+ * re-derives every step and re-renders the lines that changed. That is fine on a
+ * finished task and quadratic on a live one — the cost of a rebuild grows with
+ * the log while the number of rebuilds grows with it too. Measured on a real run
+ * (741 entries) one rebuild costs ~8ms of string building alone, before the DOM;
+ * at 4,000 entries it is ~13ms, at 8,000 ~27ms. Multiplied by a packet each,
+ * that is minutes of blocked main thread, and a blocked main thread is a window
+ * that does not answer clicks — including the click on this very tab.
+ *
+ * So the rebuild is coalesced: everything else still updates per packet (status,
+ * header, the Story), and the log catches up at most five times a second, with a
+ * trailing rebuild so the last packet is never left out.
+ */
+const RAW_LOG_REBUILD_MS = 200;
 
 /** The one element this view owns; everything inside it is MonitorRoot's. */
 const ROOT_HOST = 'monitor-root';
@@ -269,6 +287,9 @@ export class MonitorView {
         // ── Tear down the previous task's live plumbing ──
         if (this.socket) { try { this.socket.close(); } catch (_) {} this.socket = null; }
         if (this._replayFlushTimer) { clearTimeout(this._replayFlushTimer); this._replayFlushTimer = null; }
+        // A pending Raw Log rebuild belongs to the task being left.
+        if (this._rawTrailTimer) { clearTimeout(this._rawTrailTimer); this._rawTrailTimer = null; }
+        this._rawBuiltAt = 0;
         this._replaying = false;
         // Migrated regions belong to the OUTGOING task; a fresh mount follows.
         // One host: MonitorRoot owns every component inside it.
@@ -557,8 +578,35 @@ export class MonitorView {
         };
     }
 
-    _syncRawLog({ follow = false } = {}) {
-        this._logVersion = (this._logVersion || 0) + 1;
+    /**
+     * Re-render, and (unless it is being coalesced) rebuild the Raw Log with it.
+     *
+     * `live: true` marks the per-packet caller — the only one that can arrive
+     * faster than the panel can be rebuilt. See RAW_LOG_REBUILD_MS. The rebuild
+     * is what `_logVersion` triggers: the log array is mutated in place, so the
+     * panel re-derives on the version and on nothing else.
+     */
+    _syncRawLog({ follow = false, live = false } = {}) {
+        const showingRawLog = this._filter === 'all';
+        const since = Date.now() - (this._rawBuiltAt || 0);
+        const hold = live && showingRawLog && since < RAW_LOG_REBUILD_MS;
+
+        if (hold) {
+            // The packet is already in `this.logs`; without a trailing rebuild it
+            // would sit there unshown until the NEXT packet — and the last packet
+            // of a run has no next one, so the panel would end a step behind.
+            if (!this._rawTrailTimer) {
+                this._rawTrailTimer = setTimeout(() => {
+                    this._rawTrailTimer = null;
+                    if (!this._destroyed) this._syncRawLog({ follow: true });
+                }, RAW_LOG_REBUILD_MS - since);
+            }
+        } else {
+            if (this._rawTrailTimer) { clearTimeout(this._rawTrailTimer); this._rawTrailTimer = null; }
+            this._rawBuiltAt = Date.now();
+            this._logVersion = (this._logVersion || 0) + 1;
+        }
+
         this._sync();
         if (follow && !this._userScrolledUp) {
             Promise.resolve().then(() => { if (!this._destroyed) this._rootApi?.scrollToBottom(); });
@@ -616,6 +664,10 @@ export class MonitorView {
                 if (log.data?.method === 'TOOL') return fmtTelemetry(log.data);
                 if (log.data?.method === 'METRICS') return fmtEfficiency(log.data);
                 if (log.data?.method === 'REVIEW') return fmtReview(log.data);
+                // Why the run stopped, on the record. The live status line that
+                // used to be the only trace of a limit does not survive a reload,
+                // and a sub-agent's status never reached this surface at all.
+                if (log.data?.method === 'LIMIT') return fmtLimit(log.data);
                 return ''; // CHAT handled by renderAllLogs / connectWebSocket
             case 'confirm_request': return this._fmtConfirm(log.data);
             // A marker, not a line: the outcome it carries is already shown by
@@ -1088,7 +1140,9 @@ export class MonitorView {
                 }
                 if (isStepBoundary(packet)) this._stepMemory = {};
 
-                this._syncRawLog({ follow: true });
+                // `live` — this is the per-packet caller, and the only one that
+                // can outrun the panel it is asking to rebuild.
+                this._syncRawLog({ follow: true, live: true });
 
                 // Update progress/status/tokens
                 if (packet.event === 'token_usage') {
@@ -2839,6 +2893,7 @@ export class MonitorView {
         if (this._newTaskKeyHandler) { document.removeEventListener('keydown', this._newTaskKeyHandler); this._newTaskKeyHandler = null; }
         if (this.socket) { this.socket.close(); this.socket = null; }
         if (this._replayFlushTimer) { clearTimeout(this._replayFlushTimer); this._replayFlushTimer = null; }
+        if (this._rawTrailTimer) { clearTimeout(this._rawTrailTimer); this._rawTrailTimer = null; }
         // Release the window-level Tauri drag-drop listener (previously leaked
         // one per view instance).
         if (this._dragUnlisten) { try { this._dragUnlisten(); } catch (_) {} this._dragUnlisten = null; }

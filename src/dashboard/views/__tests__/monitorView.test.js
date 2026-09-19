@@ -1438,3 +1438,77 @@ describe('connectWebSocket — a URL is not built out of values we do not have',
         expect(seen).toContain(false);
     });
 });
+
+/*
+ * The Raw Log while a run is streaming.
+ *
+ * Reported: with a task in progress, the app stops answering the Raw Log tab.
+ * The panel is derived from the WHOLE log list and was rebuilt on every packet,
+ * so the work per packet grew with the log while the packets kept coming —
+ * measured at ~8ms of string building per rebuild at 741 entries and ~27ms at
+ * 8,000, before any DOM. A main thread spending that on every packet is a window
+ * that does not answer clicks.
+ */
+describe('Raw Log rebuilds while live', () => {
+    beforeEach(() => { vi.useFakeTimers(); });
+    afterEach(() => { vi.useRealTimers(); });
+
+    /** The version is what the panel rebuilds on — counting it counts rebuilds. */
+    const rebuilds = (fn) => {
+        const before = v._logVersion || 0;
+        fn();
+        return (v._logVersion || 0) - before;
+    };
+
+    it('coalesces a burst of packets into one rebuild', () => {
+        v._filter = 'all';
+        v._sync = () => {};
+        const n = rebuilds(() => {
+            for (let i = 0; i < 50; i++) v._syncRawLog({ live: true });
+        });
+        expect(n).toBe(1);
+    });
+
+    it('still shows the last packet — the burst has no packet after it', () => {
+        v._filter = 'all';
+        v._sync = () => {};
+        for (let i = 0; i < 50; i++) v._syncRawLog({ live: true });
+        const before = v._logVersion;
+        vi.advanceTimersByTime(500);      // the trailing rebuild fires
+        expect(v._logVersion).toBeGreaterThan(before);
+    });
+
+    it('catches up again once the gap has passed', () => {
+        v._filter = 'all';
+        v._sync = () => {};
+        expect(rebuilds(() => v._syncRawLog({ live: true }))).toBe(1);
+        vi.advanceTimersByTime(1000);
+        expect(rebuilds(() => v._syncRawLog({ live: true }))).toBeGreaterThanOrEqual(1);
+    });
+
+    it('does not hold anything back on the Story tab — there is no panel to rebuild', () => {
+        v._filter = 'result';
+        v._sync = () => {};
+        const n = rebuilds(() => {
+            for (let i = 0; i < 5; i++) v._syncRawLog({ live: true });
+        });
+        expect(n).toBe(5);
+    });
+
+    it('never coalesces a non-live caller (a tab switch, a page of history)', () => {
+        v._filter = 'all';
+        v._sync = () => {};
+        const n = rebuilds(() => {
+            for (let i = 0; i < 5; i++) v._syncRawLog();
+        });
+        expect(n).toBe(5);
+    });
+
+    it('re-renders everything else on every packet — only the log waits', () => {
+        v._filter = 'all';
+        let syncs = 0;
+        v._sync = () => { syncs++; };
+        for (let i = 0; i < 20; i++) v._syncRawLog({ live: true });
+        expect(syncs).toBe(20);
+    });
+});

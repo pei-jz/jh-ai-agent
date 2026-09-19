@@ -150,11 +150,60 @@ pub(crate) fn split_system_on_cache_break(sys: &str, sentinel: &str) -> (String,
 ///
 /// `gpt-5-chat` is the non-reasoning chat variant and does take temperature.
 pub(crate) fn model_accepts_temperature(model: &str) -> bool {
+    !is_reasoning_model(model)
+}
+
+/// A model that spends hidden reasoning tokens before it answers.
+///
+/// One name test, three consequences, all of them the same fact seen from
+/// different sides: it rejects `temperature`, it renames `max_tokens` to
+/// `max_completion_tokens`, and it is the only kind of model `reasoning_effort`
+/// means anything to.
+pub(crate) fn is_reasoning_model(model: &str) -> bool {
     let m = model.to_lowercase();
-    let reasoning = (m.contains("gpt-5") && !m.contains("chat"))
+    (m.contains("gpt-5") && !m.contains("chat"))
         || m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4")
-        || m.contains("-o1") || m.contains("-o3") || m.contains("-o4");
-    !reasoning
+        || m.contains("-o1") || m.contains("-o3") || m.contains("-o4")
+}
+
+/// Providers that speak the OpenAI wire format, and so share its parameter
+/// names and its rules about which of them a reasoning model will accept.
+///
+/// `ollama` is excluded on purpose: its OpenAI-compat layer passes unknown
+/// fields down to runtimes that reject them, and no model it serves is one of
+/// these anyway. Anthropic and Gemini are excluded because their thinking
+/// budgets are `thinking.budget_tokens` and `thinkingConfig` — different
+/// parameters with different units, not this one under another name.
+fn is_openai_family(provider: &str) -> bool {
+    matches!(provider, "openai" | "openai_responses" | "azure" | "generic")
+}
+
+/// The reasoning depth to actually send, or None to send nothing.
+///
+/// Returns None — rather than an error — for every case where the setting
+/// cannot apply: a non-reasoning model, a provider that has no such parameter,
+/// an unset or unrecognised value. A per-connection setting outlives the model
+/// it was made for, and dropping it silently is what lets one connection be
+/// re-pointed between a chat model and a reasoning model without being re-edited
+/// (the same bargain `temperature` already gets, in the other direction).
+///
+/// `"minimal"` exists only on the gpt-5 family; o-series 400s on it, so it is
+/// clamped to the shallowest depth that model does have instead.
+pub(crate) fn normalize_reasoning_effort(
+    provider: &str,
+    model: &str,
+    effort: Option<&str>,
+) -> Option<String> {
+    let e = effort?.trim().to_lowercase();
+    if e.is_empty() || !is_openai_family(provider) || !is_reasoning_model(model) {
+        return None;
+    }
+    let supports_minimal = model.to_lowercase().contains("gpt-5");
+    match e.as_str() {
+        "minimal" if !supports_minimal => Some("low".to_string()),
+        "minimal" | "low" | "medium" | "high" => Some(e),
+        _ => None,
+    }
 }
 
 /// Build the Responses API `input` array from the same history the Chat
@@ -737,6 +786,7 @@ pub(crate) fn build_request_body(
     tools: &Option<serde_json::Value>,
     resolved_max_tokens: Option<u32>,
     resolved_temperature: Option<f32>,
+    resolved_reasoning_effort: Option<&str>,
 ) -> serde_json::Value {
     match provider {
         "openai" | "ollama" | "azure" | "generic" => {
@@ -784,10 +834,32 @@ pub(crate) fn build_request_body(
             // so unconfigured connections keep the provider's default behavior.
             if let Some(obj) = body_obj.as_object_mut() {
                 if let Some(mt) = resolved_max_tokens {
-                    obj.insert("max_tokens".to_string(), serde_json::json!(mt));
+                    // A reasoning model rejects `max_tokens` here outright —
+                    // "Use 'max_completion_tokens' instead". The field was
+                    // renamed once the budget started covering the invisible
+                    // reasoning tokens as well as the visible answer, so the
+                    // old name now means something the model cannot promise.
+                    let field = if is_openai_family(provider) && is_reasoning_model(model) {
+                        "max_completion_tokens"
+                    } else {
+                        "max_tokens"
+                    };
+                    obj.insert(field.to_string(), serde_json::json!(mt));
                 }
+                // Dropped for reasoning models for the same reason the Responses
+                // arm drops it: they 400 on it, and the setting was made for
+                // whichever model this connection pointed at first.
                 if let Some(temp) = resolved_temperature {
-                    obj.insert("temperature".to_string(), serde_json::json!(temp));
+                    if !is_openai_family(provider) || model_accepts_temperature(model) {
+                        obj.insert("temperature".to_string(), serde_json::json!(temp));
+                    }
+                }
+                // Chat Completions takes the depth as a flat top-level field;
+                // Responses nests it under `reasoning`. Same setting, and
+                // `normalize_reasoning_effort` decides for both whether this
+                // model can be sent one at all.
+                if let Some(effort) = normalize_reasoning_effort(provider, model, resolved_reasoning_effort) {
+                    obj.insert("reasoning_effort".to_string(), serde_json::json!(effort));
                 }
             }
             // Forward native tool definitions if provided. Excluded for "ollama"
@@ -860,6 +932,11 @@ pub(crate) fn build_request_body(
                     if model_accepts_temperature(model) {
                         obj.insert("temperature".to_string(), serde_json::json!(temp));
                     }
+                }
+                // The other half of the same trade: what a reasoning model takes
+                // in place of temperature. Nested here, flat on Chat Completions.
+                if let Some(effort) = normalize_reasoning_effort(provider, model, resolved_reasoning_effort) {
+                    obj.insert("reasoning".to_string(), serde_json::json!({ "effort": effort }));
                 }
                 if let Some(tools) = tools {
                     let converted = openai_tools_to_responses(tools, true);
@@ -1260,18 +1337,112 @@ mod responses_api_tests {
         let body = build_request_body(
             "openai_responses", "o3",
             vec![msg("user", "hi")],
-            None, &None, &None, None, Some(0.2),
+            None, &None, &None, None, Some(0.2), None,
         );
         assert!(body.get("temperature").is_none());
 
         let body = build_request_body(
             "openai_responses", "gpt-4o",
             vec![msg("user", "hi")],
-            None, &None, &None, None, Some(0.2),
+            None, &None, &None, None, Some(0.2), None,
         );
         // f32 → JSON widens (0.2f32 is 0.20000000298…), so compare as a number.
         let sent = body["temperature"].as_f64().expect("temperature must be sent");
         assert!((sent - 0.2).abs() < 1e-6, "got {}", sent);
+    }
+
+    // ── reasoning effort ─────────────────────────────────────────────────
+
+    #[test]
+    fn a_chat_model_is_never_sent_a_reasoning_effort() {
+        // The setting outlives the model it was made for: a connection moved
+        // from o3 to gpt-4o must keep working, not 400 on a leftover field.
+        assert_eq!(normalize_reasoning_effort("openai", "gpt-4o", Some("high")), None);
+        assert_eq!(normalize_reasoning_effort("openai", "gpt-5-chat-latest", Some("high")), None);
+    }
+
+    #[test]
+    fn a_provider_without_the_parameter_is_never_sent_one() {
+        // Anthropic and Gemini have thinking budgets, but not THIS field.
+        assert_eq!(normalize_reasoning_effort("anthropic", "claude-opus-4", Some("high")), None);
+        assert_eq!(normalize_reasoning_effort("gemini", "gemini-2.5-pro", Some("high")), None);
+        assert_eq!(normalize_reasoning_effort("ollama", "o3", Some("high")), None);
+    }
+
+    #[test]
+    fn minimal_is_clamped_for_a_model_that_has_no_such_depth() {
+        // "minimal" is gpt-5-only; o-series 400s on it.
+        assert_eq!(normalize_reasoning_effort("openai", "gpt-5", Some("minimal")).as_deref(), Some("minimal"));
+        assert_eq!(normalize_reasoning_effort("openai", "o3", Some("minimal")).as_deref(), Some("low"));
+    }
+
+    #[test]
+    fn an_unset_or_unrecognised_value_sends_nothing() {
+        assert_eq!(normalize_reasoning_effort("openai", "gpt-5", None), None);
+        assert_eq!(normalize_reasoning_effort("openai", "gpt-5", Some("")), None);
+        assert_eq!(normalize_reasoning_effort("openai", "gpt-5", Some("  ")), None);
+        assert_eq!(normalize_reasoning_effort("openai", "gpt-5", Some("extreme")), None);
+    }
+
+    #[test]
+    fn chat_completions_takes_it_flat_and_responses_takes_it_nested() {
+        let chat = build_request_body(
+            "openai", "gpt-5",
+            vec![msg("user", "hi")],
+            None, &None, &None, None, None, Some("high"),
+        );
+        assert_eq!(chat["reasoning_effort"], serde_json::json!("high"));
+        assert!(chat.get("reasoning").is_none());
+
+        let responses = build_request_body(
+            "openai_responses", "gpt-5",
+            vec![msg("user", "hi")],
+            None, &None, &None, None, None, Some("high"),
+        );
+        assert_eq!(responses["reasoning"]["effort"], serde_json::json!("high"));
+        assert!(responses.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn a_reasoning_model_on_chat_completions_gets_the_renamed_token_cap() {
+        // `max_tokens` is rejected outright by these models — the budget now
+        // covers the invisible reasoning tokens, so the field was renamed.
+        let body = build_request_body(
+            "openai", "o3",
+            vec![msg("user", "hi")],
+            None, &None, &None, Some(2048), Some(0.2), None,
+        );
+        assert_eq!(body["max_completion_tokens"], serde_json::json!(2048));
+        assert!(body.get("max_tokens").is_none());
+        // …and the temperature it would also have rejected is gone with it.
+        assert!(body.get("temperature").is_none());
+    }
+
+    #[test]
+    fn an_ordinary_chat_model_keeps_the_old_field_names() {
+        let body = build_request_body(
+            "openai", "gpt-4o",
+            vec![msg("user", "hi")],
+            None, &None, &None, Some(2048), Some(0.2), Some("high"),
+        );
+        assert_eq!(body["max_tokens"], serde_json::json!(2048));
+        assert!(body.get("max_completion_tokens").is_none());
+        assert!(body.get("reasoning_effort").is_none());
+        assert!(body["temperature"].is_number());
+    }
+
+    #[test]
+    fn a_local_model_keeps_its_temperature_whatever_it_is_called() {
+        // The name rule is an OpenAI-family rule. An ollama model that happens
+        // to start with "o1" is not a reasoning model and must not lose the
+        // temperature its connection set.
+        let body = build_request_body(
+            "ollama", "o1-local-experiment",
+            vec![msg("user", "hi")],
+            None, &None, &None, None, Some(0.2), None,
+        );
+        assert!(body["temperature"].is_number());
+        assert_eq!(body["max_tokens"], serde_json::Value::Null);
     }
 
     // ── request body shape ───────────────────────────────────────────────
@@ -1282,7 +1453,7 @@ mod responses_api_tests {
             "openai_responses", "gpt-5",
             vec![msg("user", "hello")],
             Some("be brief".to_string()),
-            &None, &None, Some(2048), None,
+            &None, &None, Some(2048), None, None,
         );
         // Renamed / restructured fields.
         assert_eq!(body["instructions"], serde_json::json!("be brief"));
@@ -1304,7 +1475,7 @@ mod responses_api_tests {
         let body = build_request_body(
             "openai_responses", "gpt-4o",
             vec![msg("user", "hello")],
-            Some(sys), &None, &None, None, None,
+            Some(sys), &None, &None, None, None, None,
         );
         assert_eq!(body["instructions"], serde_json::json!("STABLE PART"));
         let input = body["input"].as_array().unwrap();
@@ -1426,7 +1597,7 @@ mod responses_api_tests {
         let body = build_request_body(
             "openai_responses", "gpt-4o",
             vec![msg("user", "hi")],
-            None, &None, &Some(tools()), None, None,
+            None, &None, &Some(tools()), None, None, None,
         );
         assert_eq!(body["tools"][0]["name"], serde_json::json!("read_file"));
         assert_eq!(body["tool_choice"], serde_json::json!("auto"));
@@ -1439,7 +1610,7 @@ mod responses_api_tests {
         let body = build_request_body(
             "openai", "gpt-4o",
             vec![msg("user", "hi")],
-            Some("sys".to_string()), &None, &None, Some(100), Some(0.2),
+            Some("sys".to_string()), &None, &None, Some(100), Some(0.2), None,
         );
         assert!(body["messages"].is_array());
         assert_eq!(body["max_tokens"], serde_json::json!(100));

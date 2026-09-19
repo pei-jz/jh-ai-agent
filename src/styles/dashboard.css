@@ -679,6 +679,34 @@ body {
   /* No transition — fixed width, no hover expand */
 }
 
+/* Auto-hide: the rail slides fully off-screen — nothing of it stays visible —
+   leaving only an invisible 8px hover strip along the window's left edge. The
+   cursor brushing that strip (or keyboard focus) slides the rail back in.
+   Controlled by Settings → General → Basic, ON by default (Sidebar.js writes
+   `.auto-hide` when the stored preference allows it). */
+.sidebar.auto-hide {
+  position: fixed;
+  top: var(--titlebar-height);
+  left: 0;
+  height: calc(100vh - var(--titlebar-height));
+  width: var(--sidebar-width);
+  min-width: 0;
+  background-color: transparent;
+  background-image: none;
+  border-right: 1px solid transparent;
+  box-shadow: none;
+  transform: translateX(calc(-100% + 8px));
+  transition: transform var(--transition-normal);
+}
+.sidebar.auto-hide:hover,
+.sidebar.auto-hide:focus-within {
+  transform: translateX(0);
+  background-color: var(--surface-panel);
+  background-image: var(--texture-app);
+  border-right: 1px solid var(--line);
+  box-shadow: var(--shadow-pop);
+}
+
 /* The logo block is gone — see the note at the top of components/Sidebar.js.
    Its rules are removed rather than left orphaned: dead selectors are how a
    stylesheet ends up with three ways to size the same thing. */

@@ -51,8 +51,12 @@ export function buildLogSteps(logs, fmt) {
         // Skip noise events
         if (SKIP_EVENTS.has(log.event)) continue;
 
-        // Step boundary marker
-        if (log.event === 'status' && log.data.message?.startsWith('Thinking... (step ')) {
+        // Step boundary marker. `message` is not always a string: a status
+        // event can carry an object (e.g. a rich status payload), and calling
+        // .startsWith on it throws and takes the whole raw-log view down.
+        if (log.event === 'status'
+            && typeof log.data?.message === 'string'
+            && log.data.message.startsWith('Thinking... (step ')) {
             flushStep();
             const m = log.data.message.match(/\(step (\d+)\)/);
             const stepId = m ? parseInt(m[1]) : stepCount + 1;

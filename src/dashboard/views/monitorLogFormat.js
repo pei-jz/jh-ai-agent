@@ -342,7 +342,42 @@ export function fmtStatus(log) {
 
 export function isChatLog(data) {
         const m = data && data.method;
-        return !!data && m !== 'TOOL' && m !== 'METRICS' && m !== 'REVIEW';
+        return !!data && m !== 'TOOL' && m !== 'METRICS' && m !== 'REVIEW' && m !== 'LIMIT';
+    }
+
+    /** ⚠️ A safety limit ended the run — see agent/stopReason.js stopLogEntry. */
+
+export function fmtLimit(d) {
+        const r = (d && d.response) || {};
+        const KIND = {
+            step_limit: 'ステップ上限 / step limit',
+            token_budget: 'トークン予算 / token budget',
+            wall_clock: '実行時間 / wall clock',
+        };
+        const kind = KIND[r.kind] || r.kind || 'limit';
+        // A sub-agent's stop is the one the Raw Log could not show at all: its
+        // status feed is not forwarded to the parent, so this row is the only
+        // place the cap it hit is ever stated.
+        const who = r.scope === 'subagent'
+            ? '<strong>sub-agent</strong>'
+            : 'run';
+        const num = (v) => (v === null || v === undefined || v === '' ? '?' : Number(v).toLocaleString());
+        // Same chip styling as the Efficiency Report — this row is read in the
+        // same scan, and a second chip look would only imply a second meaning.
+        const chips = [
+            `⛔ ${kind}`,
+            `📍 ${num(r.used)} / ${num(r.limit)}`,
+        ].map(c =>
+            `<span style="display:inline-block;padding:2px 8px;border-radius:var(--r-3);background:var(--surface-sunken);font-size:11px">${escapeHtml(c)}</span>`
+        ).join(' ');
+        const where = r.setting
+            ? `<div style="margin-top:3px;font-size:11px;opacity:.75">⚙ ${escapeHtml(String(r.setting))}</div>`
+            : '';
+        const msg = r.message
+            ? `<div style="margin-top:3px;font-size:11px;opacity:.85">${escapeHtml(String(r.message))}</div>`
+            : '';
+        return `<div class="mlog mlog-warn log-warn"><span class="mlog-icon">⚠️</span><span class="mlog-body">`
+            + `<strong>Stopped by limit (${who}):</strong> ${chips}${msg}${where}</span></div>`;
     }
 
     /** 📊 Efficiency Report card — the end-of-run step-reduction metrics. */

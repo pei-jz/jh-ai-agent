@@ -65,6 +65,37 @@ const ICONS = {
         <circle cx="10" cy="10" r="2.6"/>`,
 };
 
+// The main-menu rail can auto-hide (collapse to a thin edge and expand on
+// hover / keyboard focus). ON by default; Settings → General → Basic can turn
+// it off. Persisted in localStorage so the choice survives a restart. The key
+// uses the same `jhai_*` convention as the Monitor's list/inspector toggles.
+const AUTOHIDE_KEY = 'jhai_sidebar_autohide';
+
+/**
+ * Whether the rail auto-hides. Defaults to TRUE (auto-hide on): the absence of
+ * a stored value is read as the default, so an untouched install gets the
+ * requested behaviour. Only an explicit '0' means "keep it visible".
+ */
+export function readSidebarAutoHide() {
+    try { return localStorage.getItem(AUTOHIDE_KEY) !== '0'; } catch (_) { return true; }
+}
+
+/** Persist the choice. Safe under private-mode / blocked storage. */
+export function writeSidebarAutoHide(enabled) {
+    try { localStorage.setItem(AUTOHIDE_KEY, enabled ? '1' : '0'); } catch (_) { /* private mode */ }
+}
+
+/**
+ * Apply the choice to an already-rendered rail without a full re-render.
+ * Settings changes this on the fly; the constructor/render path reads it via
+ * readSidebarAutoHide for the next full layout build.
+ */
+export function applySidebarAutoHide(enabled) {
+    document.querySelectorAll('.sidebar').forEach((el) => {
+        el.classList.toggle('auto-hide', !!enabled);
+    });
+}
+
 // The product mark. A hexagon (chip / shield) around a spark: the old glyph was
 // a generic user avatar, which said "account", not "agent" — and it was the one
 // thing on screen that could not be mistaken for part of the nav.
@@ -95,6 +126,8 @@ export class Sidebar {
     constructor(activeRoute, onNavigate) {
         this.activeRoute = activeRoute;
         this.onNavigate = onNavigate;
+        // The rail is collapsed by default; a stored '0' pins it open.
+        this.autoHide = readSidebarAutoHide();
     }
 
     render() {
@@ -155,7 +188,7 @@ export class Sidebar {
                 .sidebar-item.active .sidebar-item-icon .ic-fill { fill: var(--accent-surface); }
                 .sidebar-item:hover:not(.active) .sidebar-item-icon svg { stroke: var(--ink); }
             </style>
-            <div class="sidebar">
+            <div class="sidebar${this.autoHide ? ' auto-hide' : ''}">
                 <nav class="sidebar-nav">
                     ${navHtml}
                 </nav>

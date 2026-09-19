@@ -40,3 +40,45 @@ export function instanceSupportsVision(instance) {
     if (typeof instance?.supports_vision === 'boolean') return instance.supports_vision;
     return inferVisionSupport(instance?.provider, instance?.model);
 }
+
+// ── Reasoning depth ──────────────────────────────────────────────────────
+//
+// `reasoning_effort` is the mirror image of `temperature`: the models that take
+// one reject the other. Which is why the connection form shows the two fields
+// by turns rather than both at once — a dialog offering a setting the model
+// will 400 on is a dialog that teaches the wrong thing.
+//
+// The rule below is the SAME rule the backend applies (ai_providers.rs
+// `is_reasoning_model`). It is duplicated rather than fetched because the form
+// has to decide what to draw before anything has been sent anywhere; the
+// backend still has the last word on what goes on the wire.
+
+/** The depths the OpenAI API accepts, shallowest first. */
+export const REASONING_EFFORTS = ['minimal', 'low', 'medium', 'high'];
+
+/**
+ * Does this provider/model spend hidden reasoning tokens before answering?
+ * True ⇒ it takes `reasoning_effort` and rejects `temperature`.
+ * @param {string} provider
+ * @param {string} model
+ */
+export function inferReasoningModel(provider, model) {
+    const p = String(provider || '').toLowerCase();
+    // An OpenAI-family wire format is what makes the parameter meaningful.
+    // Anthropic and Gemini think too, but through their own parameters.
+    if (!['openai', 'azure', 'generic'].includes(p)) return false;
+    const m = String(model || '').toLowerCase();
+    // gpt-5-chat is the NON-reasoning variant of the family.
+    return (m.includes('gpt-5') && !m.includes('chat'))
+        || /^o[134]/.test(m) || /-o[134]/.test(m);
+}
+
+/**
+ * "minimal" only exists on the gpt-5 family — the o-series rejects it. The form
+ * hides what the model cannot take instead of offering a choice that 400s.
+ * @param {string} model
+ */
+export function reasoningEffortsFor(model) {
+    const m = String(model || '').toLowerCase();
+    return m.includes('gpt-5') ? REASONING_EFFORTS : REASONING_EFFORTS.filter(e => e !== 'minimal');
+}

@@ -212,6 +212,10 @@ export function buildConfigPayload(config, promptTemplates) {
         identical_call_threshold: limitValue(config.identical_call_threshold),
         cycle_detection_min_repeats: limitValue(config.cycle_detection_min_repeats),
         escalate_at_step: limitValue(config.escalate_at_step),
+        // 0 here means "use the default (20)", not "unlimited" — see
+        // agent/SafetyLimits.js. Sent like the rest so clearing the box is a
+        // real edit rather than a field the backend keeps at its old value.
+        subtask_max_steps: limitValue(config.subtask_max_steps),
         agent_temperature: config.agent_temperature ?? null,
         history_compress_ratio: config.history_compress_ratio ?? null,
         plan_mode: config.plan_mode || 'auto',

@@ -83,6 +83,8 @@ export const en = {
 
     // ── Settings → General ──
     'settings.advanced.show': 'Show advanced settings',
+    'settings.sidebarAutoHide': 'Auto-hide the side menu',
+    'settings.sidebarAutoHide.hint': 'Fold the menu away and expand it on hover. Turn off to keep it always visible.',
     'settings.advanced.hint': 'Hides the expert controls — agent safety limits, model routing and experimental features — until you need them. Non-engineers can stop here; the defaults are safe.',
     'settings.planMode.off.desc': 'Runs straight away; never asks for a plan.',
     'settings.planMode.auto.desc': '<strong>Recommended.</strong> Tasks judged complex must have an approved plan before any file is changed; simple edits run unblocked.',
@@ -164,6 +166,20 @@ export const en = {
     'stop.notice.steps': '⚠️ **Stopped before finishing.** It reached the {limit}-step limit (the task did not fail). {resume}{where}',
     'stop.notice.tokens': '⚠️ **Stopped before finishing.** Cumulative tokens (sub-agents included) reached the {limit} budget. {resume}{where}',
     'stop.notice.wallClock': '⚠️ **Stopped before finishing.** It reached the {limit}-minute time limit. {resume}{where}',
+    // A sub-agent's step cap is a DIFFERENT setting, and a sub-agent cannot be
+    // messaged to continue — it is one tool call inside its parent's run.
+    'stop.setting.subSteps': 'Settings → General → Agent Safety Limits → Max Sub-agent Steps',
+    'stop.resume.sub': 'This report is partial. If more is needed, delegate again with a narrower brief.',
+    'stop.notice.steps.sub': '⚠️ **The sub-agent stopped before reaching finish_task.** It hit the {limit}-step sub-agent limit (this is not a failure). {resume}{where}',
+    'stop.log.label': '⚠️ Stopped by a limit',
+
+    // ── Partial report (agent/PartialReport.js) ──
+    'partial.heading': '### Partial progress (assembled automatically — a limit cut the run short, so there is no report from the model)',
+    'partial.preamble': 'Assembled mechanically from the run record — not a summary. What the model said at each step, and what it actually did.',
+    'partial.preamble.sub': 'This sub-agent never reached finish_task. What follows is assembled mechanically from its run record: not a summary, but what the model said at each step and the calls it actually made.',
+    'partial.notes': '**Working notes (the model\'s own words)**',
+    'partial.actions': '**Calls made**',
+    'partial.errors': '**Errors**',
 
     'phase.plan': 'plan',
     'phase.execute': 'execute',
@@ -231,6 +247,8 @@ export const en = {
     'settings.safety.token_budget.hint': 'Hard stop when cumulative prompt + completion tokens reach this number. Soft reminder at 80%. Example: <code>1000000</code> (1M tokens).',
     'settings.safety.wall_clock_minutes.label': 'Wall-clock timeout (minutes)',
     'settings.safety.wall_clock_minutes.hint': 'Hard stop after N minutes of runtime. Soft reminder at 80%. Example: <code>30</code>.',
+    'settings.safety.subtask_max_steps.label': 'Max sub-agent steps',
+    'settings.safety.subtask_max_steps.hint': 'Step ceiling for ONE sub-agent (<code>run_subtask</code>: reviewer / researcher / tester / auditor). <strong>Blank or 0 = the default, 20</strong> — this one is not an "unlimited" field. A sub-agent that hits it stops without calling <code>finish_task</code>, and its parent receives an automatically assembled partial report instead of a real one, so raise it (e.g. <code>40</code>) if delegated investigations keep coming back unfinished. Every extra step is billed on the sub-agent\'s own model tier.',
     'settings.safety.no_progress_window.label': 'No-progress window (steps)',
     'settings.safety.no_progress_window.hint': 'If the agent runs this many consecutive steps without modifying any file (only <code>read_file</code> / <code>grep_search</code> / <code>list_files</code>), it gets a one-time reminder to either finish or report blockers. <strong>0 disables this detector.</strong> Recommended: 15.',
     'settings.safety.identical_call_threshold.label': 'Identical-call threshold',
@@ -423,6 +441,8 @@ export const en = {
     'list.resize': 'Drag to resize the task list',
     'list.title': 'Executions',
     'list.toggle': 'Show or hide the task list',
+    'list.hide': 'Hide the task list',
+    'list.show': 'Show the task list',
     'mcp.configJson': 'Configuration JSON',
     'mem.cardOff': 'Switch this card off',
     'mem.empty': 'Nothing learned yet',
@@ -602,6 +622,15 @@ export const en = {
     'conn.temp.label': 'Temperature (optional, 0.0–2.0)',
     'conn.temp.placeholder': 'Provider default (blank). Use ~0.2 for reliable agent tool-use.',
     'conn.temp.hint': 'Lower = more deterministic (better for tool-calling). Leave blank for the provider default.',
+    // Shown INSTEAD of temperature when the model is a reasoning one — the two
+    // parameters are mutually exclusive on the wire.
+    'conn.effort.label': 'Reasoning effort (optional)',
+    'conn.effort.unset': 'Model default (medium)',
+    'conn.effort.minimal': 'minimal — barely thinks, fastest and cheapest',
+    'conn.effort.low': 'low — a quick pass',
+    'conn.effort.medium': 'medium — the API default',
+    'conn.effort.high': 'high — thinks hard, slower and dearer',
+    'conn.effort.hint': 'How long this model thinks before it answers. The thinking is invisible but billed as output tokens, so “high” costs both latency and money — and eats into Max Output Tokens, which has to be large enough to leave room for an actual answer. Replaces Temperature because reasoning models reject that one.',
     'conn.pricing.label': 'Pricing — USD per 1M tokens (optional)',
     'conn.pricing.hint': 'Used for the dashboard cost estimate when THIS model is active. e.g. GPT-4o ≈ 2.5 / — / 10; Claude Sonnet ≈ 3 / 0.3 / 15. Cache blank ⇒ ~10% of input.',
     'conn.test': '⚡ Test Connection',

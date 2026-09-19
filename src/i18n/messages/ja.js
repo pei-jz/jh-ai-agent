@@ -85,6 +85,8 @@ export const ja = {
 
     // ── 設定 → General ──
     'settings.advanced.show': '詳細設定を表示',
+    'settings.sidebarAutoHide': 'サイドメニューを自動で隠す',
+    'settings.sidebarAutoHide.hint': '通常はメニューを畳んでおき、マウスを乗せると展開します。オフにすると常に表示されます。',
     'settings.advanced.hint': 'エージェント安全制限・モデルルーティング・実験的機能など、専門的な設定を隠します。エンジニアでない方はここまでで十分です。既定値は安全です。',
     'settings.planMode.off.desc': '計画を求めず、そのまま実行します。',
     'settings.planMode.auto.desc': '<strong>推奨。</strong>複雑だと判断したタスクだけ、ファイルを変更する前に計画を出して承認を求めます。単純な編集はそのまま実行します。',
@@ -173,6 +175,20 @@ export const ja = {
     'stop.notice.steps': '⚠️ **未完了のまま停止しました。** 実行ステップ数が上限 {limit} に到達したためです（タスクが失敗したわけではありません）。{resume}{where}',
     'stop.notice.tokens': '⚠️ **未完了のまま停止しました。** 累積トークン数（サブエージェント分を含む）が予算 {limit} に到達したためです。{resume}{where}',
     'stop.notice.wallClock': '⚠️ **未完了のまま停止しました。** 実行時間が上限 {limit} 分に到達したためです。{resume}{where}',
+    // A sub-agent's step cap is a DIFFERENT setting, and a sub-agent cannot be
+    // messaged to continue — it is one tool call inside its parent's run.
+    'stop.setting.subSteps': '設定 → 一般 → エージェント安全制限 → Max Sub-agent Steps',
+    'stop.resume.sub': 'この報告は途中経過です。続きが必要なら、範囲を絞って再度サブタスクに出してください。',
+    'stop.notice.steps.sub': '⚠️ **サブエージェントは finish_task に到達しないまま停止しました。** ステップ数がサブエージェントの上限 {limit} に達したためです（失敗ではありません）。{resume}{where}',
+    'stop.log.label': '⚠️ 上限到達で停止',
+
+    // ── Partial report (agent/PartialReport.js) ──
+    'partial.heading': '### 途中経過（自動生成 — 上限で打ち切られたため、モデル自身の最終レポートはありません）',
+    'partial.preamble': '以下は実行記録から機械的に組み立てたものです（要約ではありません）。各ステップでモデルが述べたことと、実際に行った操作です。',
+    'partial.preamble.sub': 'このサブエージェントは finish_task に到達しませんでした。以下は実行記録から機械的に組み立てたもので、要約ではなく「各ステップでモデルが述べたこと」と「実際に行った操作」そのものです。',
+    'partial.notes': '**作業メモ（モデル自身の記述）**',
+    'partial.actions': '**実行した操作**',
+    'partial.errors': '**エラー**',
 
     'phase.plan': '計画',
     'phase.execute': '実装',
@@ -240,6 +256,8 @@ export const ja = {
     'settings.safety.token_budget.hint': '累計のプロンプト＋完了トークンがこの値に達したら強制停止します。80%で一度だけ注意喚起。例: <code>1000000</code>（100万トークン）。',
     'settings.safety.wall_clock_minutes.label': '実時間タイムアウト（分）',
     'settings.safety.wall_clock_minutes.hint': 'N分経過で強制停止します。80%で一度だけ注意喚起。例: <code>30</code>。',
+    'settings.safety.subtask_max_steps.label': 'サブエージェントの最大ステップ数',
+    'settings.safety.subtask_max_steps.hint': 'サブエージェント1体（<code>run_subtask</code>: reviewer / researcher / tester / auditor）のステップ上限です。<strong>空欄または0で既定値の20</strong>——この項目だけは「0＝無制限」ではありません。上限に達したサブエージェントは <code>finish_task</code> を呼べずに停止し、親には自動生成の途中経過レポートが返ります。委任した調査が未完了で戻ることが続くなら引き上げてください（例: <code>40</code>）。増やした分はサブエージェント側のモデルで課金されます。',
     'settings.safety.no_progress_window.label': '無進捗ウィンドウ（ステップ）',
     'settings.safety.no_progress_window.hint': 'ファイルを一切変更しないステップ（<code>read_file</code> / <code>grep_search</code> / <code>list_files</code> のみ）がこの回数続くと、完了するか障害を報告するよう一度だけ促します。<strong>0で無効。</strong>推奨は15。',
     'settings.safety.identical_call_threshold.label': '同一呼び出しのしきい値',
@@ -432,6 +450,8 @@ export const ja = {
     'list.resize': 'ドラッグして一覧の幅を変える',
     'list.title': '実行',
     'list.toggle': '一覧の表示・非表示',
+    'list.hide': '一覧を隠す',
+    'list.show': 'タスク一覧を表示',
     'mcp.configJson': '設定 JSON',
     'mem.cardOff': 'このカードを無効にする',
     'mem.empty': 'まだ学習していません',
@@ -611,6 +631,14 @@ export const ja = {
     'conn.temp.label': '温度（任意、0.0〜2.0）',
     'conn.temp.placeholder': 'プロバイダ既定（空欄）。ツール呼び出しを安定させるなら 0.2 前後。',
     'conn.temp.hint': '低いほど決定的になります（ツール呼び出し向き）。空欄ならプロバイダの既定値。',
+    // 推論モデルのときは温度の代わりにこちらを出す（両者は排他）。
+    'conn.effort.label': '推論の深さ（任意）',
+    'conn.effort.unset': 'モデル既定（medium）',
+    'conn.effort.minimal': 'minimal — ほぼ考えない。最速・最安',
+    'conn.effort.low': 'low — 軽く考える',
+    'conn.effort.medium': 'medium — API の既定値',
+    'conn.effort.high': 'high — じっくり考える。遅く高い',
+    'conn.effort.hint': '答える前にこのモデルがどれだけ考えるかです。考えた分は表示されませんが出力トークンとして課金されるため、high は時間もお金もかかります。最大出力トークンの枠も食うので、答えを書く余地が残る値にしてください。推論モデルは温度を受け付けないため、温度の代わりに表示しています。',
     'conn.pricing.label': '単価 — 100万トークンあたりUSD（任意）',
     'conn.pricing.hint': 'このモデルが動いているときのコスト概算に使います。例: GPT-4o ≈ 2.5 / — / 10、Claude Sonnet ≈ 3 / 0.3 / 15。キャッシュを空欄にすると入力の約10%とみなします。',
     'conn.test': '⚡ 接続テスト',

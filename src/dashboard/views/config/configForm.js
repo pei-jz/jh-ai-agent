@@ -34,6 +34,14 @@ export const SAFETY_FIELDS = [
         half: true,
     },
     {
+        // The one field here where 0 does NOT mean "disabled": a sub-agent with
+        // no step cap cannot be stopped by anything the user can see — it has no
+        // task of its own to message — so blank/0 means the default, 20.
+        key: 'subtask_max_steps', unit: 'steps', label: 'Max Sub-agent Steps', fallback: 20, min: 1, max: 200,
+        placeholder: '20',
+        hint: 'Step ceiling for ONE sub-agent (<code>run_subtask</code>: reviewer / researcher / tester / auditor). <strong>Blank or 0 = the default, 20</strong> — this one is not an "unlimited" field. A sub-agent that hits it stops without calling <code>finish_task</code>, and its parent receives an automatically assembled partial report instead of a real one, so raise it (e.g. <code>40</code>) if delegated investigations keep coming back unfinished. Every extra step is billed on the sub-agent\'s own model tier.',
+    },
+    {
         key: 'no_progress_window', unit: 'steps', label: 'No-Progress Window (steps)', fallback: 15, min: 0, max: 200,
         placeholder: '15',
         hint: 'If the agent runs this many consecutive steps without modifying any file (only <code>read_file</code> / <code>grep_search</code> / <code>list_files</code>), it gets a one-time reminder to either finish or report blockers. <strong>0 disables this detector.</strong> Recommended: 15.',

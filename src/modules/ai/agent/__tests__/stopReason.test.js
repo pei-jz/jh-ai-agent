@@ -1,7 +1,7 @@
 // stopReason — a run cut short must say so, and say how to carry on.
 import { describe as suite, it, expect } from 'vitest';
 import {
-    stopReason, stopStatusMessage, stopNotice, wasInterrupted,
+    stopReason, stopStatusMessage, stopNotice, wasInterrupted, stopLogEntry,
 } from '../stopReason.js';
 import { setLocale } from '../../../../i18n/index.js';
 
@@ -143,5 +143,66 @@ suite('stopReason — follows the UI language', () => {
             }
         }
         setLocale('ja');
+    });
+});
+
+suite('a sub-agent stops against a different setting', () => {
+    // The bug: a child capped at 20 steps told the user to raise
+    // Settings → Max Agent Steps. That field is the PARENT's step ceiling and
+    // changing it does nothing to a sub-agent — so the one actionable sentence
+    // in the notice sent the reader to the wrong box.
+    it('names the sub-agent cap, not the run-wide one', () => {
+        const notice = stopNotice(stopReason('step_limit', { limit: 20 }), { subagent: true });
+        expect(notice).toContain('Max Sub-agent Steps');
+        expect(notice).not.toContain('Max Agent Steps');
+    });
+
+    it('does not offer to resume a child that cannot be messaged', () => {
+        // A sub-agent is one tool call inside its parent's run: there is no task
+        // to send a message to.
+        const notice = stopNotice(stopReason('step_limit', { limit: 20 }), { subagent: true });
+        expect(notice).not.toContain('このタスクにメッセージ');
+        expect(notice).toContain('サブタスク');
+    });
+
+    it('still points a child at the PARENT setting for budget and time', () => {
+        // Those two really are the parent's: the child spends a slice of the
+        // parent's tokens and runs inside its wall clock.
+        expect(stopNotice(stopReason('token_budget', { limit: 5 }), { subagent: true }))
+            .toContain('Token Budget');
+        expect(stopNotice(stopReason('wall_clock', { limit: 5 }), { subagent: true }))
+            .toContain('Wall-clock Timeout');
+    });
+
+    it('leaves the ordinary run untouched', () => {
+        expect(stopNotice(stopReason('step_limit', { limit: 300 })))
+            .toContain('Max Agent Steps');
+    });
+});
+
+suite('stopLogEntry', () => {
+    // A limit used to exist only as a live status line: not in the Raw Log, and
+    // for a sub-agent not anywhere at all (its status feed is not forwarded).
+    it('is its own kind of entry, so the log does not read it as an LLM call', () => {
+        expect(stopLogEntry(stopReason('step_limit', { limit: 20, used: 20 })).method).toBe('LIMIT');
+    });
+
+    it('records which limit, how far it got, and where to change it', () => {
+        const entry = stopLogEntry(stopReason('step_limit', { limit: 20, used: 20 }), {
+            subagent: true,
+        });
+        expect(entry.response).toMatchObject({ kind: 'step_limit', limit: 20, used: 20, scope: 'subagent' });
+        expect(entry.response.setting).toContain('Max Sub-agent Steps');
+        expect(entry.response.message).toBeTruthy();
+    });
+
+    it('falls back to the run\'s step count when the reason carries no usage', () => {
+        const entry = stopLogEntry(stopReason('wall_clock', { limit: 30 }), { iterations: 12 });
+        expect(entry.response.used).toBe(12);
+        expect(entry.response.scope).toBe('run');
+    });
+
+    it('is null for a normal finish', () => {
+        expect(stopLogEntry(null)).toBe(null);
     });
 });

@@ -139,3 +139,30 @@ describe('resolveRecallArm', () => {
         expect(CONTROL_GROUP_SHARE).toBeLessThanOrEqual(0.5);
     });
 });
+
+describe('sub-agent step cap', () => {
+    // It was a source constant. Every delegated investigation, however large,
+    // was cut off at the same twenty steps — and the orchestrating model asks
+    // for whatever maximum it is offered, so the cap was always the number.
+    it('defaults to 20 when nothing is configured', () => {
+        expect(normalizeSafetyLimits({}).subtaskMaxSteps).toBe(20);
+    });
+
+    it('takes the configured value', () => {
+        expect(normalizeSafetyLimits({ subtask_max_steps: 40 }).subtaskMaxSteps).toBe(40);
+        expect(normalizeSafetyLimits({ subtask_max_steps: '35' }).subtaskMaxSteps).toBe(35);
+    });
+
+    it('reads 0 / blank / nonsense as the DEFAULT, never as unlimited', () => {
+        // The opposite of every other field here, deliberately: a sub-agent has
+        // no UI and cannot be messaged to continue, so "no cap" is not a state
+        // it can be left in.
+        for (const v of [0, '', null, undefined, -5, 'abc']) {
+            expect(normalizeSafetyLimits({ subtask_max_steps: v }).subtaskMaxSteps, String(v)).toBe(20);
+        }
+    });
+
+    it('clamps an extravagant value to the ceiling', () => {
+        expect(normalizeSafetyLimits({ subtask_max_steps: 100000 }).subtaskMaxSteps).toBe(200);
+    });
+});

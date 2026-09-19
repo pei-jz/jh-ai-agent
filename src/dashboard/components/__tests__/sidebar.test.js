@@ -5,10 +5,15 @@
 // understanding that a CSS tooltip carried the name, and that tooltip drew
 // `attr(data-tooltip)` — an attribute nothing sets. Hovering produced an empty
 // bordered box. These tests pin the two halves together.
-import { describe, it, expect } from 'vitest';
-import { Sidebar, NAV_ITEMS, FOOTER_ITEMS } from '../Sidebar.js';
+import { describe, it, expect, beforeEach } from 'vitest';
+import { Sidebar, NAV_ITEMS, FOOTER_ITEMS, readSidebarAutoHide, writeSidebarAutoHide, applySidebarAutoHide } from '../Sidebar.js';
 
 const html = (active = 'monitor') => new Sidebar(active, () => {}).render();
+
+beforeEach(() => {
+    localStorage.clear();
+    document.body.innerHTML = '';
+});
 
 describe('the rail names its destinations', () => {
     it('renders a non-empty label for every destination', () => {
@@ -51,5 +56,41 @@ describe('the rail names its destinations', () => {
         for (const item of [...NAV_ITEMS, ...FOOTER_ITEMS]) {
             expect(item.labelKey, item.id).toMatch(/^nav\./);
         }
+    });
+});
+
+describe('the side-menu auto-hide', () => {
+    it('defaults to auto-hide ON when nothing is stored', () => {
+        expect(readSidebarAutoHide()).toBe(true);
+    });
+
+    it('persists and reads the explicit off choice', () => {
+        writeSidebarAutoHide(false);
+        expect(localStorage.getItem('jhai_sidebar_autohide')).toBe('0');
+        expect(readSidebarAutoHide()).toBe(false);
+    });
+
+    it('reads a non-"0" value as ON (the default)', () => {
+        localStorage.setItem('jhai_sidebar_autohide', '1');
+        expect(readSidebarAutoHide()).toBe(true);
+    });
+
+    it('renders the .auto-hide class when enabled and omits it when disabled', () => {
+        writeSidebarAutoHide(true);
+        expect(html()).toContain('class="sidebar auto-hide"');
+        writeSidebarAutoHide(false);
+        const el = document.createElement('div');
+        el.innerHTML = html();
+        expect(el.querySelector('.sidebar').classList.contains('auto-hide')).toBe(false);
+    });
+
+    it('applies the choice to an already-rendered rail without a rebuild', () => {
+        const el = document.createElement('div');
+        el.innerHTML = '<div class="sidebar"></div>';
+        document.body.appendChild(el);
+        applySidebarAutoHide(true);
+        expect(el.querySelector('.sidebar').classList.contains('auto-hide')).toBe(true);
+        applySidebarAutoHide(false);
+        expect(el.querySelector('.sidebar').classList.contains('auto-hide')).toBe(false);
     });
 });

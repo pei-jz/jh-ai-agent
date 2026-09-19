@@ -682,7 +682,10 @@ export const TOOL_DEFINITIONS = [
                     description: "Preset defaults. 'reviewer' = read-only (no file edits, no shell), reports findings + VERDICT, never fixes. 'tester' = writes/runs tests only (has a shell; cannot touch implementation code). 'researcher' = read-only investigation (no shell) + web. null/'generic' = full toolset. The read-only roles genuinely cannot write — it is enforced by their tool allowlist, not by instructions."
                 },
                 tools: { type: ['array', 'null'], items: { type: 'string' }, description: 'Optional explicit tool allowlist for the sub-agent (overrides the role preset). null = use the role default.' },
-                max_steps: { type: ['integer', 'null'], description: 'Optional step budget for the sub-agent (1-20). null = role default.' },
+                // No literal ceiling in the text: the ceiling is a user setting
+                // now (Max Sub-agent Steps), and a number written here would be
+                // both stale and the number the model then asks for every time.
+                max_steps: { type: ['integer', 'null'], description: 'Optional step budget for the sub-agent. null = the role default, which is the right choice unless this sub-task is clearly larger or smaller than usual. Whatever is asked for is clamped to the configured sub-agent step cap.' },
                 model: { type: ['string', 'null'], enum: ['fast', 'deep', null], description: "Model tier for the sub-agent. null = 'fast' (cheap). Use 'deep' only for genuinely hard sub-problems." },
                 write_scope: { type: ['array', 'null'], items: { type: 'string' }, description: "REQUIRED when the sub-agent will EDIT files: the paths/dirs/globs it may modify (e.g. [\"src/moduleA\", \"docs/*.md\"]). Writes outside are blocked by the system, and two sub-tasks with overlapping scopes run sequentially instead of in parallel. null = read-only roles, or claim the whole workspace (which forces serialization with every other editing sub-task). The 'tester' role defaults to test-file patterns." }
             },

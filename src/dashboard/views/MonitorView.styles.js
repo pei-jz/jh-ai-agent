@@ -61,6 +61,40 @@ const BASE_STYLES = `
                 body.resizing-panes { cursor: col-resize; user-select: none; }
                 body.resizing-panes .mpane-divider::after { background: var(--accent); opacity: 0.8; }
 
+                /* ── Left rail (the collapsed list) ──────────────── */
+                /* The list does not vanish, it narrows to its edge. A pane that
+                   disappears completely takes its own reopen control with it,
+                   which is exactly how the list became unreachable from the start
+                   screen. 28px is enough for the control and the count and not
+                   enough to read as a column. */
+                .mpanel-rail {
+                    flex: 0 0 28px;
+                    display: flex;
+                    flex-direction: column;
+                    align-items: center;
+                    gap: 6px;
+                    padding-top: 8px;
+                    background: transparent;
+                    border-right: 1px solid var(--line);
+                }
+                .mrail-btn {
+                    width: 22px; height: 22px;
+                    display: flex; align-items: center; justify-content: center;
+                    background: none;
+                    border: 1px solid var(--line);
+                    border-radius: var(--r-2);
+                    color: var(--ink-faint);
+                    font-size: var(--fs-2xs);
+                    line-height: 1;
+                    cursor: pointer;
+                }
+                .mrail-btn:hover { color: var(--accent); border-color: var(--line-focus); }
+                .mrail-count {
+                    font-size: var(--fs-2xs);
+                    color: var(--ink-faint);
+                    opacity: 0.8;
+                }
+
                 /* ── Left Panel ────────────────────────────────── */
                 .mpanel-left {
                     width: var(--mpane-left-w, 240px);
@@ -562,6 +596,11 @@ const BASE_STYLES = `
                 }
                 .mfilter-btn:hover { background: var(--surface-hover); color: var(--ink-soft); }
                 .mfilter-btn.active { background: var(--surface-sunken); color: var(--accent); }
+                /* The inspector's toggle, at the edge of the column it opens.
+                   The class was on the markup with no rule behind it, so the
+                   pane toggles sat in the middle of the bar next to the tabs —
+                   where they read as two more places to go. */
+                .mfilter-spacer { margin-left: auto; }
 
                 /* ── Live-activity FEED (chat-style, flows inside the Task scroll) ── */
                 .mresult-live {

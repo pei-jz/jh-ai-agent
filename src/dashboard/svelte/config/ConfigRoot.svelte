@@ -47,6 +47,9 @@
         readList, addToList, removeFromList, readOpenSections, writeOpenSection,
         buildConfigPayload, applyConfigPatch, upsertInstance, removeInstance,
     } from '../../views/config/configModel.js';
+    import {
+        readSidebarAutoHide, writeSidebarAutoHide, applySidebarAutoHide,
+    } from '../../components/Sidebar.js';
     import { storageUsageHtml } from '../../views/config/storageUsage.js';
 
     import ConnectionTable from './ConnectionTable.svelte';
@@ -78,6 +81,9 @@
         mcp_servers: {}, llm_instances: [], active_llm_instance_id: null,
         token_budget: 0, wall_clock_minutes: 0, no_progress_window: 15,
         identical_call_threshold: 5, cycle_detection_min_repeats: 3,
+        // Not 0: for this field 0 means "the default", and showing 0 in the box
+        // would state a cap that is not the one in force.
+        subtask_max_steps: 20,
     };
 
     let config = $state({ ...DEFAULT_CONFIG, mcp_text: '{}' });
@@ -105,6 +111,9 @@
     let licensingOn = $state(false);
     let license = $state(licenseState());
     let uiLocale = $state(getLocale());
+    // Side-menu auto-hide — a localStorage preference, not part of the backend
+    // config, so it can flip live (no Save) and apply to the running layout.
+    let sidebarAutoHide = $state(readSidebarAutoHide());
 
     // Optional browser stack. Read from local state on mount (cheap, synchronous)
     // and re-read after a probe; the probe itself spawns the worker, so it only
@@ -422,8 +431,14 @@
                         {config} {connection} {openSections} {approvedCommands}
                         {autoApproveWorkspaces} {storageUsage} {pairedApps} {eventTokens} {issuedEventToken} {secretStorage}
                         {appVersion} {updatesConfigured} {uiLocale} {license}
+                        {sidebarAutoHide}
                         licensingConfigured={licensingOn}
                         hasLicenseKey={hasStoredKey()}
+                        onChangeSidebarAutoHide={(on) => {
+                            sidebarAutoHide = on;
+                            writeSidebarAutoHide(on);
+                            applySidebarAutoHide(on);
+                        }}
                         onChange={patchConfig}
                         onToggleSection={(k, open) => { openSections = openOnlySection(openSections, k, open); }}
                         onSelectLogDir={async () => {

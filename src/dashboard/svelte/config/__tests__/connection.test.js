@@ -248,6 +248,65 @@ describe('ConnectionModal — saving', () => {
         expect(onSave.mock.calls[0][0].api_style).toBe('responses');
     });
 
+    // Reasoning models reject `temperature` and take `reasoning_effort`; every
+    // other model is the other way round. The form shows whichever the model can
+    // actually accept rather than offering a field that 400s the request.
+    it('swaps temperature for reasoning effort on a reasoning model', () => {
+        const el = modal({ instance: inst({ model: 'gpt-5' }) });
+        expect(field(el, 'modal-inst-effort')).toBeTruthy();
+        expect(field(el, 'modal-inst-temp')).toBeNull();
+    });
+
+    it('keeps temperature for an ordinary model', () => {
+        const el = modal({ instance: inst({ model: 'gpt-4o' }) });
+        expect(field(el, 'modal-inst-temp')).toBeTruthy();
+        expect(field(el, 'modal-inst-effort')).toBeNull();
+    });
+
+    it('swaps back as the model name is typed, not only when the dialog opens', async () => {
+        const el = modal({ instance: inst({ model: 'gpt-4o' }) });
+        const model = field(el, 'modal-inst-model');
+        model.value = 'o3';
+        model.dispatchEvent(new Event('input', { bubbles: true }));
+        await tick();
+        expect(field(el, 'modal-inst-effort')).toBeTruthy();
+        expect(field(el, 'modal-inst-temp')).toBeNull();
+    });
+
+    it('does not offer "minimal" to a model that has no such depth', () => {
+        // gpt-5 has it; the o-series 400s on it.
+        const values = (el) => [...field(el, 'modal-inst-effort').options].map(o => o.value);
+        expect(values(modal({ instance: inst({ model: 'gpt-5' }) }))).toContain('minimal');
+        cleanup();
+        expect(values(modal({ instance: inst({ model: 'o3' }) }))).not.toContain('minimal');
+    });
+
+    it('saves the chosen depth, and a blank as null so nothing is sent', async () => {
+        const onSave = vi.fn();
+        const el = modal({ instance: inst({ model: 'gpt-5' }), onSave });
+        const sel = field(el, 'modal-inst-effort');
+        // Unset by default: an existing connection must not silently acquire an
+        // effort it never had.
+        expect(sel.value).toBe('');
+        el.querySelector('#btn-modal-save').click();
+        expect(onSave.mock.calls[0][0].reasoning_effort).toBeNull();
+
+        sel.value = 'high';
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
+        await tick();
+        el.querySelector('#btn-modal-save').click();
+        expect(onSave.mock.calls[1][0].reasoning_effort).toBe('high');
+    });
+
+    it('keeps a hidden temperature rather than wiping it', () => {
+        // Re-pointing a connection at a reasoning model hides the temperature
+        // field; pointing it back must bring the old value with it.
+        const onSave = vi.fn();
+        modal({ instance: inst({ model: 'gpt-5', temperature: 0.2 }), onSave })
+            .querySelector('#btn-modal-save').click();
+        expect(onSave.mock.calls[0][0].temperature).toBe(0.2);
+    });
+
     // A style on a provider that has no such choice is a setting the backend
     // ignores and the next reader has to explain away.
     it('writes no API style for a provider that has no choice', () => {

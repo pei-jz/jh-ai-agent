@@ -39,6 +39,17 @@ pub struct LlmInstance {
     /// For agentic tool-use, a low value (e.g. 0.2) improves reliability.
     #[serde(default)]
     pub temperature: Option<f32>,
+    /// How hard a REASONING model thinks before answering: `"minimal"`,
+    /// `"low"`, `"medium"` (the API default) or `"high"`. None ⇒ don't send it,
+    /// which is what every config written before this field existed means.
+    ///
+    /// The mirror image of `temperature`: a reasoning model rejects temperature
+    /// and takes this, an ordinary model takes temperature and rejects this. The
+    /// backend drops whichever the model cannot accept rather than 400-ing the
+    /// request, so a connection can carry both and be re-pointed at either kind
+    /// of model without the settings having to be re-edited.
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
 
     /// Whether this connection's model accepts IMAGES.
     /// None ⇒ infer from the provider/model name (the historical behaviour).
@@ -123,6 +134,14 @@ pub struct AiConfig {
     /// 0 ⇒ disabled. Higher = more permissive (rare false positives but slower to catch loops).
     #[serde(default)]
     pub cycle_detection_min_repeats: Option<u32>,
+
+    /// Step cap for ONE sub-agent spawned by `run_subtask`.
+    ///
+    /// Unlike the other limits here, 0/None is NOT "unlimited" — it means the
+    /// built-in default (20). A sub-agent has no UI of its own and cannot be
+    /// messaged to continue, so "no cap" is not a state it can be left in.
+    #[serde(default)]
+    pub subtask_max_steps: Option<u32>,
 
     /// Step at which a run on the Fast tier is promoted to the Deep model.
     /// None / 0 ⇒ never (the default): a mid-run model change discards the
@@ -403,6 +422,7 @@ pub async fn get_ai_config<R: tauri::Runtime>(
             no_progress_window: None,
             identical_call_threshold: None,
             cycle_detection_min_repeats: None,
+            subtask_max_steps: None,
             escalate_at_step: None,
             history_budget_ratio: None,
             history_compress_ratio: None,
@@ -592,6 +612,7 @@ pub async fn set_rag_approval<R: tauri::Runtime>(
             no_progress_window: None,
             identical_call_threshold: None,
             cycle_detection_min_repeats: None,
+            subtask_max_steps: None,
             escalate_at_step: None,
             history_budget_ratio: None,
             history_compress_ratio: None,
@@ -1396,17 +1417,19 @@ mod secret_field_coverage {
     fn explicit_clears_are_not_mistaken_for_absence() {
         let stored: AiConfig = serde_json::from_str(r#"{
             "llm_instances":[{"id":"i","name":"n","provider":"openai","model":"m"}],
-            "fast_model_id":"i:m","max_steps":40
+            "fast_model_id":"i:m","max_steps":40,
+            "prompt_templates":{"wiki":{"label":"wiki","prompt":"wiki"}}
         }"#).unwrap();
 
         let patch: AiConfig = serde_json::from_str(
-            r#"{"llm_instances":[],"fast_model_id":"","max_steps":0}"#).unwrap();
+            r#"{"llm_instances":[],"fast_model_id":"","max_steps":0,"prompt_templates":{}}"#).unwrap();
 
         let merged = merge_preserving(&patch, &stored).unwrap();
 
         assert_eq!(merged.llm_instances.unwrap().len(), 0, "removing the last connection");
         assert_eq!(merged.fast_model_id.as_deref(), Some(""), "routing set to (not set)");
         assert_eq!(merged.max_steps, Some(0), "limit explicitly disabled");
+        assert_eq!(merged.prompt_templates, Some(serde_json::json!({})), "deleting the last template");
     }
 
 }
