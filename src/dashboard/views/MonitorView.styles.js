@@ -635,8 +635,9 @@ const BASE_STYLES = `
                 .mrc-files-summary:hover { color: var(--accent); }
                 .mrc-fd-hint { font-weight: 400; font-size: var(--fs-2xs); color: var(--ink-faint); }
                 .mrc-files-scroll {
-                    max-height: 240px;   /* fixed cap; scrolls internally */
-                    overflow-y: auto;
+                    /* No fixed height: the changed-files list flows with the
+                       card, so the story panel is the only vertical scroller
+                       beside the diff's own — one scrollbar fewer. */
                     margin-top: 4px;
                     padding-right: 4px;
                 }
@@ -811,14 +812,26 @@ const BASE_STYLES = `
                    line-clamp. */
                 /* "thinking…" placeholder shown under the just-sent user message. */
                 @keyframes mrc-typing { 0%,60%,100%{opacity:0.3;transform:translateY(0)} 30%{opacity:1;transform:translateY(-3px)} }
-                .mrc-files { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+                /* One file per line (not a wrapping row of pills): a directory's
+                   files read top-to-bottom, matching the inspector's tree. */
+                .mrc-files { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+                /* A changed file + its inline Diff toggle on ONE line: the name
+                   stretches left, the Diff button sits on its right, and the open
+                   panel wraps to a full-width row underneath. */
+                .mrc-file-wrap { display: flex; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 6px; }
                 .mrc-file {
                     display: inline-flex; align-items: center; gap: 5px;
                     background: var(--surface-sunken); border: 1px solid var(--line);
                     padding: 3px 8px; border-radius: var(--r-2); font-size: var(--fs-xs); cursor: pointer;
+                    flex: 1 1 auto; min-width: 0;
                 }
                 .mrc-file:hover { border-color: var(--accent); }
                 .mrc-file-act { color: var(--ink-faint); font-size: var(--fs-2xs); }
+                /* DiffPanel's root joins the row via display:contents, so the
+                   toggle sits beside the name while the open panel wraps below. */
+                .mrc-file-wrap .tl-diff { display: contents; }
+                .mrc-file-wrap .tl-diff-toggle { margin-left: 0; flex: 0 0 auto; }
+                .mrc-file-wrap .tl-diff-panel { flex: 1 1 100%; margin: 2px 0 0; }
                 .mrc-stats { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
                 .mrc-stats span {
                     background: var(--surface-sunken); color: var(--ink-faint);

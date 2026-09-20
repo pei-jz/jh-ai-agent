@@ -124,3 +124,19 @@ pub async fn git_commit(
 
     run_git(&cwd, &["commit", "-m", message.trim()], &guard)
 }
+
+/// Revert a file's working-tree changes, restoring it to the index (staged)
+/// state. This is the destructive counterpart to `git_diff` (working tree vs
+/// index): the frontend gates it behind an explicit confirmation dialog.
+#[tauri::command]
+pub async fn git_revert(
+    cwd: String,
+    path: String,
+    guard: State<'_, PathGuard>,
+) -> Result<String, String> {
+    let p = path.trim();
+    if p.is_empty() {
+        return Err("git_revert requires a path".to_string());
+    }
+    run_git(&cwd, &["checkout", "--", p], &guard)
+}

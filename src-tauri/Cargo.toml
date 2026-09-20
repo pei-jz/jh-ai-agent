@@ -1,6 +1,6 @@
 [package]
 name = "jh-ai-agent"
-version = "0.3.1"
+version = "0.3.2"
 description = "J.H AI Agent — standalone Tauri-based AI agent server."
 authors = ["J.H AI Agent Contributors"]
 edition = "2021"

@@ -25,6 +25,7 @@
 //   {kind:'ask',         text, options[], multi}                  ask_user — question AND choices
 //   {kind:'confirm',     text, payload}                           pending approval
 //   {kind:'run',         request, answer, files[], stats}         a completed exchange
+//   {kind:'stdout',      command, commandId, lines[], truncated}   live command output
 //   {kind:'error',       text}
 
 import { toolTarget, toolLineText } from './toolLine.js';
@@ -130,6 +131,9 @@ const THINK_TYPES = new Set(['thought', 'live']);
 /** Cap on retained live items so a long run can't grow without bound. */
 const DEFAULT_MAX_LIVE = 40;
 
+/** Cap on lines kept per stdout card — a broad command fires thousands. */
+const STDOUT_MAX_LINES = 400;
+
 export class TaskTimeline {
     constructor({ maxLive = DEFAULT_MAX_LIVE } = {}) {
         this._maxLive = maxLive;
@@ -143,6 +147,7 @@ export class TaskTimeline {
         this._group = null;      // open reasoning group, if any
         this._narration = null;  // open narration item, if any
         this._progress = null;   // the one live task_progress card, if any
+        this._stdout = new Map(); // command_id → the open stdout card, if any
         this._clock = null;      // replay clock; null = wall-clock (live)
         this._stepNo = 0;        // monotonic step counter for the rail
     }
@@ -403,6 +408,42 @@ export class TaskTimeline {
     }
 
     /**
+     * One line of live command stdout. Lines for the SAME command accumulate
+     * into one collapsible card; a new command id opens a new card.
+     *
+     * Stdout is the terminal-scoped surface's one piece of live feedback, and it
+     * was being dropped entirely (see liveEvents.js). It is never STORED — the
+     * card is part of the live trace, so it is cleared with the rest when the
+     * run completes (the finished command's result is already shown via the tool
+     * telemetry).
+     *
+     * @param {{command_id:string, command?:string, line?:string}} data
+     */
+    pushStdout(data) {
+        const cmdId = String(data?.command_id || '');
+        const line = String(data?.line ?? '');
+        if (!cmdId || !line) return null;
+        const command = String(data?.command || '');
+        const existing = this._stdout.get(cmdId);
+        if (existing) {
+            if (existing.lines.length < STDOUT_MAX_LINES) {
+                existing.lines.push(line);
+            } else {
+                existing.truncated = true;
+            }
+            return this._touch(existing);
+        }
+        this._group = null;   // stdout is its own chapter, outside any reasoning group
+        const item = this._add({
+            kind: 'stdout', command, commandId: cmdId, lines: [line],
+            truncated: false, collapsed: true, live: true,
+        });
+        this._stdout.set(cmdId, item);
+        this._trim();
+        return item;
+    }
+
+    /**
      * task_progress — the agent's subtask checklist, as its own chapter.
      *
      * The model calls task_progress to register (set) and update its subtasks, and
@@ -601,6 +642,12 @@ export class TaskTimeline {
         const lastGroup = [...this._items].reverse().find(i => i.kind === 'group' && i.live);
         this._group = lastGroup || null;
         this._progress = [...this._items].reverse().find(i => i.kind === 'task_progress') || null;
+        // Re-derive open stdout cards so a re-opened running task keeps
+        // accumulating into the same card instead of opening a new one.
+        this._stdout = new Map();
+        for (const i of this._items) {
+            if (i.kind === 'stdout' && i.live && i.commandId) this._stdout.set(i.commandId, i);
+        }
         // Continue numbering from the highest step already in the story.
         this._stepNo = this._items.reduce((m, i) => Math.max(m, i._stepNo || 0), 0);
         this._narration = [...this._items].reverse().find(i => i.kind === 'narration' && i.live) || null;

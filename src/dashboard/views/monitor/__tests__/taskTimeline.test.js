@@ -652,6 +652,22 @@ describe('remaining edges', () => {
         expect(tl.pushNarration('   ')).toBe(null);
     });
 
+    it('pushStdout accumulates one collapsible card per command', () => {
+        expect(tl.pushStdout({ command_id: 'c1', command: 'npm test', line: 'a' })).not.toBe(null);
+        expect(tl.pushStdout({ command_id: 'c1', line: 'b' })).not.toBe(null);
+        expect(tl.pushStdout({ command_id: 'c2', command: 'ls', line: 'x' })).not.toBe(null);
+        const cards = tl.items.filter(i => i.kind === 'stdout');
+        expect(cards).toHaveLength(2);
+        expect(cards[0]).toMatchObject({ command: 'npm test', lines: ['a', 'b'] });
+        expect(cards[1]).toMatchObject({ command: 'ls', lines: ['x'] });
+    });
+
+    it('pushStdout ignores a line with no command id or no text', () => {
+        expect(tl.pushStdout({ command_id: '', line: 'x' })).toBe(null);
+        expect(tl.pushStdout({ command_id: 'c1', line: '' })).toBe(null);
+        expect(tl.items).toHaveLength(0);
+    });
+
     it('closeNarration makes the next prose a new item', () => {
         tl.pushNarration('first');
         tl.closeNarration();
@@ -685,6 +701,15 @@ describe('remaining edges', () => {
         fresh.restore(tl.snapshot());
         fresh.pushNarration('prose extended');
         expect(fresh.items.filter(i => i.kind === 'narration')).toHaveLength(1);
+    });
+
+    it('restore keeps accumulating into the SAME stdout card after a re-open', () => {
+        tl.pushStdout({ command_id: 'c1', command: 'npm test', line: 'a' });
+        const fresh = new TaskTimeline();
+        fresh.restore(tl.snapshot());
+        fresh.pushStdout({ command_id: 'c1', line: 'b' });
+        expect(fresh.items.filter(i => i.kind === 'stdout')).toHaveLength(1);
+        expect(fresh.items[0].lines).toEqual(['a', 'b']);
     });
 
     it('buildTimeline keeps the prompt bubble ahead of a restored question', () => {

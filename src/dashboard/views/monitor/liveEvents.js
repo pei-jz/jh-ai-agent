@@ -50,6 +50,7 @@ const NEVER_STORED = new Set(['command_chunk']);
  *   replay-done   the boundary marker — flush the buffer / close the discard window
  *   drop          ignore it, with `why` for the reason
  *   narrate       a live token; `chunk` is the text
+ *   chunk         a line of live command stdout — surface it, never store it
  *   buffer        accumulate it; `store` says whether it belongs in the log list
  *   resolve-confirm  an approval was answered, possibly by another client
  *   process       everything else: the normal path
@@ -95,8 +96,10 @@ export function routePacket(packet, gate = {}) {
             : { kind: 'drop', why: 'confirm-no-id' };
     }
 
-    // Live stdout. Thousands of these on a broad command, none of them rendered.
-    if (event === 'command_chunk') return { kind: 'drop', why: 'chunk' };
+    // Live stdout. Thousands of these on a broad command, so they are never
+    // STORED (NEVER_STORED above keeps them out of the log) — but they ARE
+    // surfaced live as one collapsible card per command (TaskTimeline.pushStdout).
+    if (event === 'command_chunk') return { kind: 'chunk' };
 
     return { kind: 'process' };
 }

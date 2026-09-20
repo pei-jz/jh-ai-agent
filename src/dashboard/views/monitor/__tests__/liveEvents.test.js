@@ -109,9 +109,9 @@ describe('routePacket — the live path', () => {
             .toMatchObject({ kind: 'drop', why: 'confirm-no-id' });
     });
 
-    it('drops live stdout chunks', () => {
+    it('surfaces live stdout chunks instead of dropping them', () => {
         expect(routePacket(pkt('command_chunk', { chunk: 'x' }), FRESH))
-            .toMatchObject({ kind: 'drop', why: 'chunk' });
+            .toEqual({ kind: 'chunk' });
     });
 
     it('processes everything else', () => {

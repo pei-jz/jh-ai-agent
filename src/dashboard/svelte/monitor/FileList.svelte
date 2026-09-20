@@ -7,6 +7,7 @@
 <script>
     import { icon } from '../../utils/icons.js';
     import { buildFileTree } from '../../views/monitor/inspector.js';
+    import DiffPanel from './DiffPanel.svelte';
 
     let { files = [], workspace = '', onOpenFile = null } = $props();
 
@@ -30,6 +31,8 @@
         for (const child of tree.dirs.values()) walk(child, '');
         return out.sort((a, b) => a.dir.localeCompare(b.dir));
     });
+
+    const isWrite = (action) => action === 'created' || action === 'modified';
 </script>
 
 {#if list.length}
@@ -47,13 +50,18 @@
                         </div>
                         <div class="mrc-files">
                             {#each g.files as f (f.path)}
-                                <button
-                                    type="button"
-                                    class="mrc-file"
-                                    data-open-path={f.path}
-                                    title={f.path}
-                                    onclick={() => onOpenFile?.(f.path)}
-                                >{@html icon('file')} {f.name}{#if f.action}<span class="mrc-file-act">{f.action}</span>{/if}</button>
+                                <div class="mrc-file-wrap">
+                                    <button
+                                        type="button"
+                                        class="mrc-file"
+                                        data-open-path={f.path}
+                                        title={f.path}
+                                        onclick={() => onOpenFile?.(f.path)}
+                                    >{@html icon('file')} {f.name}{#if f.action}<span class="mrc-file-act">{f.action}</span>{/if}</button>
+                                    {#if isWrite(f.action)}
+                                        <DiffPanel path={f.path} {workspace} />
+                                    {/if}
+                                </div>
                             {/each}
                         </div>
                     </div>

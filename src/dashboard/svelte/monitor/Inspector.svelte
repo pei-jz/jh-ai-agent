@@ -181,7 +181,7 @@
         <div class="insp-sec">
             <div class="insp-h">{t('task.changedFiles')}<span class="insp-n">{fileList.length}</span></div>
             <div class="insp-tree">
-                <FileTree node={tree} {onOpenFile} />
+                <FileTree node={tree} workspace={ws} {onOpenFile} />
                 {#if hiddenFiles > 0}
                     <div class="insp-tree-more">+{hiddenFiles} more</div>
                 {/if}

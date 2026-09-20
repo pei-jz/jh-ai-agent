@@ -14,11 +14,14 @@
 <script>
     import { icon } from '../../utils/icons.js';
     import Self from './FileTree.svelte';
+    import DiffPanel from './DiffPanel.svelte';
 
     let {
         /** A node from buildFileTree: {name, dirs: Map, files: []} */
         node,
         depth = 0,
+        /** The workspace root, for git_diff. */
+        workspace = '',
         /** Called with the real absolute path — the row shows only the basename. */
         onOpenFile = null,
     } = $props();
@@ -69,7 +72,7 @@
         <span class="insp-tree-count">{countFiles(dir)}</span>
     </button>
     {#if !isClosed}
-        <Self node={dir} depth={depth + 1} {onOpenFile} />
+        <Self node={dir} depth={depth + 1} {workspace} {onOpenFile} />
     {/if}
 {/each}
 
@@ -77,16 +80,20 @@
     <!-- A real <button>: this row is activated, so it must be reachable by keyboard.
          The old markup was a <div> with a delegated click handler, which no amount of
          CSS makes focusable. -->
-    <button
-        type="button"
-        class="insp-file insp-tree-file"
-        style={pad(depth)}
-        data-open-path={file.path}
-        title={file.path}
-        onclick={() => onOpenFile?.(file.path)}
-    >
-        {@html icon(isWrite(file.action) ? 'edit' : 'file')}
-        <span class="insp-file-n">{file.name}</span>
-        {#if file.action}<span class="insp-file-a">{file.action}</span>{/if}
-    </button>
+    <div class="insp-file-row" style={pad(depth)}>
+        <button
+            type="button"
+            class="insp-file insp-tree-file"
+            data-open-path={file.path}
+            title={file.path}
+            onclick={() => onOpenFile?.(file.path)}
+        >
+            {@html icon(isWrite(file.action) ? 'edit' : 'file')}
+            <span class="insp-file-n">{file.name}</span>
+            {#if file.action}<span class="insp-file-a">{file.action}</span>{/if}
+        </button>
+        {#if isWrite(file.action)}
+            <DiffPanel path={file.path} {workspace} />
+        {/if}
+    </div>
 {/each}

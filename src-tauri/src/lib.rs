@@ -1428,6 +1428,7 @@ pub fn run() {
             commands::git::git_diff,
             commands::git::git_log,
             commands::git::git_commit,
+            commands::git::git_revert,
             // Office documents (read xlsx/docx/pptx, write xlsx)
             commands::office::read_office_document,
             commands::office::write_xlsx,

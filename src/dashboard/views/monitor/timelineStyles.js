@@ -187,6 +187,22 @@ export const TIMELINE_STYLES = `
         border-bottom: 1px solid var(--line-soft);
     }
     .tl-card-final { border-left: 3px solid var(--success); }
+    /* Live command stdout — one collapsible card per command. */
+    .tl-card-stdout { border-left: 3px solid var(--accent); background: var(--surface-sunken); }
+    .tl-stdout-cmd {
+        font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--ink-soft);
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .tl-stdout-n { margin-left: auto; font-size: var(--fs-2xs); color: var(--ink-faint); flex-shrink: 0; }
+    .tl-stdout-body {
+        font-family: var(--font-mono); font-size: var(--fs-xs);
+        max-height: 260px; overflow: auto;
+        padding: var(--space-1) var(--space-2);
+        color: var(--ink-soft);
+    }
+    .tl-stdout-line { white-space: pre; line-height: 1.45; }
+    .tl-stdout-line:empty { display: none; }
+    .tl-stdout-more { color: var(--ink-faint); font-size: var(--fs-2xs); font-style: italic; }
     /* A foldable card header. */
     .tl-fold-h { cursor: pointer; user-select: none; }
     .tl-fold-h:hover { color: var(--accent); }
@@ -349,6 +365,46 @@ export const TIMELINE_STYLES = `
     /* A file row is indented past its directory's icon, so the names line up in a
        column instead of stepping with the folder glyphs. */
     .insp-tree-file { padding-top: 2px; padding-bottom: 2px; }
+    /* A changed file row + its inline Diff panel. The name and the Diff/Revert
+       controls share ONE line (the row is a wrapping flex row); the open panel
+       wraps to a full-width row underneath. */
+    .insp-file-row { display: flex; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 4px; }
+    .insp-file-row .insp-file { flex: 1 1 auto; min-width: 0; width: auto; }
+    .insp-file-row .tl-diff { display: contents; }
+    .insp-file-row .tl-diff-toggle { margin-left: 0; flex: 0 0 auto; }
+    .insp-file-row .tl-diff-panel { flex: 1 1 100%; margin: 2px 0 0; }
+    .tl-diff { margin: 0 0 2px calc(var(--space-1) * -1); }
+    .tl-diff-toggle {
+        display: inline-flex; align-items: center; gap: 4px;
+        margin-left: var(--space-3); padding: 1px 8px;
+        background: none; border: 1px solid var(--line); border-radius: var(--r-2);
+        color: var(--ink-faint); font-size: var(--fs-2xs); cursor: pointer;
+    }
+    .tl-diff-toggle:hover, .tl-diff-toggle.is-open { color: var(--accent); border-color: var(--line-focus); }
+    .tl-diff-actions { display: inline-flex; align-items: center; gap: 4px; }
+    .tl-diff-toggle.is-revert { color: var(--error); border-color: color-mix(in srgb, var(--error) 40%, transparent); }
+    .tl-diff-toggle.is-revert:hover { color: var(--error); border-color: var(--error); }
+    .tl-diff-toggle:disabled { opacity: 0.5; cursor: default; }
+    .tl-diff-panel {
+        margin: 2px var(--space-2) 2px var(--space-3);
+        border: 1px solid var(--line); border-radius: var(--r-2);
+        background: var(--surface-sunken);
+    }
+    .tl-diff-note {
+        display: flex; align-items: center; gap: 6px;
+        padding: 6px 8px; color: var(--ink-faint); font-size: var(--fs-2xs);
+    }
+    .tl-diff-note.is-error { color: var(--error); }
+    .tl-diff-pre {
+        margin: 0; padding: 6px 0; overflow-x: auto;
+        font-family: var(--font-mono); font-size: 10.5px; line-height: 1.45;
+        height: 320px; overflow-y: auto;
+    }
+    .tl-diff-line { padding: 0 8px; white-space: pre; color: var(--ink-soft); }
+    .tl-diff-line.is-meta { color: var(--ink-faint); }
+    .tl-diff-line.is-hunk { color: var(--accent); background: var(--accent-surface); }
+    .tl-diff-line.is-add { color: var(--success); background: rgba(80, 250, 123, 0.08); }
+    .tl-diff-line.is-del { color: var(--error); background: rgba(255, 85, 85, 0.08); }
     .insp-tree-more {
         padding: var(--space-1); color: var(--ink-faint); font-size: var(--fs-2xs);
     }

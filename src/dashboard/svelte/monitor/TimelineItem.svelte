@@ -310,6 +310,26 @@
         </div>
     </div>
 
+{:else if item.kind === 'stdout'}
+    <!-- Live command output, accumulated per command into one collapsible card.
+         Stdout is not stored (see liveEvents.js), so this is a live-only chapter;
+         it folds on its OWN via the model's collapsed flag, like task_progress. -->
+    <div class="tl-card tl-card-stdout">
+        <div class="tl-card-h tl-fold-h" role="button" tabindex="0"
+            onclick={toggleCollapsed}
+            onkeydown={(e) => { if (e.key === 'Enter') toggleCollapsed(); }}>
+            {@html icon('code')} <span class="tl-stdout-cmd">{item.command || 'command'}</span>
+            <span class="tl-stdout-n">{item.lines?.length} line{(item.lines?.length ?? 0) === 1 ? '' : 's'}</span>
+            <span class="tl-card-chev">▼</span>
+        </div>
+        <div class="tl-card-body tl-stdout-body">
+            {#each (item.lines || []) as line, i (i)}
+                <div class="tl-stdout-line">{line}</div>
+            {/each}
+            {#if item.truncated}<div class="tl-stdout-more">… truncated (only the latest {item.lines.length} lines shown)</div>{/if}
+        </div>
+    </div>
+
 {:else if item.kind === 'run'}
     <div class="tl-card tl-card-final">
         <div class="tl-card-h tl-fold-h" role="button" tabindex="0"

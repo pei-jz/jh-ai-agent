@@ -1048,6 +1048,12 @@ export class MonitorView {
                 }
                 if (route.kind === 'drop') return;
                 if (route.kind === 'narrate') { this._appendNarration(route.chunk); return; }
+                if (route.kind === 'chunk') {
+                    // Live command stdout — one collapsible card per command,
+                    // surfaced instead of dropped (see TaskTimeline.pushStdout).
+                    if (this._timeline.pushStdout(packet.data)) this._renderResultPanel();
+                    return;
+                }
                 if (route.kind === 'buffer') {
                     // Accumulate only; ALL rendering is deferred to _flushReplay.
                     // Live events arriving during the burst flush with it, so

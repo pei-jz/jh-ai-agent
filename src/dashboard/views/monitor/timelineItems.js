@@ -162,6 +162,7 @@ export function chapterKind(item) {
         case 'activity':  return 'bare';
         case 'narration': return 'note';
         case 'task_progress': return 'progress';
+        case 'stdout':    return 'stdout';
         case 'ask':       return item.answered ? 'answered' : 'question';
         case 'confirm':   return 'approval';
         case 'document':
