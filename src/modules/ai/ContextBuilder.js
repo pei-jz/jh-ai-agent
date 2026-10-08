@@ -632,6 +632,15 @@ ${projectInfo}
             }
         }
 
+        // Usage notes the offered MCP servers publish (MCP `instructions`, e.g.
+        // "read get_guide before writing slides"). Without them a server's tools
+        // arrive as bare schemas and the model skips the server's own workflow.
+        // Run-constant (the tool pick depends only on the run's query) → STABLE.
+        const mcpInstructions = toolExecutor.getMcpServerInstructions?.() || [];
+        if (mcpInstructions.length) {
+            stablePart += `\n<mcp_server_instructions>\nNotes from the MCP servers whose tools you have in this task. Follow them when you use those tools.\n${mcpInstructions.map(s => `<server name="${s.name}">\n${s.instructions}\n</server>`).join('\n')}\n</mcp_server_instructions>\n`;
+        }
+
         if (kisContext) {
             stablePart += `\n<knowledge_items>\n${kisContext}\n</knowledge_items>\n`;
         }

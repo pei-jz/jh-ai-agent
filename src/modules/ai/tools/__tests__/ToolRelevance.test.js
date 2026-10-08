@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { scoreToolRelevance, selectMcpTools } from '../ToolRelevance.js';
+import { scoreToolRelevance, scoreServerRelevance, selectMcpTools } from '../ToolRelevance.js';
 import { textUnits } from '../../memory/MemoryScoring.js';
 
 const mkTools = (n, prefix = 't') =>
@@ -73,5 +73,61 @@ describe('selectMcpTools', () => {
         const tools = mkTools(3); // ≤ minCount would normally send all
         const r = selectMcpTools(tools, 'totally unrelated', { minScore: 0.5 });
         expect(r.loaded).toEqual([]); // score-pruned anyway
+    });
+});
+
+// A server that spreads one job over many tools whose own descriptions share
+// few words with the request (jh-presentation: guide → create → write → check).
+const deckTools = () => [
+    { name: 'get_guide', description: '書き方・部品カタログ', _serverName: 'jh-presentation' },
+    { name: 'list_themes', description: 'テーマ一覧', _serverName: 'jh-presentation' },
+    { name: 'create_deck', description: '新しいデッキを作る', _serverName: 'jh-presentation' },
+    { name: 'write_deck', description: 'デッキに書き込む', _serverName: 'jh-presentation' },
+    { name: 'audit_deck', description: 'レイアウトを検査する', _serverName: 'jh-presentation' },
+    { name: 'open_deck', description: 'ブラウザで開く', _serverName: 'jh-presentation' },
+];
+const deckInstructions = new Map([['jh-presentation',
+    'プレゼンテーション資料 (スライド・発表資料) を HTML で作成・確認する道具。スライドを作る前に必ず get_guide を呼び、問題があれば直してから完了を伝える。']]);
+
+describe('scoreServerRelevance', () => {
+    it('scores the topic words of the request against the server description', () => {
+        const ins = deckInstructions.get('jh-presentation');
+        expect(scoreServerRelevance('jh-presentation', ins, textUnits('スライドを作って'))).toBe(1);
+        expect(scoreServerRelevance('jh-presentation', ins, textUnits('発表資料を作成したい'))).toBeGreaterThan(0.5);
+    });
+    it('ignores hiragana-only units (particles and verb endings match anything)', () => {
+        const ins = deckInstructions.get('jh-presentation');
+        // 「この」「して」「直し」 all appear in the description — none is a topic.
+        expect(scoreServerRelevance('jh-presentation', ins, textUnits('このバグを直して'))).toBe(0);
+    });
+    it('is 0 for a server without instructions', () => {
+        expect(scoreServerRelevance('srv', '', textUnits('スライド'))).toBe(0);
+    });
+});
+
+describe('selectMcpTools — server relevance', () => {
+    it('loads the whole server when the request is plainly about it, even in minScore mode', () => {
+        const tools = [...deckTools(), ...mkTools(10, 'noise')];
+        const before = selectMcpTools(tools, 'スライドを作って', { minScore: 0.12, top: 5 });
+        expect(before.loaded.map(t => t.name)).not.toContain('get_guide');
+        const { loaded } = selectMcpTools(tools, 'スライドを作って', { minScore: 0.12, top: 5, serverInstructions: deckInstructions });
+        expect(loaded.filter(t => t._serverName === 'jh-presentation')).toHaveLength(deckTools().length);
+        expect(loaded.some(t => t.name.startsWith('noise'))).toBe(false);
+    });
+    it('loads only the top tools of a partially matching server', () => {
+        const tools = [...deckTools(), ...mkTools(10, 'noise')];
+        // topic units: git 基本 新人 人向 発表 表資 資料 → 3/7 ≈ 0.43 (between 0.2 and 0.5)
+        const { loaded } = selectMcpTools(tools, 'Gitの基本について新人向けに発表資料を作って', {
+            minScore: 0.12, top: 5, serverInstructions: deckInstructions, serverTop: 2,
+        });
+        expect(loaded.filter(t => t._serverName === 'jh-presentation')).toHaveLength(2);
+    });
+    it('adds nothing for a request about another server', () => {
+        const tools = [...deckTools(), { name: 'find_issue', description: '課題を検索する', _serverName: 'backlog' }];
+        const opts = { minScore: 0.12, top: 5 };
+        const without = selectMcpTools(tools, 'Backlogの課題を検索して', opts).loaded;
+        const withHints = selectMcpTools(tools, 'Backlogの課題を検索して', { ...opts, serverInstructions: deckInstructions }).loaded;
+        expect(withHints).toEqual(without);
+        expect(withHints.map(t => t.name)).toContain('find_issue');
     });
 });

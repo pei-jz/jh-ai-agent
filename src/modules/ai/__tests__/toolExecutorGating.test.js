@@ -12,9 +12,11 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(async () => null) }));
 // MCP tools are injected per-test via this stub.
 let mcpTools = [];
+let mcpInstructions = new Map();
 vi.mock('../McpManager.js', () => ({
     mcpManager: {
         getAllTools: () => mcpTools,
+        getServerInstructions: () => mcpInstructions,
         callTool: async () => ({ content: [{ type: 'text', text: 'ok' }] }),
         clients: new Map(),
     },
@@ -26,6 +28,7 @@ const { invoke } = await import('@tauri-apps/api/core');
 let ex;
 beforeEach(() => {
     mcpTools = [];
+    mcpInstructions = new Map();
     ex = new ToolExecutor();
     ex.workspacePath = 'C:/work/proj';
     try { globalThis.localStorage = { getItem: () => null, setItem: () => {}, removeItem: () => {} }; } catch (_) {}
@@ -217,6 +220,34 @@ describe('tool advertisement — MCP tools', () => {
         const names = ex.getToolsForNativeAPI().map(t => t.function.name);
         expect(names).toContain('get_buffer');
         expect(names).not.toContain('list_workspace_files');
+    });
+
+    // A server whose own description matches the request gets its tools sent
+    // even when each tool's description shares few words with it — and its
+    // instructions reach the prompt so the model follows the server's workflow.
+    it('loads a server that matches the request by its instructions, and returns those instructions', () => {
+        const deck = ['get_guide', 'create_deck', 'write_deck', 'open_deck'].map(n => mcp(n, 'jh-presentation'));
+        mcpTools = [...deck, ...Array.from({ length: 10 }, (_, i) => mcp(`noise_${i}`, 'other'))];
+        mcpInstructions = new Map([
+            ['jh-presentation', 'プレゼンテーション資料 (スライド) を作る道具。必ず get_guide を読む。'],
+            ['other', 'Backlog の課題を扱う道具。'],
+        ]);
+        ex.setMcpRelevanceQuery('スライドを作って');
+        ex.setMcpPruneOptions({ minScore: 0.12, top: 5 });
+        const names = ex.getToolsForNativeAPI().map(t => t.function.name);
+        expect(names).toEqual(expect.arrayContaining(['get_guide', 'create_deck', 'write_deck', 'open_deck']));
+        expect(names.some(n => n.startsWith('noise_'))).toBe(false);
+        expect(ex.getMcpServerInstructions()).toEqual([
+            { name: 'jh-presentation', instructions: mcpInstructions.get('jh-presentation') },
+        ]);
+    });
+
+    it('returns no instructions for a server whose tools are all pruned', () => {
+        mcpTools = Array.from({ length: 10 }, (_, i) => mcp(`noise_${i}`, 'other'));
+        mcpInstructions = new Map([['other', 'Backlog の課題を扱う道具。']]);
+        ex.setMcpRelevanceQuery('スライドを作って');
+        ex.setMcpPruneOptions({ minScore: 0.12, top: 5 });
+        expect(ex.getMcpServerInstructions()).toEqual([]);
     });
 });
 

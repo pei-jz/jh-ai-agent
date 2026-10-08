@@ -51,6 +51,9 @@ import { ARGS_TRUNCATED, ARGS_UNPARSEABLE } from './agent/ResponseParser.js';
 // is drive-by reads that the next run has no reason to remember.
 const CARRIED_CACHE_MAX_FILES = 40;
 
+/** Per-server cap on MCP `instructions` copied into the system prompt. */
+const MCP_INSTRUCTIONS_MAX_CHARS = 2000;
+
 // ── Per-tool watchdog budgets (ms) ─────────────────────────────────────────
 // Only INVESTIGATION tools appear here: they cannot prompt the user and have a
 // bounded amount of honest work to do, so exceeding these means something is
@@ -1269,6 +1272,61 @@ export class ToolExecutor {
         });
     }
 
+    /**
+     * The MCP tools offered to the model this run.
+     *
+     * When a relevance query is set (interactive callers), only the top-5 most
+     * relevant to the task prompt are sent; the rest are omitted. With no query
+     * (Simple chat, external app callers) ALL eligible tools load — the previous
+     * behavior. A server whose own description (MCP `instructions`) matches the
+     * request also gets its most relevant tools loaded (see selectMcpTools).
+     *
+     * Server-name override: if the user EXPLICITLY names an MCP server (e.g.
+     * "use the Backlog MCP to search the wiki"), include ALL of that server's
+     * tools regardless of relevance score. Long/verbose prompts otherwise
+     * dilute the score (hits / queryUnits) below the threshold, so an
+     * explicitly-requested server would be pruned and the model concludes
+     * "no MCP available" — the exact reported bug.
+     */
+    _selectMcpToolsForRun() {
+        const eligibleMcp = this._eligibleMcpTools();
+        const q = (this._mcpRelevanceQuery || '').toLowerCase();
+        const alwaysInclude = new Set(this._mcpPruneOpts.alwaysInclude || []);
+        if (q) {
+            for (const t of eligibleMcp) {
+                const sn = String(t._serverName || '').toLowerCase();
+                if (!sn) continue;
+                // Match the whole server name, or any word-part of it (≥3 chars),
+                // so "backlog" in the prompt matches a "backlog-mcp" server.
+                const parts = sn.split(/[-_ .]+/).filter(p => p.length >= 3);
+                if (q.includes(sn) || parts.some(p => q.includes(p))) {
+                    alwaysInclude.add(t.name);
+                }
+            }
+        }
+        const { loaded } = selectMcpTools(
+            eligibleMcp,
+            this._mcpRelevanceQuery,
+            { ...this._mcpPruneOpts, alwaysInclude, serverInstructions: mcpManager.getServerInstructions?.() }
+        );
+        return loaded;
+    }
+
+    /**
+     * MCP `instructions` of the servers whose tools are offered this run, for
+     * the system prompt. Servers whose tools are all pruned are left out — their
+     * notes would only describe tools the model cannot call.
+     * @returns {Array<{name:string, instructions:string}>}
+     */
+    getMcpServerInstructions() {
+        const all = mcpManager.getServerInstructions?.() ?? new Map();
+        if (all.size === 0) return [];
+        const offered = new Set(this._selectMcpToolsForRun().map(t => t._serverName));
+        return [...offered]
+            .filter(name => all.has(name))
+            .map(name => ({ name, instructions: all.get(name).slice(0, MCP_INSTRUCTIONS_MAX_CHARS) }));
+    }
+
     getToolsForNativeAPI() {
         // Respect the per-session allowlist so the LLM is only PRESENTED tools it
         // may actually use. Otherwise a capability-scoped task (e.g. an app intent
@@ -1302,37 +1360,7 @@ export class ToolExecutor {
                 }
             }));
 
-        // MCP tools: when a relevance query is set (interactive callers), only
-        // the top-5 most relevant to the task prompt are sent; the rest are
-        // omitted. With no query (Simple chat, external app callers) ALL
-        // eligible tools load — the previous behavior.
-        //
-        // Server-name override: if the user EXPLICITLY names an MCP server (e.g.
-        // "use the Backlog MCP to search the wiki"), include ALL of that server's
-        // tools regardless of relevance score. Long/verbose prompts otherwise
-        // dilute the score (hits / queryUnits) below the threshold, so an
-        // explicitly-requested server would be pruned and the model concludes
-        // "no MCP available" — the exact reported bug.
-        const eligibleMcp = this._eligibleMcpTools();
-        const q = (this._mcpRelevanceQuery || '').toLowerCase();
-        const alwaysInclude = new Set(this._mcpPruneOpts.alwaysInclude || []);
-        if (q) {
-            for (const t of eligibleMcp) {
-                const sn = String(t._serverName || '').toLowerCase();
-                if (!sn) continue;
-                // Match the whole server name, or any word-part of it (≥3 chars),
-                // so "backlog" in the prompt matches a "backlog-mcp" server.
-                const parts = sn.split(/[-_ .]+/).filter(p => p.length >= 3);
-                if (q.includes(sn) || parts.some(p => q.includes(p))) {
-                    alwaysInclude.add(t.name);
-                }
-            }
-        }
-        const { loaded: mcpTools } = selectMcpTools(
-            eligibleMcp,
-            this._mcpRelevanceQuery,
-            { ...this._mcpPruneOpts, alwaysInclude }
-        );
+        const mcpTools = this._selectMcpToolsForRun();
         mcpTools.forEach(t => {
             const rawSchema = t.inputSchema || { type: 'object', properties: {} };
             // Third-party MCP schemas: convert the ones we safely can to strict

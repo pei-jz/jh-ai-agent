@@ -130,6 +130,28 @@ describe('project instructions (.agent/instructions.md)', () => {
     });
 });
 
+describe('MCP server instructions', () => {
+    it('is absent when no offered server published instructions', async () => {
+        const p = await build();
+        expect(p).not.toContain('<mcp_server_instructions>');
+    });
+
+    it('carries the instructions of the offered servers in the cacheable region', async () => {
+        const executor = {
+            ...fakeExecutor(),
+            getMcpServerInstructions: () => [{ name: 'jh-presentation', instructions: 'READ-GET-GUIDE-FIRST' }],
+        };
+        const p = await build({ executor });
+        expect(p).toContain('<mcp_server_instructions>');
+        expect(p).toContain('<server name="jh-presentation">');
+        expect(p).toContain('READ-GET-GUIDE-FIRST');
+        const sentinel = p.indexOf(ContextBuilder.SYSTEM_CACHE_BREAK);
+        if (sentinel !== -1) {
+            expect(p.indexOf('<mcp_server_instructions>')).toBeLessThan(sentinel);
+        }
+    });
+});
+
 describe('static-prefix cache', () => {
     it('reuses the built prefix across calls with unchanged inputs', async () => {
         const a = await build();

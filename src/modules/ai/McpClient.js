@@ -140,6 +140,10 @@ export class McpClient {
                 clientInfo: { name: 'JHAiAgent', version: await getAppVersion() }
             });
             this.capabilities = initResult.capabilities;
+            // Usage notes the server publishes for the model (MCP `instructions`).
+            // Surfaced in the system prompt by ContextBuilder for servers whose
+            // tools are offered in a run.
+            this.instructions = typeof initResult.instructions === 'string' ? initResult.instructions : '';
             await this.notification('notifications/initialized', {});
 
             // Discover tools

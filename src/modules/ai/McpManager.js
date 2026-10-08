@@ -247,6 +247,19 @@ export class McpManager {
         return allTools;
     }
 
+    /**
+     * MCP `instructions` of every connected server that published any.
+     * @returns {Map<string, string>} server name → instructions
+     */
+    getServerInstructions() {
+        const out = new Map();
+        for (const client of this.clients.values()) {
+            const text = typeof client.instructions === 'string' ? client.instructions.trim() : '';
+            if (text) out.set(client.name, text);
+        }
+        return out;
+    }
+
     async callTool(serverName, toolName, args, meta = null) {
         const client = this.clients.get(serverName);
         if (!client) throw new Error(`Server ${serverName} not found`);
