@@ -641,7 +641,7 @@ export const en = {
     'rag.enterPath': 'Enter a workspace path and click "Load Directories".',
     'rag.comingSoon': '🚧 Coming soon',
     'rag.notAvailable': 'Semantic indexing is not available yet — this feature is under development.',
-    'mcp.jsonHint': 'Edit the MCP servers config in JSON format. Example:',
+    'mcp.jsonHint': 'Edit the MCP servers config in JSON format. Registered servers start with the app and are used by new tasks by default; turn one off per task with MCP in the composer (its tools are then not sent), or add "disabled": true to keep it registered but not started. Example:',
 
     // ── Settings / Allowlist / Memory root ──
     'settings.secret.stored': '🔐 API keys are stored in {store}, not in ai_config.json.',
@@ -733,7 +733,13 @@ export const en = {
 
     // ── Composer send ──
     'composer.ws.browse': 'Choose a folder…',
-    'composer.details': 'More (MCP, attachments)',
+    'composer.details': 'More (attachments, etc.)',
+    'composer.mcp': 'MCP servers to use',
+    'composer.mcp.all': 'MCP: all',
+    'composer.mcp.none': 'MCP: off',
+    'composer.mcp.some': 'MCP {n}/{total}',
+    'composer.mcp.running': 'Connected — its tools are sent when on',
+    'composer.mcp.stopped': 'Not connected (starting, or failed to start)',
     'composer.send': 'Send',
     'composer.sendKey': 'Ctrl+Enter',
 

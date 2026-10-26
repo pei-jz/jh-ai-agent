@@ -649,7 +649,7 @@ export const ja = {
     'rag.enterPath': 'ワークスペースのパスを入力して「Load Directories」を押してください。',
     'rag.comingSoon': '🚧 準備中',
     'rag.notAvailable': '意味検索の索引化はまだ使えません — 開発中の機能です。',
-    'mcp.jsonHint': 'MCP サーバの設定を JSON で編集します。例:',
+    'mcp.jsonHint': 'MCP サーバの設定を JSON で編集します。登録したサーバは新しいタスクで既定で使われます（アプリ起動時に自動起動。タスクごとにツールを送るかどうかは入力欄の「MCP」で On/Off。登録だけして使わない場合は "disabled": true）。例:',
 
     // ── Settings / Allowlist / Memory root ──
     'settings.secret.stored': '🔐 API キーは {store} に保存されます。',
@@ -741,7 +741,13 @@ export const ja = {
 
     // ── Composer send ──
     'composer.ws.browse': 'フォルダを選ぶ…',
-    'composer.details': 'その他の設定（MCP・添付）',
+    'composer.details': 'その他の設定（添付など）',
+    'composer.mcp': '使う MCP サーバー',
+    'composer.mcp.all': 'MCP すべて',
+    'composer.mcp.none': 'MCP オフ',
+    'composer.mcp.some': 'MCP {n}/{total}',
+    'composer.mcp.running': '接続中 — On ならツールを送ります',
+    'composer.mcp.stopped': '未接続（起動中か、起動に失敗）',
     'composer.send': '送信',
     'composer.sendKey': 'Ctrl+Enter',
 

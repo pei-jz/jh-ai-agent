@@ -28,6 +28,7 @@
     import { showNotification } from '../../utils/notifications.js';
     import { promptTemplateManager } from '../../../modules/ai/PromptTemplateManager.js';
     import { skillManager } from '../../../modules/ai/SkillManager.js';
+    import { mcpManager } from '../../../modules/ai/McpManager.js';
     import { classifyCommand } from '../../../modules/ai/tools/commandPolicy.js';
     import {
         readBrowserState, markBrowserAvailable, markBrowserUnavailable, clearBrowserProbe,
@@ -177,6 +178,10 @@
         const c = client();
         if (!c) return;
         await c.updateConfig(payload);
+        // Running servers follow the saved config: new/changed start, removed or
+        // "disabled": true stop. Not awaited — a slow start must not hold Save.
+        mcpManager.syncServers(payload.mcp_servers || {})
+            .catch(e => console.warn('MCP sync after save failed:', e));
         try {
             const { default: llmService } = await import('../../../modules/ai/LLMService.js');
             // A saved default is authoritative — drop any earlier session

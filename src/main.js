@@ -1394,6 +1394,11 @@ window.addEventListener('DOMContentLoaded', async () => {
             console.warn('Failed to activate MCP-WS listener:', e);
         }
 
+        // Start every registered (non-disabled) MCP server. Not awaited: a slow
+        // `npx` download must not hold the window. Per-task On/Off decides which
+        // servers' tools are SENT, not which run — see McpManager.autoStart.
+        mcpManager.autoStart().catch(e => console.warn('MCP auto-start failed:', e));
+
         // Initialize background task scheduler
         // ONE registry for everything that runs without being asked.
         //

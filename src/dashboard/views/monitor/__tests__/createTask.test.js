@@ -1,12 +1,13 @@
 // createTask — the shared creation path.
 //
 // The rules worth pinning are the ones that are invisible from either call site:
-// selected MCP servers must be RUNNING before the POST, a server that refuses to
-// start must not lose the user's prompt, and `mcp_servers` must go on the wire
-// even when it is empty (an omitted list means "every server" to AgentController).
+// creating a task never starts or stops an MCP server (they start with the app;
+// the selection only decides whose tools are SENT), and `mcp_servers` must go on
+// the wire even when it is empty (an omitted list means "every server" to
+// AgentController).
 
 import { describe, it, expect, vi } from 'vitest';
-import { createTask, startSelectedMcp, rememberWorkspace } from '../createTask.js';
+import { createTask, rememberWorkspace } from '../createTask.js';
 
 const mkMcp = (running = [], failing = []) => ({
     clients: new Set(running),
@@ -21,45 +22,16 @@ const mkClient = (taskId = 't-1') => ({
 
 const body = (client) => JSON.parse(client.request.mock.calls[0][1].body);
 
-describe('startSelectedMcp', () => {
-    it('starts only what is not already running', async () => {
-        const mcp = mkMcp(['alpha']);
-        await startSelectedMcp(['alpha', 'beta'], { beta: { cmd: 'x' } }, mcp);
-        expect(mcp.startClient).toHaveBeenCalledTimes(1);
-        expect(mcp.startClient).toHaveBeenCalledWith('beta', { cmd: 'x' });
-    });
-
-    it('reports failures instead of throwing — a refusing server must not block the task', async () => {
-        const mcp = mkMcp([], ['beta']);
-        const failed = await startSelectedMcp(['beta'], { beta: {} }, mcp);
-        expect(failed).toEqual(['beta']);
-    });
-});
-
 describe('createTask', () => {
-    it('starts the selected servers BEFORE posting', async () => {
-        const order = [];
-        const mcp = {
-            clients: new Set(),
-            startClient: vi.fn(async () => { order.push('mcp'); }),
-        };
-        const client = { request: vi.fn(async () => { order.push('post'); return { task_id: 't' }; }) };
-
-        await createTask({
-            prompt: 'go', workspace: 'C:/p', modeId: 'develop',
-            selectedMcp: ['s1'], mcpServers: { s1: {} }, client, mcp,
-        });
-        expect(order).toEqual(['mcp', 'post']);
-    });
-
-    it('still creates the task when a server failed to start', async () => {
+    // On/Off is "send this server's tools or not". Servers start with the app.
+    it('passes the selection through and starts no server', async () => {
         const client = mkClient('t-9');
         const id = await createTask({
             prompt: 'go', workspace: 'C:/p', modeId: 'develop',
-            selectedMcp: ['bad'], mcpServers: { bad: {} },
-            client, mcp: mkMcp([], ['bad']),
+            selectedMcp: ['s1'], client,
         });
         expect(id).toBe('t-9');
+        expect(body(client).behavior.mcp_servers).toEqual(['s1']);
     });
 
     it('sends mcp_servers even when empty — an omitted list means "every server"', async () => {

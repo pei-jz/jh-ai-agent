@@ -23,7 +23,7 @@
     import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
     import { AGENT_MODES, DEFAULT_MODE_ID, modeDescription } from '../../../modules/ai/AgentModes.js';
     import { BUILD } from '../../../modules/ai/agent/InteractionMode.js';
-    import { mcpManager } from '../../../modules/ai/McpManager.js';
+    import { availableMcp, defaultMcpSelection, toggleMcpSelection } from '../../views/monitor/mcpSelection.js';
     import { promptTemplateManager } from '../../../modules/ai/PromptTemplateManager.js';
     import { skillManager } from '../../../modules/ai/SkillManager.js';
     import { SlashCommands } from '../../components/SlashCommands.js';
@@ -95,7 +95,7 @@
     let slash = null;
 
     const modeDesc = $derived(modeDescription(AGENT_MODES[modeId]));
-    const mcpNames = $derived(Object.keys(mcpServers));
+    const mcpNames = $derived(availableMcp(mcpServers));
 
     $effect(() => {
         let alive = true;
@@ -105,7 +105,8 @@
             if (!alive) return;
             projects = Array.isArray(config.approved_projects) ? config.approved_projects : [];
             mcpServers = config.mcp_servers || {};
-            selectedMcp = mcpNames.filter(n => mcpManager.clients.has(n));
+            // Registered = used, minus what the user turned off. See mcpSelection.js.
+            selectedMcp = defaultMcpSelection(mcpServers);
             workspace = presetWs || lastWs || projects[0] || '';
             promptTemplateManager.loadFromConfig(config);
             skillManager.refresh().catch(() => {});
@@ -165,7 +166,7 @@
     }
 
     function toggleMcp(name, on) {
-        selectedMcp = on ? [...new Set([...selectedMcp, name])] : selectedMcp.filter(n => n !== name);
+        selectedMcp = toggleMcpSelection(selectedMcp, name, on);
     }
 
     async function browse() {
@@ -195,7 +196,7 @@
             // Shared with the composer at the top of the list — see
             // views/monitor/createTask.js. Two entries, one creation path.
             const taskId = await createTask({
-                prompt: body, workspace, modeId, selectedMcp, mcpServers, images,
+                prompt: body, workspace, modeId, selectedMcp, images,
                 interaction,
                 client: client(),
             });

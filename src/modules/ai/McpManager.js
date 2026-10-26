@@ -18,6 +18,9 @@ export class McpManager {
         this.serversConfig = { mcpServers: {} };
         // name -> { message, stage, at } for servers that failed to start.
         this.startErrors = new Map();
+        // name -> the config (JSON) a running config server was started with,
+        // so syncServers restarts only what actually changed.
+        this._started = new Map();
         // Set once we've subscribed to inbound MCP-WS connections (T1).
         this._wsListenerReady = false;
     }
@@ -141,10 +144,67 @@ export class McpManager {
     }
 
     async startAll() {
-        const servers = this.serversConfig.mcpServers || {};
-        for (const [name, config] of Object.entries(servers)) {
-            await this.startClient(name, config);
+        await this.syncServers(this.serversConfig.mcpServers || {});
+    }
+
+    /**
+     * Start every registered server at app launch.
+     *
+     * Registered = running: whether a task may USE a server is a separate,
+     * per-task question (behavior.mcp_servers → ToolExecutor's server filter),
+     * answered by which tools are sent, not by starting or stopping anything.
+     */
+    async autoStart() {
+        await this.loadConfig();
+        await this.syncServers(this.serversConfig.mcpServers || {});
+    }
+
+    /**
+     * Make the running CONFIG servers match `servers`: start what is new or
+     * changed, stop what was removed or marked `"disabled": true`.
+     *
+     * WebSocket-dialed app servers are not in the config and are never touched.
+     * Servers start in parallel and each failure is recorded (getError) rather
+     * than thrown, so one bad entry cannot hold up the rest.
+     */
+    async syncServers(servers = {}) {
+        // The { mcpServers: {...} } wrapper some users paste from Claude Desktop.
+        if (servers?.mcpServers && typeof servers.mcpServers === 'object' && !Array.isArray(servers.mcpServers)) {
+            servers = servers.mcpServers;
         }
+        const wanted = Object.entries(servers || {})
+            .filter(([, cfg]) => cfg && typeof cfg === 'object' && cfg.disabled !== true);
+        const wantedNames = new Set(wanted.map(([n]) => n));
+        this.serversConfig = { mcpServers: servers || {} };
+
+        const stops = [];
+        for (const [name, client] of this.clients) {
+            if (client instanceof McpWsClient || wantedNames.has(name)) continue;
+            stops.push((async () => {
+                try { await client.stop(); } catch (_) { /* already gone */ }
+                this.clients.delete(name);
+                this._started.delete(name);
+                resourceRegistry.clearApp(name);
+            })());
+        }
+        for (const name of this.startErrors.keys()) {
+            if (!wantedNames.has(name) && !(this.clients.get(name) instanceof McpWsClient)) this.startErrors.delete(name);
+        }
+        await Promise.all(stops);
+
+        await Promise.all(wanted.map(async ([name, cfg]) => {
+            const key = JSON.stringify(cfg);
+            if (this.clients.has(name) && this._started.get(name) === key) return;
+            this._started.set(name, key);
+            try {
+                await this.startClient(name, cfg);
+            } catch (e) {
+                this.startErrors.set(name, {
+                    message: String(e?.message || e), stage: 'spawn', at: new Date().toISOString(),
+                });
+            }
+        }));
+        this._notify();
     }
 
     async startClient(name, config) {

@@ -12,10 +12,14 @@
   views/monitor/createTask.js, the same function NewTaskModal calls, with the
   same payload assembly (newTaskRequest.js) and the same MCP start rule. What
   the modal still owns is the things this box deliberately does not ask for —
-  agent mode, MCP selection, attachments — reachable here as "Details", which
+  attachments and the long-form fields — reachable here as "Details", which
   opens it pre-filled with whatever has been typed.
 
-  Mode and MCP are inherited from the last create rather than defaulted, because
+  MCP servers are chosen here too ("MCP n/m" on the status line): every server
+  registered in Settings is on unless the user turned it off — see
+  views/monitor/mcpSelection.js.
+
+  Mode is inherited from the last create rather than defaulted, because
   the common case is a run of tasks in one project with one mode, and asking
   again each time is the friction this box exists to remove.
 -->
@@ -34,6 +38,7 @@
     import ContextPicker from './ContextPicker.svelte';
     import { ASK, BUILD } from '../../../modules/ai/agent/InteractionMode.js';
     import { createTask } from '../../views/monitor/createTask.js';
+    import { availableMcp, defaultMcpSelection, toggleMcpSelection } from '../../views/monitor/mcpSelection.js';
 
     let {
         /** Seeded from the last create, or from a Dashboard handoff. */
@@ -134,6 +139,21 @@
     }
     const mode = $derived(AGENT_MODES[activeMode] || AGENT_MODES[DEFAULT_MODE_ID]);
 
+    const mcpNames = $derived(availableMcp(mcpServers));
+    // Servers come up in the background after launch, so "connected" has to
+    // follow the manager rather than be read once.
+    let mcpTick = $state(0);
+    $effect(() => mcpManager.onChange?.(() => { mcpTick++; }));
+    const mcpOptions = $derived((mcpTick, mcpNames).map(n => ({
+        value: n, label: n,
+        hint: mcpManager.clients.has(n) ? t('composer.mcp.running') : t('composer.mcp.stopped'),
+    })));
+    const mcpOn = $derived(selectedMcp.filter(n => mcpNames.includes(n)));
+    const mcpDisplay = $derived(
+        mcpOn.length === 0 ? t('composer.mcp.none')
+        : mcpOn.length === mcpNames.length ? t('composer.mcp.all')
+        : t('composer.mcp.some', { n: mcpOn.length, total: mcpNames.length }));
+
     // Seeded ONCE. `untrack` marks the capture as deliberate — reading the prop
     // directly does the same thing but warns, and those warnings drown out the
     // ones that mean something. The $effects below re-seed while the field is
@@ -188,9 +208,10 @@
 
     // Loaded here rather than pushed in as props, so the view does not have to
     // carry config it has no other use for — the same shape NewTaskModal uses.
-    // The MCP default is "whatever is running", which is what the modal defaults
-    // to as well: a task started from this box gets the servers the user already
-    // brought up, and the modal is where that selection gets changed.
+    // The MCP default is "every registered server the user has not turned
+    // off" — the same rule as the modal (mcpSelection.js). It used to be
+    // "whatever is running", so whether a task got a server's tools depended
+    // on whether something else had happened to start it.
     let projects = $state([]);
     let mcpServers = $state({});
     let selectedMcp = $state([]);
@@ -203,7 +224,7 @@
             if (!alive) return;
             projects = Array.isArray(config.approved_projects) ? config.approved_projects : [];
             mcpServers = config.mcp_servers || {};
-            selectedMcp = Object.keys(mcpServers).filter(n => mcpManager.clients.has(n));
+            selectedMcp = defaultMcpSelection(mcpServers);
             promptTemplateManager.loadFromConfig(config);
             skillManager.refresh().catch(() => {});
             if (!ws) ws = projects[0] || '';
@@ -332,7 +353,6 @@
                 workspace: ws,
                 modeId: activeMode,
                 selectedMcp,
-                mcpServers,
                 interaction,
                 client: client(),
                 caller: 'Composer',
@@ -466,6 +486,20 @@
                 value={activeMode}
                 options={modeOptions}
                 onPick={(id) => (pickedMode = id)} />
+
+            {#if mcpNames.length}
+                <span class="mcomp-ctx-sep">·</span>
+
+                <ContextPicker
+                    glyph="mcp"
+                    label={t('composer.mcp')}
+                    title={mcpOn.join(', ') || t('composer.mcp.none')}
+                    multiple
+                    values={mcpOn}
+                    display={mcpDisplay}
+                    options={mcpOptions}
+                    onToggle={(name, on) => (selectedMcp = toggleMcpSelection(selectedMcp, name, on))} />
+            {/if}
 
             <button type="button" class="mcomp-ctx-more" title={t('composer.details')}
                 onclick={() => onDetails?.({ prompt: prompt.trim(), ws: ws.trim() })}>⋯</button>

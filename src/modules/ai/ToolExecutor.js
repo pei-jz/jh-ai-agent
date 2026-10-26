@@ -1705,6 +1705,11 @@ export class ToolExecutor {
         if (!targetTool) {
             return `Error: Tool "${name}" not found. Available MCP tools: ${mcpManager.getAllTools().map(t => t.name).join(', ') || 'none'}.`;
         }
+        // A server switched OFF for this task: its tools were not sent, but a
+        // model can still name one it saw earlier (history, another task).
+        if (this._mcpServerFilter && !this._mcpServerFilter.has(targetTool._serverName)) {
+            return `Error: Tool "${name}" belongs to MCP server "${targetTool._serverName}", which is turned off for this task.`;
+        }
         // Defense-in-depth: an external-app (WS) tool should never reach here in a
         // JHAI-owned task (it was excluded from the advertised list). If it does,
         // refuse with a clear reason rather than reading a connected app's state.

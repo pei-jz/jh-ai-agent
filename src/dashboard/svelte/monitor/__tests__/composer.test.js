@@ -638,3 +638,46 @@ describe('how tall the box may get', () => {
         expect(el.style.height).toBe('600px');
     });
 });
+
+describe('Composer — MCP servers are chosen here', () => {
+    const WITH_MCP = { ...CONFIG, mcp_servers: { backlog: { command: 'npx' }, er_app: { command: 'npx' } } };
+    beforeEach(() => {
+        try { localStorage.removeItem('jhai_mcp_off'); } catch (_) { /* none */ }
+        invoke.mockImplementation(async (cmd) => (cmd === 'get_ai_config' ? WITH_MCP : ''));
+    });
+    const mcpBtn = (c) => pickers(c)[2] || null;
+    const mcpText = (c) => mcpBtn(c)?.querySelector('.ctxp-cur')?.textContent?.trim() || '';
+
+    it('has no MCP picker when no server is registered', async () => {
+        invoke.mockImplementation(async (cmd) => (cmd === 'get_ai_config' ? CONFIG : ''));
+        const { container } = mount();
+        await open(container);
+        await waitFor(() => expect(pickers(container).length).toBe(2));
+    });
+
+    it('uses every registered server by default', async () => {
+        const h = mount();
+        await open(h.container);
+        await waitFor(() => expect(mcpBtn(h.container)).toBeTruthy());
+        expect(mcpText(h.container)).toMatch(/all|すべて/);
+        await fireEvent.input(ta(h.container), { target: { value: 'go' } });
+        await fireEvent.click(send(h.container));
+        await waitFor(() => expect(h.request).toHaveBeenCalled());
+        expect(body(h.request).behavior.mcp_servers).toEqual(['backlog', 'er_app']);
+    });
+
+    it('turns a server off from the list, which stays open, and sends without it', async () => {
+        const h = mount();
+        await open(h.container);
+        await waitFor(() => expect(mcpBtn(h.container)).toBeTruthy());
+        const list = await rows(h.container, mcpBtn(h.container));
+        await fireEvent.click(rowNamed(list, 'er_app'));
+        // Several toggles in a row is the normal use, so the list does not close.
+        expect(h.container.querySelector('.ctxp-list')).toBeTruthy();
+        await waitFor(() => expect(mcpText(h.container)).toBe('MCP 1/2'));
+        await fireEvent.input(ta(h.container), { target: { value: 'go' } });
+        await fireEvent.click(send(h.container));
+        await waitFor(() => expect(h.request).toHaveBeenCalled());
+        expect(body(h.request).behavior.mcp_servers).toEqual(['backlog']);
+    });
+});

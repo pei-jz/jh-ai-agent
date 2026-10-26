@@ -31,6 +31,16 @@
         title = '',
         /** (value) => void */
         onPick = () => {},
+        /**
+         * Several on at once (the MCP servers). Picking a row TOGGLES it and
+         * leaves the list open, since the next thing is usually another row.
+         * `onToggle(value, on)` reports it; `values` is what is on.
+         */
+        multiple = false,
+        values = [],
+        onToggle = () => {},
+        /** Button text in multiple mode, where no single option names the state. */
+        display = '',
     } = $props();
 
     let open = $state(false);
@@ -39,16 +49,21 @@
     let cursor = $state(-1);
 
     const current = $derived(options.find(o => o.value === value) || null);
-    const shown = $derived(current?.label || '');
+    const shown = $derived(multiple ? display : (current?.label || ''));
+    const isSel = (o) => multiple ? values.includes(o.value) : o.value === value;
 
     function toggle() {
         open = !open;
         // Opening puts the cursor on what is selected, so ↓ moves from there
         // rather than from the top of a list you are already part-way down.
-        cursor = open ? Math.max(0, options.findIndex(o => o.value === value)) : -1;
+        cursor = open ? Math.max(0, options.findIndex(o => isSel(o))) : -1;
     }
 
     function choose(option) {
+        if (multiple) {
+            if (option) onToggle(option.value, !values.includes(option.value));
+            return;
+        }
         open = false;
         cursor = -1;
         if (option && option.value !== value) onPick(option.value);
@@ -91,15 +106,15 @@
     </button>
 
     {#if open}
-        <div class="ctxp-list" role="listbox" aria-label={label} tabindex="-1">
+        <div class="ctxp-list" role="listbox" aria-label={label} aria-multiselectable={multiple} tabindex="-1">
             {#each options as o, i (o.value)}
                 <button type="button" class="ctxp-opt"
-                    class:is-sel={o.value === value}
+                    class:is-sel={isSel(o)}
                     class:is-cursor={i === cursor}
-                    role="option" aria-selected={o.value === value}
+                    role="option" aria-selected={isSel(o)}
                     onmouseenter={() => (cursor = i)}
                     onclick={() => choose(o)}>
-                    <span class="ctxp-mark" aria-hidden="true">{o.value === value ? '✓' : ''}</span>
+                    <span class="ctxp-mark" aria-hidden="true">{isSel(o) ? '✓' : ''}</span>
                     <span class="ctxp-texts">
                         <span class="ctxp-name">{o.label}</span>
                         {#if o.hint}<span class="ctxp-hint">{o.hint}</span>{/if}

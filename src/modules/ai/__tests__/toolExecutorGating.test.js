@@ -202,6 +202,26 @@ describe('tool advertisement — MCP tools', () => {
         expect(names).not.toContain('a');
     });
 
+    // Per-task MCP On/Off means "send this server's tools or not" — including
+    // when relevance pruning picks the top few. An Off server must not get in
+    // through the top-5 either.
+    it('relevance pruning only ever picks from the servers that are on', () => {
+        mcpTools = [mcp('search_issues', 'backlog'), mcp('search_wiki', 'wiki')];
+        ex.setMcpServerFilter(['wiki']);
+        ex.setMcpRelevanceQuery('search the issues in backlog');
+        const names = ex.getToolsForNativeAPI().map(t => t.function.name);
+        expect(names).not.toContain('search_issues');
+    });
+
+    // The model can still NAME a tool it saw earlier (history, another task);
+    // the filter is enforced at the call too, not only in what is advertised.
+    it('refuses to run a tool from a server that is off for this task', async () => {
+        mcpTools = [mcp('query_db', 'er-app')];
+        ex.setMcpServerFilter(['jheditor']);
+        const out = await ex._dispatchMcpTool('query_db', {}, null);
+        expect(out).toMatch(/turned off for this task/);
+    });
+
     it('MCP tools bypass the built-in allowlist when the flag is set (Simple chat)', () => {
         mcpTools = [mcp('get_buffer', 'jheditor')];
         ex.setToolAllowlist(['read_file']);

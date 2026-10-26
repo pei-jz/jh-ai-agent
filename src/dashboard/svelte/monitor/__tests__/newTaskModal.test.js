@@ -43,6 +43,8 @@ beforeEach(() => {
     invoke.mockImplementation(async (cmd) => (cmd === 'get_ai_config' ? CONFIG : null));
     startClient.mockClear();
     clients.clear();
+    // The servers the user turned off are remembered there (mcpSelection.js).
+    localStorage.clear();
 });
 
 function mountModal(props = {}) {
@@ -123,13 +125,43 @@ describe('creating a task', () => {
         });
     });
 
+    // Registered = used. It used to be "whatever is running", so a task got a
+    // server's tools only if something else had happened to start it.
+    it('uses every registered server by default, running or not', async () => {
+        const h = mountModal();
+        await waitFor(() => expect(h.container.querySelector('.nt-mcp-cb[data-name="backlog"]')?.checked).toBe(true));
+        expect(h.container.querySelector('.nt-mcp-cb[data-name="er_app"]').checked).toBe(true);
+        await fillAndSend(h);
+        await waitFor(() => expect(h.api.request).toHaveBeenCalled());
+        expect(bodyOf(h.api).behavior.mcp_servers).toEqual(['backlog', 'er_app']);
+    });
+
     it('passes the checked servers as behavior.mcp_servers', async () => {
         const h = mountModal();
-        await waitFor(() => expect(h.container.querySelector('.nt-mcp-cb[data-name="backlog"]')).toBeTruthy());
-        await fireEvent.click(h.container.querySelector('.nt-mcp-cb[data-name="backlog"]'));
+        await waitFor(() => expect(h.container.querySelector('.nt-mcp-cb[data-name="er_app"]')).toBeTruthy());
+        await fireEvent.click(h.container.querySelector('.nt-mcp-cb[data-name="er_app"]'));
         await fillAndSend(h);
         await waitFor(() => expect(h.api.request).toHaveBeenCalled());
         expect(bodyOf(h.api).behavior.mcp_servers).toEqual(['backlog']);
+    });
+
+    it('remembers a server the user turned off', async () => {
+        const a = mountModal();
+        await waitFor(() => expect(a.container.querySelector('.nt-mcp-cb[data-name="er_app"]')).toBeTruthy());
+        await fireEvent.click(a.container.querySelector('.nt-mcp-cb[data-name="er_app"]'));
+        cleanup();
+        const b = mountModal();
+        await waitFor(() => expect(b.container.querySelector('.nt-mcp-cb[data-name="backlog"]')?.checked).toBe(true));
+        expect(b.container.querySelector('.nt-mcp-cb[data-name="er_app"]').checked).toBe(false);
+    });
+
+    it('leaves out a server marked "disabled": true in config', async () => {
+        invoke.mockImplementation(async (cmd) => (cmd === 'get_ai_config'
+            ? { ...CONFIG, mcp_servers: { ...CONFIG.mcp_servers, er_app: { command: 'npx', disabled: true } } }
+            : null));
+        const h = mountModal();
+        await waitFor(() => expect(h.container.querySelector('.nt-mcp-cb[data-name="backlog"]')).toBeTruthy());
+        expect(h.container.querySelector('.nt-mcp-cb[data-name="er_app"]')).toBeNull();
     });
 
     // Omitting the list entirely means "all servers" on the agent side, so a
@@ -137,6 +169,8 @@ describe('creating a task', () => {
     // leak its tools into later turns. Unchecked must mean an explicit [].
     it('sends an EXPLICIT empty mcp_servers when nothing is checked', async () => {
         const h = mountModal();
+        await waitFor(() => expect(h.container.querySelector('.nt-mcp-cb[data-name="backlog"]')).toBeTruthy());
+        for (const cb of h.container.querySelectorAll('.nt-mcp-cb')) await fireEvent.click(cb);
         await fillAndSend(h);
         await waitFor(() => expect(h.api.request).toHaveBeenCalled());
         const body = bodyOf(h.api);
@@ -145,22 +179,14 @@ describe('creating a task', () => {
         expect(body.behavior.mode).toBe('iterative_agent');
     });
 
-    it('starts a checked server that is not running yet', async () => {
+    // Servers start with the app; creating a task only chooses whose tools
+    // are sent, so nothing is started here.
+    it('does not start servers when creating a task', async () => {
         const h = mountModal();
-        await waitFor(() => expect(h.container.querySelector('.nt-mcp-cb[data-name="backlog"]')).toBeTruthy());
-        await fireEvent.click(h.container.querySelector('.nt-mcp-cb[data-name="backlog"]'));
-        await fillAndSend(h);
-        await waitFor(() => expect(startClient).toHaveBeenCalledWith('backlog', { command: 'npx' }));
-    });
-
-    // A server that refuses to start must not block the task from being created.
-    it('creates the task even when a server fails to start', async () => {
-        startClient.mockRejectedValueOnce(new Error('spawn failed'));
-        const h = mountModal();
-        await waitFor(() => expect(h.container.querySelector('.nt-mcp-cb[data-name="backlog"]')).toBeTruthy());
-        await fireEvent.click(h.container.querySelector('.nt-mcp-cb[data-name="backlog"]'));
+        await waitFor(() => expect(h.container.querySelector('.nt-mcp-cb[data-name="backlog"]')?.checked).toBe(true));
         await fillAndSend(h);
         await waitFor(() => expect(h.api.request).toHaveBeenCalled());
+        expect(startClient).not.toHaveBeenCalled();
     });
 
     it('hands the new task id back so the view can navigate to it', async () => {
