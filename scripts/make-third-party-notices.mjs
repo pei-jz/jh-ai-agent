@@ -224,8 +224,13 @@ const body = preamble.replace('{{GENERATED}}', generated);
 // no longer match the dependency graph. The date stamp moves on every run and
 // is excluded: a regeneration that differs only by today's date is not
 // staleness, and treating it as such would make the check cry wolf daily.
+//
+// Line endings are excluded for the same reason: with core.autocrlf=true a
+// checkout turns the committed LF file into CRLF, so comparing raw text failed
+// on every Windows checkout however fresh the notices were — and regenerating
+// could not fix it, since the next checkout converts it back.
 if (process.argv.includes('--check')) {
-    const strip = (x) => x.replace(/_Sections 3 and 4 were generated [^_]*_/, '');
+    const strip = (x) => x.replace(/\r\n/g, '\n').replace(/_Sections 3 and 4 were generated [^_]*_/, '');
     const current = existsSync(outPath) ? readFileSync(outPath, 'utf8') : '';
     if (strip(current) !== strip(body)) {
         die('THIRD-PARTY-NOTICES.md no longer matches the dependency graph. '
