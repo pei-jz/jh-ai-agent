@@ -147,6 +147,10 @@ const PATHS = {
     circle: `<circle cx="10" cy="10" r="7"/>`,
     /** In progress — a ring with a pulsing dot. Used by the task_progress checklist. */
     pulse: `<circle cx="10" cy="10" r="7"/><circle cx="10" cy="10" r="2.4" fill="currentColor" stroke="none"/>`,
+    /** Open / folded, for a fold control. Drawn rather than ▾ ▸, which change
+        size and weight from font to font. */
+    'chevron-down': `<path d="M5.5 8l4.5 4.5L14.5 8"/>`,
+    'chevron-right': `<path d="M8 5.5l4.5 4.5L8 14.5"/>`,
 };
 
 /** Return an inline SVG string for `name`, sized `size` px (default 1em). */

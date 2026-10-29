@@ -166,8 +166,13 @@ describe('in-progress view survives navigation (snapshot/restore)', () => {
         await tick();
         await tick();
 
-        const group = document.querySelector('.mtl .tl-card-step');
-        expect(group.querySelectorAll('.tl-step-body .mtask-feed-item')).toHaveLength(1);
+        // The model still nests the line in the open group; the Story shows that
+        // group as one chapter with the line in its steps.
+        const groups = v._timeline.items.filter(i => i.kind === 'group');
+        expect(groups).toHaveLength(1);
+        expect(groups[0].lines).toHaveLength(1);
+        expect(document.querySelectorAll('.mtl .tl-phase')).toHaveLength(1);
+        expect(document.querySelector('.mtl .tl-phase-trace').textContent).toContain('後続ツール');
     });
 
     it('does NOT snapshot a finished task — its permanent bubbles take over', () => {
@@ -191,8 +196,10 @@ describe('live activity feed — reasoning groups', () => {
         v._taskFinished = false;
     });
 
-    // Steps are chapters on the rail now.
-    const groups = () => document.querySelectorAll('.mtl .tl-step');
+    // The MODEL still groups by reasoning step; the Story reads those groups
+    // as chapters (storyChapters.js), so the grouping is asserted on the model.
+    const groups = () => v._timeline.items.filter(i => i.kind === 'group');
+    const phases = () => document.querySelectorAll('.mtl .tl-phase');
 
     it('nests the tool lines that follow a reasoning line inside its group', async () => {
         v._setResultLive('考えています', 'thought');
@@ -200,7 +207,9 @@ describe('live activity feed — reasoning groups', () => {
         v._setResultLive('grep_search: foo', 'tool');
         await tick();
         expect(groups()).toHaveLength(1);
-        expect(groups()[0].querySelectorAll('.tl-step-body .mtask-feed-item')).toHaveLength(2);
+        expect(groups()[0].lines).toHaveLength(2);
+        expect(phases()).toHaveLength(1);
+        expect(phases()[0].querySelectorAll('.tl-phase-trace .mtask-feed-item')).toHaveLength(2);
     });
 
     it('a NEW reasoning line starts its own group', async () => {
@@ -209,8 +218,8 @@ describe('live activity feed — reasoning groups', () => {
         v._setResultLive('次の推論', 'thought');
         await tick();
         expect(groups()).toHaveLength(2);
-        expect(groups()[0].querySelectorAll('.tl-step-body .mtask-feed-item')).toHaveLength(1);
-        expect(groups()[1].querySelectorAll('.tl-step-body .mtask-feed-item')).toHaveLength(0);
+        expect(groups()[0].lines).toHaveLength(1);
+        expect(groups()[1].lines).toHaveLength(0);
     });
 
     it('a question ends the group and stands on its own', async () => {
@@ -219,17 +228,25 @@ describe('live activity feed — reasoning groups', () => {
         v._setResultLive('後続のツール', 'tool');
         await tick();
         // The tool line after the question is NOT swallowed into the group.
-        expect(groups()[0].querySelectorAll('.tl-step-body .mtask-feed-item')).toHaveLength(0);
+        expect(groups()[0].lines).toHaveLength(0);
         expect(document.querySelector('.mtl .mask-q').textContent).toContain('どちらにしますか？');
+        // …and in the Story the two sides are separate chapters. The question is
+        // still UNANSWERED, so it ends the exchange (storyExchanges.js): an open
+        // question is what the reader has to act on, so it is always last.
+        const kinds = [...document.querySelectorAll('.mtl .tl-chapter')].map(el =>
+            el.classList.contains('tl-phase') ? 'phase' : (el.querySelector('.mask-q') ? 'ask' : 'other'));
+        expect(kinds.slice(-3)).toEqual(['phase', 'phase', 'ask']);
     });
 
-    it('does NOT cap the steps — a long run has to show all of them', async () => {
+    it('does NOT cap the steps — a long run has to keep all of them', async () => {
         // Steps used to be trimmed at 40, which silently truncated the story of a
-        // long run. Folded, a step costs one line; the cap now applies only to
-        // transient lines.
+        // long run. The cap applies only to transient lines.
         for (let i = 0; i < 120; i++) v._setResultLive(`推論 ${i}`, 'thought');
         await tick();
-        expect(document.querySelectorAll('.mtl .tl-step')).toHaveLength(120);
+        expect(groups()).toHaveLength(120);
+        // All 120 are in the one chapter's steps, not 120 cards.
+        expect(phases()).toHaveLength(1);
+        expect(phases()[0].querySelectorAll('.tl-phase-th')).toHaveLength(120);
     });
 
     it('still caps the transient lines that arrive before any reasoning', () => {
@@ -265,7 +282,7 @@ describe('task_progress becomes a chapter in the story', () => {
         ]);
         await tick();
         const el = document.querySelector('.mtl');
-        expect(el.textContent).toContain('task_progress (1/3 complete)');
+        expect(el.querySelector('.tl-plan-n').textContent).toBe('1 / 3');
         expect(el.querySelectorAll('.tl-progress-row')).toHaveLength(3);
     });
 
@@ -276,11 +293,12 @@ describe('task_progress becomes a chapter in the story', () => {
         await tick();
         const el = document.querySelector('.mtl');
         expect(el.querySelectorAll('.tl-card-progress')).toHaveLength(1);
-        expect(el.textContent).toContain('task_progress (1/1 complete)');
-        expect(el.querySelectorAll('.tl-progress-row')).toHaveLength(1);
+        // Every step done: the plan folds to its one line by itself.
+        expect(el.querySelector('.tl-plan-n').textContent).toBe(t('story.plan.done', { n: 1 }));
+        expect(el.querySelectorAll('.tl-progress-row')).toHaveLength(0);
     });
 
-    it('a REPLANNED checklist gets its own card — the latest plan is what runs', async () => {
+    it('a REPLANNED checklist replaces the old one in the Story — the latest plan is what runs', async () => {
         pushProgress([{ id: '1', title: '調査', status: 'completed' }]);
         await tick();
         pushProgress([
@@ -289,10 +307,14 @@ describe('task_progress becomes a chapter in the story', () => {
         ]);
         await tick();
         const el = document.querySelector('.mtl');
-        expect(el.querySelectorAll('.tl-card-progress')).toHaveLength(2);
-        // The LATEST card carries the newest plan.
-        expect(el.textContent).toContain('task_progress (0/2 complete)');
-        expect(el.querySelectorAll('.tl-progress-row')).toHaveLength(3);
+        // The model keeps both (the Raw Log and the inspector still have the
+        // history); the Story shows ONE plan per exchange, the latest
+        // (storyExchanges.js withPlanOnTop) — two stacked checklists read as two
+        // plans running at once.
+        expect(v._timeline.items.filter(i => i.kind === 'task_progress')).toHaveLength(2);
+        expect(el.querySelectorAll('.tl-card-progress')).toHaveLength(1);
+        expect(el.querySelector('.tl-plan-n').textContent).toBe('0 / 2');
+        expect(el.querySelectorAll('.tl-progress-row')).toHaveLength(2);
     });
 });
 

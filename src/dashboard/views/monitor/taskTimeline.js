@@ -197,6 +197,11 @@ export class TaskTimeline {
      */
     sameProgressPlan(a, b) {
         if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+        // When every item carries an id, the ids ARE the plan. Models routinely
+        // shorten a title as they tick it off ("…の設計（worktree・…）" → "…の設計"),
+        // and comparing titles read that as a replan and drew a second card.
+        const ids = (xs) => xs.every(x => x.id !== '');
+        if (ids(a) && ids(b)) return a.every((x, i) => x.id === b[i].id);
         for (let i = 0; i < a.length; i++) {
             if (a[i].id !== b[i].id || a[i].title !== b[i].title) return false;
         }
@@ -281,6 +286,9 @@ export class TaskTimeline {
             line.tool = String(meta.tool);
             if (meta.path) line.path = String(meta.path);
             if (meta.write) line.write = true;
+            // The command itself, so the Story can tell `npm test` (checking)
+            // from `git grep` (looking) without parsing it back out of prose.
+            if (meta.tool === 'run_command' && meta.label) line.command = String(meta.label);
         }
         if (this._group) {
             this._group.lines.push(line);
@@ -820,6 +828,9 @@ export function splitForPanes(items) {
         files: fromRun ? (source.files || []) : [],
         stats: fromRun ? (source.stats || {}) : {},
         request: fromRun ? source.request : '',
+        // The run's own closing report (vs a present_result deliverable). The
+        // Story treats it as an interim report when the run stopped on a question.
+        fromRun,
     };
 
     // The document REPLACES its source IN PLACE. Appending it to the end put the

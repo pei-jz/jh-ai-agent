@@ -154,6 +154,10 @@ export function chapterKind(item) {
         case 'request':   return 'request';
         case 'turn':      return 'turn';
         case 'group':     return 'step';
+        // A Story chapter (storyChapters.js): several steps read as one phase.
+        case 'phase':     return 'phase';
+        // A folded exchange as one line (storyExchanges.js).
+        case 'digest':    return 'digest';
         // A folded exchange's working, standing in for the steps it replaced.
         case 'fold':      return 'bare';
         // A line that arrived before the run's first reasoning. It is a fragment,
@@ -196,7 +200,7 @@ const CHAPTER_TAG = {
  */
 export function chapterTag(item) {
     const kind = chapterKind(item);
-    if (kind === 'step' || kind === 'bare' || kind === 'turn') return '';
+    if (kind === 'step' || kind === 'bare' || kind === 'turn' || kind === 'phase' || kind === 'digest') return '';
     if (item?._bodyless) return '';
     return CHAPTER_TAG[kind] || '';
 }
@@ -214,7 +218,9 @@ export function chapterTag(item) {
  * `item.collapsed` is invisible to Svelte.
  */
 export function itemClass(item) {
-    return `tl-chapter tl-${chapterKind(item)}` + (item.live ? ' is-live' : '');
+    return `tl-chapter tl-${chapterKind(item)}`
+        + (item.kind === 'phase' ? ` tl-role-${item.role}` : '')
+        + (item.live ? ' is-live' : '');
 }
 
 /** Word count for a folded result's one-line summary. */

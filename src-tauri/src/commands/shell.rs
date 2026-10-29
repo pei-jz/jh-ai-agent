@@ -325,17 +325,67 @@ fn run_command_blocking<R: Runtime>(
     }
 }
 
-/// Drain a pipe to a String, lossily. On its own thread so a child that fills its
+/// Drain a pipe to a String. On its own thread so a child that fills its
 /// pipe buffer cannot deadlock against our wait.
 fn read_all<R: Read>(mut reader: R) -> String {
     let mut buf: Vec<u8> = Vec::new();
     let _ = reader.read_to_end(&mut buf);
-    String::from_utf8_lossy(&buf).into_owned()
+    decode_output(&buf)
+}
+
+#[cfg(target_os = "windows")]
+extern "system" {
+    fn GetOEMCP() -> u32;
+}
+
+/// The encoding a Windows console program writes in when its output is piped:
+/// the OEM code page (932 = Shift_JIS on a Japanese system). None elsewhere.
+fn console_encoding() -> Option<&'static encoding_rs::Encoding> {
+    #[cfg(target_os = "windows")]
+    {
+        // SAFETY: GetOEMCP takes no arguments and only reads a system setting.
+        let cp = unsafe { GetOEMCP() };
+        return encoding_for_codepage(cp);
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
+fn encoding_for_codepage(cp: u32) -> Option<&'static encoding_rs::Encoding> {
+    use encoding_rs::*;
+    Some(match cp {
+        932 => SHIFT_JIS,
+        936 => GBK,
+        949 => EUC_KR,
+        950 => BIG5,
+        866 => IBM866,
+        1250 => WINDOWS_1250,
+        1251 => WINDOWS_1251,
+        437 | 850 | 1252 => WINDOWS_1252,
+        _ => return None,
+    })
+}
+
+/// Command output as text. UTF-8 when it is UTF-8; otherwise the console code
+/// page. Lossy UTF-8 alone turned Japanese PowerShell output — `Get-Date`'s
+/// "(水曜日)" — into U+FFFD, and the agent and the Story both read the garbage.
+fn decode_output(bytes: &[u8]) -> String {
+    decode_with(bytes, console_encoding())
+}
+
+fn decode_with(bytes: &[u8], fallback: Option<&'static encoding_rs::Encoding>) -> String {
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return s.to_owned();
+    }
+    match fallback {
+        Some(enc) => enc.decode_without_bom_handling(bytes).0.into_owned(),
+        None => String::from_utf8_lossy(bytes).into_owned(),
+    }
 }
 
 /// Spawn a background thread that reads `reader` line-by-line and forwards each
-/// line over `tx`. Uses lossy UTF-8 conversion so non-UTF8 (Windows codepage)
-/// output is preserved rather than dropped.
+/// line over `tx`. Decodes per line with `decode_output`, so Windows code-page
+/// output reads as text rather than replacement characters.
 fn spawn_line_pump<R: Read + Send + 'static>(
     stream: &'static str,
     reader: R,
@@ -353,7 +403,7 @@ fn spawn_line_pump<R: Read + Send + 'static>(
                     while matches!(buf.last(), Some(b'\n') | Some(b'\r')) {
                         buf.pop();
                     }
-                    let line = String::from_utf8_lossy(&buf).into_owned();
+                    let line = decode_output(&buf);
                     if tx.send((stream, line)).is_err() {
                         break; // receiver dropped — bail
                     }
@@ -583,5 +633,27 @@ mod tests {
         let conf: serde_json::Value =
             serde_json::from_str(include_str!("../../tauri.conf.json")).unwrap();
         assert_eq!(conf["identifier"].as_str().unwrap(), NOTIFY_APP_ID);
+    }
+}
+
+#[cfg(test)]
+mod decode_tests {
+    use super::{decode_with, encoding_for_codepage};
+
+    #[test]
+    fn utf8_stays_utf8() {
+        assert_eq!(decode_with("水曜日".as_bytes(), encoding_for_codepage(932)), "水曜日");
+    }
+
+    #[test]
+    fn shift_jis_console_output_is_read_as_text() {
+        // "(水曜日)" as Windows PowerShell 5.1 writes it to a pipe on a Japanese system.
+        let (sjis, _, _) = encoding_rs::SHIFT_JIS.encode("2026-10-28 (水曜日)");
+        assert_eq!(decode_with(&sjis, encoding_for_codepage(932)), "2026-10-28 (水曜日)");
+    }
+
+    #[test]
+    fn unknown_code_page_falls_back_to_lossy() {
+        assert_eq!(decode_with(&[0x61, 0xff], None), "a\u{fffd}");
     }
 }

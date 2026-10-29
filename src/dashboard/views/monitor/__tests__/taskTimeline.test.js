@@ -1593,3 +1593,13 @@ describe('buildTimeline — settled approvals', () => {
         expect(confirms([req('c1')])).toHaveLength(1);
     });
 });
+
+describe('task_progress — a plan is its ids', () => {
+    it('a shortened title is the SAME plan, updated in place', async () => {
+        const { TaskTimeline } = await import('../taskTimeline.js');
+        const tl = new TaskTimeline();
+        tl.pushTaskProgress([{ id: '1', title: '設計（worktree・リポジトリ）', status: 'in_progress' }, { id: '2', title: '作成', status: 'pending' }]);
+        tl.pushTaskProgress([{ id: '1', title: '設計', status: 'completed' }, { id: '2', title: '作成', status: 'pending' }]);
+        expect(tl.items.filter(i => i.kind === 'task_progress')).toHaveLength(1);
+    });
+});

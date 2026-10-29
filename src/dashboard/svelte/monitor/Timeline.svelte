@@ -43,6 +43,10 @@
         onReopenAsk = null,
         onCopyDoc = null,
         onOpenFile = null,
+        /** () => void — switch to the Raw Log tab (a Story chapter's "full record" link). */
+        onShowRaw = null,
+        /** (ex) => void — open a folded exchange (its digest row) in full. */
+        onOpenExchange = null,
     } = $props();
 
     const list = $derived(Array.isArray(items) ? items : []);
@@ -63,5 +67,7 @@
         {onReopenAsk}
         {onCopyDoc}
         {onOpenFile}
+        {onShowRaw}
+        {onOpenExchange}
     />
 {/each}

@@ -169,17 +169,45 @@ export const TIMELINE_STYLES = `
     .tl-card-note { background: transparent; border-style: dashed; }
     .tl-note-label { font-size: var(--fs-2xs); color: var(--ink-faint); margin-bottom: var(--space-1); }
     .tl-card-deliverable { border-color: var(--success); border-left-width: 3px; }
-    /* The task_progress checklist card — a plan the reader can watch fill in. */
-    .tl-card-progress { border-color: var(--accent); border-left-width: 3px; }
+    /* The plan (task_progress). On screen for the whole exchange, so it is the
+       quiet element: a thin rounded frame on a ground only a shade off the
+       page, no accent rail. The theme's accent appears once — in the bar and
+       on the step under way. */
+    .tl-plan {
+        min-width: 0;
+        border: 1px solid var(--line-soft); border-radius: var(--r-3);
+        background: color-mix(in srgb, var(--surface-panel) 55%, transparent);
+        padding: 6px var(--space-3);
+    }
+    .tl-plan-h {
+        display: flex; align-items: center; gap: var(--space-2); width: 100%; min-width: 0;
+        padding: 0; border: 0; background: none; cursor: pointer; text-align: left;
+        font-size: var(--fs-xs); color: var(--ink-soft);
+    }
+    .tl-plan-n { flex-shrink: 0; font-variant-numeric: tabular-nums; }
+    .tl-plan-ok { display: inline-flex; color: var(--success); }
+    .tl-plan-bar {
+        flex: 0 0 120px; height: 3px; border-radius: var(--r-1); overflow: hidden;
+        background: var(--line-soft);
+    }
+    .tl-plan-fill { display: block; height: 100%; background: var(--accent); border-radius: var(--r-1); }
+    .tl-plan-gist { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-faint); }
+    .tl-plan-chev { margin-left: auto; display: inline-flex; color: var(--ink-faint); }
+    .tl-plan-h:hover .tl-plan-chev { color: var(--accent); }
+    .tl-plan-body { margin-top: 6px; }
     .tl-progress-row {
         display: flex; align-items: baseline; gap: var(--space-2);
-        padding: 2px 0; font-size: var(--fs-sm); line-height: 1.4;
+        padding: 2px 0; font-size: var(--fs-sm); line-height: 1.5; color: var(--ink-soft);
     }
-    .tl-progress-row.is-done .tl-progress-title { color: var(--ink-faint); text-decoration: line-through; }
-    .tl-progress-ic { flex-shrink: 0; color: var(--ink-faint); }
+    /* Done is dimmed, not struck through: four struck lines were the loudest
+       thing in the card. */
+    .tl-progress-row.is-done { color: var(--ink-faint); }
+    .tl-progress-row.is-current { color: var(--ink); font-weight: 600; }
+    .tl-progress-ic { flex-shrink: 0; display: inline-flex; align-self: center; color: var(--ink-faint); }
     .tl-progress-row.is-done .tl-progress-ic { color: var(--success); }
-    .tl-progress-id { font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--ink-faint); flex-shrink: 0; }
-    .tl-progress-note { color: var(--ink-faint); font-size: var(--fs-2xs); }
+    .tl-progress-row.is-current .tl-progress-ic { color: var(--accent); }
+    .tl-progress-row.is-blocked .tl-progress-ic { color: var(--warning); }
+    .tl-progress-note { color: var(--ink-faint); font-size: var(--fs-2xs); font-weight: 400; }
     .tl-card-h {
         display: flex; align-items: center; gap: var(--space-2);
         font-size: var(--fs-md); font-weight: 600; color: var(--success);
@@ -521,71 +549,71 @@ export const TIMELINE_STYLES = `
     /* ── Markdown inside a card ─────────────────────────────────────────── */
     /* A report is mostly headings, lists and code. Rendered at one weight and one
        size it reads as a wall; the hierarchy has to be visible before it is read. */
-    .tl-card .rv-summary { font-size: var(--fs-md); line-height: 1.7; color: var(--ink-soft); }
-    .tl-card .rv-summary > *:first-child { margin-top: 0; }
-    .tl-card .rv-summary > *:last-child { margin-bottom: 0; }
-    .tl-card .rv-summary h1,
-    .tl-card .rv-summary h2,
-    .tl-card .rv-summary h3,
-    .tl-card .rv-summary h4 {
+    :is(.tl-card, .tl-result) .rv-summary { font-size: var(--fs-md); line-height: 1.7; color: var(--ink-soft); }
+    :is(.tl-card, .tl-result) .rv-summary > *:first-child { margin-top: 0; }
+    :is(.tl-card, .tl-result) .rv-summary > *:last-child { margin-bottom: 0; }
+    :is(.tl-card, .tl-result) .rv-summary h1,
+    :is(.tl-card, .tl-result) .rv-summary h2,
+    :is(.tl-card, .tl-result) .rv-summary h3,
+    :is(.tl-card, .tl-result) .rv-summary h4 {
         color: var(--ink); font-weight: 700; line-height: 1.35;
         margin: var(--space-5) 0 var(--space-2);
     }
-    .tl-card .rv-summary h1 {
+    :is(.tl-card, .tl-result) .rv-summary h1 {
         font-size: var(--fs-lg);
         padding-bottom: var(--space-2);
         border-bottom: 1px solid var(--line);
     }
     /* h2 is the workhorse in a report, so it gets the one strong signal: a rule
        above it. A coloured left bar on every h2 competed with the rail itself. */
-    .tl-card .rv-summary h2 {
+    :is(.tl-card, .tl-result) .rv-summary h2 {
         font-size: var(--fs-base);
         padding-top: var(--space-3);
         border-top: 1px solid var(--line-soft);
     }
-    .tl-card .rv-summary h3 { font-size: var(--fs-md); color: var(--ink); }
-    .tl-card .rv-summary h4 { font-size: var(--fs-sm); color: var(--ink-soft); text-transform: uppercase; letter-spacing: .05em; }
-    .tl-card .rv-summary p { margin: var(--space-2) 0; }
-    .tl-card .rv-summary ul,
-    .tl-card .rv-summary ol { margin: var(--space-2) 0; padding-left: var(--space-5); }
-    .tl-card .rv-summary li { margin: var(--space-1) 0; }
-    .tl-card .rv-summary li::marker { color: var(--ink-faint); }
-    .tl-card .rv-summary strong { color: var(--ink); font-weight: 600; }
+    :is(.tl-card, .tl-result) .rv-summary h3 { font-size: var(--fs-md); color: var(--ink); }
+    :is(.tl-card, .tl-result) .rv-summary h4 { font-size: var(--fs-sm); color: var(--ink-soft); text-transform: uppercase; letter-spacing: .05em; }
+    :is(.tl-card, .tl-result) .rv-summary p { margin: var(--space-2) 0; }
+    :is(.tl-card, .tl-result) .rv-summary ul,
+    :is(.tl-card, .tl-result) .rv-summary ol { margin: var(--space-2) 0; padding-left: var(--space-5); }
+    :is(.tl-card, .tl-result) .rv-summary li { margin: var(--space-1) 0; }
+    :is(.tl-card, .tl-result) .rv-summary li::marker { color: var(--ink-faint); }
+    :is(.tl-card, .tl-result) .rv-summary strong { color: var(--ink); font-weight: 600; }
     /* On a dark surface a bordered chip per inline code turns a paragraph into a
        dotted line of boxes — the report read as noise. Tint instead of outline,
        and let the accent carry the emphasis. */
-    .tl-card .rv-summary code {
+    :is(.tl-card, .tl-result) .rv-summary code {
         font-family: var(--font-mono); font-size: var(--fs-sm);
         background: var(--accent-surface); border: 0;
         border-radius: var(--r-2); padding: 1px 5px; color: var(--accent);
     }
-    :root[data-theme="light"] .tl-card .rv-summary code {
+    :root[data-theme="light"] :is(.tl-card, .tl-result) .rv-summary code {
         background: var(--surface-sunken); color: var(--ink);
     }
     /* Paper keeps JHEditor's own code treatment: red-pen ink on a faint wash. */
-    :root[data-theme="paper"] .tl-card .rv-summary code {
+    :root[data-theme="paper"] :is(.tl-card, .tl-result) .rv-summary code {
         background: rgba(178, 58, 72, 0.08); color: #93313c;
         border: 1px solid rgba(178, 58, 72, 0.20);
     }
     /* Emphasis is for emphasis. Bold + a background made every other phrase
        shout, which is the same as none of them shouting. */
-    .tl-card .rv-summary em { color: var(--ink-faint); font-style: italic; }
-    .tl-card .rv-summary a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
-    .tl-card .rv-summary pre {
+    :is(.tl-card, .tl-result) .rv-summary em { color: var(--ink-faint); font-style: italic; }
+    :is(.tl-card, .tl-result) .rv-summary a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
+    :is(.tl-card, .tl-result) .rv-summary pre {
         background: var(--surface-input); border: 1px solid var(--line);
         border-radius: var(--r-2); padding: var(--space-3);
         overflow-x: auto; margin: var(--space-3) 0;
     }
-    .tl-card .rv-summary pre code { border: 0; background: none; padding: 0; font-size: var(--fs-xs); }
-    .tl-card .rv-summary blockquote {
+    :is(.tl-card, .tl-result) .rv-summary pre code { border: 0; background: none; padding: 0; font-size: var(--fs-xs); }
+    :is(.tl-card, .tl-result) .rv-summary blockquote {
         margin: var(--space-3) 0; padding: var(--space-1) var(--space-3);
         border-left: 3px solid var(--line); color: var(--ink-faint);
     }
-    .tl-card .rv-summary table { border-collapse: collapse; margin: var(--space-3) 0; font-size: var(--fs-sm); }
-    .tl-card .rv-summary th,
-    .tl-card .rv-summary td { border: 1px solid var(--line); padding: var(--space-1) var(--space-2); }
-    .tl-card .rv-summary th { background: var(--surface-sunken); color: var(--ink); font-weight: 600; }
-    .tl-card .rv-summary hr { border: 0; border-top: 1px solid var(--line); margin: var(--space-4) 0; }
+    :is(.tl-card, .tl-result) .rv-summary table { border-collapse: collapse; margin: var(--space-3) 0; font-size: var(--fs-sm); }
+    :is(.tl-card, .tl-result) .rv-summary th,
+    :is(.tl-card, .tl-result) .rv-summary td { border: 1px solid var(--line); padding: var(--space-1) var(--space-2); }
+    :is(.tl-card, .tl-result) .rv-summary th { background: var(--surface-sunken); color: var(--ink); font-weight: 600; }
+    :is(.tl-card, .tl-result) .rv-summary hr { border: 0; border-top: 1px solid var(--line); margin: var(--space-4) 0; }
 
     /* ── An unanswered question, made impossible to miss ────────────────── */
     /* The STICKY element has to be the slot, not the banner inside it: a sticky
@@ -629,6 +657,157 @@ export const TIMELINE_STYLES = `
         color: var(--accent); border-color: var(--accent);
         background: var(--accent-surface);
     }
+
+    /* ── Story chapters (storyChapters.js) ─────────────────────────────────
+       Prose on the page, not cards on a rail: the Raw Log is the card-per-step
+       record, and the Story looked like it. A chapter is a label column and a
+       paragraph, with the files it touched under it. */
+    .tl-phase {
+        display: grid; grid-template-columns: 76px minmax(0, 1fr); gap: 0 var(--space-3);
+        padding: var(--space-2) 0; margin-bottom: var(--space-2);
+    }
+    .tl-phase::before { top: 10px; }
+    .tl-role-change::before { background: var(--success); border-color: var(--success); }
+    .tl-role-verify::before, .tl-role-loop::before { background: var(--accent); border-color: var(--accent); }
+    .tl-phase.is-live::before { background: var(--accent); border-color: var(--accent); }
+    .tl-phase-side { display: flex; flex-direction: column; gap: 2px; padding-top: 2px; }
+    .tl-phase-label { font-size: var(--fs-xs); font-weight: 600; color: var(--ink-soft); }
+    .tl-role-change .tl-phase-label { color: var(--success); }
+    .tl-phase-meta { font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--ink-faint); }
+    .tl-phase-main { min-width: 0; }
+    .tl-phase-prose {
+        margin: 0 0 var(--space-1); font-size: var(--fs-sm); line-height: 1.7; color: var(--ink);
+        display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden;
+    }
+    .tl-phase-loop { font-size: var(--fs-xs); color: var(--success); margin-bottom: var(--space-1); }
+    .tl-phase-loop.is-failed { color: var(--error); }
+    .tl-phase-files { display: flex; flex-wrap: wrap; gap: 4px; margin: 2px 0; }
+    .tl-phase-file {
+        display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px;
+        font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--ink-soft);
+        background: transparent; border: 1px solid var(--line); border-radius: var(--r-1); cursor: pointer;
+    }
+    .tl-phase-file:hover { border-color: var(--accent); color: var(--accent); }
+    .tl-phase-file.is-write { color: var(--success); border-color: var(--success); background: var(--success-surface); }
+    .tl-phase-file.is-aside { opacity: .75; }
+    .tl-phase-more { font-size: var(--fs-2xs); color: var(--ink-faint); align-self: center; }
+    .tl-phase-cmds { display: flex; flex-wrap: wrap; gap: 4px; margin: 2px 0; }
+    .tl-phase-cmds code { font-size: var(--fs-2xs); color: var(--ink-soft); background: var(--surface-sunken); padding: 1px 6px; border-radius: var(--r-1); }
+    .tl-phase-now {
+        display: flex; align-items: center; gap: 6px; margin: 4px 0 2px;
+        font-size: var(--fs-xs); color: var(--ink-soft); min-width: 0;
+    }
+    .tl-phase-now-k { flex-shrink: 0; color: var(--accent); font-weight: 600; }
+    .tl-phase-now-t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tl-phase-dot {
+        flex-shrink: 0; width: 6px; height: 6px; border-radius: 50%; background: var(--accent);
+        animation: tl-phase-pulse 1.4s ease-in-out infinite;
+    }
+    @keyframes tl-phase-pulse { 50% { opacity: .3; } }
+    .tl-phase-foot {
+        display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px var(--space-3);
+        font-size: var(--fs-2xs); color: var(--ink-faint); margin-top: 2px;
+    }
+    .tl-phase-failed { color: var(--error); }
+    .tl-phase-raw {
+        padding: 0; border: 0; background: none; cursor: pointer;
+        font-size: var(--fs-2xs); color: var(--ink-faint); text-decoration: underline dotted;
+    }
+    .tl-phase-raw:hover { color: var(--accent); }
+    .tl-phase-detail { flex-basis: 100%; order: 9; }
+    .tl-phase-detail > summary { cursor: pointer; width: max-content; color: var(--ink-faint); }
+    .tl-phase-detail > summary:hover { color: var(--ink-soft); }
+    .tl-phase-trace {
+        margin-top: var(--space-1); padding-left: var(--space-3);
+        border-left: 2px solid var(--line); border-radius: 0;
+    }
+    .tl-phase-th { font-size: var(--fs-xs); color: var(--ink-soft); font-style: italic; margin: 4px 0 2px; }
+    .tl-phase-out code { font-size: var(--fs-2xs); }
+    .tl-phase-out pre {
+        margin: 2px 0 6px; max-height: 220px; overflow: auto;
+        font-size: var(--fs-2xs); background: var(--surface-sunken); padding: 6px 8px; border-radius: var(--r-2);
+    }
+
+    /* ── A folded exchange: ONE line (storyExchanges.js) ─────────────────── */
+    .tl-digest { margin-bottom: 2px; }
+    .tl-digest-row {
+        display: flex; align-items: center; gap: var(--space-3); width: 100%; min-width: 0;
+        padding: 6px var(--space-2); text-align: left; cursor: pointer;
+        font-size: var(--fs-xs); color: var(--ink-soft);
+        background: transparent; border: 0; border-bottom: 1px solid var(--line); border-radius: 0;
+    }
+    .tl-digest-row:hover { background: var(--surface-sunken); }
+    .tl-digest-st { flex-shrink: 0; display: inline-flex; color: var(--ink-faint); }
+    .tl-digest-row.is-done .tl-digest-st { color: var(--success); }
+    .tl-digest-row.is-waiting .tl-digest-st { color: var(--warning); }
+    .tl-digest-row.is-running .tl-digest-st { color: var(--accent); }
+    .tl-digest-row.is-failed .tl-digest-st { color: var(--error); }
+    .tl-digest-req {
+        flex: 0 1 34%; min-width: 0; font-weight: 600; color: var(--ink);
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .tl-digest-path { flex-shrink: 0; font-size: var(--fs-2xs); color: var(--ink-faint); white-space: nowrap; }
+    .tl-digest-out { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tl-digest-row.is-waiting .tl-digest-out { color: var(--warning); }
+    .tl-digest-dur { flex-shrink: 0; font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--ink-faint); }
+    .tl-digest-chev { flex-shrink: 0; color: var(--ink-faint); }
+
+    /* A folded result: a chapter row, not a dashed box. */
+    .tl-chapter.is-bodyless {
+        display: grid; grid-template-columns: 76px minmax(0, 1fr); gap: 0 var(--space-3);
+        padding: var(--space-2) 0;
+    }
+    .tl-outcome-label { color: var(--accent); }
+    .tl-outcome-row {
+        display: flex; align-items: baseline; gap: var(--space-3); min-width: 0; width: 100%;
+        padding: 0; text-align: left; cursor: pointer; background: none; border: 0;
+        font-size: var(--fs-sm); color: var(--ink);
+    }
+    .tl-outcome-gist { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tl-outcome-row .tl-fold-hint { flex-shrink: 0; font-size: var(--fs-2xs); color: var(--ink-faint); text-decoration: underline dotted; }
+    .tl-outcome-row:hover .tl-fold-hint { color: var(--accent); }
+
+    /* The Story's result, open: the chapters' shape. No tint and no bar — a
+       rule above it, and the THEME's accent on the label and the conclusion,
+       mark the landing. The conclusion sentence leads. */
+    .tl-chapter.is-story-result {
+        margin-top: var(--space-2); padding: var(--space-3) 0 var(--space-2);
+        border-top: 1px solid var(--line);
+    }
+    .tl-result { min-width: 0; }
+    .tl-result-lead { margin: 0 0 var(--space-2); font-size: var(--fs-base); font-weight: 600; line-height: 1.55; color: var(--accent); }
+    .tl-result .rv-summary { font-size: var(--fs-sm); }
+    .tl-result-foot { margin-top: var(--space-2); }
+    /* The label is the fold control, open (▾) or folded (▸). */
+    .tl-chapter > .tl-when .tl-result-toggle,
+    .tl-result-toggle {
+        padding: 0; border: 0; background: none; cursor: pointer; text-align: left;
+        font-size: var(--fs-xs); font-weight: 600; color: var(--accent);
+    }
+    .tl-result-toggle { display: inline-flex; align-items: center; gap: 2px; }
+    .tl-result-toggle:hover { text-decoration: underline dotted; }
+
+    /* The run's report, folded under the question it stopped on. */
+    .mask-interim { margin-top: var(--space-2); font-size: var(--fs-xs); }
+    .mask-interim > summary { cursor: pointer; width: max-content; color: var(--ink-faint); }
+    .mask-interim > summary:hover { color: var(--ink-soft); }
+    .mask-interim[open] > summary { margin-bottom: var(--space-2); }
+
+    /* Questions, approvals and results take the same label column as the
+       chapters around them, so the Story reads down one edge. The request is a
+       sticky band of its own and keeps its full width. */
+    .tl-chapter:not(.tl-request):has(> .tl-when) {
+        display: grid; grid-template-columns: 76px minmax(0, 1fr); gap: 0 var(--space-3);
+    }
+    .tl-chapter:not(.tl-request) > .tl-when {
+        flex-direction: column; align-items: flex-start; gap: 2px; margin: 0; padding-top: 4px;
+    }
+    .tl-chapter:not(.tl-request) > .tl-when .tl-tag {
+        padding: 0; background: none; letter-spacing: 0; text-transform: none;
+        font-size: var(--fs-xs); font-weight: 600;
+    }
+    .tl-chapter:not(.tl-request):has(> .tl-when) > :not(.tl-when) { grid-column: 2; }
+    .tl-chapter:not(.tl-request) > .tl-when .tl-clock { order: 2; }
 
     @media (max-width: 1100px) {
         .mtl-insp { display: none !important; }

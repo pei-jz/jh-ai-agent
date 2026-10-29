@@ -34,6 +34,10 @@
         spanOf, spanLabel, wordCount,
     } from '../../views/monitor/timelineItems.js';
     import { clockText } from '../../views/monitor/taskTimeline.js';
+    import { chapterTally } from '../../views/monitor/storyChapters.js';
+    import { outcomeLine, resultStats, splitLead } from '../../views/monitor/storyExchanges.js';
+
+    const NL = String.fromCharCode(10);
     import StepLine from './StepLine.svelte';
     import StatChips from './StatChips.svelte';
     import FileList from './FileList.svelte';
@@ -53,7 +57,12 @@
         onReopenAsk = null,
         onCopyDoc = null,
         onOpenFile = null,
+        onShowRaw = null,
+        onOpenExchange = null,
     } = $props();
+
+    /** A digest row's status mark. Drawn icons, like every other marker here. */
+    const DIGEST_ICON = { done: 'check', waiting: 'question', running: 'pulse', failed: 'alert', stopped: 'circle' };
 
     const kind = $derived(chapterKind(item));
     const tag = $derived(chapterTag(item));
@@ -146,6 +155,8 @@
     class:is-open={requestOpen}
     class:is-min={requestMin}
     class:is-unpinned={!requestPinned}
+    class:is-bodyless={!!item._bodyless}
+    class:is-story-result={!!item._story}
     data-item-id={item.id}
 >
 
@@ -153,7 +164,15 @@
 {#if tag}
     <div class="tl-when">
         {#if item.at}<span class="tl-clock">{clockText(item.at)}</span>{/if}
-        <span class="tl-tag tl-tag-{kind}">{tag}</span>
+        {#if item._story}
+            <!-- The label IS the fold control, like the folded row's "› 結果":
+                 the header band it used to live on is gone. -->
+            <button type="button" class="tl-tag tl-tag-{kind} tl-result-toggle" aria-expanded="true"
+                title={t('story.fold')} onclick={foldOutcome}>{@html icon('chevron-down', 12)}{t(`story.tag.${kind}`, null, tag)}</button>
+            <span class="tl-phase-meta">{wordCount(item.kind === 'run' ? item.answer : item.text)} words</span>
+        {:else}
+            <span class="tl-tag tl-tag-{kind}">{t(`story.tag.${kind}`, null, tag)}</span>
+        {/if}
     </div>
 {/if}
 
@@ -166,11 +185,19 @@
         ? { icon: 'report', label: 'Agent · Final' }
         : deliverableLabel(item.envKind, 'Deliverable')}
     {@const words = wordCount(item.text || item.answer)}
-    <button type="button" class="tl-fold-bar tl-fold-out"
+    {@const gist = outcomeLine(item.text ?? item.answer)}
+    <!-- Same shape as a chapter (label column + one line) rather than a dashed
+         box: folded, the result is one more line of the story. -->
+    <div class="tl-phase-side">
+        <button type="button" class="tl-phase-label tl-outcome-label tl-result-toggle" aria-expanded="false"
+            title={t('task.showResult')}
+            onclick={() => onToggleStory?.(item._ex, 'outcome')}>{@html icon('chevron-right', 12)}{d.label === 'Agent · Final' ? t('story.tag.final') : d.label}</button>
+        {#if words}<span class="tl-phase-meta">{words} words</span>{/if}
+    </div>
+    <button type="button" class="tl-outcome-row tl-fold-out"
         data-unfold-ex={item._ex}
         onclick={() => onToggleStory?.(item._ex, 'outcome')}>
-        {@html icon(d.icon)}<span class="tl-fold-n">{d.label}</span>
-        {#if words}<span class="tl-fold-dur">{words} words</span>{/if}
+        <span class="tl-outcome-gist">{gist || d.label}</span>
         <span class="tl-fold-hint">{t('task.showResult')}</span>
     </button>
 
@@ -265,6 +292,89 @@
         </div>
     </div>
 
+{:else if item.kind === 'digest'}
+    <!-- A folded exchange, as one line (storyExchanges.js). Clicking opens the
+         whole exchange — both halves. -->
+    {@const dur = spanLabel(spanOf(item.at, item.to))}
+    <button type="button" class="tl-digest-row is-{item.status}" title={item.text}
+        onclick={() => onOpenExchange?.(item.ex)}>
+        <span class="tl-digest-st" title={t(`story.status.${item.status}`)}>{@html icon(DIGEST_ICON[item.status] || 'circle', 14)}</span>
+        <span class="tl-digest-req">{item.text}</span>
+        {#if item.path.length}
+            <span class="tl-digest-path">{item.path.map(r => r === '…' ? r : t(`story.role.${r}`)).join(' → ')}</span>
+        {/if}
+        <span class="tl-digest-out">{item.outcome}</span>
+        {#if dur}<span class="tl-digest-dur">{dur}</span>{/if}
+        <span class="tl-digest-chev">›</span>
+    </button>
+{:else if item.kind === 'phase'}
+    <!-- A Story chapter: what a run of steps DID, as prose plus the files it
+         touched. The steps themselves are one click away (内訳) and the Raw Log
+         keeps everything; this is the reading, not the record. -->
+    {@const dur = spanLabel(spanOf(item.at, item.to))}
+    {@const tally = chapterTally(item, t)}
+    {@const writes = item.writes.filter(f => f.path)}
+    <div class="tl-phase-side">
+        <span class="tl-phase-label">{t(`story.role.${item.role}`)}</span>
+        {#if dur}<span class="tl-phase-meta">{dur}</span>
+        {:else if item.at}<span class="tl-phase-meta">{clockText(item.at)}</span>{/if}
+    </div>
+    <div class="tl-phase-main">
+        {#if item.summary}<p class="tl-phase-prose">{item.summary}</p>{/if}
+        {#if item.role === 'loop'}
+            <div class="tl-phase-loop" class:is-failed={item.lastFailed}>
+                {t('story.loop.rounds', { n: item.rounds })} — {item.lastFailed ? t('story.loop.failed') : t('story.loop.passed')}
+            </div>
+        {/if}
+        {#if writes.length || item.reads.length}
+            <div class="tl-phase-files">
+                {#each writes as f (f.path)}
+                    <button type="button" class="tl-phase-file is-write" title={f.path}
+                        onclick={() => onOpenFile?.(f.path)}>{@html icon('edit', 12)} {f.label || f.base}</button>
+                {/each}
+                {#each item.reads.slice(0, 6) as f (f.path)}
+                    <button type="button" class="tl-phase-file" class:is-aside={writes.length > 0} title={f.path}
+                        onclick={() => onOpenFile?.(f.path)}>{@html icon('file', 12)} {f.label || f.base}</button>
+                {/each}
+                {#if item.reads.length > 6}<span class="tl-phase-more">+{item.reads.length - 6}</span>{/if}
+            </div>
+        {/if}
+        {#if (item.role === 'verify' || item.role === 'loop') && item.commands.length}
+            <div class="tl-phase-cmds">
+                {#each [...new Set(item.commands)].slice(0, 3) as c (c)}<code>{c}</code>{/each}
+            </div>
+        {/if}
+        {#if item.live && item.now}
+            <div class="tl-phase-now" title={item.now}>
+                <span class="tl-phase-dot"></span><span class="tl-phase-now-k">{t('story.now')}</span>
+                <span class="tl-phase-now-t">{item.now}</span>
+            </div>
+        {/if}
+        <div class="tl-phase-foot">
+            {#if tally.length}<span>{tally.join(' · ')}</span>{/if}
+            {#if item.failed}<span class="tl-phase-failed">{t('story.tally.failed', { n: item.failed })}</span>{/if}
+            {#if item.trace.length}
+                <details class="tl-phase-detail">
+                    <summary>{t('story.detail')}</summary>
+                    <div class="tl-phase-trace">
+                        {#each item.trace as e, i (i)}
+                            {#if e.kind === 'thought'}
+                                <div class="tl-phase-th">{e.text}</div>
+                            {:else if e.kind === 'line'}
+                                <StepLine line={e.line} {onOpenFile} />
+                            {:else if e.kind === 'stdout'}
+                                <div class="tl-phase-out"><code>{e.item.command}</code>
+                                    <pre>{(e.item.lines || []).slice(-30).join(NL)}</pre></div>
+                            {/if}
+                        {/each}
+                    </div>
+                </details>
+            {/if}
+            {#if onShowRaw}
+                <button type="button" class="tl-phase-raw" onclick={() => onShowRaw()}>{t('story.openRaw')}</button>
+            {/if}
+        </div>
+    </div>
 {:else if item.kind === 'activity'}
     <!-- A bare line, not a framed step — see chapterKind('activity'). -->
     <div class="tl-bare-line"><StepLine line={item} {onOpenFile} /></div>
@@ -284,30 +394,43 @@
     </div>
 
 {:else if item.kind === 'task_progress'}
-    <!-- The agent's subtask checklist, as its own chapter. Unlike a step, it
-         folds on its OWN — clicking the header toggles just this card via the
-         model's collapsed flag (onToggleCollapse), never the exchange's working.
-         The header always shows the live tally so a folded card still says how
-         far the plan got. -->
-    {@const done = (item.items || []).filter(x => x.status === 'completed').length}
-    {@const total = (item.items || []).length}
-    <div class="tl-card tl-card-progress">
-        <div class="tl-card-h tl-fold-h" role="button" tabindex="0"
-            onclick={toggleCollapsed}
-            onkeydown={(e) => { if (e.key === 'Enter') toggleCollapsed(); }}>
-            {@html icon('steps')} task_progress ({done}/{total} complete)
-            <span class="tl-card-chev">▼</span>
-        </div>
-        <div class="tl-card-body tl-progress-body">
-            {#each (item.items || []) as step (step.id)}
-                <div class="tl-progress-row" class:is-done={step.status === 'completed'}>
-                    <span class="tl-progress-ic">{@html icon(progressIcon(step.status))}</span>
-                    <span class="tl-progress-id">[{step.id}]</span>
-                    <span class="tl-progress-title">{step.title}</span>
-                    {#if step.note}<span class="tl-progress-note">({step.note})</span>{/if}
-                </div>
-            {/each}
-        </div>
+    <!-- The plan. It stays on screen for the whole exchange, so it is the
+         quiet one: a thin rounded frame on a ground a shade off the page — the
+         result is the loud one. It says where the run IS (a bar, and the step
+         under way), not just which steps are struck through. Folded, it is one
+         line; once every step is done the view folds it by itself
+         (MonitorView), unless the reader has opened or folded it. Marks are
+         drawn icons, never emoji or ▸, which render differently per font. -->
+    {@const steps = item.items || []}
+    {@const done = steps.filter(x => x.status === 'completed').length}
+    {@const total = steps.length}
+    {@const allDone = total > 0 && done === total}
+    {@const current = steps.find(x => x.status === 'in_progress')
+        || (done > 0 && !allDone ? steps.find(x => x.status !== 'completed') : null)}
+    <div class="tl-plan tl-card-progress" class:is-done={allDone}>
+        <button type="button" class="tl-plan-h" aria-expanded={!collapsed} onclick={toggleCollapsed}>
+            {#if allDone}<span class="tl-plan-ok">{@html icon('check', 13)}</span>{/if}
+            <span class="tl-plan-n">{allDone ? t('story.plan.done', { n: total }) : `${done} / ${total}`}</span>
+            {#if !allDone}
+                <span class="tl-plan-bar"><span class="tl-plan-fill" style="width:{total ? Math.round(done / total * 100) : 0}%"></span></span>
+            {/if}
+            {#if collapsed}
+                <span class="tl-plan-gist">{(current ? [current] : steps).map(x => x.title).join(' → ')}</span>
+            {/if}
+            <span class="tl-plan-chev">{@html icon(collapsed ? 'chevron-right' : 'chevron-down', 13)}</span>
+        </button>
+        {#if !collapsed}
+            <div class="tl-plan-body">
+                {#each steps as step (step.id)}
+                    <div class="tl-progress-row" class:is-done={step.status === 'completed'}
+                        class:is-current={step === current} class:is-blocked={step.status === 'blocked'}>
+                        <span class="tl-progress-ic">{@html icon(step === current ? 'pulse' : progressIcon(step.status), 13)}</span>
+                        <span class="tl-progress-title">{step.title}</span>
+                        {#if step.note}<span class="tl-progress-note">{step.note}</span>{/if}
+                    </div>
+                {/each}
+            </div>
+        {/if}
     </div>
 
 {:else if item.kind === 'stdout'}
@@ -328,6 +451,30 @@
             {/each}
             {#if item.truncated}<div class="tl-stdout-more">… truncated (only the latest {item.lines.length} lines shown)</div>{/if}
         </div>
+    </div>
+
+{:else if item._story && (item.kind === 'run' || item.kind === 'document' || item.kind === 'deliverable')}
+    <!-- The Story's result: the chapters' shape (label column + body), not a
+         framed card with a header band. No tint and no bar — a rule above it and
+         the theme's accent on the label and the conclusion mark the landing. The
+         conclusion leads, and is taken OUT of the body so it is not said twice. -->
+    {@const body = item.kind === 'run' ? String(item.answer || '').trim() : String(item.text || '')}
+    {@const split = splitLead(body)}
+    {@const stats = resultStats(item.stats, t)}
+    <div class="tl-result">
+        {#if split.lead}<p class="tl-result-lead">{split.lead}</p>{/if}
+        {#if split.rest || !split.lead}
+            <div class="rv-summary chat-md">{@html renderMarkdown(split.rest || '(no answer)')}</div>
+        {/if}
+        {#if item.kind !== 'deliverable'}<FileList files={item.files} {workspace} {onOpenFile} />{/if}
+        {#if stats.length || item.kind === 'document'}
+            <div class="tl-phase-foot tl-result-foot">
+                {#if stats.length}<span>{stats.join('・')}</span>{/if}
+                {#if item.kind === 'document'}
+                    <button type="button" class="tl-phase-raw" onclick={() => onCopyDoc?.(item.text)}>{t('task.copyBody')}</button>
+                {/if}
+            </div>
+        {/if}
     </div>
 
 {:else if item.kind === 'run'}
@@ -451,6 +598,17 @@
                 {:else}Click to answer, or type one below{/if}
             </div>
         </div>
+    {/if}
+    {#if item._interim}
+        <!-- The run's closing report when it stopped on THIS question. It is
+             where things stand, not the result, so it sits folded under the
+             question instead of above it as "結果" (storyExchanges.js). -->
+        <details class="mask-interim">
+            <summary>{t('story.interim')}</summary>
+            <div class="rv-summary chat-md">{@html renderMarkdown(item._interim.text)}</div>
+            <FileList files={item._interim.files} {workspace} {onOpenFile} />
+            <StatChips stats={item._interim.stats} />
+        </details>
     {/if}
 
 {:else if item.kind === 'confirm'}

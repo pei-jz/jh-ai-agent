@@ -417,8 +417,10 @@ describe('TimelineItem — folded exchanges', () => {
         // This is what makes a long task open quickly: the markdown of every past
         // exchange no longer has to be parsed to show one line.
         const el = mountItem({ id: 'i8', kind: 'run', _bodyless: true, _ex: 1, answer: 'one two three' });
-        expect(el.textContent).toContain('Agent · Final');
+        expect(el.textContent).toContain(t('story.tag.final'));
         expect(el.textContent).toContain('3 words');
+        // Folded, a result is one line of the story: its gist, not just a label.
+        expect(el.querySelector('.tl-outcome-gist').textContent).toBe('one two three');
         expect(el.querySelector('.tl-card-body')).toBe(null);
         expect(el.querySelector('.rv-summary')).toBe(null);
     });
@@ -432,7 +434,7 @@ describe('TimelineItem — folded exchanges', () => {
         cleanup();
         onToggleStory.mockClear();
         mountItem({ id: 'i8', kind: 'run', _bodyless: true, _ex: 3 }, { onToggleStory })
-            .querySelector('.tl-fold-bar').click();
+            .querySelector('.tl-fold-out').click();
         expect(onToggleStory).toHaveBeenCalledWith(3, 'outcome');
     });
 });
@@ -450,11 +452,12 @@ describe('TimelineItem — task_progress', () => {
 
     it('shows the tally and every subtask with its status', () => {
         const el = mountItem(progress);
-        expect(el.textContent).toContain('task_progress (1/4 complete)');
-        expect(el.textContent).toContain('[1]');
+        expect(el.querySelector('.tl-plan-n').textContent).toBe('1 / 4');
+        expect(el.querySelector('.tl-plan-fill').style.width).toBe('25%');
         expect(el.textContent).toContain('タスク一覧の調査');
-        expect(el.textContent).toContain('[2]');
         expect(el.textContent).toContain('実装');
+        // The step under way is the one that stands out.
+        expect(el.querySelector('.tl-progress-row.is-current').textContent).toContain('実装');
         expect(el.querySelectorAll('.tl-progress-row')).toHaveLength(4);
         // Completed rows are marked so the tick reads as done.
         expect(el.querySelectorAll('.tl-progress-row.is-done')).toHaveLength(1);
@@ -463,8 +466,24 @@ describe('TimelineItem — task_progress', () => {
     it('folds on its OWN header click, not through the exchange', () => {
         const onToggleCollapse = vi.fn();
         const el = mountItem({ ...progress, _ex: 3 }, { onToggleCollapse });
-        el.querySelector('.tl-card-h').click();
+        el.querySelector('.tl-plan-h').click();
         expect(onToggleCollapse).toHaveBeenCalledWith('i14');
+    });
+
+    it('marks are drawn icons, not emoji or text arrows', () => {
+        const el = mountItem(progress);
+        expect(el.querySelectorAll('.tl-progress-ic svg')).toHaveLength(4);
+        expect(el.querySelector('.tl-plan-chev svg')).not.toBe(null);
+        expect(el.textContent).not.toMatch(/[✓✔●○▸▾✅]/u);
+    });
+
+    it('a finished plan, folded, is one line', () => {
+        const all = { ...progress, items: progress.items.map(x => ({ ...x, status: 'completed' })) };
+        const el = mountItem(all, { isCollapsed: true });
+        expect(el.querySelector('.tl-plan-n').textContent).toBe(t('story.plan.done', { n: 4 }));
+        expect(el.querySelector('.tl-plan-bar')).toBe(null);
+        expect(el.querySelector('.tl-plan-gist').textContent).toBe('タスク一覧の調査 → 実装 → テスト → 修正内容を反映');
+        expect(el.querySelectorAll('.tl-progress-row')).toHaveLength(0);
     });
 
     it('renders a note when a subtask carries one', () => {
@@ -547,5 +566,27 @@ describe('Timeline — keyed reuse', () => {
         expect(render(Timeline, { props: { items: [] } }).container.textContent.trim()).toBe('');
         cleanup();
         expect(render(Timeline, { props: { items: null } }).container.textContent.trim()).toBe('');
+    });
+});
+
+describe('TimelineItem — the Story’s result', () => {
+    it('reads as a chapter: no card header, the conclusion leads, numbers in one line', () => {
+        const onToggleStory = vi.fn();
+        const el = mountItem({
+            id: 'r9', kind: 'run', _story: true, _ex: 2,
+            answer: '## 結果\n- デッキを19枚に更新しました\n- 警告は0件',
+            stats: { steps: 12, durationMs: 120000 },
+        }, { onToggleStory });
+        expect(el.querySelector('.tl-card-final')).toBe(null);
+        expect(el.querySelector('.tl-card-h')).toBe(null);
+        expect(el.querySelector('.tl-result-lead').textContent).toBe('デッキを19枚に更新しました');
+        // Said once: the lead is taken out of the body.
+        expect(el.querySelector('.rv-summary').textContent).not.toContain('デッキを19枚');
+        expect(el.querySelector('.rv-summary').textContent).toContain('警告は0件');
+        expect(el.querySelector('.tl-result-foot').textContent).toContain(t('story.stat.steps', { n: 12 }));
+        expect(el.querySelector('.tl-chapter').classList.contains('is-story-result')).toBe(true);
+        // The label is the fold control.
+        el.querySelector('.tl-when .tl-result-toggle').click();
+        expect(onToggleStory).toHaveBeenCalledWith(2, 'outcome');
     });
 });

@@ -7,6 +7,8 @@ import { mcpManager } from '../../modules/ai/McpManager.js';
 // attaches its own instance inside NewTaskModal.svelte.
 import { SlashCommands } from '../components/SlashCommands.js';
 import llmService from '../../modules/ai/LLMService.js';
+import { toStoryChapters } from './monitor/storyChapters.js';
+import { withInterimReports, withStoryFolds, withPlanOnTop } from './monitor/storyExchanges.js';
 import { TaskTimeline, buildTimeline, envelopeText, splitForPanes, chapters, withExchangeFolds, exchangeCount, collapsedIds, applyFileDescriptions, pinLiveProgress } from './monitor/taskTimeline.js';
 // timelineRender.js is retired: Timeline.svelte's keyed {#each} does the keyed
 // DOM reuse it hand-rolled, and timelineItems.js now exports only pure vocabulary.
@@ -1682,11 +1684,45 @@ export class MonitorView {
             const latest = progs[progs.length - 1];
             if (latest && !latest.userFolded) latest.collapsed = false;
         }
+        // A plan whose every step is done has nothing left to watch: it folds to
+        // its one line so it stops pushing the chapters down. A reader who has
+        // opened or folded it by hand keeps their choice.
+        for (const p of this._timeline.items) {
+            if (p.kind !== 'task_progress' || p.userFolded) continue;
+            const steps = p.items || [];
+            if (steps.length && steps.every(x => x.status === 'completed')) p.collapsed = true;
+        }
         let items = pinLiveProgress(folded, running);
+        let storyLive = false;
         // The inspector keeps the FULL list even on an ask run: its job is "what
         // did this touch", and that question survives the presentation choice.
         this._inspectorItems = items;
         if (this._isAskRun() && this._filter !== 'all') items = askStream(items).items;
+        // The Story reads the run as chapters (looked into / changed / checked),
+        // not one card per step — that grain is the Raw Log's. The cache keeps an
+        // unchanged chapter the same object between renders. It lives on the
+        // timeline, so a rebuilt timeline (another task, a reload) starts clean:
+        // item ids restart per timeline and must not match a stale chapter.
+        //
+        // It starts from the UNFOLDED stream: a folded exchange becomes a one-line
+        // digest built from its chapters (storyExchanges.js), so the chapters have
+        // to exist before folding, not be replaced by a "9 steps" bar first.
+        else {
+            const tl = this._timeline;
+            if (!tl._storyCache) tl._storyCache = new Map();
+            // The plan goes under its request (withPlanOnTop) instead of being
+            // pinned to the bottom: the bottom belongs to the chapter being
+            // written, which is where the reader's eye — and "now" — is.
+            let story = toStoryChapters(withPlanOnTop(stream), { live: running, cache: tl._storyCache });
+            story = withInterimReports(story);
+            story = withStoryFolds(story, this._collapsedExchanges(stream));
+            items = story;
+            // The live chapter carries its own "now" marker, so the separate
+            // Working bar below everything would say it twice, in the wrong place.
+            const last = story[story.length - 1];
+            storyLive = last?.kind === 'phase' && !!last.live;
+        }
+        this._storyLiveChapter = storyLive;
         return {
             items,
             collapsed: collapsedIds(this._timeline.items),
@@ -1698,6 +1734,22 @@ export class MonitorView {
             // breath.
             groupsCollapsed: !!this._feedCollapsed,
             onToggleStory: (ex, what) => this._toggleExchange(ex, what),
+            // A digest row opens its whole exchange: both halves, in one click.
+            onOpenExchange: (ex) => {
+                const n = Number(ex);
+                if (!Number.isFinite(n)) return;
+                this._collapsedExchanges(this._timeline ? splitForPanes(this._timeline.items).stream : []);
+                this._foldTouched = true;
+                this._collapsedEx.delete(n);
+                this._collapsedOut.delete(n);
+                this._renderResultPanel();
+                this._sync();
+            },
+            onShowRaw: () => {
+                this._userPickedTab = true;
+                this._filter = 'all';
+                this._sync();
+            },
             onToggleCollapse: (id) => this._toggleCard(id),
             onAnswer: (ans) => this._answerAsk(ans),
             onReopenAsk: (item) => this._reopenAsk(item),
@@ -2286,7 +2338,8 @@ export class MonitorView {
             foldAll: this._foldAllProps(),
             loading: !!this._loadingResults,
             earlier: { canLoadMore: this._logStart > 0, note: this._earlierNote },
-            working: this._working
+            // Read AFTER `timeline` above, which sets _storyLiveChapter.
+            working: this._working && !(this._filter === 'result' && this._storyLiveChapter)
                 ? { text: this._workingText || '⏳ Working…', collapsed: !!this._feedCollapsed }
                 : null,
             ask: this._askProps(),

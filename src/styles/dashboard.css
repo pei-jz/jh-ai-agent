@@ -351,10 +351,10 @@
 /* ── Bamboo Slip — "簡牘古文" (bamboo-ancient, proposal #3) ────────
    Adopted from docs/design/bamboo-slip-proposals/03-bamboo-ancient.html.
    An unearthed bamboo-slip manuscript: charred near-black dark brown, faint
-   ivory ink, and a bronze-verdigris (銅青) accent. The canvas is a bundle of
-   vertically bound bamboo slats — individual slats separated by grooves and
-   tied with two cords — layered as `--grain` (fibre noise) + `--slip`
-   (slat/cord texture). Self-contained: no new dependency. */
+   ivory ink, and a bronze-verdigris (銅青) accent. The title bar is a bundle
+   of fine vertical slips, the same texture JHEditor draws on its bars,
+   layered as `--grain` (fibre) + `--slip` (slats). Self-contained: no new
+   dependency. */
 :root[data-theme="bamboo-ancient"] {
   /* Background palette — charred bamboo slips */
   --surface-app:   #3a2e1e;
@@ -405,10 +405,20 @@
   /* A classical serif rather than handwriting; still chrome-only. */
   --font-accent: "Yu Mincho", "YuMincho", "Hiragino Mincho ProN", "Noto Serif JP", "Noto Serif", Georgia, "Times New Roman", serif;
 
-  /* Bamboo fibre grain (faint fractal noise; layered via body/.card/#result-panel) */
-  --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='a'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.4 0.06' numOctaves='4' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3CfeComponentTransfer%3E%3CfeFuncA type='linear' slope='0.09'/%3E%3C/feComponentTransfer%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23a)'/%3E%3C/svg%3E");
-  /* A bundle of vertically bound slats + two binding cords. */
-  --slip: linear-gradient(180deg,transparent 0%,transparent 17%,rgba(0,0,0,0.55) 17%,rgba(0,0,0,0.55) calc(17% + 3px),rgba(220,205,160,0.08) calc(17% + 4px),transparent calc(17% + 6px),transparent 82%,rgba(0,0,0,0.55) 82%,rgba(0,0,0,0.55) calc(82% + 3px),rgba(220,205,160,0.08) calc(82% + 4px),transparent calc(82% + 6px),transparent 100%),repeating-linear-gradient(90deg,transparent 0px,transparent 42px,rgba(0,0,0,0.65) 42px,rgba(0,0,0,0.65) 46px),repeating-linear-gradient(90deg,rgba(0,0,0,0.35) 0px,rgba(0,0,0,0) 5px,rgba(220,205,160,0.10) 14px,rgba(255,255,255,0) 24px,rgba(0,0,0,0.15) 38px,rgba(0,0,0,0.35) 46px),radial-gradient(130% 95% at 50% 42%,rgba(225,205,165,0.04) 0%,rgba(0,0,0,0) 42%,rgba(0,0,0,0.6) 100%);
+  /* Fibre grain, from JHEditor: long, fine fibre at a third of the old
+     strength. The old one ('0.4 0.06', alpha 0.09) read as jagged stripes. */
+  --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='a'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9 0.008' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3CfeComponentTransfer%3E%3CfeFuncA type='linear' slope='0.03'/%3E%3C/feComponentTransfer%3E%3C/filter%3E%3Crect width='240' height='240' filter='url(%23a)'/%3E%3C/svg%3E");
+  /* The bundle of slips, as JHEditor draws it. Real slips are about a
+     centimetre wide and sit edge to edge: 18px slats with a 1px seam and a 1px
+     catch-light, not 42px planks with a 4px black gap and two black cords —
+     which read as heavy beams across the top of every screen. Three periods
+     (18 / 54 / 126px) vary the tone slat to slat so the bundle doesn't read as
+     a printed stripe; the top-to-bottom shade gives the bar its roundness. */
+  --slip: linear-gradient(180deg, rgba(225,205,165,0.06) 0%, rgba(0,0,0,0.10) 55%, rgba(0,0,0,0.28) 100%),
+    repeating-linear-gradient(90deg, rgba(0,0,0,0.42) 0 1px, rgba(225,200,150,0.07) 1px 2px, transparent 2px 18px),
+    repeating-linear-gradient(90deg, rgba(225,200,150,0.035) 0 18px, transparent 18px 36px, rgba(0,0,0,0.06) 36px 54px),
+    repeating-linear-gradient(90deg, transparent 0 72px, rgba(0,0,0,0.07) 72px 90px, transparent 90px 108px, rgba(225,200,150,0.04) 108px 126px),
+    repeating-linear-gradient(90deg, rgba(0,0,0,0.10) 0, transparent 5px, transparent 13px, rgba(0,0,0,0.10) 18px);
   /* Slats on the window's ground AND on the reading surface — but never on
      cards, where they would fight the dense data. */
   /* The slats are the theme, and they are also 40px of high-contrast vertical
@@ -417,6 +427,9 @@
      working area. The palette still says 竹簡 everywhere; the pattern says it
      where there is nothing to read. */
   --texture-chrome: var(--grain), var(--slip);
+  /* The slats sit on the desk's darker brown, as in JHEditor — on the panel
+     colour they read lighter and busier. */
+  --surface-chrome: #2f2518;
   --texture-app:  none;
   --texture-read: none;
 
@@ -573,7 +586,9 @@ body {
   align-items: center;
   justify-content: space-between;
   padding: 0 8px 0 14px;
-  background: var(--surface-panel);
+  /* A theme may give the bar its own ground (--surface-chrome); by default it
+     is a panel. */
+  background: var(--surface-chrome, var(--surface-panel));
   /* The title bar wears the theme's pattern: one that stops at the edge of the
      content looks like a wallpaper hung inside a plain frame, and on 掛け軸 the
      mount IS the theme.
